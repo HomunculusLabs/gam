@@ -1,15 +1,15 @@
 # MASTER_FAILURES
 
 - Compile failures: **0**
-- Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **443**
-- Python API test failures: **158**
+- Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **430**
+- Python API test failures: **6**
 - Forbidden runtime signatures seen: **1**
-- Slow/timeout notices (#1393): **217**
+- Slow/timeout notices (#1393): **208**
 
 Coverage:
 - workspace shards: **MEASURED** (build `success`, matrix `failure`)
 - gam-pyffi unit tests: **MEASURED** (job `failure`)
-- Python API tests: **MEASURED** (job `failure`)
+- Python API tests: **MEASURED** (job `cancelled`)
 - Python populations (slow + torch): **NOT MEASURED** (job `cancelled`)
 
 ## Compile failures
@@ -37,12 +37,8 @@ _None._
 - **FAIL** `gam::owed_1082_reml` :: `poisson_tensor_te_recovers_true_mean_surface_not_oversmoothed_1373`
 - **FAIL** `gam::owed_1378` :: `default_thin_plate_fit_is_row_permutation_invariant_1378`
 - **FAIL** `gam::owed_1418` :: `sae_ift_uses_exact_stationarity_jacobian_softmax_high_residual_1418`
-- **TERMINATING** `(─────────)` :: `gam::owed_1477_factorial double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
-- **TIMEOUT** `gam::owed_1477_factorial` :: `double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
 - **FAIL** `gam::owed_993_real_fit` :: `real_fitted_bound_torus_atom_runs_carve_and_blocks_fission`
 - **FAIL** `gam::perf_scale` :: `misc::kappa_loop_n_scaling::kappa_outer_loop_is_n_independent_fast_ladder`
-- **TERMINATING** `(─────────)` :: `gam::perf_scale misc::large_scale_perf_benchmark::large_scale_perf_binomial_cylinder_n100k`
-- **TIMEOUT** `gam::perf_scale` :: `misc::large_scale_perf_benchmark::large_scale_perf_binomial_cylinder_n100k`
 - **FAIL** `gam::pyffi` :: `optimization::warm_start_invariance_contract::fits_are_invariant_to_warm_start_cache_state_across_families`
 - **FAIL** `gam::quality_workflow_classifier_test` :: `test_reference_quality_classifier`
 - **FAIL** `gam::regressions` :: `misc::monotone_shape_binding_constraint::monotone_increasing_shape_binds_on_non_monotone_data`
@@ -63,7 +59,6 @@ _None._
 - **TERMINATING** `(─────────)` :: `gam::survival survival::survival_marginal_slope_large_scale_repro::survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges`
 - **TIMEOUT** `gam::survival` :: `survival::survival_marginal_slope_large_scale_repro::survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges`
 - **FAIL** `gam::survival` :: `survival::survival_multi_z_reduction_hard::auto_derivation_shape_reductions`
-- **FAIL** `gam-cli::bug_hunt_explicit_family_emits_wrong_inferred_family_note` :: `explicit_family_does_not_emit_wrong_inferred_family_note`
 - **FAIL** `gam-cli::bug_hunt_sas_link_finalize_inner_cap_leak` :: `sas_link_binomial_fit_finalize_does_not_abort_under_throttled_inner_cap`
 - **FAIL** `gam-cli::bug_hunt_sas_link_outer_inner_cap_guard` :: `sas_link_binomial_fit_does_not_abort_with_lambda_count_mismatch`
 - **FAIL** `gam-cli::bin/gam` :: `cli_tests::cli_binomial_beta_logistic_parametric_fit_survives_outer_inner_cap_guard`
@@ -72,7 +67,6 @@ _None._
 - **TERMINATING** `(─────────)` :: `gam-models::quality_multinomial_penguins_2612 gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet`
 - **TIMEOUT** `gam-models::quality_multinomial_penguins_2612` :: `gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet`
 - **FAIL** `gam-row-macros::cause_specific_codegen_perf` :: `generated_cause_specific_matches_strongest_hand_932`
-- **FAIL** `gam-row-macros::gaussian_codegen_perf` :: `generated_gaussian_matches_and_beats_strongest_hand_932`
 - **FAIL** `gam-sae` :: `gpu_kernels::sae_encode_resident::tests::encode_kernel_source_substitutes_macros_and_compiles`
 - **FAIL** `gam-sae` :: `manifold::construction::construction_tests::amortized_encoder_tests::exact_observed_information_prices_e_attributable_a_saddle_2336`
 - **FAIL** `gam-sae` :: `manifold::construction::test_support::assembled_exact_hessian_delta_contracts_like_the_applier_2509`
@@ -119,6 +113,7 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests::phi_eta_one_reproduces_current_atom_bases_bit_for_bit`
 - **FAIL** `gam-sae` :: `manifold::tests::streaming_exact_laml_matches_full_batch_ordered_beta_bernoulli`
 - **FAIL** `gam-sae` :: `manifold::tests_behavioral_fisher_rung1::behavioral_fisher_metric_survives_stagewise_growth`
+- **FAIL** `gam-sae` :: `manifold::tests_checkpoint_resume_wiring::checkpoint_banks_resumes_and_discards_across_objectives`
 - **FAIL** `gam-sae` :: `manifold::tests_deflation_traces_780::ard_log_precision_trace_matches_dense_fd_pd_region_deflation`
 - **FAIL** `gam-sae` :: `manifold::tests_indefinite_a_refusal_2336::priced_ard_direct_gradient_matches_fixed_state_value_2434`
 - **FAIL** `gam-sae` :: `manifold::tests_logdet_adjoint_780::end_to_end_dual_vs_analytic_logdet_parity_battery_2156_2144`
@@ -129,6 +124,7 @@ _None._
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::seed_infeasibility_channel_is_named_2609`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::seed_infeasibility_channel_is_named_2609`
 - **FAIL** `gam-sae` :: `manifold::tests_streaming_outer_gradient_2026::fixed_point_certificate_covers_non_ordered_beta_bernoulli_exact_gradient`
+- **FAIL** `gam-solve` :: `pirls::loop_driver::tests::kronecker_diagonal_double_penalty_hits_only_joint_null_space`
 - **FAIL** `gam::basis_smooth` :: `smooths::matern_high_frequency_init::matern_default_does_not_collapse_on_sin8`
 - **FAIL** `gam::bug_hunt_flexible_loglog_cauchit_binomial_wiggle` :: `flexible_cloglog_control_binomial_wiggle_converges_2155`
 - **FAIL** `gam::identifiability` :: `misc::constant_curvature_kappa_coverage_sims::profile_ci_covers_planted_curvature_across_replicates`
@@ -176,11 +172,7 @@ _None._
 - **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::topologies_fit_on_circle_data_1782`
 - **FAIL** `gam-sae` :: `manifold::tests_streaming_outer_gradient_2026::production_objective_forced_streaming_value_gradient_matches_dense`
 - **FAIL** `gam-sae` :: `manifold::tests_sure_dispersion_2133::sure_correction_wiring_and_stability_2133`
-- **FAIL** `gam-sae` :: `sparse_dict::block::block_tests::matryoshka_prefix_losses_are_monotone_and_match_truncated_readout`
-- **FAIL** `gam-sae` :: `sparse_dict::block::block_tests::small_k_block_fit_runs_on_cpu_baseline_2134`
-- **FAIL** `gam-sae` :: `sparse_dict::block_stream::block_stream_tests::streaming_over_shards_matches_one_shot`
 - **FAIL** `gam-sae` :: `structure_harvest::tests::apply_move_restructures_warm`
-- **FAIL** `gam-sae` :: `structure_harvest::tests_atlas_prior_2280::cylinder_residual_floats_cylinder_and_race_unchanged_or_better_2280`
 - **FAIL** `gam-sae::sparse_lane_no_dense_assignment` :: `sparse_lane_constructs_no_dense_assignment`
 - **FAIL** `gam::bug_hunt_2301_diagnose_alo_multiclass_test` :: `diagnose_alo_transformation_normal_matches_brute_force_loo_2301`
 - **FAIL** `gam::bug_hunt_flexible_loglog_cauchit_binomial_wiggle` :: `flexible_loglog_binomial_wiggle_converges_2155`
@@ -222,8 +214,6 @@ _None._
 - **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::all_assignment_topology_combinations_pass_startup_validation_1782`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_rank_charge_zoo_micro_2022`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_zoo_micro_local::zz_rank_charge_zoo_micro_2022`
-- **FAIL** `gam-sae` :: `tiered::code_space::code_space_tests::pair_chart_fit_is_certified_reml_on_a_noisy_ring`
-- **FAIL** `gam-sae` :: `tiered::fit::fit_tests::tiered_returns_best_effort_open_certificate_at_k_gg_rank_2275`
 - **FAIL** `gam-sae::calendar_ground_truth_benchmark` :: `planted_calendar_block_chart_promotion_recovers_circle_atoms`
 - **FAIL** `gam-solve::issue_1017_resident_frame` :: `nonlinear_prepare_keeps_frame_identity_and_refreshes_current_content_1017`
 - **FAIL** `gam::basis_smooth` :: `smooths::smooth_term_lr_bartlett_calibration::poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated`
@@ -267,8 +257,6 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests_transport_law::wrap_boundary_half_turn_phase_and_nonlinear_verdicts`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
-- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
-- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
 - **FAIL** `gam-sae::calendar_ground_truth_benchmark` :: `planted_calendar_coordinate_readout_orders_weekdays_with_closed_form_se`
 - **FAIL** `gam-sae::saebench_metrics` :: `chart_interp_wraps_cyclic_boundary_and_quotients_orientation`
 - **FAIL** `gam::basis_smooth` :: `smooths::matern_integration::matern_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regularization`
@@ -314,16 +302,15 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests_streaming_efs_cache_1026::streaming_cache_is_efs_dropin_for_dense_cache_1026`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_streaming_outer_gradient_2026::whitened_streaming_criterion_completes`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_streaming_outer_gradient_2026::whitened_streaming_criterion_completes`
-- **FAIL** `gam-sae` :: `sparse_dict::block::block_tests::planted_block_subspaces_recovered`
+- **FAIL** `gam-sae` :: `tiered::code_space::code_space_tests::pair_chart_fit_is_certified_reml_on_a_noisy_ring`
+- **FAIL** `gam-sae` :: `tiered::fit::fit_tests::tiered_returns_best_effort_open_certificate_at_k_gg_rank_2275`
 - **FAIL** `gam-sae::chart_gluing_1890_e2e` :: `sphere_pole_pair_registers_atlas_end_to_end`
-- **FAIL** `gam-solve` :: `rho_optimizer::run_plan::run_plan_tests::criterion_flat_provenance_preserves_score_relative_certificate_1689`
 - **FAIL** `gam::basis_smooth` :: `misc::aniso_population_calibration::aniso_demo_population_z_scores_are_equalized_for_iso_and_aniso`
 - **FAIL** `gam::basis_smooth` :: `smooths::matern_length_scale_sensitivity::matern_length_scale_sweep_stays_within_budget`
 - **FAIL** `gam::glm` :: `families::multinomial_reml_deviance_reuse_issue_348::multinomial_formula_deviance_equals_independent_softmax_recompute`
 - **FAIL** `gam::identifiability` :: `misc::binary_outcome_bms_identifiability::binary_outcome_shape_bms_matern_centers60_are_rank_reduced`
 - **TERMINATING** `(─────────)` :: `gam::inference misc::margslope_flex_large_scale_repro::margslope_flex_beta_equivalence_smoke`
 - **TIMEOUT** `gam::inference` :: `misc::margslope_flex_large_scale_repro::margslope_flex_beta_equivalence_smoke`
-- **FAIL** `gam::inference` :: `misc::uncertainty_integration::mixture_uncertainty_intervals_are_clamped_to_unit_interval`
 - **FAIL** `gam::measure_jet` :: `misc::measure_jet_formula_fit_robustness_sweep::measure_jet_formula_fit_succeeds_across_random_datasets`
 - **FAIL** `gam::misc` :: `misc::sas_mixture_system::sas_recovers_negative_skew_and_positive_log_delta`
 - **FAIL** `gam::no_production_finite_differences` :: `production_code_has_no_finite_difference_markers`
@@ -345,8 +332,8 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests_sparse_curvature_operator_2500::threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_2500`
 - **FAIL** `gam-sae` :: `manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
 - **FAIL** `gam-sae` :: `structure_harvest::tests::grown_atom_count_assembles_without_lambda_smooth_oob_357`
-- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
-- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
+- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
 - **FAIL** `gam-sae::calendar_ground_truth_benchmark` :: `planted_calendar_structure_search_selects_graph_atoms`
 - **FAIL** `gam::glm` :: `misc::beta_generative_phi_drives_draw_variance::beta_generative_draw_variance_tracks_forwarded_phi_not_seed`
 - **FAIL** `gam::identifiability` :: `misc::binary_outcome_bms_identifiability::binary_outcome_shape_bms_matern_fit_is_not_refused_by_identifiability_audit`
@@ -376,8 +363,6 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests_quality_behavior_calibration_2015::qwen_behavior_nats_calibration_matches_exact_kl_2015`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609`
-- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
-- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
 - **FAIL** `gam::basis_smooth` :: `smooths::smooth_term_lr_size_calibration::exhaustive_null_simulation_size_grid`
 - **FAIL** `gam::glm` :: `misc::binomial_logit_outer_work_1575::binomial_logit_reml_firth_on_outer_work_bounded_1575`
 - **FAIL** `gam::identifiability` :: `misc::binary_outcome_bms_identifiability::binary_outcome_shape_bms_shared_matern_prs_pc_confound_starts_outer_solver`
@@ -408,11 +393,12 @@ _None._
 - **FAIL** `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::zz_measure_wide_p_criterion_cost_localizer_2080`
 - **FAIL** `gam-sae` :: `manifold::tests_streaming_outer_gradient_2026::complete_matrix_free_outer_gradient_matches_dense_softmax`
 - **FAIL** `gam-sae` :: `spectrometer::tests::spectrometer_recovers_torus_dimension_two`
-- **FAIL** `gam-solve` :: `pirls::loop_driver::tests::kronecker_diagonal_double_penalty_hits_only_joint_null_space`
+- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- **FAIL** `gam-solve` :: `rho_optimizer::run_plan::run_plan_tests::criterion_flat_provenance_preserves_score_relative_certificate_1689`
 - **FAIL** `gam::autodiff` :: `misc::contract_gradient_gates::gradient_is_differential_contract_gate`
 - **FAIL** `gam::basis_smooth` :: `smooths::smooth_term_lr_size_calibration::null_simulation_size_is_calibrated_small_n`
 - **FAIL** `gam::identifiability` :: `misc::binary_outcome_bms_identifiability::production_like_binary_outcome_shared_matern_centers10_confound_starts_outer_solver`
-- **FAIL** `gam::inference` :: `misc::uncertainty_integration::prediction_uncertainty_is_finite_andwell_shaped`
 - **FAIL** `gam::measure_jet` :: `misc::measure_jet_perf_parity::measure_jet_single_scale_mode_accuracy_parity`
 - **FAIL** `gam::owed_1026` :: `spectral_floor_preserves_healthy_subspace_under_mixed_collapse_1026`
 - **FAIL** `gam::regressions` :: `families::flexible_link_linkwiggle_joint_solve_aborts::flexible_link_linkwiggle_parametric_mean_engages_or_fails_loud`
@@ -445,8 +431,9 @@ _None._
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - **FAIL** `gam-sae` :: `manifold::tests_structured_residual_floor::tests::near_exact_fit_skips_structured_pass_and_certifies`
-- **FAIL** `gam-sae` :: `sparse_dict::block::block_tests::farthest_point_seeded_entry_matches_default_byte_for_byte`
 - **FAIL** `gam-sae` :: `spectrometer::tests::stable_window_resists_high_k_overfit_drift`
+- **TERMINATING** `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
+- **TIMEOUT** `gam-sae` :: `tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
 - **FAIL** `gam-pyffi` :: `batch_tests::circle_latent_recovers_circle_not_collapse`
 - **FAIL** `gam-pyffi` :: `inference::inference_instruments::tests::matched_controls_do_not_promote_circle_on_seeded_isotropic_noise_2262`
 - **FAIL** `gam-pyffi` :: `inference::inference_instruments::tests::ring_of_clusters_owns_discrete_cyclic_verdict_2262`
@@ -467,161 +454,9 @@ _None._
 - **FAIL** `python::tests/test_python_api` :: `test_transformation_normal_pgs_conditional_mean_tracks_response`
 - **FAIL** `python::tests/test_python_api` :: `test_transformation_normal_predicts_without_raw_pgs`
 - **FAIL** `python::tests/test_python_api` :: `test_survival_marginal_slope_weibull_n3000_returns_under_60s`
-- **FAIL** `python::tests/bug_hunt_cr_marginal_binary_covariate_degradation_recovers_test` :: `test_sz_factor_smooth_binary_covariate_degrades_and_recovers_contrasts`
-- **FAIL** `python::tests/bug_hunt_left_truncated_survival_predicts_degenerate_covariate_independent_survival_test` :: `test_left_truncated_survival_is_nondegenerate_and_covariate_dependent`
-- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_model_predicts_and_summarizes[quintic-order3]`
-- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predict_point_and_interval_still_work`
-- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predictions_intervals_and_summary_replay_exactly_after_save_load`
-- **FAIL** `python::tests/bug_hunt_double_penalty_inflates_edf_instead_of_shrinking_test` :: `test_bspline_double_penalty_does_not_inflate_linear_edf`
-- **FAIL** `python::tests/bug_hunt_sz_factor_smooth_cr_marginal_low_cardinality_hard_fails_test` :: `test_sz_factor_smooth_caps_cr_marginal_and_recovers_group_curves`
-- **FAIL** `python::tests/bug_hunt_sz_factor_smooth_cr_marginal_low_cardinality_hard_fails_test` :: `test_sz_factor_smooth_explicit_k_caps_cr_marginal`
-- **FAIL** `python::tests/bug_hunt_sz_factor_smooth_cr_marginal_low_cardinality_hard_fails_test` :: `test_sz_matches_fs_marginal_on_low_cardinality`
-- **FAIL** `python::tests/bug_hunt_te_tensor_smooth_edf_depends_on_row_order_test` :: `test_te_tensor_smooth_edf_and_se_invariant_to_row_order`
-- **FAIL** `python::tests/bug_hunt_thinplate_single_penalty_overfits_linear_data_test` :: `test_pspline_single_penalty_linear_data_control`
-- **FAIL** `python::tests/bug_hunt_2299_affine_design_link_wiggle_test` :: `test_link_wiggle_affine_design_offset_separation_red_gate`
-- **FAIL** `python::tests/bug_hunt_2299_affine_design_link_wiggle_test` :: `test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate`
-- **FAIL** `python::tests/bug_hunt_multinomial_summary_raises_on_smooth_terms_test` :: `test_summary_renders_every_lambda_no_truncation`
-- **FAIL** `python::tests/bug_hunt_flexible_link_engages_and_predicts_test` :: `test_flexible_link_engages_predicts_and_is_monotone_on_probit_data`
-- **FAIL** `python::tests/bug_hunt_transformation_normal_generate_draws_on_latent_scale_wrong_direction_test` :: `test_ctm_generate_conditional_mean_increases_with_covariate`
-- **FAIL** `python::tests/bug_hunt_transformation_normal_predict_returns_pit_of_response_not_conditional_mean_test` :: `test_transformation_normal_predict_returns_conditional_mean_not_pit`
-- **FAIL** `python::tests/bug_hunt_competing_risks_cif_depends_on_cause_label_permutation_test` :: `test_competing_risks_cif_invariant_to_cause_label_permutation`
-- **FAIL** `python::tests/test_bug_hunt_cyclic_smooth_overfits_null_space_signal` :: `test_cyclic_pspline_collapses_to_constant_on_flat_data`
-- **FAIL** `python::tests/test_bug_hunt_dispersion_location_scale_observation_interval_symmetric` :: `test_dispersion_location_scale_observation_band_is_skewed_not_symmetric`
-- **FAIL** `python::tests/test_bug_hunt_dispersion_location_scale_observation_interval_symmetric` :: `test_location_scale_band_matches_standard_path_skew_on_identical_data`
-- **FAIL** `python::tests/bug_hunt_flexible_link_predict_deviance_matches_fit_2141_test` :: `test_flexible_link_predict_deviance_matches_fit_2141`
-- **FAIL** `python::tests/bug_hunt_competing_risks_transformation_fit_refused_by_identifiability_audit_test` :: `test_competing_risks_transformation_fit_succeeds_and_is_consistent`
-- **FAIL** `python::tests/bug_hunt_flexible_link_silent_noop_on_binomial_parametric_test` :: `test_flexible_logit_not_silent_logit_noop_on_cloglog_data`
-- **FAIL** `python::tests/bug_hunt_nb_location_scale_inner_solve_abort_test` :: `test_nb_location_scale_fit_succeeds_on_heteroscedastic_counts`
-- **FAIL** `python::tests/test_bug_hunt_spline_scan_predict_observation_interval` :: `test_scan_observation_interval_covers_about_95pct[y ~ s(x, bs="ps", degree=5, penalty_order=3, double_penalty=false)]`
-- **FAIL** `python::tests/test_bug_hunt_tweedie_observation_interval_equal_tailed` :: `test_tweedie_observation_interval_is_equal_tailed_not_symmetric`
-- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_nonnegative_coefficient_bound`
-- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_two_sided_linear_coefficient_bounds`
-- **FAIL** `python::tests/bug_hunt_sae_fit_avg_active_atoms_structurally_zero_test` :: `test_sae_fit_avg_active_atoms_is_consistent_with_reconstruction`
-- **FAIL** `python::tests/bug_hunt_sae_manifold_fit_tiny_ordered_beta_bernoulli_circle_process_kill_2089_test` :: `test_tiny_ordered_beta_bernoulli_circle_fit_does_not_kill_the_process`
-- **FAIL** `python::tests/test_bug_hunt_tweedie_observation_interval_equal_tailed` :: `test_tweedie_observation_upper_edge_is_above_the_symmetric_band`
-- **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_cloglog_positive_control_fits`
-- **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_advertised_link_is_handled_gracefully[flexible(loglog)]`
-- **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_advertised_link_is_handled_gracefully[flexible(cauchit)]`
-- **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_gamma_dispersion_location_scale_is_predictable`
-- **FAIL** `python::tests/bug_hunt_smooth_significance_ref_df_tracks_edf_not_basis_dim_test` :: `test_ref_df_stays_in_edf1_band_not_basis_dimension`
-- **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_negbin_dispersion_location_scale_is_predictable`
-- **FAIL** `python::tests/bug_hunt_smooth_significance_ref_df_tracks_edf_not_basis_dim_test` :: `test_nonconverged_flat_fit_is_not_flagged_significant`
-- **FAIL** `python::tests/test_fit_model_spec_kwargs_match_config` :: `test_rust_flexible_link_fit_kwarg_matches_config`
-- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_optimizer_recovers_coordinate_from_random_init`
-- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_recovery_is_initialization_independent`
-- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_recovered_latent_is_returned_with_shape`
-- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_caller_init_is_a_pure_local_solve`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_to_dict_from_dict_is_a_fixed_point`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_all_fields_are_explicit_and_runtime_diagnostics_round_trip`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_deprecated_score_alias_is_rejected`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_obsolete_projected_model_payloads_are_rejected[top_k_projection]`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_obsolete_projected_model_payloads_are_rejected[pre_topk]`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_noncanonical_assignment_is_rejected`
-- **FAIL** `python::tests/test_manifold_sae_golden_roundtrip` :: `test_covariance_bearing_fixture_round_trips`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_to_dict_is_a_fixed_point`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_dense_array_getters`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_fisher_and_selected_getters`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_scalar_and_list_getters`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_atoms_is_an_object_surface`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_atom_dense_covariance_is_reconstructed`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_report_block_getters`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_getters` :: `test_native_summary_and_description_length_use_the_fitted_artifact`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_type_is_the_pyo3_model`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_steer_reuses_the_resident_metric`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_target_dose_probe_is_wired_through_the_public_model`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_target_dose_rejects_scalar_and_malformed_probe_results`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_target_dose_local_decrease_does_not_claim_unreachable`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_target_dose_unreachable_requires_a_global_envelope_certificate`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_rebuilds_every_analytic_coordinate_action[geometry_plan0-3-t_from0-t_to0]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_rebuilds_every_analytic_coordinate_action[geometry_plan1-9-t_from1-t_to1]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_rebuilds_every_analytic_coordinate_action[geometry_plan2-6-t_from2-t_to2]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_rebuilds_every_analytic_coordinate_action[geometry_plan3-3-t_from3-t_to3]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_respects_periodic_seams_in_product_manifolds[geometry_plan0-9-1.0-t_from0-t_wrapped0-t_unwrapped0]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_steer_respects_periodic_seams_in_product_manifolds[geometry_plan1-6-1.0-t_from1-t_wrapped1-t_unwrapped1]`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_mobius_steer_identifies_deck_twins`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_public_target_dose_rebuilds_cylinder_metadata`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_attach_fisher_is_atomic_and_builds_once`
-- **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_detach_is_explicit_not_attach_none`
-- **FAIL** `python::tests/test_multinomial_inference_completeness_1101_test` :: `test_confidence_interval_returns_sane_bounds`
-- **FAIL** `python::tests/test_cross_frame_dispatch` :: `test_sphere_numpy_frame`
-- **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_gaussian`
-- **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_binomial`
-- **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_linear_min_max_active_lower_bound`
-- **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonpositive_active_bound`
-- **FAIL** `python::tests/test_posterior_monotone_shape_constraint` :: `test_convex_posterior_curves_are_convex`
-- **FAIL** `python::tests/test_pyffi_bug_hunt4` :: `test_bug_custom_family_coefficient_group_labels_are_stably_routed`
-- **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_tweedie_dispersion_location_scale_is_predictable`
-- **FAIL** `python::tests/bug_hunt_gaussian_bounded_coefficient_posterior_escapes_interval_test` :: `test_binomial_bounded_posterior_stays_in_interval_control`
-- **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_predict_emits_interval_columns`
-- **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_interval_matches_transform_eta_construction`
-- **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_interval_covers_truth_at_nominal_rate`
-- **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_sample_predict_returns_posterior_bands`
-- **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_posterior_predict_draws_matrix_shape`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_recovers_spherical_sign`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_does_not_reject_flat_truth`
-- **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_report_and_gated_angle_reader`
-- **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_round_trips_through_dict`
-- **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_manifoldsae_has_hybrid_split_field_defaulting_none`
-- **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_to_dict_emits_hybrid_split`
-- **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_to_dict_emits_none_when_absent`
-- **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_hybrid_split_round_trips_through_from_dict`
-- **FAIL** `python::tests/test_sae_manifold_certify_external_2266` :: `test_certify_external_returns_typed_nonfit_for_perturbed_state`
-- **FAIL** `python::tests/test_sae_manifold_certify_external_2266` :: `test_certify_external_requires_matching_per_atom_metadata_lengths`
-- **FAIL** `python::tests/test_multinomial_inference_completeness_1101_test` :: `test_std_error_alias_matches_interval`
-- **FAIL** `python::tests/test_sae_manifold_converged_latents_issue_357` :: `test_converged_latents_exposes_t_star_and_a_star`
-- **FAIL** `python::tests/test_sae_manifold_converged_latents_issue_357` :: `test_standalone_per_atom_projection`
-- **FAIL** `python::tests/test_sae_manifold_olmo_real_recon_ev` :: `test_olmo_real_heldout_reconstruction_ev_meets_linear_parity`
-- **FAIL** `python::tests/test_sae_manifold_converged_latents_issue_357` :: `test_warm_start_accepted_and_refines`
-- **FAIL** `python::tests/test_sae_manifold_oos_reencode_issue_2132` :: `test_oos_reencode_of_training_rows_matches_native_reconstruction`
-- **FAIL** `python::tests/bug_hunt_convex_concave_smooth_collapses_to_flat_at_moderate_snr_test` :: `test_concave_smooth_recovers_clean_concave_signal`
-- **FAIL** `python::tests/test_binomial_posterior_mean_uncertainty` :: `test_rare_event_observation_band_is_informative`
-- **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data`
-- **FAIL** `python::tests/test_sae_manifold_converged_latents_issue_357` :: `test_oos_solve_returns_converged_latents_not_post_solve_reseed`
-- **FAIL** `python::tests/test_sae_manifold_oos_reencode_issue_2132` :: `test_selected_rho_survives_save_load_roundtrip`
-- **FAIL** `python::tests/test_multinomial_inference_completeness_1101_test` :: `test_smooth_significance_table_is_populated`
-- **FAIL** `python::tests/test_sae_manifold_determinism` :: `test_sae_fit_is_deterministic_for_fixed_seed`
-- **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_estimated_power_strictly_beats_pinned_1p5_in_low_mean_stratum`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_isometry_weight_is_not_a_silent_noop`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_ard_per_atom_is_not_a_silent_noop`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_block_orthogonality_weight_is_not_a_silent_noop`
-- **FAIL** `python::tests/test_sae_manifold_determinism` :: `test_sae_fit_random_state_changes_output`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_decoder_feature_sparsity_groups_is_not_a_silent_noop`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_decoder_feature_sparsity_groups_produces_nontrivial_gradient`
-- **FAIL** `python::tests/test_sae_manifold_regularizer_noops_issue_240` :: `test_primitive_names_metadata_is_not_a_substitute_for_effect`
-- **FAIL** `python::tests/test_sae_manifold_determinism` :: `test_sae_fit_random_state_changes_output_topk_path`
-- **FAIL** `python::tests/test_sae_manifold_shape_band_save_load` :: `test_shape_band_survives_save_load_to_tight_tolerance`
-- **FAIL** `python::tests/test_bug_hunt_2093_smooth_significance_uses_prior_weights` :: `test_smooth_significance_uses_saved_weight_column`
-- **FAIL** `python::tests/test_sae_manifold_heterogeneous_d_atom_2088` :: `test_heterogeneous_d_atom_passes_validation_when_row_block_penalties_disabled`
-- **FAIL** `python::tests/test_sae_manifold_shape_band_save_load` :: `test_on_disk_format_is_compact_per_channel_not_dense_joint`
-- **FAIL** `python::tests/test_sae_manifold_k_multi_heterogeneous_atoms` :: `test_heterogeneous_mixed_topology_atoms_reconstruct`
-- **FAIL** `python::tests/test_multinomial_inference_completeness_1101_test` :: `test_posterior_predict_draws_sane_labels`
-- **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_evaluate_more_centers_than_rows_numpy`
-- **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_basis_size_then_evaluate_consistent`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_structure_certificate_matches_independent_e_bh`
-- **FAIL** `python::tests/test_sae_manifold_shape_band_save_load` :: `test_reconstruction_and_band_are_physical_under_heterogeneous_column_scale`
-- **FAIL** `python::tests/test_sae_manifold_shape_uncertainty` :: `test_shape_uncertainty_fields_present_and_well_shaped`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_stricter_alpha_never_grows_confirmed_set`
-- **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[1]`
-- **FAIL** `python::tests/test_sae_manifold_shape_uncertainty` :: `test_band_sd_matches_analytic_phi_cov_phi_propagation`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_contested_entries_are_the_unconfirmed_complement`
-- **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[2]`
-- **FAIL** `python::tests/test_sae_manifold_shape_uncertainty` :: `test_posterior_shape_band_is_tighter_than_data_deviation`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_certificate_round_trips_through_native_payload`
-- **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_payload_is_one_unprojected_model`
-- **FAIL** `python::tests/test_sae_spectral_facade_smoke` :: `test_block_firing_coordinates_smoke`
-- **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_marginal_slope_fit_returns`
-- **FAIL** `python::tests/test_sae_manifold_shape_uncertainty` :: `test_more_data_tightens_the_posterior_band`
-- **FAIL** `python::tests/test_survival_marginal_slope_clustered_pc_808` :: `test_survival_marginal_slope_clustered_pc_converges_808`
 - **FAIL** `python::tests/test_survival_api_regressions` :: `test_joint_competing_risks_survival_is_reachable_from_fit`
-- **FAIL** `python::tests/test_sae_manifold_single_circle_default_795` :: `test_single_circle_quickstart_converges_with_default_regularizers`
-- **FAIL** `python::tests/test_survival_nonlinear_baseline_fits_issue_392_369` :: `test_weibull_survival_with_timewiggle_fits`
+- **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_marginal_slope_fit_returns`
 - **FAIL** `python::tests/test_survival_save_load_roundtrip` :: `test_survival_marginal_slope_save_load_predict_roundtrips`
-- **FAIL** `python::tests/test_validate_formula_operator_family_issue_219` :: `test_identity_wrapper_pass_through`
-- **FAIL** `python::tests/test_sae_manifold_single_circle_default_795` :: `test_single_circle_positive_isometry_recovers_honest_chart_span`
-- **FAIL** `python::tests/test_sae_manifold_speed` :: `test_periodic_atom_fit_recovers_one_harmonic_within_iteration_cap`
-- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_fit_learns_disjoint_periodic_atoms_without_inactive_leakage`
-- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_fit_oos_quality_matches_training_on_planted_oracle_distribution`
-- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_isometry_on_circle_recovers_planted_geometry_normalized_reference`
 
 ## Forbidden runtime-error signatures
 
@@ -635,13 +470,7 @@ _None._
 - SLOW `(─────────)` :: `gam::competing_risks_corrected_covariance_2346 competing_risks_fit_carries_smoothing_corrected_covariance_2346`
 - TERMINATING `(─────────)` :: `gam::competing_risks_corrected_covariance_2346 competing_risks_fit_carries_smoothing_corrected_covariance_2346`
 - TIMEOUT `gam::competing_risks_corrected_covariance_2346` :: `competing_risks_fit_carries_smoothing_corrected_covariance_2346`
-- SLOW `(─────────)` :: `gam::owed_1477_double_vs_single_penalty tweedie_default_double_penalty_matches_single_penalty_no_overshrink_1477`
 - SLOW `(─────────)` :: `gam::owed_1477_factorial double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
-- TERMINATING `(─────────)` :: `gam::owed_1477_factorial double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
-- TIMEOUT `gam::owed_1477_factorial` :: `double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
-- SLOW `(─────────)` :: `gam::perf_scale misc::large_scale_perf_benchmark::large_scale_perf_binomial_cylinder_n100k`
-- TERMINATING `(─────────)` :: `gam::perf_scale misc::large_scale_perf_benchmark::large_scale_perf_binomial_cylinder_n100k`
-- TIMEOUT `gam::perf_scale` :: `misc::large_scale_perf_benchmark::large_scale_perf_binomial_cylinder_n100k`
 - SLOW `(─────────)` :: `gam::sae sae::sae_1026_tiny_toy_parity::sae_1026_tiny_toy_curved_beats_linear_at_k1_on_unit_circle`
 - TERMINATING `(─────────)` :: `gam::sae sae::sae_1026_tiny_toy_parity::sae_1026_tiny_toy_curved_beats_linear_at_k1_on_unit_circle`
 - TIMEOUT `gam::sae` :: `sae::sae_1026_tiny_toy_parity::sae_1026_tiny_toy_curved_beats_linear_at_k1_on_unit_circle`
@@ -669,7 +498,9 @@ _None._
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::seed_verdict_depends_on_lane_call_order_2609`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::seed_verdict_depends_on_lane_call_order_2609`
 - TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::seed_verdict_depends_on_lane_call_order_2609`
-- SLOW `gam::owed_1477_double_vs_single_penalty` :: `tweedie_default_double_penalty_matches_single_penalty_no_overshrink_1477`
+- SLOW `(─────────)` :: `gam-solve gpu_kernels::sae_resident::tests::moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
+- SLOW `gam::owed_1477_factorial` :: `double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476`
+- SLOW `gam-solve` :: `gpu_kernels::sae_resident::tests::moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
 - SLOW `(─────────)` :: `gam::inference optimization::margslope_inner_pirls_scaling::margslope_inner_pirls_flex_scaling_law`
 - TERMINATING `(─────────)` :: `gam::inference optimization::margslope_inner_pirls_scaling::margslope_inner_pirls_flex_scaling_law`
 - TIMEOUT `gam::inference` :: `optimization::margslope_inner_pirls_scaling::margslope_inner_pirls_flex_scaling_law`
@@ -742,9 +573,6 @@ _None._
 - SLOW `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - TIMEOUT `gam-sae` :: `manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
-- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
-- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
-- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
 - SLOW `(─────────)` :: `gam::basis_smooth smooths::spline_scan_workflow_equivalence::spline_scan_million_row_fit_scales_linearly_and_recovers_truth`
 - TERMINATING `(─────────)` :: `gam::basis_smooth smooths::spline_scan_workflow_equivalence::spline_scan_million_row_fit_scales_linearly_and_recovers_truth`
 - TIMEOUT `gam::basis_smooth` :: `smooths::spline_scan_workflow_equivalence::spline_scan_million_row_fit_scales_linearly_and_recovers_truth`
@@ -759,7 +587,6 @@ _None._
 - TERMINATING `(─────────)` :: `gam::sae sae::sae_manifold_euclidean_line_fit::sae_manifold_euclidean_line_fits_through_production_engine`
 - TIMEOUT `gam::sae` :: `sae::sae_manifold_euclidean_line_fit::sae_manifold_euclidean_line_fits_through_production_engine`
 - SLOW `(─────────)` :: `gam::sae sae::sae_manifold_planted_bifurcation::planted_two_completion_symmetry_is_a_detected_event_not_a_silent_branch_choice`
-- SLOW `(─────────)` :: `gam::survival survival::survival_marginal_slope_outer_gradient_fd_1040::survival_marginal_slope_outer_gradient_fd_audit_duchon`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
 - TIMEOUT `gam-sae` :: `manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
@@ -778,9 +605,9 @@ _None._
 - SLOW `(─────────)` :: `gam::sbc_family_predictive_interval_coverage tweedie_predictive_interval_covers_new_observation_at_nominal`
 - TERMINATING `(─────────)` :: `gam::sbc_family_predictive_interval_coverage tweedie_predictive_interval_covers_new_observation_at_nominal`
 - TIMEOUT `gam::sbc_family_predictive_interval_coverage` :: `tweedie_predictive_interval_covers_new_observation_at_nominal`
-- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
-- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
-- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
+- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
+- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::composed_reconstruction_is_mu_plus_linear_plus_curved`
 - SLOW `(─────────)` :: `gam::inference misc::margslope_flex_large_scale_repro::margslope_flex_large_scale_repro_cycle0`
 - TERMINATING `(─────────)` :: `gam::inference misc::margslope_flex_large_scale_repro::margslope_flex_large_scale_repro_cycle0`
 - TIMEOUT `gam::inference` :: `misc::margslope_flex_large_scale_repro::margslope_flex_large_scale_repro_cycle0`
@@ -799,13 +626,9 @@ _None._
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609`
 - TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609`
-- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
-- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
-- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
 - SLOW `(─────────)` :: `gam::inference misc::margslope_smallcondition_smoke::margslope_flex_small_good_condition_completes_quickly`
 - TERMINATING `(─────────)` :: `gam::inference misc::margslope_smallcondition_smoke::margslope_flex_small_good_condition_completes_quickly`
 - TIMEOUT `gam::inference` :: `misc::margslope_smallcondition_smoke::margslope_flex_small_good_condition_completes_quickly`
-- SLOW `(─────────)` :: `gam::pathological misc::standard_gam_scaling::standard_gam_p_scaling_law`
 - SLOW `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::factored_fit_recovers_planted_low_rank_atoms`
 - TERMINATING `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::factored_fit_recovers_planted_low_rank_atoms`
 - TIMEOUT `gam::sae` :: `sae::sae_factored_frame_solve::factored_fit_recovers_planted_low_rank_atoms`
@@ -821,7 +644,9 @@ _None._
 - SLOW `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
 - TIMEOUT `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
-- SLOW `gam::pathological` :: `misc::standard_gam_scaling::standard_gam_p_scaling_law`
+- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
+- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::peel_disabled_target_is_the_mean_centered_target`
 - SLOW `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::factored_matches_full_b_recovery`
 - TERMINATING `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::factored_matches_full_b_recovery`
 - TIMEOUT `gam::sae` :: `sae::sae_factored_frame_solve::factored_matches_full_b_recovery`
@@ -844,6 +669,7 @@ _None._
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
-- SLOW `(─────────)` :: `gam-solve gpu_kernels::sae_resident::tests::moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
-- SLOW `gam-solve` :: `gpu_kernels::sae_resident::tests::moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
+- SLOW `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
+- TERMINATING `(─────────)` :: `gam-sae tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
+- TIMEOUT `gam-sae` :: `tiered::fit::peel_tests::peeled_support_fit_converges_on_planted_bulk_plus_curvature`
 
