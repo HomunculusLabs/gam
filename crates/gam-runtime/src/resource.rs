@@ -56,7 +56,7 @@ pub const OWNED_DATA_CACHE_MAX_ENTRIES: usize = 2;
 /// The base quantity is *capacity* (`min(host total, binding cgroup hard
 /// limit)`), not free space, and that is the same separation #2684 established
 /// for the materialization ceiling — see
-/// [`governor_budget_from_availability`] for why the ledger cannot be an
+/// `governor_budget_from_availability` for why the ledger cannot be an
 /// exception to it (#2702).
 const GOVERNOR_BUDGET_NUMERATOR: u128 = 3;
 const GOVERNOR_BUDGET_DENOMINATOR: u128 = 4;
