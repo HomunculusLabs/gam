@@ -11,6 +11,20 @@
 //! It scans ONLY the sparse lane, so it cannot break the overcomplete dense
 //! research / certification path (which legitimately builds `SaeAssignment` at
 //! K > P for small N) — that path lives in the manifold engine, not here.
+//!
+//! #2693 strengthened the scan twice, both tightenings:
+//!
+//! * it RECURSES through `sparse_dict/**` instead of reading only the top level,
+//!   so a nested submodule cannot hold the dense state the flat `read_dir` missed;
+//! * it also refuses the MECHANISM, not only the symptom. `SaeManifoldTerm` is the
+//!   dense engine aggregate and its ONLY constructor is
+//!   `SaeManifoldTerm::new(atoms, assignment: SaeAssignment)`, so naming that type
+//!   in the sparse lane FORCES a dense `N×K` assignment into existence — there is
+//!   no sparse in-core entry (that is the Stage 2 `SaeAssignmentState::from_topk_support`
+//!   seam on #2023). Without this needle the invariant could be re-broken by any
+//!   new dense-engine caller, and the `SaeAssignment` needle would only catch it
+//!   at the last line. `crate::manifold::realised_rank_charge_dof` and friends are
+//!   deliberately NOT needles: they are pure helpers that build no routing state.
 
 use gam_sae::front_door::{SaeFitLane, admit_dense_certification, admit_sae_fit};
 use gam_sae::sparse_dict::{SparseDictConfig, fit_sparse_dictionary};
@@ -65,7 +79,7 @@ fn strip_cfg_test_regions(src: &str) -> String {
 fn strip_cfg_test_regions_removes_guarded_blocks_only() {
     let src = "fn prod() { build(SaeAssignment::new()); }\n\
                #[cfg(test)]\n\
-               mod tests { fn t() { build(SaeAssignment::from_blocks()); } }\n\
+               mod tests { fn t() { build(SaeAssignment::from_blocks()); SaeManifoldTerm::new(); } }\n\
                fn also_prod() {}\n";
     let stripped = strip_cfg_test_regions(src);
     assert!(
@@ -79,6 +93,10 @@ fn strip_cfg_test_regions_removes_guarded_blocks_only() {
     assert!(
         !stripped.contains("SaeAssignment::from_blocks"),
         "the cfg(test) block must be stripped"
+    );
+    assert!(
+        !stripped.contains("SaeManifoldTerm"),
+        "the dense-engine needle must also be stripped inside a cfg(test) block"
     );
 }
 
@@ -96,21 +114,35 @@ fn sparse_lane_constructs_no_dense_assignment() {
     // A dense-assignment CONSTRUCTION is a struct literal (`SaeAssignment {`) or
     // any associated-fn call (`SaeAssignment::…`, covering every constructor —
     // `new`, `from_blocks_with_mode`, `from_blocks_with_mode_and_manifolds`, …).
-    const CONSTRUCTION_NEEDLES: [&str; 2] = ["SaeAssignment {", "SaeAssignment::"];
+    // `SaeManifoldTerm` is the dense engine aggregate: its only constructor takes a
+    // `SaeAssignment`, so naming it here forces the dense `N×K` state (#2693).
+    const CONSTRUCTION_NEEDLES: [&str; 3] =
+        ["SaeAssignment {", "SaeAssignment::", "SaeManifoldTerm"];
+
+    // Recurse: a nested `sparse_dict/<sub>/*.rs` module is still the sparse lane.
+    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut pending: Vec<PathBuf> = vec![dir.clone()];
+    while let Some(d) = pending.pop() {
+        for entry in std::fs::read_dir(&d).expect("read sparse_dict directory") {
+            let path = entry.expect("sparse_dict dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                sources.push(path);
+            }
+        }
+    }
 
     let mut scanned = 0usize;
     let mut offenders: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("read sparse_dict directory") {
-        let path = entry.expect("sparse_dict dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).expect("read sparse-lane source file");
+    for path in &sources {
+        let src = std::fs::read_to_string(path).expect("read sparse-lane source file");
         let production = strip_cfg_test_regions(&src);
         let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .strip_prefix(&dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
         for needle in CONSTRUCTION_NEEDLES {
             if production.contains(needle) {
                 offenders.push(format!("{name}: production code contains `{needle}`"));
@@ -125,9 +157,10 @@ fn sparse_lane_constructs_no_dense_assignment() {
     );
     assert!(
         offenders.is_empty(),
-        "the production sparse-code lane must construct ZERO dense SaeAssignments — that \
+        "the production sparse-code lane must construct ZERO dense SaeAssignments and must not \
+         enter the dense engine (`SaeManifoldTerm`, whose only constructor takes one) — that \
          dense N×K routing state is the certification / debug-and-research lane only (#985 / E1); \
-         found {} offender(s): {offenders:?}",
+         scanned {scanned} file(s), found {} offender(s): {offenders:?}",
         offenders.len()
     );
 }

@@ -21,6 +21,20 @@
 //! the engine lane on #2023 — this module never touches the driver internals, it
 //! only CALLS `SaeManifoldTerm`.
 //!
+//! **Why this module lives under [`crate::manifold`] and NOT under
+//! [`crate::sparse_dict`] (#2693 / #985 E1).** It is a caller of the DENSE
+//! manifold engine: the engine's only constructor is
+//! [`SaeManifoldTerm::new(atoms, assignment)`](SaeManifoldTerm::new), whose
+//! `assignment` is a [`SaeAssignment`] — the dense `N x K` routing state, stored
+//! as an `Array2<f64>` of logits. Entering the dense engine therefore REQUIRES
+//! materializing that state; there is no sparse in-core entry (that is the Stage 2
+//! `SaeAssignmentState::from_topk_support` seam, still specced to the engine lane
+//! on #2023). `sparse_dict` is defined by "no dense `N x K` object anywhere", and
+//! `sparse_lane_constructs_no_dense_assignment` locks that. So this bridge from a
+//! block routing into the dense certification engine belongs on the dense side of
+//! the boundary, and it consumes the sparse lane's public surface
+//! ([`crate::sparse_dict`]) rather than living inside it.
+//!
 //! **#2275 certificate reconciliation.** The joint solver's
 //! `EvidenceJointFitOutcome.fixed_point` is a construction gate, not report
 //! telemetry: `false` returns a non-convergence error, so every
@@ -33,13 +47,13 @@ use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3};
 
 use gam_terms::latent::LatentManifold;
 
-use super::block_chart::{
-    BlockChartComposeConfig, BlockChartComposeResult, compose_block_coordinate_charts,
-};
-use super::coordinate::explained_variance_from_reconstruction;
 use crate::assignment::{AssignmentMode, SaeAssignment};
 use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisEvaluator};
 use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm};
+use crate::sparse_dict::{
+    BlockChartComposeConfig, BlockChartComposeResult, compose_block_coordinate_charts,
+    explained_variance_from_reconstruction,
+};
 
 /// Result of the arrow-Schur-routed co-fit linear tier (Stage 1).
 #[derive(Clone, Debug)]
@@ -334,7 +348,7 @@ fn build_curved_atom(
 ///
 /// This is the composed analogue of [`cofit_linear_via_arrow`] and the match-or-beat
 /// replacement for the hand-rolled A/B coordinate descent of
-/// [`super::cofit_block_and_curved`]: instead of alternating a linear-code refit with
+/// [`crate::sparse_dict::cofit_block_and_curved`]: instead of alternating a linear-code refit with
 /// a guarded curved-chart commit, it builds a mixed atom set — a flat linear atom for
 /// every block the chart-discovery lane leaves flat, a curved periodic atom for every
 /// block it promotes to a ring — and descends the SINGLE joint objective the unified
@@ -837,7 +851,7 @@ mod tests {
     }
 
     /// Orthonormal-per-block decoder with a planted overlap, mirroring the fixture
-    /// [`super::super::cofit`] is tested on: 3 blocks of size b=2 in P=5, block 1
+    /// `sparse_dict::cofit` is tested on: 3 blocks of size b=2 in P=5, block 1
     /// overlapping block 0 on e1 (so the tied projection double-counts e1), block 2
     /// the plane holding a planted circle.
     fn planted_decoder() -> Array2<f32> {
@@ -1151,7 +1165,7 @@ mod tests {
 
     /// #2023 Increment 5 (the composed cutover): the unified arrow-Schur joint solve
     /// over a MIXED linear + curved atom set must MATCH-OR-BEAT the hand-rolled A/B
-    /// coordinate-descent co-fit ([`super::super::cofit_block_and_curved`]) in
+    /// coordinate-descent co-fit ([`crate::sparse_dict::cofit_block_and_curved`]) in
     /// explained variance on the same planted routing, and it must actually fold in
     /// a curved atom (the discovered circle in block 2). This is the parity evidence
     /// that licenses deleting the alternation and repointing `fit_tiered`.

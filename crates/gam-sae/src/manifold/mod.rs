@@ -192,6 +192,10 @@ mod certificate;
 mod chart_atlas;
 mod chart_degeneracy;
 mod checkpoint;
+// #2693 / #985 E1: the block-routing -> dense-engine co-fit bridge. It sits on the
+// DENSE side of the boundary because the engine's only constructor takes a dense
+// `SaeAssignment`; it consumes `crate::sparse_dict`'s public surface from outside.
+mod cofit_arrow;
 mod construction;
 mod construction_ard;
 mod construction_arrow_schur_assembly;
@@ -511,6 +515,7 @@ pub use behavior_isometry::*;
 pub use certificate::*;
 pub use chart_atlas::*;
 pub use chart_degeneracy::*;
+pub use cofit_arrow::*;
 pub use construction_aux_types::*;
 pub use construction_cache_refresh::*;
 pub use construction_padded_blocks::*;
