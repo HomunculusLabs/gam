@@ -11,8 +11,7 @@ pub(crate) use csv::WriterBuilder;
 
 pub(crate) use gam::estimate::{
     BlockRole, ContinuousSmoothnessOrderStatus, FittedLinkState, ModelSummary,
-    ParametricTermSummary, SmoothTermSummary, UnifiedFitResult,
-    compute_continuous_smoothness_order,
+    ParametricTermSummary, UnifiedFitResult, smooth_term_summary_rows,
 };
 
 pub(crate) use gam::families::bms::{
@@ -71,8 +70,6 @@ pub(crate) use gam_predict::input::{
 
 pub(crate) use gam_predict::linalg::{PredictionCovarianceBackend, rowwise_local_covariances};
 
-pub(crate) use gam::inference::smooth_test::{SmoothTestInput, wood_smooth_test};
-
 pub(crate) use gam::matrix::{DesignMatrix, SymmetricMatrix};
 
 pub(crate) use gam::mixture_link::state_fromspec;
@@ -98,8 +95,6 @@ pub(crate) use gam::smooth::{
 };
 // #1521: relocated DOWN into gam_terms::smooth (was families::...::drivers).
 pub(crate) use gam::terms::smooth::build_term_collection_design;
-
-pub(crate) use gam::smooth_test::SmoothTestScale;
 
 pub(crate) use gam::families::survival::survival_event_code_from_value;
 

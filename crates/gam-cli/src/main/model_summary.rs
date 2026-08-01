@@ -16,7 +16,6 @@ pub(crate) fn build_model_summary(
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
 ) -> Result<ModelSummary, String> {
-    const CONTINUOUS_ORDER_EPS: f64 = 1e-12;
     if y.len() != fit.training_sample_size() {
         return Err(format!(
             "summary response has {} rows but the fitted model records {} training rows",
@@ -31,14 +30,6 @@ pub(crate) fn build_model_summary(
     let se = display_uncertainty
         .as_ref()
         .map(|view| view.standard_errors);
-    // Conditional Bayesian covariance `Vb = H⁻¹·φ̂` (mgcv's `Vp`) for the Wald
-    // smooth test — NOT the smoothing-corrected `Vc`, whose λ̂-uncertainty
-    // inflates the wiggle directions and flips the whitened eigenvalue ordering
-    // for near-linear terms (#2142). `Vc` is for prediction/credible bands,
-    // and it is NEVER a substitute here: silently swapping it in changes the
-    // Wald p-values (#2296), so when the conditional matrix is absent the
-    // smooth test is simply not reported.
-    let cov_forwald = fit.beta_covariance();
     // Wood (2013) design-whitening metric for the Wald smooth test (#2142):
     // the exact weighted Gram `X'WX` when the inference block is present, else
     // the unweighted `X'X` from the summary design (here the real training
@@ -168,175 +159,15 @@ pub(crate) fn build_model_summary(
         }
     }
 
-    let mut smooth_terms = Vec::<SmoothTermSummary>::new();
-    // The fit's GLOBAL penalty layout (and thus `penalty_block_trace`) opens with
-    // ONE `LinearTermRidge` block PER linear term carrying `double_penalty=true`
-    // — not one shared block (`smooth/term_design.rs:289-311`; every non-intercept
-    // effect owns its own REML coordinate so an unsupported slope can be shrunk
-    // independently). Random-effect and smooth penalty blocks follow them.
-    // Seeding `penalty_cursor` at 0 ignored those leading blocks, sliding every
-    // per-term trace window off by the number of penalized linear terms and
-    // masking the bug only on small dense fits (where `per_term_edf` reads the
-    // influence matrix instead, #1372). Start the cursor PAST them by COUNTING
-    // them in the recorded global ordering rather than re-deriving it — which is
-    // what the `.count()` below does, and why it must not be replaced by a
-    // boolean.
-    let mut penalty_cursor = design
-        .penaltyinfo
-        .iter()
-        .filter(|info| {
-            matches!(
-                &info.penalty.source,
-                gam::basis::PenaltySource::Other(s) if s == "LinearTermRidge"
-            )
-        })
-        .count();
-    for (re_idx, (name, range)) in design.random_effect_ranges.iter().enumerate() {
-        // Only PENALIZED random-effect blocks contribute a penalty block to the
-        // flat `lambdas`/`penalty_block_trace`/`edf_by_block` layout: design
-        // assembly skips the unpenalised ones (`design_construction.rs` RE-penalty
-        // loop `continue`s on `!penalized`). A factor `by=` smooth injects exactly
-        // such an UNPENALISED treatment-coded factor main-effect block; walking
-        // `penalty_cursor` by one for it (the #1368 defect) slid the cursor one
-        // block past every smooth term that followed, so the LAST by-level smooth's
-        // `penalty_cursor..+k` window ran off the end of the per-block traces and
-        // `per_term_edf` returned 0 (and, with EDF 0, the Wood test was skipped,
-        // leaving ref_df/chi_sq/p_value at 0/NaN). Advance the cursor by the number
-        // of penalty blocks the term actually owns: 1 if penalized, 0 if not.
-        let penalized = spec
-            .random_effect_terms
-            .get(re_idx)
-            .map(|t| t.penalized)
-            .unwrap_or(true);
-        // The design's RE-penalty loop skips a block when EITHER it is
-        // unpenalised OR its coefficient range is empty (`design_construction.rs`
-        // `range.is_empty() || !penalized` → `continue`). A penalised RE term
-        // with zero kept groups (every level filtered) is exactly such an
-        // empty-range penalised block: it owns NO entry in the flat
-        // `lambdas`/`penalty_block_trace`/`edf_by_block` layout. Counting it here
-        // (advancing the cursor by 1) would slide `penalty_cursor` one block past
-        // every RE/smooth term that followed — the #1368 desync, just triggered by
-        // an empty range rather than `!penalized`. Mirror BOTH design conditions.
-        let k_pen = usize::from(penalized && !range.is_empty());
-        let edf = fit.per_term_edf(range.clone(), penalty_cursor, k_pen);
-        penalty_cursor += k_pen;
-        // Random-effect smooths are variance-component tests on the boundary;
-        // a naive coefficient Wald χ² p-value is anti-conservative, so only EDF is reported.
-        let chi_sq_opt: Option<f64> = None;
-        let ref_df = edf.max(0.0);
-        let pvalue: Option<f64> = None;
-        smooth_terms.push(SmoothTermSummary {
-            name: name.clone(),
-            edf,
-            ref_df,
-            chi_sq: chi_sq_opt,
-            pvalue,
-            continuous_order: None,
-            basis_note: None,
-        });
-    }
-    // `SmoothTerm::coeff_range` is block-local (0-based within the smooth block);
-    // the global coefficient layout is [intercept | linear | random | smooth], so
-    // every term's block must be shifted by `smooth_start` before indexing the
-    // global `fit.beta` / covariance / influence matrix. Omitting this offset
-    // (the #1360 defect) slid each smooth's window one-per-preceding-column off,
-    // folding the intercept and a neighbouring term's coefficients into the test.
-    let smooth_start = design
-        .design
-        .ncols()
-        .saturating_sub(design.smooth.total_smooth_cols());
-    for term in &design.smooth.terms {
-        let k = term.active_penalties.len();
-        let term_penalty_start = penalty_cursor;
-        let global_range =
-            (smooth_start + term.coeff_range.start)..(smooth_start + term.coeff_range.end);
-        let edf = fit.per_term_edf(global_range.clone(), penalty_cursor, k);
-        penalty_cursor += k;
-        let smooth_test = if term.shape == gam::smooth::ShapeConstraint::None {
-            cov_forwald.and_then(|cov| {
-                wood_smooth_test(SmoothTestInput {
-                    beta: fit.beta.view(),
-                    covariance: cov,
-                    influence_matrix: fit.coefficient_influence(),
-                    // Wood (2013) design-whitening Gram in the original
-                    // coefficient basis (#2142): exact `X'WX` or the design
-                    // `X'X`. Without it the rank-r cut keeps the wrong
-                    // eigen-subspace and a dominant wiggly smooth reads as
-                    // non-significant.
-                    whitening_gram: whitening_gram_full,
-                    coeff_range: global_range.clone(),
-                    edf,
-                    nullspace_dim: term.wald_unpenalized_dim(),
-                    residual_df,
-                    scale: if scale_is_estimated {
-                        SmoothTestScale::Estimated
-                    } else {
-                        SmoothTestScale::Known
-                    },
-                })
-            })
-        } else {
-            None
-        };
-        let chi_sq_opt = smooth_test.as_ref().map(|test| test.statistic);
-        let ref_df = smooth_test
-            .as_ref()
-            .map(|test| test.ref_df)
-            .unwrap_or(edf.max(0.0));
-        let pvalue = smooth_test.as_ref().map(|test| test.p_value);
-        let continuous_order = if k == 3
-            && term_penalty_start + 2 < fit.lambdas.len()
-            && term_penalty_start + 2 < design.penaltyinfo.len()
-        {
-            // Unscaling identity for physical lambdas:
-            //   S_tilde_k = S_k / c_k, and
-            //   lambda_tilde_k * S_tilde_k = (lambda_tilde_k / c_k) * S_k.
-            // Therefore physical lambda used by continuous-order diagnostics is
-            //   lambda_k = lambda_tilde_k / c_k.
-            let normalized_scale = |idx: usize| {
-                let c = design.penaltyinfo[idx].penalty.normalization_scale;
-                if c.is_finite() && c > 0.0 {
-                    Some(c)
-                } else {
-                    None
-                }
-            };
-            let lambda_tilde = [
-                fit.lambdas[term_penalty_start],
-                fit.lambdas[term_penalty_start + 1],
-                fit.lambdas[term_penalty_start + 2],
-            ];
-            match (
-                normalized_scale(term_penalty_start),
-                normalized_scale(term_penalty_start + 1),
-                normalized_scale(term_penalty_start + 2),
-            ) {
-                (Some(c0), Some(c1), Some(c2)) => Some(compute_continuous_smoothness_order(
-                    lambda_tilde,
-                    [c0, c1, c2],
-                    CONTINUOUS_ORDER_EPS,
-                )),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let basis_note = match &term.metadata {
-            gam::basis::BasisMetadata::BSpline1D {
-                auto_shrink_note, ..
-            } => auto_shrink_note.clone(),
-            _ => None,
-        };
-        smooth_terms.push(SmoothTermSummary {
-            name: term.name.clone(),
-            edf,
-            ref_df,
-            chi_sq: chi_sq_opt,
-            pvalue,
-            continuous_order,
-            basis_note,
-        });
-    }
+    // The walk over the fit's flat penalty layout — the `LinearTermRidge`
+    // prologue, the random-effect blocks that own no entry, the block-local →
+    // global coefficient shift, the per-term influence trace, and the Wood test
+    // itself — is ONE accounting shared with the persisted-model summary the
+    // Python API reads (#2470). It was written out here and again in
+    // `gam-pyffi`, which is why #1219, #1277, #1360, #1368 and #1372 each had to
+    // be landed twice. This surface's only distinctive input is the whitening
+    // Gram, because it holds the real training design.
+    let smooth_terms = smooth_term_summary_rows(design, spec, fit, whitening_gram_full);
 
     Ok(ModelSummary {
         family: family.pretty_name().to_string(),

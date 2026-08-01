@@ -1268,10 +1268,17 @@ mod whitening_gram_tests {
 
 /// Build the mgcv-style per-smooth significance table for the FFI summary.
 ///
-/// Mirrors `main.rs::build_model_summary`'s smooth-term loop: random-effect
-/// smooths report `edf` only (their boundary variance-component test is not a
-/// Wald χ²); penalized smooth terms get the Wood (2013) rank-truncated Wald
-/// statistic and p-value from [`gam::inference::smooth_test::wood_smooth_test`].
+/// This is marshalling, not a second summary: the table comes from
+/// `gam::solver::estimate::smooth_term_summary_rows`, the one walk of the
+/// fit's penalty layout that the in-process CLI summary also uses (#2470). Its
+/// contract is unchanged — random-effect smooths report `edf` only (their
+/// boundary variance-component test is not a Wald χ²), and penalized smooth
+/// terms get the Wood (2013) rank-truncated Wald statistic and p-value.
+///
+/// The "Mirrors `main.rs::build_model_summary`'s smooth-term loop" this
+/// sentence used to open with was accurate and was the problem: a comment
+/// asserting parity between two implementations is the marker for a wiring that
+/// should have had one.
 ///
 /// Returns an empty vector (rather than erroring) when the design cannot be
 /// rebuilt — e.g. a model saved without `resolved_termspec` or training feature
@@ -1281,9 +1288,6 @@ fn summary_smooth_terms(
     model: &FittedModel,
     fit: &gam::solver::estimate::UnifiedFitResult,
 ) -> Vec<SummarySmoothTermRow> {
-    use gam::inference::smooth_test::{SmoothTestInput, SmoothTestScale, wood_smooth_test};
-    use gam::terms::smooth::ShapeConstraint;
-
     let payload = model.payload();
     let Some(spec) = payload.resolved_termspec.as_ref() else {
         return Vec::new();
@@ -1311,20 +1315,6 @@ fn summary_smooth_terms(
         return Vec::new();
     };
 
-    // The Wald smooth test uses the CONDITIONAL Bayesian covariance
-    // `Vb = H⁻¹·φ̂` (mgcv's `Vp`, the covariance mgcv's `testStat` whitens by
-    // default), NOT the smoothing-parameter-corrected `Vc`. `Vc` adds the λ̂
-    // uncertainty `(∂β/∂ρ)·Cov(ρ)·(∂β/∂ρ)ᵀ`, whose variance concentrates in the
-    // wiggle directions (those are the ones λ controls). For a heavily-smoothed,
-    // near-linear term that inflation can exceed the linear direction's variance
-    // and flip the whitened eigenvalue ordering, so the rank-`round(edf)`
-    // truncation keeps a wiggle mode where β̂≈0 and reports the term
-    // non-significant even though its linear effect is real (#2142). The
-    // conditional covariance is the correct hypothesis-test object; `Vc` is for
-    // prediction/credible bands — and it is NEVER a substitute here: silently
-    // swapping it in changes the Wald p-values (#2296). When the conditional
-    // matrix is absent the smooth test is simply not reported.
-    let cov_forwald = fit.beta_covariance();
     // Wood (2013) design-whitening metric for the Wald smooth test (#2142).
     // Prefer the fit's exact weighted Gram `X'WX` when the inference block
     // survived; on the persisted summary path (inference dropped) reconstruct
@@ -1336,145 +1326,34 @@ fn summary_smooth_terms(
     };
     let whitening_gram_full: Option<&Array2<f64>> =
         fit.weighted_gram().or(reconstructed_gram.as_ref());
-    // The fit's scale METADATA owns this, not the family name — one definition
-    // for this persisted-model summary and the in-process CLI one (#2470). The
-    // family name cannot answer it: `FixedGammaShape` and `EstimatedGammaShape`
-    // are both `ResponseFamily::Gamma`, and this surface's old
-    // `matches!(family.response, Gaussian | Gamma)` therefore handed a
-    // user-pinned Gamma shape an `F` reference while the CLI, reading the same
-    // saved fit, handed it a `χ²` one.
-    //
-    // The fit owns both the training row count and the denominator calculation.
-    // The representative design above exists only to replay frozen basis
-    // geometry; optional working evidence exists only for row-wise diagnostics.
-    // Neither is a sample-size source.
-    let residual_df = fit.wald_residual_degrees_of_freedom();
-    let scale = if fit.likelihood_scale.wald_scale_is_estimated() {
-        SmoothTestScale::Estimated
-    } else {
-        SmoothTestScale::Known
-    };
-
-    let mut out = Vec::<SummarySmoothTermRow>::new();
-    // The fit's GLOBAL penalty layout (and thus `penalty_block_trace`) opens with
-    // ONE `LinearTermRidge` block PER linear term carrying `double_penalty=true`
-    // — not one shared block (`smooth/term_design.rs:289-311`; every non-intercept
-    // effect owns its own REML coordinate so an unsupported slope can be shrunk
-    // independently). Random-effect and smooth penalty blocks follow them.
-    // Seeding `penalty_cursor` at 0 ignored those leading blocks, sliding every
-    // per-term trace window off by the number of penalized linear terms; on this
-    // persisted / column-conditioned path `F` is nulled, so `per_term_edf` falls
-    // back to the `penalty_block_trace` window and the offset corrupts every
-    // per-term EDF (#1372). Start the cursor PAST them by COUNTING them in the
-    // recorded global ordering rather than re-deriving it — which is what the
-    // `.count()` below does, and why it must not be replaced by a boolean.
-    let mut penalty_cursor = design
-        .penaltyinfo
-        .iter()
-        .filter(|info| {
-            matches!(
-                &info.penalty.source,
-                gam::basis::PenaltySource::Other(s) if s == "LinearTermRidge"
-            )
+    // The walk over the fit's flat penalty layout — the `LinearTermRidge`
+    // prologue, the random-effect blocks that own no entry, the block-local →
+    // global coefficient shift, the per-term influence trace, and the Wood test
+    // with its reference distribution — is ONE accounting, shared with the
+    // in-process CLI summary (#2470). Both surfaces spelled it out, so #1219,
+    // #1277, #1360, #1368 and #1372 each had to be landed twice; the comment
+    // this replaces recorded its own copy of #1368 as "fixed on the in-process
+    // path but never propagated here". What genuinely differs on this persisted
+    // path is the EVIDENCE — a frozen-basis replay instead of the training
+    // design, so the whitening Gram is reconstructed rather than exact — and
+    // that is the only thing handed over. Both reference-distribution inputs
+    // (`wald_residual_degrees_of_freedom`, `wald_scale_is_estimated`) are read
+    // off the fit inside that walk, which is where `fd998d957` put them.
+    let rows = gam::solver::estimate::smooth_term_summary_rows(
+        &design,
+        spec,
+        fit,
+        whitening_gram_full,
+    );
+    rows.into_iter()
+        .map(|row| SummarySmoothTermRow {
+            name: row.name,
+            edf: row.edf,
+            ref_df: row.ref_df,
+            chi_sq: row.chi_sq,
+            p_value: row.pvalue,
         })
-        .count();
-    for (re_idx, (name, range)) in design.random_effect_ranges.iter().enumerate() {
-        // Per-term EDF as the influence-matrix trace over the term's coefficient
-        // block (#1219, #1277) — never the legacy per-block-EDF sum, which
-        // double-counts shared coefficients and can exceed the model total.
-        //
-        // Only PENALIZED, non-empty RE blocks own an entry in the flat
-        // `lambdas`/`penalty_block_trace`/`edf_by_block` layout: design assembly
-        // (`design_construction.rs`) `continue`s its RE-penalty loop on
-        // `range.is_empty() || !penalized`. Advancing the cursor by a fixed 1 per
-        // RE term (the #1368 defect — fixed on the in-process `model_summary.rs`
-        // path but never propagated here) slides `penalty_cursor` one block past
-        // every RE/smooth term that follows an UNPENALIZED RE block (e.g. the
-        // treatment-coded factor main effect a `by=` smooth injects) or an empty
-        // (zero-kept-group) one, so the trailing smooth's `cursor..+k` window runs
-        // off the end of `penalty_block_trace`, `per_term_edf` returns 0, the Wood
-        // test is skipped, and ref_df/chi_sq/p_value collapse to 0/None on the
-        // Python `summary()` path. Mirror BOTH design conditions.
-        let penalized = spec
-            .random_effect_terms
-            .get(re_idx)
-            .map(|t| t.penalized)
-            .unwrap_or(true);
-        let k_pen = usize::from(penalized && !range.is_empty());
-        let edf = fit.per_term_edf(range.clone(), penalty_cursor, k_pen);
-        penalty_cursor += k_pen;
-        // Random-effect smooths are boundary variance-component tests; a naive
-        // coefficient Wald χ² is anti-conservative, so only EDF is reported.
-        out.push(SummarySmoothTermRow {
-            name: name.clone(),
-            edf,
-            ref_df: edf.max(0.0),
-            chi_sq: None,
-            p_value: None,
-        });
-    }
-    // `SmoothTerm::coeff_range` is block-local; the global coefficient layout is
-    // [intercept | linear | random | smooth], so each block must be shifted by
-    // `smooth_start` before indexing the global `fit.beta` / covariance /
-    // influence matrix. The rebuilt design replays the frozen basis, so its
-    // column counts and `smooth_start` match the trained fit exactly; only this
-    // offset (omitted in the #1360 defect) was missing.
-    let smooth_start = design
-        .design
-        .ncols()
-        .saturating_sub(design.smooth.total_smooth_cols());
-    for term in &design.smooth.terms {
-        let k = term.active_penalties.len();
-        // Per-term EDF as the influence-matrix trace over the term's coefficient
-        // block, NOT the legacy `Σ_kk edf_by_block` per-penalty sum. For a tensor
-        // product `te`/`ti` (and anisotropic / adaptive smooths) several penalty
-        // blocks span the SAME shared coefficient range, so the block-sum
-        // double-counts and reports a per-term EDF exceeding the model total and
-        // the design column count (#1219 fixed the in-process summary; #1277 is
-        // this persisted-model path the Python API reads via `summary()`).
-        let global_range =
-            (smooth_start + term.coeff_range.start)..(smooth_start + term.coeff_range.end);
-        let edf = fit.per_term_edf(global_range.clone(), penalty_cursor, k);
-        penalty_cursor += k;
-        let smooth_test = if term.shape == ShapeConstraint::None {
-            cov_forwald.and_then(|cov| {
-                // The summary table is built from representative inputs reconstructed
-                // from saved feature ranges (not the original training rows).
-                wood_smooth_test(SmoothTestInput {
-                    beta: fit.beta.view(),
-                    covariance: cov,
-                    influence_matrix: fit.coefficient_influence(),
-                    // Wood (2013) design-whitening Gram in the original
-                    // coefficient basis (#2142): exact `X'WX` when available, else
-                    // the frozen-basis `X'X` reconstruction. Without it the
-                    // rank-r truncation keeps the wrong eigen-subspace and a
-                    // dominant wiggly smooth reads as non-significant.
-                    whitening_gram: whitening_gram_full,
-                    coeff_range: global_range.clone(),
-                    edf,
-                    nullspace_dim: term.wald_unpenalized_dim(),
-                    residual_df,
-                    scale,
-                })
-            })
-        } else {
-            None
-        };
-        let chi_sq = smooth_test.as_ref().map(|test| test.statistic);
-        let ref_df = smooth_test
-            .as_ref()
-            .map(|test| test.ref_df)
-            .unwrap_or(edf.max(0.0));
-        let p_value = smooth_test.as_ref().map(|test| test.p_value);
-        out.push(SummarySmoothTermRow {
-            name: term.name.clone(),
-            edf,
-            ref_df,
-            chi_sq,
-            p_value,
-        });
-    }
-    out
+        .collect()
 }
 
 /// Read the fitted κ̂ off every `curv(...)` constant-curvature smooth in the

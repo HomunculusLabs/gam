@@ -69,6 +69,7 @@ pub mod outer_eval_capture;
 mod penalty;
 mod prefit;
 pub(crate) mod smoothing_correction;
+mod smooth_term_summary;
 mod summary;
 
 pub use crate::model_types::result_types::dispersion_from_likelihood;
@@ -112,6 +113,7 @@ pub(crate) use smoothing_correction::{
 // #1521 carve: the spatial-optimization driver reads the unified rho bound as
 // `gam_solve::estimate::RHO_BOUND`.
 pub use smoothing_correction::RHO_BOUND;
+pub use smooth_term_summary::smooth_term_summary_rows;
 pub use summary::{
     ContinuousSmoothnessOrder, ContinuousSmoothnessOrderStatus, ModelSummary,
     ParametricTermSummary, SmoothTermSummary, compute_continuous_smoothness_order,
