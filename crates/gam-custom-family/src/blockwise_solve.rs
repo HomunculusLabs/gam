@@ -1699,7 +1699,15 @@ pub(crate) fn check_linear_feasibility(
         // β magnitude, and the outcome of the exact active-set projection of
         // THIS β onto these constraints.
         let norm_worst = constraints.row_norm(worst_idx).unwrap_or(f64::NAN);
-        let raw_worst = worst_scaled * norm_worst;
+        // The raw violation is the scaled one un-normalized. A vacuous row with
+        // a positive bound reports an INFINITE scaled violation against a zero
+        // norm, whose product is NaN; report its bound, which is the shortfall
+        // no β can close.
+        let raw_worst = if norm_worst > 0.0 {
+            worst_scaled * norm_worst
+        } else {
+            constraints.bound(worst_idx).unwrap_or(f64::NAN)
+        };
         let beta_inf = beta.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let interior_outcome =
             match gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(

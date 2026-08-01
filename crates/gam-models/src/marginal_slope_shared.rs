@@ -1813,26 +1813,40 @@ mod tests {
     /// why answering it with a trust-radius shrink cannot converge: quartering
     /// the step quarters the drift and leaves `0 / -drift` at zero. This is the
     /// mechanism behind the witness fit's 24-attempts-per-cycle ladder.
+    ///
+    /// The ladder terminates for one reason only — the drift itself eventually
+    /// falls inside the primal-feasibility contract, at which point the step is
+    /// no longer a violation and is admitted whole. With `|drift| = 4^-k` that
+    /// is the first `k` with `4^-k <= 1e-8`, i.e. `k = 14`. Pinning the exact
+    /// crossing is what makes this a bounded relief and not a widened
+    /// tolerance: rung 13 still blocks.
     #[test]
     fn a_zero_numerator_ratio_is_invariant_under_shrinking_the_step() {
         let constraints = unit_box();
         let on_the_face = ndarray::array![0.0, 1.0];
         let mut direction = ndarray::array![-1.0, 0.5];
+        let mut first_admitting_rung = None;
         for attempt in 0..24 {
             let alpha = feasible_step_fraction(&constraints, &on_the_face, &direction)
                 .expect("a feasible origin at every rung of the ladder");
-            assert_eq!(
-                alpha, 0.0,
-                "attempt {attempt} must re-derive the same zero, not a larger fraction"
-            );
+            if alpha == 0.0 {
+                assert!(
+                    first_admitting_rung.is_none(),
+                    "the answer must not oscillate: rung {attempt} blocks after rung {:?} admitted",
+                    first_admitting_rung
+                );
+            } else {
+                assert_eq!(alpha, 1.0, "rung {attempt} must admit the step whole");
+                first_admitting_rung.get_or_insert(attempt);
+            }
             direction.mapv_inplace(|value| value * 0.25);
         }
-        // ...until the drift falls inside the contract band, at which point the
-        // step is admitted whole instead of being refused forever.
-        direction.mapv_inplace(|value| value * 1.0e-12);
-        let admitted = feasible_step_fraction(&constraints, &on_the_face, &direction)
-            .expect("a feasible origin");
-        assert_eq!(admitted, 1.0);
+        assert_eq!(
+            first_admitting_rung,
+            Some(14),
+            "the ladder must re-derive the same zero until the drift enters the \
+             contract band, and cross exactly where 4^-k reaches 1e-8"
+        );
     }
 
     #[test]

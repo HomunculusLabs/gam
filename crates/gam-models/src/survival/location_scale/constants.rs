@@ -28,7 +28,19 @@ pub(crate) const CONSTRAINT_NONNEGATIVITY_REL_TOL: f64 = 1e-10;
 /// run to its final inner refit, that refit's cone-projected β routinely landed
 /// at slack ~-6.6e-9 — feasible to the 1e-8 gate but a hard error at 1e-10 — so
 /// the otherwise-converged fit failed on a pure numerical-precision mismatch.
-pub(crate) const MONOTONE_CONE_FEASIBILITY_GATE_TOL: f64 = 1e-8;
+///
+/// It is the primal-feasibility contract itself, referenced rather than
+/// re-spelled (gam#2719) — a local name for where it is used, not a second
+/// number that can drift away from the one the solver actually honours.
+///
+/// The consumers here apply it to a RAW slack while the contract is stated on
+/// unit-normalized rows. That direction is the safe one: the guard rows are
+/// pre-normalized by `max(‖row‖, |rhs|, 1)`, so `‖a‖ ≤ 1` and `raw ≤ scaled`,
+/// and a raw floor at the contract is therefore never TIGHTER than the gate it
+/// exists to agree with. It cannot reject a β the pipeline calls feasible,
+/// which is the whole property #1569 needed.
+pub(crate) const MONOTONE_CONE_FEASIBILITY_GATE_TOL: f64 =
+    gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
 
 /// Maximum number of Dykstra alternating-projection sweeps when projecting an
 /// initial coefficient guess onto the represented linear inequality
