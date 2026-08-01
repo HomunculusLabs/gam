@@ -1337,9 +1337,23 @@ fn zz_2691_is_the_residual_gap_scale_invariant() {
 /// **Caveat that bounds all of the above: there are NO REPLICATES.**
 /// `deterministic_circle_noise` takes no seed, so changing `n` also changes the
 /// noise draw, and seed-to-seed variation of `c_star` is UNMEASURED. Part of the
-/// `1.4056` could be it. Measuring it needs a seed parameter on the fixture
-/// generator and >= 3 draws per cell; until that exists, treat `1.4056` as an
-/// upper bound on the systematic variation, not an estimate of it.
+/// `1.4056` could be it. So `1.4056` is an upper bound on the systematic
+/// variation, not an estimate of it.
+///
+/// **The actionable conclusion is robust to that caveat, which is why the
+/// replicate work is deliberately NOT done here.** The caveat has exactly two
+/// branches and they agree on the only thing anyone would act on:
+///
+/// * if the spread is SYSTEMATIC, `c` is not a constant;
+/// * if the spread is SEED VARIANCE, `c` is not *measurable* to better than
+///   ~40% by this instrument.
+///
+/// Both give **"a face `curvature / c` with a fixed `c` is not installable"**.
+/// Nothing is landing on `c`, and proof is owed by the landing — so pinning `c`
+/// rather than bounding it buys nothing at present. The follow-up is SPECIFIED
+/// rather than performed: it needs a seed parameter on the fixture generator and
+/// `>= 3` draws per cell, and it is owed by whoever wants to install such a
+/// face, not by this diagnostic.
 ///
 /// Two things actually break the intersection, and neither is a law:
 ///
