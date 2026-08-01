@@ -1285,13 +1285,14 @@ impl SaeManifoldTerm {
                          {escalation_window} iterations"
                     );
                 } else if gradient_stationary {
+                    let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          KKT entered its admission band (raw ‖g‖={grad_norm:.6e}, quotient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e}, tolerance {grad_tolerance:.6e}) \
                          but an evidence-only re-entry still made a strict state/objective move \
-                         after {total_inner_iter} granted iterations. Refusing to differentiate \
-                         a non-idempotent inner map.",
+                         after {total_inner_iter} granted iterations ({intensive}). Refusing to \
+                         differentiate a non-idempotent inner map.",
                         ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 } else {
@@ -1471,12 +1472,14 @@ impl SaeManifoldTerm {
                     } else {
                         f64::INFINITY
                     };
+                    let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          neither the KKT gradient ‖g‖={grad_norm:.6e} nor the quotient KKT gradient \
                          ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
                          after {total_inner_iter} inner iterations \
-                         (gauge_share={gauge_share:.4}, quotient_over_tol={quotient_over_tol:.3e}). \
+                         (gauge_share={gauge_share:.4}, quotient_over_tol={quotient_over_tol:.3e}, \
+                         {intensive}). \
                          Refusing to rank an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
                     ));
@@ -1770,13 +1773,14 @@ impl SaeManifoldTerm {
                         }
                         None => grad_norm,
                     };
+                    let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
                          rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor its \
-                         quotient met tolerance {grad_tolerance:.6e}. Objective stagnation and a \
-                         finite deflated factor are diagnostic only; refusing to rank or \
-                         differentiate an off-optimum Laplace criterion.",
+                         quotient met tolerance {grad_tolerance:.6e} ({intensive}). Objective \
+                         stagnation and a finite deflated factor are diagnostic only; refusing to \
+                         rank or differentiate an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
                     ));
                 }
@@ -1952,6 +1956,52 @@ impl SaeManifoldTerm {
     /// Objective stagnation, a finite deflated factor, or a small Newton
     /// decrement may diagnose conditioning but cannot substitute for raw or
     /// quotient KKT stationarity.
+    /// #2228 DIAGNOSTIC — the INTENSIVE companion of the bar this loop enforces.
+    ///
+    /// `quasi_laplace_kkt_stationary` compares an EXTENSIVE L2 gradient norm
+    /// (`Σ_i ‖g_t^(i)‖² + ‖g_β‖²`, a sum over rows AND atoms) against
+    /// `1e-5 · (1 + ‖x‖₂)`, whose right side grows only like `sqrt(#params)`.
+    /// `system_scaled_grad_max` / `inner_iterate_max` are the componentwise,
+    /// Jacobi-curvature-scaled pair whose own doc says they "remove row-count,
+    /// atom-count, and basis-scale extensivity" — and
+    /// `SaeInstalledInnerKktAudit::certifies` already accepts that pair as
+    /// SUFFICIENT. Its only production consumer is `installed_inner_kkt_audit`
+    /// (the external-state certification entry), so no refusal raised by this
+    /// loop has ever reported the intensive ratio and nobody can tell a units
+    /// artefact from a genuinely non-stationary iterate. Reporting it costs one
+    /// assembly on a path that is already returning `Err`.
+    ///
+    /// Diagnostic only: it does not decide, accept, or relax anything.
+    fn intensive_kkt_diagnostic(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+    ) -> String {
+        let system = match self.assemble_arrow_schur(target, rho, registry) {
+            Ok(system) => system,
+            Err(reason) => return format!("intensive=unresolved(assembly: {reason})"),
+        };
+        let scaled_max = match Self::system_scaled_grad_max(&system) {
+            Ok(value) => value,
+            Err(reason) => return format!("intensive=unresolved(scaled-grad: {reason})"),
+        };
+        let iterate_max = match self.inner_iterate_max() {
+            Ok(value) => value,
+            Err(reason) => return format!("intensive=unresolved(iterate-max: {reason})"),
+        };
+        let bound = SAE_MANIFOLD_INNER_GRAD_REL_TOL * iterate_max;
+        let ratio = if bound > 0.0 {
+            scaled_max / bound
+        } else {
+            f64::INFINITY
+        };
+        format!(
+            "intensive_scaled_max={scaled_max:.6e}, intensive_bound={bound:.6e}, \
+             intensive_over_bound={ratio:.3e}"
+        )
+    }
+
     pub(crate) fn quasi_laplace_kkt_stationary(
         grad_norm: f64,
         quotient_grad_norm: f64,
