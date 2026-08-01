@@ -1185,11 +1185,26 @@ fn cloglog_survival_extreme_asymptotic(
 
 /// Clenshaw–Curtis node count for the Gumbel survival quadrature at `sigma`.
 ///
-/// Above σ = 8 the Φ((η−μ)/σ) transition is at least as wide as the node
-/// spacing, so the floor `CLOGLOG_GUMBEL_QUAD_MIN_NODES` suffices. Below it the
-/// transition narrows to width σ, so the count grows like SCALE/σ to keep it
+/// **This ladder is currently INERT and the count is the constant 513** —
+/// `CLOGLOG_GUMBEL_QUAD_MIN_NODES == CLOGLOG_GUMBEL_QUAD_MAX_NODES == 513`, so
+/// `.max(FLOOR).min(CEILING)` returns that value for every `sigma` and
+/// `CLOGLOG_GUMBEL_QUAD_NODE_SCALE` cannot reach any output. Pinned by
+/// `cloglog_gumbel_quad_node_ladder_is_inert_at_a_constant_513_2469`.
+///
+/// The design the surrounding arithmetic encodes, and which the floor/ceiling
+/// coincidence currently suppresses: above σ = 8 the `Φ((η−μ)/σ)` transition is
+/// at least as wide as the node spacing, so the floor suffices; below it the
+/// transition narrows to width σ, so the count grows like `SCALE/σ` to keep it
 /// resolved. An odd count is used so the rule has an even number of intervals
 /// and a symmetric, gap-free grid.
+///
+/// Separating floor from ceiling would restore that σ-adaptivity and change the
+/// node count — hence every cloglog survival value and μ-gradient — for σ
+/// outside the pinned point. Whether it should be restored is the accuracy-vs-σ
+/// question owned by #2566; this doc records the shipped behaviour rather than
+/// the intended one, and the constants are recorded as **derived in form,
+/// unsupported in value** under #2469 rather than deleted: they are load-bearing
+/// for a branch, not isolated magic numbers.
 #[inline]
 fn cloglog_gumbel_quad_nodes(sigma: f64) -> usize {
     let target = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / sigma.min(CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN))
@@ -7054,5 +7069,81 @@ mod tests {
         // A negative variance triggers jitter; with jitter <= 1e-6 it still
         // can't reach positive — should return None.
         assert!(cholesky_static_with_jitter::<1>(&[[-1.0e3]]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod cloglog_gumbel_quad_node_ladder_2469 {
+    use super::{
+        CLOGLOG_GUMBEL_QUAD_MAX_NODES, CLOGLOG_GUMBEL_QUAD_MIN_NODES,
+        CLOGLOG_GUMBEL_QUAD_NODE_SCALE, cloglog_gumbel_quad_nodes,
+    };
+
+    /// #2469: the σ-adaptive node ladder is INERT — floor and ceiling coincide
+    /// at 513, so the count is constant and `CLOGLOG_GUMBEL_QUAD_NODE_SCALE`
+    /// reaches no output.
+    ///
+    /// This pins the SHIPPED behaviour, not the intended one. The arithmetic
+    /// reads as a live `SCALE/σ` ladder and the constants read as live policy;
+    /// they are not. Without this test, separating the floor from the ceiling
+    /// would silently change the node count — and therefore every cloglog
+    /// survival value and μ-gradient — at every σ outside the pinned point,
+    /// with nothing to report it: neither constant is referenced anywhere
+    /// outside its own definition and this one function, and no other test pins
+    /// the count.
+    ///
+    /// It is deliberately a two-sided statement. `assert_eq!(nodes, 513)` alone
+    /// would keep passing if someone raised the ceiling AND the floor together;
+    /// asserting that the two constants are equal names the actual cause, so a
+    /// future change fails on the mechanism rather than on a number.
+    ///
+    /// Disposition under #2469: **record as unsupported**, not delete. The
+    /// one-build probe settles it — deleting the consumer branch makes the
+    /// compiler report the constants themselves as unused, which means they are
+    /// load-bearing for a branch rather than isolated magic numbers, and
+    /// removing them is a change to behaviour + constants + tests together.
+    /// That choice is the accuracy-vs-σ measurement owned by #2566.
+    #[test]
+    fn cloglog_gumbel_quad_node_ladder_is_inert_at_a_constant_513_2469() {
+        // The cause, named directly: a clamp whose floor equals its ceiling.
+        assert_eq!(
+            CLOGLOG_GUMBEL_QUAD_MIN_NODES, CLOGLOG_GUMBEL_QUAD_MAX_NODES,
+            "#2469: the cloglog Gumbel node ladder is inert only because its \
+             floor and ceiling coincide. They now differ, so the `SCALE/σ` \
+             ladder is live again and the node count varies with σ — which \
+             changes every cloglog survival value and μ-gradient. That is the \
+             accuracy-vs-σ decision owned by #2566 and it needs its measurement, \
+             not just this test updated."
+        );
+
+        // ... and the consequence, over a σ range spanning ten decades and
+        // straddling the σ = 8 asymptotic switch. `target = SCALE/min(σ, 8)`
+        // ranges from 40 (σ ≥ 8) to 3.2e7 (σ = 1e-5), i.e. the ladder is asked
+        // for counts both far below and far above the pinned value and returns
+        // the pinned value regardless.
+        let expected = CLOGLOG_GUMBEL_QUAD_MIN_NODES;
+        for &sigma in &[
+            1.0e-5, 1.0e-3, 0.1, 0.624, 0.8, 1.0, 2.0, 3.3, 8.0, 64.0, 1.0e3, 1.0e5,
+        ] {
+            let nodes = cloglog_gumbel_quad_nodes(sigma);
+            assert_eq!(
+                nodes, expected,
+                "#2469: the node count must be the constant {expected} at every σ \
+                 while floor == ceiling (σ = {sigma:e} gave {nodes})"
+            );
+        }
+
+        // NON-VACUITY: the ladder must genuinely be ASKING for something other
+        // than the pinned value, or the constancy above is trivial rather than a
+        // suppressed ladder. At σ = 1e-5 the request is ~3.2e7 nodes; at σ ≥ 8
+        // it is 40. Both are clamped away.
+        let small_sigma_request = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / 1.0e-5).ceil() as usize;
+        let large_sigma_request = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / 8.0).ceil() as usize;
+        assert!(
+            small_sigma_request > expected && large_sigma_request < expected,
+            "#2469: the ladder must straddle the pinned count for this to pin a \
+             SUPPRESSED ladder rather than a coincidence (σ=1e-5 asks {small_sigma_request}, \
+             σ≥8 asks {large_sigma_request}, pinned {expected})"
+        );
     }
 }
