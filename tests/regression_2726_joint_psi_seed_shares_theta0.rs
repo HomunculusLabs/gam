@@ -169,7 +169,11 @@ fn run_fit(max_outer_iter: usize) -> Result<(), String> {
     }));
     match outcome {
         Ok(FitResult::Standard(_)) => Ok(()),
-        Ok(other) => Err(format!("unexpected fit result variant: {other:?}")),
+        // `FitResult` does not implement `Debug`, so name the variant rather than
+        // formatting it -- `{other:?}` did not compile and turned every target in
+        // the workspace red (the root `build.rs` aborts, so no crate-scoped build
+        // could see it).
+        Ok(_) => Err("unexpected fit result variant (expected FitResult::Standard)".to_string()),
         Err(e) => Err(format!("{e}")),
     }
 }
