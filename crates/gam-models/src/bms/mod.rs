@@ -991,7 +991,17 @@ pub struct LatentZConditionalCalibration {
     /// diagonal blocks.
     ///
     /// Fit-time only: predict applies the map from `mean_coeffs`/`var_coeffs`
-    /// and never reads their uncertainty.
+    /// and never reads their uncertainty. Verified rather than assumed -- the
+    /// only production consumer of this matrix is the Murphy-Topel assembly in
+    /// `block_specs.rs`, which runs at fit.
+    ///
+    /// `#[serde(default)]` so a model saved before gam#2484 -- carrying the two
+    /// retired per-stage blocks and no joint -- still deserializes on the
+    /// predict path. An empty default is NOT a silent zero: it is refused at the
+    /// single point of consumption (see
+    /// [`Self::generated_regressor_correction`]), because a covariance that
+    /// quietly vanishes is exactly the failure this issue exists to prevent.
+    #[serde(default)]
     pub theta1_cov: Array2<f64>,
 }
 
@@ -1223,6 +1233,23 @@ impl LatentZConditionalCalibration {
         // ~13s/disease cost of the SE correction). Floored rows yield an exact
         // all-zero `J` row, so they contribute zero to the GEMM — bit-identical
         // to skipping them, no approximation.
+        // gam#2484: refuse an absent or ill-shaped first-stage covariance rather
+        // than multiplying by it. This fires for a payload written before the
+        // joint covariance existed (`theta1_cov` defaults to `0×0` there); such
+        // a model cannot supply the term, and silently contributing nothing
+        // would understate the interval by exactly the amount the correction
+        // exists to add.
+        let dim_theta1 = self.mean_coeffs.len() + self.var_coeffs.len();
+        if self.theta1_cov.nrows() != dim_theta1 || self.theta1_cov.ncols() != dim_theta1 {
+            return Err(format!(
+                "generated_regressor_correction: the first-stage covariance is {}×{} but \
+                 theta1 has dimension {dim_theta1}. A calibration deserialized from a payload \
+                 written before gam#2484 carries no joint first-stage covariance; refit rather \
+                 than publishing an uncorrected interval.",
+                self.theta1_cov.nrows(),
+                self.theta1_cov.ncols()
+            ));
+        }
         let j_mat = self.build_zeta_theta1_jacobian(z, a_block);
         let vb_g = self.beta_theta1_sensitivity(score_zeta_sensitivity, j_mat.view(), vb)?;
         Ok(self.generated_regressor_term(vb_g.view()))
