@@ -614,48 +614,69 @@ impl BarrierConfig {
     /// by extracting rows that represent simple coordinate bounds
     /// (`β_j ≥ b_i` or `β_j ≤ -b_i`).
     ///
-    /// A row is a simple bound iff it has exactly one nonzero entry equal to ±1.0.
+    /// A row is a simple bound iff it has exactly one non-negligible entry. The
+    /// entry does NOT have to be `±1`: `v·β_j ≥ b` and `sign(v)·β_j ≥ b/|v|` are
+    /// the same half-space, exactly, for every `v != 0`, so the row is stored in
+    /// the normalized form and `|v| == 1` is carried through bit-for-bit.
+    ///
+    /// Requiring `v == ±1` was a live defect (#2705). The matrix that actually
+    /// reaches here is the INTERNAL one — `optimizer.rs` passes
+    /// `ParametricColumnConditioning::transform_linear_constraints_to_internal`'s
+    /// output (`estimate/optimizer.rs`, `fit_linear_constraints`) — and that
+    /// transform divides column `j` by the column's conditioning scale, so a
+    /// `linear(x, min, max)` / `constrain()` / `nonnegative()` box row assembled
+    /// exactly as `±e_j` (`gam-terms/src/smooth/term_design.rs`) arrives as
+    /// `±1/scale_j`. For any predictor that is not already unit-scaled that is
+    /// not within `1e-14` of `±1`, so EVERY such box row was silently dropped and
+    /// `from_constraints` returned `None` — the outer REML search ran with no
+    /// barrier at all on a box-constrained coefficient, with no diagnostic. The
+    /// row was transformed; the predicate that recognizes it was not.
+    ///
     /// Returns `None` if the constraints are `None` or no simple-bound rows are found.
     pub fn from_constraints(
         constraints: Option<&crate::pirls::LinearInequalityConstraints>,
     ) -> Option<Self> {
-        // Tolerance for recognizing a constraint-matrix entry as exactly 0 or
-        // exactly ±1, so a row qualifies as a simple coordinate bound. The
-        // constraint rows are assembled exactly, so any nonzero deviation this
-        // large is a genuine multi-coefficient constraint, not round-off.
-        const SIMPLE_BOUND_ENTRY_TOL: f64 = 1e-14;
         // Default log-barrier strength τ used when a simple-bound BarrierConfig
         // is synthesized from constraints (a weak barrier that keeps β strictly
         // feasible without materially perturbing an interior optimum).
         const DEFAULT_BARRIER_TAU: f64 = 1e-6;
         let constraints = constraints?;
+        let p = constraints.a.ncols().max(1);
         let mut indices = Vec::new();
         let mut lower_bounds = Vec::new();
         let mut bound_signs = Vec::new();
         for i in 0..constraints.a.nrows() {
             let row = constraints.a.row(i);
-            let mut single_col = None;
-            let mut single_sign = 0.0_f64;
+            // Negligibility is measured against the ROW's own largest entry and
+            // the backward error of a length-p inner product (`p·eps`) — the
+            // resolution at which this row can be evaluated at all. A fixed
+            // absolute floor is not invariant under the column conditioning this
+            // matrix has already been through, which is the defect above.
+            let row_max = row.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            if !row_max.is_finite() || row_max == 0.0 {
+                continue;
+            }
+            let negligible = row_max * f64::EPSILON * (p as f64);
+            let mut single: Option<(usize, f64)> = None;
             let mut is_simple = true;
             for (j, &val) in row.iter().enumerate() {
-                if val.abs() < SIMPLE_BOUND_ENTRY_TOL {
+                if val.abs() <= negligible {
                     continue;
                 }
-                if ((val - 1.0).abs() < SIMPLE_BOUND_ENTRY_TOL
-                    || (val + 1.0).abs() < SIMPLE_BOUND_ENTRY_TOL)
-                    && single_col.is_none()
-                {
-                    single_col = Some(j);
-                    single_sign = if val > 0.0 { 1.0 } else { -1.0 };
+                if single.is_none() {
+                    single = Some((j, val));
                 } else {
                     is_simple = false;
                     break;
                 }
             }
-            if is_simple && let Some(col) = single_col {
+            if is_simple && let Some((col, val)) = single {
+                // Same half-space, normalized: `val·β_col ≥ b` <=>
+                // `sign(val)·β_col ≥ b/|val|`. `|val| == 1` leaves `b` and the
+                // sign bit-identical, so the pre-conditioning path is unchanged.
                 indices.push(col);
-                lower_bounds.push(constraints.b[i]);
-                bound_signs.push(single_sign);
+                lower_bounds.push(constraints.b[i] / val.abs());
+                bound_signs.push(if val > 0.0 { 1.0 } else { -1.0 });
             }
         }
         if indices.is_empty() {

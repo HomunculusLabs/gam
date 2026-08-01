@@ -8988,3 +8988,129 @@ fn trace_logdet_block_root_prices_channel_b_at_root_scale() {
          if it has become equally accurate this test no longer measures anything"
     );
 }
+
+// ── #2705: the barrier recognizer must survive column conditioning ──────────
+//
+// `BarrierConfig::from_constraints` is fed the INTERNAL constraint matrix
+// (`estimate/optimizer.rs`, `fit_linear_constraints =
+// conditioning.transform_linear_constraints_to_internal(...)`), not the one the
+// formula layer assembled. The four tests below drive the real transform on a
+// real box row rather than asserting on a hand-written matrix, because the
+// defect WAS the gap between the two.
+
+/// Build the box row `gam-terms/src/smooth/term_design.rs` assembles for
+/// `linear(x, min=LO, max=HI)`: `+e_col ≥ LO` and `−e_col ≥ −HI`, entries
+/// exactly `±1`, in ORIGINAL coefficient coordinates.
+fn box_rows_as_assembled(p: usize, col: usize, lo: f64, hi: f64) -> crate::pirls::LinearInequalityConstraints {
+    let mut a = ndarray::Array2::<f64>::zeros((2, p));
+    a[[0, col]] = 1.0;
+    a[[1, col]] = -1.0;
+    crate::pirls::LinearInequalityConstraints::new(a, array![lo, -hi]).expect("row counts agree")
+}
+
+#[test]
+fn barrier_recognizes_a_box_row_that_carries_a_unit_entry() {
+    // Control for the two below: before conditioning the entries ARE ±1, and
+    // this is the case the pre-#2705 recognizer handled. It must be unchanged,
+    // and unchanged BIT-FOR-BIT — the normalization divides by |val| == 1.0.
+    let raw = box_rows_as_assembled(3, 1, 0.25, 4.0);
+    let cfg = BarrierConfig::from_constraints(Some(&raw)).expect("unit-entry box is a simple bound");
+    assert_eq!(cfg.constrained_indices, vec![1, 1]);
+    assert_eq!(cfg.bound_signs, vec![1.0, -1.0]);
+    assert_eq!(cfg.lower_bounds, vec![0.25, -4.0]);
+}
+
+#[test]
+fn barrier_recognizes_a_column_conditioned_box_row_2705() {
+    // The production path: the SAME row, pushed through the SAME transform the
+    // optimizer applies. `x` on an even grid over [-1, 1] has population mean 0
+    // and std 1/sqrt(3), which is the fixture in
+    // `tests/regressions/misc/linear_box_constraint_violated_by_internal_scaling.rs`.
+    let scale = (1.0_f64 / 3.0).sqrt();
+    let conditioning = crate::estimate::penalty::ParametricColumnConditioning {
+        intercept_idx: Some(0),
+        columns: vec![(1, 0.0, scale)],
+    };
+    let raw = box_rows_as_assembled(3, 1, 0.0, 1.0);
+    let internal = conditioning
+        .transform_linear_constraints_to_internal(Some(raw))
+        .expect("Some in, Some out");
+
+    // First, the premise this test exists to pin: the transform really does
+    // move the entry off ±1. If it ever stops doing so, the assertions below
+    // stop measuring the defect and this line says so.
+    assert!(
+        (internal.a[[0, 1]].abs() - 1.0).abs() > 1e-9,
+        "premise lost: conditioned box entry is {} (expected 1/scale = {}); this \
+         fixture no longer exercises #2705",
+        internal.a[[0, 1]],
+        1.0 / scale
+    );
+
+    let cfg = BarrierConfig::from_constraints(Some(&internal))
+        .expect("#2705: a conditioned box row is still a simple coordinate bound");
+    assert_eq!(cfg.constrained_indices, vec![1, 1]);
+    assert_eq!(cfg.bound_signs, vec![1.0, -1.0]);
+    // `(1/scale)·β ≥ 0` and `−(1/scale)·β ≥ −1` normalize to `β ≥ 0` and
+    // `−β ≥ −scale`, i.e. the internal coefficient's own box. Both are exact
+    // divisions by |entry|, so assert them as such.
+    let entry = internal.a[[0, 1]].abs();
+    assert_eq!(cfg.lower_bounds, vec![0.0 / entry, -1.0 / entry]);
+
+    // The recognized half-space must be the SAME SET as the row's, not merely a
+    // similar-looking pair of numbers. Check the boundary point and one point
+    // on each side of it, through both descriptions.
+    for (r, (sign, bound)) in cfg
+        .bound_signs
+        .iter()
+        .zip(cfg.lower_bounds.iter())
+        .enumerate()
+    {
+        for probe in [-2.0_f64, -0.5, 0.0, 0.5, 2.0] {
+            let by_row = internal.a[[r, 1]] * probe >= internal.b[r];
+            let by_cfg = sign * probe >= *bound;
+            assert_eq!(
+                by_row, by_cfg,
+                "row {r} disagrees with its normalized form at beta={probe}"
+            );
+        }
+    }
+}
+
+#[test]
+fn barrier_refuses_a_genuine_multi_coefficient_row_2705() {
+    // POSITIVE CONTROL for the loosened recognizer. Dropping the `±1` demand
+    // must not turn every row into a "simple bound": a row touching two
+    // coefficients is not a coordinate bound at any scaling, and a recognizer
+    // that accepted it would be inert rather than repaired.
+    let mut a = ndarray::Array2::<f64>::zeros((1, 3));
+    a[[0, 1]] = 1.0 / (1.0_f64 / 3.0).sqrt();
+    a[[0, 2]] = 0.5;
+    let two_coef =
+        crate::pirls::LinearInequalityConstraints::new(a, array![0.0]).expect("row counts agree");
+    assert!(
+        BarrierConfig::from_constraints(Some(&two_coef)).is_none(),
+        "a two-coefficient row must NOT be recognized as a coordinate bound"
+    );
+}
+
+#[test]
+fn barrier_negligibility_is_relative_to_the_rows_own_scale_2705() {
+    // The zero test is `|v| <= row_max·eps·p`, so it says the same thing about a
+    // row and about that row multiplied by any positive constant. A fixed
+    // absolute floor does not, which is the same disease as the ±1 demand.
+    let mut a = ndarray::Array2::<f64>::zeros((1, 4));
+    a[[0, 2]] = 1.0;
+    a[[0, 3]] = 1.0e-30; // far below 4·eps relative to the row max
+    let tiny = crate::pirls::LinearInequalityConstraints::new(a.clone(), array![2.0])
+        .expect("row counts agree");
+    let big = crate::pirls::LinearInequalityConstraints::new(&a * 1.0e6, array![2.0e6])
+        .expect("row counts agree");
+
+    let cfg_tiny = BarrierConfig::from_constraints(Some(&tiny)).expect("simple bound");
+    let cfg_big = BarrierConfig::from_constraints(Some(&big)).expect("simple bound");
+    assert_eq!(cfg_tiny.constrained_indices, cfg_big.constrained_indices);
+    assert_eq!(cfg_tiny.bound_signs, cfg_big.bound_signs);
+    assert_eq!(cfg_tiny.lower_bounds, cfg_big.lower_bounds);
+    assert_eq!(cfg_tiny.lower_bounds, vec![2.0]);
+}
