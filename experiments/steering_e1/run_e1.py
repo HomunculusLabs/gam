@@ -844,6 +844,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--per-template-center", action="store_true",
                     help="remove each context head's mean before charting (chart-construction "
                          "nuisance removal only; the intervention still edits the RAW activation)")
+    ap.add_argument("--max-heads", type=int, default=0,
+                    help="use only the first N context heads of the fit bank (0 = all). The "
+                         "cloud has n_heads x n_labels rows and the dense certification lane's "
+                         "cost grows with n, so this is the knob for trading cloud size against "
+                         "fit time; the structure-recovery R2 reported alongside says what it cost")
     ap.add_argument("--cloud-npz", default="",
                     help="write the harvested ambient cloud here (for the CPU-side chart sweep)")
     ap.add_argument("--out-dir", default="experiments/steering_e1/out")
@@ -874,7 +879,10 @@ def main() -> int:
     log(f"held-out source labels: {[structure.labels[i] for i in base_label_indices]}")
 
     log("collecting disjoint fit and held-out clouds")
-    fit_examples = collect_cloud(model_lm, tok, layer, structure.fit_templates(),
+    fit_templates = structure.fit_templates()
+    if args.max_heads:
+        fit_templates = fit_templates[:args.max_heads]
+    fit_examples = collect_cloud(model_lm, tok, layer, fit_templates,
                                  structure.labels, args.capture_at, candidate_ids)
     # Every label is collected on the held-out side so the per-head centering
     # below sees the same label set the fit side did; sources for which the
@@ -979,6 +987,7 @@ def main() -> int:
         "capture_at": args.capture_at,
         "per_template_center": bool(args.per_template_center),
         "pca_dim": int(args.pca_dim),
+        "n_fit_heads": int(len(fit_templates)),
         "n_fit_rows": int(len(fit_examples)), "n_base_rows": int(len(base_examples)),
         "target_shifts": target_shifts, "dose_fractions": dose_fractions,
         "seed": args.seed,
