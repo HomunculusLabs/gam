@@ -115,7 +115,12 @@ for crate in "${ALL_CRATES[@]}"; do
   log="$(mktemp)"
   cargo doc -p "$crate" --no-deps >"$log" 2>&1
   rc=$?
-  errors="$(grep -cE '^error' "$log" || true)"
+  # Strip ANSI before counting. Cargo colours diagnostics whenever it decides
+  # the sink is a terminal, and a `^error` match then fails against a line that
+  # really does start with an escape sequence -- which is how the first run of
+  # this script reported `errors=0` beside `rc=101` on all fifteen red crates.
+  sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$log" >"${log}.plain"
+  errors="$(grep -cE '^error(\[|:)' "${log}.plain" || true)"
   ERROR_COUNT["$crate"]="$errors"
   SCANNED=$((SCANNED + 1))
   if [ "$rc" -eq 0 ]; then
@@ -124,10 +129,18 @@ for crate in "${ALL_CRATES[@]}"; do
   else
     RED+=("$crate")
     printf '  %-24s RED       rc=%s errors=%s\n' "$crate" "$rc" "$errors"
-    # The first few lines are what a fixer needs; the whole log is noise here.
-    grep -E '^error' "$log" | head -n 3 | sed 's/^/      /'
+    if [ "$errors" -eq 0 ]; then
+      # The count contradicts the exit code, so the count -- not the crate -- is
+      # what is unexplained. Show the tail rather than printing a 0 that reads
+      # as "red for no reason", and never let this number be quoted as a census.
+      echo "      (count unreliable: rc=${rc} with no matched error lines; tail follows)"
+      tail -n 8 "${log}.plain" | sed 's/^/      /'
+    else
+      # The first few lines are what a fixer needs; the whole log is noise here.
+      grep -E '^error(\[|:)' "${log}.plain" | head -n 3 | sed 's/^/      /'
+    fi
   fi
-  rm -f "$log"
+  rm -f "$log" "${log}.plain"
 done
 
 echo
