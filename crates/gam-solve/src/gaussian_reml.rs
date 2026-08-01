@@ -4849,8 +4849,11 @@ fn reml_deriv_enclosure_profile(
         let mut num_hi = 0.0;
         let mut su_lo = 0.0; // Σ c² · u   (the ρ-dependent part of dp, ≥ 0)
         let mut su_hi = 0.0;
-        let mut c2_lo = 0.0; // Σ c², the ρ-INDEPENDENT half of dp's decomposition
-        let mut c2_hi = 0.0;
+        // Σ c², the ρ-INDEPENDENT half of dp's decomposition. Accumulated as a
+        // PLAIN sum in the same order as `dispersion_residual_parts`' `total_c2`,
+        // so `r0` below is bit-identical to the evaluator's — see the comment at
+        // `r0` for why this term must be a point rather than an interval.
+        let mut c2_point = 0.0;
         let mut dph_lo = 0.0; // Σ c² · k   (= dp″, sign-indefinite)
         let mut dph_hi = 0.0;
         for eig in 0..cache.penalty_eigenvalues.len() {
@@ -4884,8 +4887,7 @@ fn reml_deriv_enclosure_profile(
             num_hi = add_up(num_hi, w_product.hi);
             su_lo = add_down(su_lo, u_product.lo);
             su_hi = add_up(su_hi, u_product.hi);
-            c2_lo = add_down(c2_lo, c2);
-            c2_hi = add_up(c2_hi, c2);
+            c2_point += c2;
             dph_lo = add_down(dph_lo, round_down(c2 * kr.k_lo));
             dph_hi = add_up(dph_hi, round_up(c2 * kr.k_hi));
         }
@@ -4900,10 +4902,39 @@ fn reml_deriv_enclosure_profile(
         // and therefore must split. In the summed form the ρ-dependent part is a
         // sum of non-negatives and the only cancellation left sits in `r0`,
         // which is ρ-independent and therefore identical in every cell.
-        let r0_lo = round_down(ywy[j] - c2_hi).max(0.0);
-        let r0_hi = round_up(ywy[j] - c2_lo).max(r0_lo);
-        let dp_lo = add_down(r0_lo, su_lo);
-        let dp_hi = add_up(r0_hi, su_hi);
+        // `r0` is a KNOWN CONSTANT here, not an unknown to be bracketed.
+        //
+        // #2694/#2703. Bracketing it as `[max(ywy − c2_hi, 0), ywy − c2_lo]`
+        // treated the cancellation's lost digits as uncertainty in the quantity
+        // being enclosed. On a design that reproduces its response the bracket
+        // becomes `[0, ~eps·ywy]`, `dp_lo` collapses onto `Σc²·u` — the ratio
+        // NUMERATOR's own scale — and `num_hi/dp_lo` reads `1.0` whatever the
+        // data, putting `V′`'s upper bound at `g1 + half_nu`. Measured: a
+        // ZERO-WIDTH enclosure of a `V′` of `−1.0` came back `[−1.0, +4.5]`,
+        // width `5.5 = half_nu` exactly, at three separate ρ.
+        //
+        // The width equalling a STRUCTURAL CONSTANT regardless of design is the
+        // tell: the residual term contributed nothing to the bound. And it could
+        // not be bisected away — the file's own comment says why, offered as
+        // reassurance: `r0` "is ρ-independent and therefore identical in every
+        // cell". A quantity identical in every cell is a CONSTANT, and a
+        // constant belongs in an enclosure as a point.
+        //
+        // The search certifies the stationary structure of the objective AS
+        // EVALUATED: the DFS audits every cell against the computed endpoint
+        // jets (`interval_contains(dv, ea.grad)`), `refine_stationary_rho_core`
+        // brackets sign changes of the computed gradient, and the returned ρ̂
+        // builds the computed fit. So the enclosure owes a bound on the
+        // evaluator's `V′`, and for that `r0` is the single value
+        // `dispersion_residual_parts` uses — same plain accumulation, same
+        // order, same clamp, hence bit-identical. Forming it any other way is
+        // precisely the objective↔enclosure desync this file exists to prevent.
+        //
+        // Roundoff is still priced: `conservative_interval` at the end of this
+        // function pads the accumulated bounds by the operation-count budget.
+        let r0 = (ywy[j] - c2_point).max(0.0);
+        let dp_lo = add_down(r0, su_lo);
+        let dp_hi = add_up(r0, su_hi);
         if !(dp_lo.is_finite() && dp_hi.is_finite() && dp_lo > 0.0 && dp_hi >= dp_lo) {
             return (Interval::entire(), Interval::entire());
         }
@@ -5907,18 +5938,20 @@ mod tests {
     /// `enumerate_and_select_rho_with_controls` anchors its mean-value tightening
     /// on `enclose(x, x)` and states, at the `lower_point` / `upper_point`
     /// bindings, that such a point enclosure "has no cell-width looseness at all,
-    /// only the roundoff budget". Both witnesses measure that false: at ZERO cell
-    /// width the enclosure of a `V′` whose exact value is `-4.0` comes back
+    /// only the roundoff budget". Both witnesses measured that false: at ZERO
+    /// cell width the enclosure of a `V′` whose exact value was `-4.0` came back
     /// `[-4.0, +18.0]`.
     ///
     /// Cause. `dp = max(ywy − Σc², 0) + Σc²·u` (see `dispersion_residual_parts`).
-    /// On a design that reproduces its response exactly the subtraction cancels,
-    /// the `r0` term's LOWER bound clamps to `0`, and `dp_lo` collapses onto
-    /// `Σc²·u` — which is the ratio NUMERATOR's own scale. `num_hi / dp_lo` then
-    /// reads `1.0` regardless of the data, so `V′`'s upper bound sits at
-    /// `g1 + half_nu`. `r0` is ρ-INDEPENDENT, so that width survives every
-    /// bisection and is present at zero width; this is a formula defect, not a
-    /// tightening one, and no amount of subdivision can remove it.
+    /// On a design that reproduces its response exactly the subtraction cancels;
+    /// the enclosure used to BRACKET `r0` over the digits that cancellation
+    /// destroyed, so its lower bound clamped to `0`, `dp_lo` collapsed onto
+    /// `Σc²·u` — the ratio NUMERATOR's own scale — and `num_hi / dp_lo` read
+    /// `1.0` regardless of the data, putting `V′`'s upper bound at
+    /// `g1 + half_nu`. `r0` is ρ-INDEPENDENT, so that width survived every
+    /// bisection and was present at zero width: a formula defect, not a
+    /// tightening one, which is why no amount of subdivision removed it and why
+    /// the repair is to carry `r0` as the point the evaluator already uses.
     ///
     /// Two fixtures, bounding the regime from BOTH sides:
     ///
@@ -5930,7 +5963,8 @@ mod tests {
     /// * WITNESS — the #2694 harvest regime rebuilt without gam-sae: a CONSTANT
     ///   response, lying in the span of the basis AND in the null space of the
     ///   penalty, on an irrational (periodic-harmonic) basis so the cancellation
-    ///   is INEXACT. This is the side that fails today.
+    ///   is INEXACT. This is the side the defect fired on; it is green since the
+    ///   `r0`-as-a-point repair in `reml_deriv_enclosure_profile`.
     ///
     /// What the sharpness clause asserts carries no invented constant: an
     /// enclosure whose WIDTH exceeds the magnitude of the value it encloses
@@ -6103,13 +6137,29 @@ mod tests {
             );
         }
 
+        // Engagement report. A green here is only meaningful if the sharpness
+        // property was actually asserted, so the counts are printed rather than
+        // left to be inferred from the absence of a panic.
+        println!(
+            "[2694-gate] CONTROL asserted at {control_asserted} rho, WITNESS \
+             asserted at {witness_asserted} rho, failed clauses {}, witness \
+             ywy={ywy:.9e} unpenalized_residual={unpenalized_residual:.9e} \
+             penalized_residual={penalized_residual:.9e}",
+            failures.len()
+        );
+
         assert!(
             failures.is_empty(),
-            "KNOWN DEFECT #2703/#2694 — not a regression from your change.\n\
-             The profiled-REML derivative enclosure carries O(1) width at ZERO \
-             cell width on an exactly-interpolating design, because the `r0` \
-             term of `dp = max(ywy − Σc², 0) + Σc²·u` clamps its lower bound to \
-             zero and `dp_lo` collapses onto the ratio's own numerator.\n\
+            "#2703/#2694 REGRESSION — the profiled-REML derivative enclosure has \
+             lost its sharpness on an exactly-interpolating design.\n\
+             This gate was red when it landed and went green with the repair in \
+             `reml_deriv_enclosure_profile`: `r0` is ρ-INDEPENDENT, so it enters \
+             the enclosure as the single value the evaluator uses, not as a \
+             bracket over the digits its cancellation destroyed. Bracketing it \
+             put `dp_lo` on the ratio numerator's own scale, pinned \
+             `num_hi/dp_lo` at `1.0` whatever the data, and gave a ZERO-WIDTH \
+             enclosure of width `half_nu`. If you are seeing this, check that \
+             change first.\n\
              witness ywy={ywy:.9e} unpenalized_residual={unpenalized_residual:.9e} \
              penalized_residual={penalized_residual:.9e}\n{}",
             failures.join("\n")
