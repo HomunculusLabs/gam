@@ -4614,6 +4614,162 @@ fn exact_a_ard_operator_derivative_is_the_unmajorized_hessian_2515() {
     );
 }
 
+/// #2515 B-full — the from-probes exact-`A` θ-adjoint must reproduce the DENSE
+/// exact-`A` θ-adjoint. Two independent derivations of one quantity, with the
+/// dense one as the reference it is allowed to disagree with.
+///
+/// The port rests on an enumeration: every subscript of `logdet_theta_adjoint_dense`'s
+/// `inv` is one of three shapes — row-local `t–t`, `t–β` border, `β–β` — with no
+/// cross-row off-diagonal entry, so `exact_a` changes only the `dh` operands and
+/// never the contraction structure. This is that enumeration made executable: if a
+/// leg was mirrored with the wrong sign, the wrong jet, or onto the wrong index
+/// pair, the two derivations diverge here rather than being argued about.
+///
+/// The reference is called with `residual_target = None` deliberately. Under that
+/// argument the dense route skips the #2330 Patch-D residual THIRD-derivative legs
+/// (`patchd_residual = exact_a.then_some(residual_target).flatten()`), which this
+/// port does not carry either — so the comparison is term for term rather than
+/// approximately right.
+///
+/// NON-VACUITY is the load-bearing half. If the exact-`A` and majorizer-`B` legs
+/// happened to coincide on this fixture, the equality above would hold for a port
+/// that ignored `exact_a` entirely. So the test first requires the two to DISAGREE,
+/// and by a margin far above the tolerance it then demands they agree within.
+#[test]
+fn from_probes_exact_a_theta_adjoint_matches_dense_2515() {
+    use crate::manifold::construction::ThetaAdjointDhChannel;
+    let n = 24usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_dt, _db, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+
+    // Full-basis probes with exact S^-1 e_j: no stochastic error in the comparison,
+    // so a disagreement is an operator-mismatch defect and not probe noise.
+    let k = cache.k;
+    let sqrt_k = (k as f64).sqrt();
+    let probes: Vec<Array1<f64>> = (0..k)
+        .map(|j| {
+            let mut v = Array1::<f64>::zeros(k);
+            v[j] = sqrt_k;
+            v
+        })
+        .collect();
+    let sinv: Vec<Array1<f64>> = probes
+        .iter()
+        .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
+        .collect();
+
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let inv = term.materialize_joint_inverse(&cache, &solver).unwrap();
+    let dense_exact = term
+        .logdet_theta_adjoint_dense(
+            &rho,
+            &cache,
+            &inv,
+            ThetaAdjointDhChannel::All,
+            true,
+            true,
+            None,
+        )
+        .expect("dense exact-A theta adjoint");
+    let dense_majorizer = term
+        .logdet_theta_adjoint_dense(
+            &rho,
+            &cache,
+            &inv,
+            ThetaAdjointDhChannel::All,
+            true,
+            false,
+            None,
+        )
+        .expect("dense majorizer-B theta adjoint");
+
+    // NON-VACUITY — the exact-A and majorizer-B adjoints must genuinely differ on
+    // this fixture, or the parity assertion below is satisfied by a port that
+    // ignores `exact_a`.
+    let separation = dense_exact
+        .t
+        .iter()
+        .zip(dense_majorizer.t.iter())
+        .chain(dense_exact.beta.iter().zip(dense_majorizer.beta.iter()))
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        separation > 1.0e-6,
+        "#2515: the exact-A and majorizer-B theta adjoints must SEPARATE on this \
+         fixture (max|Δ|={separation:.6e}); without separation this test cannot \
+         distinguish a correct exact-A port from one that ignores the flag"
+    );
+
+    let probes_exact = term
+        .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, true)
+        .expect("from-probes exact-A theta adjoint");
+    let probes_majorizer = term
+        .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, false)
+        .expect("from-probes majorizer-B theta adjoint");
+
+    let worst = |x: &SaeArrowVector, y: &SaeArrowVector| -> f64 {
+        x.t.iter()
+            .zip(y.t.iter())
+            .chain(x.beta.iter().zip(y.beta.iter()))
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max)
+    };
+    let exact_gap = worst(&probes_exact, &dense_exact);
+    let majorizer_gap = worst(&probes_majorizer, &dense_majorizer);
+    println!(
+        "[#2515 B-FULL theta] exact-A |from_probes - dense| = {exact_gap:.6e}   \
+         majorizer-B |from_probes - dense| = {majorizer_gap:.6e}   \
+         exact-vs-majorizer separation = {separation:.6e}"
+    );
+
+    // The majorizer arm is the control: it passed before this change and must still,
+    // or the port broke the route it was supposed to leave alone.
+    assert!(
+        majorizer_gap <= 1.0e-9,
+        "#2515: the majorizer-B from-probes adjoint must still match its dense \
+         reference (max|Δ|={majorizer_gap:.6e}); the exact-A port must not disturb it"
+    );
+    assert!(
+        exact_gap <= 1.0e-9,
+        "#2515: the from-probes exact-A theta adjoint must reproduce the dense \
+         exact-A adjoint term for term (max|Δ|={exact_gap:.6e}, separation from the \
+         majorizer is {separation:.6e}). A mirrored leg with the wrong sign, jet, or \
+         index pair lands here."
+    );
+}
+
 /// #2499 spin-off measurement. `analytic_outer_gradient_with_bundle_matches_dense_assembly`
 /// desyncs on `logdet-trace coordinate 1 (smooth atom 0)` by `1.23e-1`. The two
 /// smoothness-EDF routes it compares are NOT the same operator whenever a

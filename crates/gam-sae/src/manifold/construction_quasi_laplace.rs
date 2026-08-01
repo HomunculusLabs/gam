@@ -5663,12 +5663,37 @@ impl SaeManifoldTerm {
     ///   bundle does not carry.
     /// On accepted regimes the from-probes and dense
     /// θ-adjoints agree exactly at full-basis probes — the FD gate's acceptance.
+    /// `exact_a` (#2515 B-full) selects WHICH operator's θ-adjoint this returns.
+    ///
+    /// `false` — the historical `½log|B|` adjoint `Γ = tr(B⁻¹ ∂B/∂θ)`.
+    /// `true`  — `Γ = tr(A⁻¹ ∂A/∂θ)` for `A = B + ΔC`, matching
+    /// [`SaeManifoldTerm::logdet_theta_adjoint_dense`] called with
+    /// `exact_a = true` and `residual_target = None`.
+    ///
+    /// The port is possible because the dense contraction never needs a dense
+    /// inverse. Enumerated over the whole of `logdet_theta_adjoint_dense`, every
+    /// subscript of its `inv` is one of exactly three shapes — the row-local `t–t`
+    /// block, the `t–β` border, and the `β–β` block — with NO cross-row
+    /// off-diagonal entry `inv[[base_i + a, base_j + b]]` for `i ≠ j`. All three
+    /// are what this function already reconstructs from the border bundle
+    /// (`inv_vv`, `inv_vbeta`, and the refolded `S⁻¹` trace), so `exact_a` changes
+    /// only the `dh` OPERANDS and never the contraction structure.
+    ///
+    /// SCOPE — the #2330 Patch-D residual THIRD-derivative legs
+    /// (`⟨error_metric, ∂³f⟩`) are not carried here, which is why the reference
+    /// above pins `residual_target = None`: the dense route skips those legs under
+    /// that argument too, so the two are comparable term for term. They are
+    /// additive later and need `atom_third_jets()`, a per-row quantity already
+    /// available matrix-free. `OrderedBetaBernoulli`'s cross-row adjoint is
+    /// excluded because the streaming evidence lane refuses that family by name
+    /// (#2509 Phase-2b) rather than pricing `B` and calling it `A`.
     pub(crate) fn logdet_theta_adjoint_from_probes(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         probes: &[Array1<f64>],
         sinv_probes: &[Array1<f64>],
+        exact_a: bool,
     ) -> Result<SaeArrowVector, String> {
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
@@ -5932,6 +5957,16 @@ impl SaeManifoldTerm {
                                     + sae_dot(jets.first(a), jets.second(b, w))
                             }
                         };
+                        if exact_a {
+                            // #2330 Patch D (1a) — `A = B + ΔC` carries the residual
+                            // curvature `ΔC_tt[a,b] = ⟨error_metric, ∂²f_ab⟩` the
+                            // Gauss-Newton assembly drops, and that block moves with
+                            // `θ_w` too. `∂error_metric/∂θ_w` is `jets.first(w)` in
+                            // this jet convention, so the first leg is a plain jet
+                            // dot; the third-jet leg is the Patch-D piece this port
+                            // scopes out (see the docstring).
+                            dh += sae_dot(jets.first(w), jets.second(a, b));
+                        }
                         if let (
                             Some((a_soft, mm, scale, inv_tau, _atom_w)),
                             SaeLocalRowVar::Logit { atom: atom_a },
@@ -5958,12 +5993,27 @@ impl SaeManifoldTerm {
                                 SaeLocalRowVar::Coord { atom, axis }
                                     if a == w && !ard_precisions[atom].is_empty() =>
                                 {
-                                    self.ard_majorized_hessian_derivative(
-                                        ard_precisions[atom][axis],
-                                        row,
-                                        atom,
-                                        axis,
-                                    )
+                                    // The majorizer writes `α·softplus_{τ₀}(cos κt)`
+                                    // into `H_tt`; `A` carries the unclamped
+                                    // `α·cos κt`. Their difference is exactly the
+                                    // `negative_hessian_remainder` the dense exact-A
+                                    // route adds, pinned by
+                                    // `exact_a_ard_operator_derivative_is_the_unmajorized_hessian_2515`.
+                                    if exact_a {
+                                        self.ard_exact_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
+                                    } else {
+                                        self.ard_majorized_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
+                                    }
                                 }
                                 _ => 0.0,
                             };
@@ -5974,8 +6024,15 @@ impl SaeManifoldTerm {
                 // t–β block: reuse the dense contraction with the reconstructed inv_vβ.
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
+                        // #2330 Patch D (1a), t–β leg: `ΔC_tβ[a,β]` moves with
+                        // `θ_w` through the residual exactly as the t–t block does.
                         let dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
-                            + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos));
+                            + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos))
+                            + if exact_a {
+                                sae_dot(jets.first(w), jets.beta_deriv(a, beta_pos))
+                            } else {
+                                0.0
+                            };
                         gamma += 2.0 * inv_vbeta[[a, channel.index]] * dh;
                     }
                 }

@@ -3281,7 +3281,7 @@ impl SaeManifoldTerm {
         } else {
             let mut gamma = match logdet_derivative_bundle {
                 Some((probes, sinv)) => self
-                    .logdet_theta_adjoint_from_probes(rho, cache, probes, sinv)
+                    .logdet_theta_adjoint_from_probes(rho, cache, probes, sinv, false)
                     .map_err(OuterGradientError::internal)?,
                 None => self
                     .logdet_theta_adjoint(rho, cache, solver)

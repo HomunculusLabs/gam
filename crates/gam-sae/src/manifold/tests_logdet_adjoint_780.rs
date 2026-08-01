@@ -2154,7 +2154,7 @@ fn assert_theta_adjoint_from_probes_matches_dense(
         })
         .collect();
     let mf = term
-        .logdet_theta_adjoint_from_probes(rho, cache, &probes, &sinv)
+        .logdet_theta_adjoint_from_probes(rho, cache, &probes, &sinv, false)
         .expect("matrix-free theta-adjoint");
 
     assert_eq!(dense.t.len(), mf.t.len());
@@ -2283,7 +2283,7 @@ fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
                 .expect("schur_inverse_apply")
         })
         .collect();
-    let result = term.logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv);
+    let result = term.logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, false);
     assert!(
         result.is_err(),
         "the from-probes theta-adjoint must refuse a deflated-row cache; got Ok"
