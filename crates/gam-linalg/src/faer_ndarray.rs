@@ -99,6 +99,44 @@ pub fn in_nested_parallel_region() -> bool {
 /// into a log line.
 static EIGH_CALLS: AtomicU64 = AtomicU64::new(0);
 static EIGH_NANOS: AtomicU64 = AtomicU64::new(0);
+/// Of those calls, how many observed `Par::Seq`. This is the field that makes
+/// the census ASSERTABLE rather than merely observable: a test can state "the
+/// large decomposition ran sequentially" as a bar instead of a human reading it
+/// out of a log.
+static EIGH_SEQ_CALLS: AtomicU64 = AtomicU64::new(0);
+/// The largest `dim` seen, so a run can be asked whether it ever reached the
+/// shape under investigation rather than being assumed to have.
+static EIGH_MAX_DIM: AtomicU64 = AtomicU64::new(0);
+
+/// #2267/#2738 — the eigendecomposition census, readable from a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EighCensus {
+    /// Total `eigh` calls since process start.
+    pub calls: u64,
+    /// How many of them observed faer's global parallelism as `Par::Seq`.
+    pub sequential_calls: u64,
+    /// Largest matrix dimension decomposed.
+    pub max_dim: u64,
+    /// Cumulative wall time across all calls, in nanoseconds.
+    pub nanos: u64,
+}
+
+/// Read the census. Process-global and monotonic, so a test takes a reading
+/// before and after the region it cares about and differences them.
+///
+/// This exists because `log::debug!` is INVISIBLE under `cargo test` — no logger
+/// is installed there, so a probe that only logs prints nothing and is
+/// indistinguishable from a code path that never executed. A counter can be
+/// asserted on with no logger, no stderr, and no environment variable (which the
+/// ban scanner forbids reading anyway).
+pub fn eigh_census() -> EighCensus {
+    EighCensus {
+        calls: EIGH_CALLS.load(Ordering::Relaxed),
+        sequential_calls: EIGH_SEQ_CALLS.load(Ordering::Relaxed),
+        max_dim: EIGH_MAX_DIM.load(Ordering::Relaxed),
+        nanos: EIGH_NANOS.load(Ordering::Relaxed),
+    }
+}
 
 /// #2738 — the parallelism actually in force, read INSIDE the running process.
 ///
@@ -2210,6 +2248,10 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             .map_err(FaerLinalgError::SelfAdjointEigen)?;
             let eigh_elapsed = eigh_started.elapsed();
             let eigh_calls = EIGH_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+            if eigh_par == Par::Seq {
+                EIGH_SEQ_CALLS.fetch_add(1, Ordering::Relaxed);
+            }
+            EIGH_MAX_DIM.fetch_max(matrix.nrows() as u64, Ordering::Relaxed);
             let eigh_nanos_total = EIGH_NANOS
                 .fetch_add(eigh_elapsed.as_nanos() as u64, Ordering::Relaxed)
                 + eigh_elapsed.as_nanos() as u64;
@@ -3696,6 +3738,72 @@ mod tests {
     // These tests mutate the process-global faer setting, so they save/restore a
     // known baseline and run serially under one `#[test]` to avoid racing the
     // other global-parallelism tests in this binary.
+    /// #2267/#2738 — the census must be shown to MOVE, and to record the
+    /// sequential arm, or it is a counter nobody has ever seen count.
+    ///
+    /// This is the positive control for the instrument itself. The failure it
+    /// guards against is specific and has already happened once: the `log::debug!`
+    /// half of this probe printed nothing under `cargo test` because no logger is
+    /// installed, and a probe that prints nothing is indistinguishable from a code
+    /// path that never ran. A counter can be asserted on; a log line cannot.
+    ///
+    /// Both arms, so neither a stuck-at-zero counter nor a stuck-at-everything
+    /// one passes: an `eigh` OUTSIDE the scope must not increment the sequential
+    /// tally, and one INSIDE it must.
+    #[test]
+    fn eigh_census_counts_calls_and_separates_the_sequential_arm() {
+        let sym = Array2::<f64>::from_shape_fn((6, 6), |(i, j)| {
+            if i == j { 2.0 + i as f64 } else { 0.25 / (1.0 + (i as f64 - j as f64).abs()) }
+        });
+
+        // Establish a definitely-parallel baseline so the outside-the-scope arm
+        // is not vacuously sequential already.
+        let baseline = faer::get_global_parallelism();
+        faer::set_global_parallelism(Par::rayon(2));
+
+        let before = eigh_census();
+        sym.eigh(Side::Lower).expect("outside-scope eigh");
+        let outside = eigh_census();
+        assert_eq!(
+            outside.calls,
+            before.calls + 1,
+            "the census must count an eigh call",
+        );
+        assert_eq!(
+            outside.sequential_calls, before.sequential_calls,
+            "an eigh outside any FaerSequentialScope must NOT be tallied sequential",
+        );
+        assert!(
+            outside.max_dim >= 6,
+            "max_dim must record the shape actually decomposed, got {}",
+            outside.max_dim,
+        );
+
+        {
+            let scope = FaerSequentialScope::enter();
+            sym.eigh(Side::Lower).expect("inside-scope eigh");
+            drop(scope);
+        }
+        let inside = eigh_census();
+        assert_eq!(
+            inside.calls,
+            outside.calls + 1,
+            "the census must count the second call",
+        );
+        assert_eq!(
+            inside.sequential_calls,
+            outside.sequential_calls + 1,
+            "an eigh inside a FaerSequentialScope MUST be tallied sequential — this is \
+             the property the #2267 read turns on",
+        );
+        assert!(
+            inside.nanos >= outside.nanos,
+            "cumulative time must be monotonic",
+        );
+
+        faer::set_global_parallelism(baseline);
+    }
+
     #[test]
     fn faer_sequential_scope_sets_seq_inside_and_restores_after() {
         let baseline = faer::get_global_parallelism();
