@@ -150,6 +150,8 @@ mod time_block;
 mod wiggle_geometry;
 
 #[cfg(test)]
+mod smoothing_corrected_tests;
+#[cfg(test)]
 mod tests;
 
 // Flatten every concern submodule back into the module root so the historical

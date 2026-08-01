@@ -318,6 +318,24 @@ pub struct SurvivalLocationScaleFitResultParts {
         Option<gam_solve::rho_optimizer::OuterCriterionCertificate>,
     pub outer_converged: bool,
     pub covariance_conditional: Option<Array2<f64>>,
+    /// Smoothing-corrected coefficient covariance `V_c = V_cond + C` (#2346),
+    /// already lifted into the SAME raw coefficient frame as
+    /// [`Self::covariance_conditional`].
+    ///
+    /// Finalization used to hard-code this to `None`, which silently discarded
+    /// the first-order ρ-uncertainty correction the inner custom-family fit had
+    /// already computed: every penalized survival location-scale fit therefore
+    /// saved a model with no corrected covariance, and `gam predict`'s DEFAULT
+    /// `--covariance-mode corrected` refused it with "saved model does not
+    /// contain smoothing-corrected covariance; refit" — an instruction no refit
+    /// could satisfy, because the correction was produced and then dropped
+    /// rather than never computed (#2677).
+    pub covariance_corrected: Option<Array2<f64>>,
+    /// The correction term `C` alone (raw frame) with the typed provenance that
+    /// produced it. `V_c = V_cond + C`, so this is the same lift as the two
+    /// covariances above. `None` is a typed absence, never an error.
+    pub smoothing_correction:
+        Option<(Array2<f64>, gam_solve::model_types::SmoothingCorrectionMethod)>,
     pub geometry: Option<FitGeometry>,
     /// Raw per-penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` at the converged fit,
     /// aligned 1:1 with the concatenated block lambdas in block order
@@ -440,6 +458,8 @@ pub fn survival_fit_from_parts(
         criterion_certificate,
         outer_converged,
         covariance_conditional,
+        covariance_corrected,
+        smoothing_correction,
         geometry,
         penalty_block_trace,
         edf_by_block,
@@ -742,28 +762,29 @@ pub fn survival_fit_from_parts(
     // the corrected one is then an identity of the definition, not a fallback
     // to a narrower uncertainty object.
     //
-    // Without this, `--survival-likelihood location-scale` published a typed
-    // absence on EVERY fit, so a saved model could never satisfy the default
-    // `gam predict --covariance-mode corrected`, and the CLI refused with
-    // "refit before requesting" -- an instruction no refit could satisfy,
-    // because this route never computes the term. The CLI's own
-    // `lambdas.is_empty()` carve-out could not catch it either: these fits DO
-    // carry smoothing coordinates (fixed ones), so `lambdas` is non-empty.
-    //
     // The predicate is the sibling survival-transformation route's, verbatim
     // (`fit_orchestration/fit.rs`): no outer iterations and no criterion
     // certificate is exactly "no rho was selected" -- the field doc on
     // `criterion_certificate` states `None` is valid only when
     // `outer_iterations == 0`.
     //
-    // A fit whose lambda WAS selected keeps the typed absence. There the
-    // correction is a real, non-zero term this route does not compute, and
-    // returning `Vb` under a corrected request would silently under-report
-    // every interval.
+    // This is the FALLBACK, not the primary source. A fit whose lambda WAS
+    // selected (the bench's penalized survival scenarios run 16 outer
+    // iterations) carries a real, non-zero correction computed by the
+    // custom-family assembler; finalization now hands it in through
+    // `parts.covariance_corrected` and it wins here. Only when no such term
+    // exists does the zero-rho identity apply, and a fit that selected rho
+    // WITHOUT producing a correction still keeps the typed absence rather than
+    // silently under-reporting every interval with `Vb`.
     let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
-    let covariance_corrected = lambda_is_fixed
-        .then(|| covariance_conditional.clone())
-        .flatten();
+    let covariance_corrected = covariance_corrected.or_else(|| {
+        lambda_is_fixed
+            .then(|| covariance_conditional.clone())
+            .flatten()
+    });
+    // One gate for the CORRECTED marginal SEs too: `V_c = V_cond + C` is only
+    // conditionally SPD, so a materially negative variance must be refused
+    // here rather than published as `SE = 0`.
     let beta_standard_errors_corrected = covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
@@ -771,16 +792,24 @@ pub fn survival_fit_from_parts(
         .map_err(|reason| {
             format!("survival location-scale corrected standard errors are invalid: {reason}")
         })?;
+    let (smoothing_correction_matrix, smoothing_correction_method) = match smoothing_correction {
+        Some((correction, method)) => (Some(correction), Some(method)),
+        None => (None, None),
+    };
     let inference = geometry
         .as_ref()
         .map(|geom| gam_solve::estimate::FitInference {
             edf_by_block: inference_edf_by_block.clone(),
             penalty_block_trace: inference_penalty_block_trace.clone(),
             edf_total,
-            smoothing_correction: None,
-            smoothing_correction_method: None,
-            smoothing_correction_first_order: None,
-            smoothing_correction_method_first_order: None,
+            // This lane's correction is only ever the first-order IFT term
+            // (the custom-family fit never runs a cubature upgrade), so the
+            // retained "first-order" pair is exactly the primary pair and the
+            // #946 exact corrected-EDF/AIC channel reads a populated value.
+            smoothing_correction_first_order: smoothing_correction_matrix.clone(),
+            smoothing_correction_method_first_order: smoothing_correction_method,
+            smoothing_correction: smoothing_correction_matrix.clone(),
+            smoothing_correction_method,
             penalized_hessian: geom.penalized_hessian.clone(),
             reparam_qs: None,
             dispersion: gam_solve::estimate::Dispersion::UNIT,

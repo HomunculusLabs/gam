@@ -900,6 +900,33 @@ pub(crate) fn finalize_survival_location_scale_fit(
         .as_ref()
         .map(|cov_reduced| lift_conditional_covariance(cov_reduced, &finalization_gauge))
         .transpose()?;
+    // #2677: the smoothing-corrected covariance `V_c = V_cond + C` and the
+    // correction `C` alone live in the SAME reduced coefficient frame as the
+    // conditional covariance, and the gauge lift is a linear congruence, so
+    // `lift(V_c) = lift(V_cond) + lift(C)` holds exactly. Carrying them here is
+    // what makes the saved model answer `gam predict --covariance-mode
+    // corrected`; finalization previously dropped both, so every penalized
+    // survival location-scale fit persisted a model the DEFAULT predict
+    // invocation refused.
+    let covariance_corrected = fit
+        .covariance_corrected
+        .as_ref()
+        .map(|cov_reduced| lift_conditional_covariance(cov_reduced, &finalization_gauge))
+        .transpose()?;
+    let smoothing_correction = fit
+        .inference
+        .as_ref()
+        .and_then(|inference| {
+            inference
+                .smoothing_correction
+                .as_ref()
+                .zip(inference.smoothing_correction_method)
+        })
+        .map(|(correction, method)| {
+            lift_conditional_covariance(correction, &finalization_gauge)
+                .map(|lifted| (lifted, method))
+        })
+        .transpose()?;
     let geometry = fit
         .geometry
         .as_ref()
@@ -955,6 +982,8 @@ pub(crate) fn finalize_survival_location_scale_fit(
         // sealed source fit rather than a second status decision.
         outer_converged: true,
         covariance_conditional,
+        covariance_corrected,
+        smoothing_correction,
         geometry,
         // Per-penalty trace / effective-d.f. from the inner blockwise fit,
         // aligned 1:1 with `fit.lambdas` in block order
