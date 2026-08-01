@@ -66,14 +66,27 @@ class FuzzScenario:
     family: str
     model_type: str
     basis_type: str
+    # Rows in the dataset SELECTION materialized, from the scenario's own config
+    # in scenarios.json. The trial re-materializes the dataset, so this is only
+    # the fitted row count if the trial is handed the same config -- see
+    # `dataset_config`, and `FuzzResult.n_obs_fitted` for what was actually fit.
     n_obs: int
     n_features: int
     formula: str
     mgcv_formula: str
     noise_formula: str | None = None
+    # The scenario's entry from scenarios.json, verbatim, as JSON so this stays
+    # a frozen (hashable) dataclass. `dataset_for_scenario` reads `n`, `seed`
+    # and `cv_splits` off it; a trial that rebuilds the dataset from just the
+    # name silently gets a DIFFERENT dataset.
+    config_json: str = "{}"
 
     def tag(self) -> str:
         return self.trial_id
+
+    def dataset_config(self) -> dict[str, typing.Any]:
+        cfg = json.loads(self.config_json) if self.config_json else {}
+        return cfg if cfg.get("name") else {"name": self.name}
 
 
 # Status of the mgcv *reference* arm, recorded on the mgcv payload itself.
@@ -119,6 +132,10 @@ class FuzzResult:
     mgcv: dict[str, typing.Any]
     primary_gap: Optional[float] = None
     primary_metric: Optional[str] = None
+    # Rows in the dataset this trial actually fit. `scenario["n_obs"]` is the
+    # selection-time count; these are two different measurements of two
+    # different stages and are never folded into one column.
+    n_obs_fitted: Optional[int] = None
 
     def compute_gap(self) -> None:
         self.primary_metric = "r2" if self.scenario["family"] == "gaussian" else "auc"
@@ -343,6 +360,7 @@ def _materialize_scenario(
         formula=formula,
         mgcv_formula=mgcv_formula,
         noise_formula=noise_formula,
+        config_json=json.dumps(cfg, sort_keys=True, default=str),
     )
 
 
@@ -557,7 +575,10 @@ def run_mgcv(
 ) -> dict[str, typing.Any]:
     del r_timeout
     try:
-        scenario_cfg = {"name": sc.name}
+        # The full scenario config, as run_suite.py passes it -- the runners
+        # read `scenario["name"]`, but handing them a stripped dict is the same
+        # shape of mistake that made the trial fit a different dataset.
+        scenario_cfg = sc.dataset_config()
         if sc.model_type == "gamlss":
             row = run_external_mgcv_gaulss_cv(scenario_cfg, ds=ds, folds=[fold])
         else:
@@ -601,7 +622,17 @@ def run_mgcv(
 
 
 def run_trial(sc: FuzzScenario, rust_timeout: int, r_timeout: int) -> FuzzResult:
-    ds = dataset_for_scenario({"name": sc.name})
+    # Rebuild the dataset from the scenario's OWN config, not from a bare name.
+    # `dataset_for_scenario` reads `n`, `seed` and `cv_splits` off the config it
+    # is given (bench/_run_suite_datasets.py:1917), so `{"name": ...}` falls
+    # back to `n=6000` and then to `full_n` -- and for a `_downsampleNNNx`
+    # scenario `full_n = max(6000, 6000 * NNN)`, with the downsample target
+    # defaulting to that same `full_n`, i.e. no downsample at all. A scenario
+    # configured `n: 12` with factor 500 was therefore fit at 3,000,000 rows
+    # while every printed and costed number said 12, which is what made the
+    # `n` column unreadable and what tripped the RAM guard into skipping the
+    # mgcv arm on scenarios that are tiny by construction.
+    ds = dataset_for_scenario(sc.dataset_config())
     folds = folds_for_dataset(ds)
     if not folds:
         raise RuntimeError(f"{sc.name}: no folds generated")
@@ -616,9 +647,14 @@ def run_trial(sc: FuzzScenario, rust_timeout: int, r_timeout: int) -> FuzzResult
     # (gam#820: n=2.4M p=4 → gam 13.7GiB + mgcv 6.7GiB on a 15.6GiB runner). When
     # the projected combined peak won't fit, skip *only* the mgcv arm and still
     # record the gam result, rather than letting the runner die.
-    n_obs = len(df)
+    # Named for the stage it belongs to. This is the row count of the dataset
+    # THIS TRIAL FITS, and it is the number the RAM guard's own decision is
+    # denominated in; `sc.n_obs` is what selection saw. Post-fix they agree,
+    # and the emitters print both whenever they do not, rather than letting one
+    # column silently stand for two quantities.
+    n_obs_fitted = len(df)
     n_features = len(ds["features"])
-    mgcv_ok, mgcv_reason = _mgcv_arm_fits_in_ram(n_obs, n_features)
+    mgcv_ok, mgcv_reason = _mgcv_arm_fits_in_ram(n_obs_fitted, n_features)
 
     train_df = df.iloc[fold.train_idx].copy()
     test_df = df.iloc[fold.test_idx].copy()
@@ -637,7 +673,12 @@ def run_trial(sc: FuzzScenario, rust_timeout: int, r_timeout: int) -> FuzzResult
             "skipped": True,
             "skip_reason": mgcv_reason,
         }
-    result = FuzzResult(scenario=asdict(sc), rust=rust_out, mgcv=mgcv_out)
+    result = FuzzResult(
+        scenario=asdict(sc),
+        rust=rust_out,
+        mgcv=mgcv_out,
+        n_obs_fitted=n_obs_fitted,
+    )
     result.compute_gap()
     return result
 
@@ -859,6 +900,25 @@ def _mgcv_absent_label(result: FuzzResult) -> str:
     return "  n/a"
 
 
+def _n_obs_cell(result: FuzzResult) -> str:
+    """The `n` column, which stage it came from, and both numbers when they
+    disagree.
+
+    A single `n` that silently switches between the selection-time row count
+    and the fitted one is unreadable, and was read as a row count and published
+    as a scaling law before an internal check (AUC 0.848 at n=12, p=16) killed
+    it. When the two agree there is one number and nothing to qualify; when
+    they do not, the divergence IS the finding and both are printed.
+    """
+    selected = int(result.scenario.get("n_obs", 0) or 0)
+    fitted = result.n_obs_fitted
+    if fitted is None:
+        return f"{selected:6d}(sel)"
+    if int(fitted) == selected:
+        return f"{selected:6d}"
+    return f"{int(fitted)}(fit)!={selected}(sel)"
+
+
 def _timing_cell(result: FuzzResult) -> str:
     """Per-arm wall time, with a failed arm's seconds marked as what they are.
 
@@ -890,7 +950,9 @@ def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
         print(f"\n{'=' * 120}")
         print(f"  {label} - {metric} gap (mgcv - gamfit) | {len(valid)} valid / {len(subset)} total")
         print("=" * 120)
-        print(f"{'#':>3}  {'gap':>8}  {'gamfit':>9}  {'mgcv':>9}  {'scenario':>36}  {'n':>6}  {'p':>3}")
+        # `n rows` is the FITTED row count; a cell that cannot claim that says
+        # so inline rather than letting the header speak for it.
+        print(f"{'#':>3}  {'gap':>8}  {'gamfit':>9}  {'mgcv':>9}  {'scenario':>36}  {'n rows':>6}  {'p':>3}")
         print("-" * 120)
         for i, r in enumerate(valid[:top_n]):
             s = r.scenario
@@ -901,7 +963,7 @@ def print_leaderboard(results: typing.Any, top_n: int = 25) -> None:
             gap_s = f"{r.primary_gap:+.4f}" if r.primary_gap is not None else "  N/A "
             print(
                 f"{i + 1:3d}  {gap_s}  {rs:>9}  {ms:>9}  "
-                f"{s['name'][:36]:>36}  {s['n_obs']:6d}  {s['n_features']:3d}"
+                f"{s['name'][:36]:>36}  {_n_obs_cell(r):>6}  {s['n_features']:3d}"
             )
         gaps = [float(r.primary_gap) for r in valid if r.primary_gap is not None]
         mgcv_w = sum(1 for g in gaps if g > 0.01)
@@ -938,7 +1000,16 @@ def _load_existing_results() -> tuple[list[FuzzResult], set[str]]:
             if not line:
                 continue
             obj = json.loads(line)
-            fr = FuzzResult(scenario=obj["scenario"], rust=obj["rust"], mgcv=obj["mgcv"])
+            # Rows written before the fitted count was recorded have no value
+            # for it, and stay unqualified rather than borrowing the
+            # selection-time number they were never measured against.
+            fitted = obj.get("n_obs_fitted")
+            fr = FuzzResult(
+                scenario=obj["scenario"],
+                rust=obj["rust"],
+                mgcv=obj["mgcv"],
+                n_obs_fitted=int(fitted) if isinstance(fitted, (int, float)) else None,
+            )
             fr.compute_gap()
             results.append(fr)
             trial_id = fr.scenario.get("trial_id")
@@ -1107,6 +1178,10 @@ def main() -> None:
                         "comparison_status": result.comparison_status(),
                         "comparison_reasons": result.comparison_reasons(),
                         "verdict": result.verdict(),
+                        # Two stages, two names, both recorded. `scenario.n_obs`
+                        # is what selection materialized; this is what was fit.
+                        "n_obs_selected": result.scenario.get("n_obs"),
+                        "n_obs_fitted": result.n_obs_fitted,
                     },
                     default=str,
                 )
@@ -1133,7 +1208,7 @@ def main() -> None:
                 f"  [{i + 1:3d}/{len(scenarios)}] {sc.name[:30]:30s} "
                 f"{sc.family[:4]}/{sc.model_type[:5]}/{sc.basis_type[:5]:5s} "
                 f"{metric}:gamfit={rs} {metric}:mgcv={ms} gap={gap_s} "
-                f"n={sc.n_obs:6d} p={sc.n_features:3d}{verdict_s}{flag}{time_s}",
+                f"n={_n_obs_cell(result)} p={sc.n_features:3d}{verdict_s}{flag}{time_s}",
                 flush=True,
             )
 
