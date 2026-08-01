@@ -4410,15 +4410,6 @@ struct TopologyRaceOutcome {
     tk_score: f64,
 }
 
-impl TopologyRaceOutcome {
-    /// The topology the evidence ranked first. Present whenever the outcome is,
-    /// because an empty ranking is an error in [`race_spec_set`] rather than a
-    /// winner-less success.
-    fn winner_kind(&self) -> Option<AutoTopologyKind> {
-        self.ranking.first().map(|(kind, _)| *kind)
-    }
-}
-
 fn race_spec_set(
     specs: Vec<TopologyCandidateSpec>,
     target: ArrayView2<'_, f64>,
@@ -4524,12 +4515,16 @@ fn race_spec_set(
         })?;
         ranking.push((kind, entry.tk_score));
     }
-    log_atlas_evidence_agreement(atlas, &ranking);
-    Ok(Some(TopologyRaceOutcome {
+    let outcome = TopologyRaceOutcome {
         ranking,
         fit: winner.fit_handle.clone(),
         tk_score: winner.tk_score,
-    }))
+    };
+    // Read the RETAINED ranking, not the local, so the field the outcome carries
+    // is the one the agreement log prices -- a retained copy no production path
+    // reads is dead by construction (#2280 landed it without its consumer).
+    log_atlas_evidence_agreement(atlas, &outcome.ranking);
+    Ok(Some(outcome))
 }
 
 /// #2280 — log the atlas's MEASURED manifold against the REML race's INDEPENDENT
@@ -7869,7 +7864,7 @@ mod tests_atlas_prior_2280 {
                 None,
             )
             .expect("the planted zoo must not error the race")
-            .and_then(|outcome| outcome.winner_kind());
+            .and_then(|outcome| outcome.ranking.first().map(|(kind, _)| *kind));
 
             let atlas_right = atlas_kind.is_some_and(|kind| names_truth(kind, *truth));
             let menu_right = menu_kind.is_some_and(|kind| names_truth(kind, *truth));
