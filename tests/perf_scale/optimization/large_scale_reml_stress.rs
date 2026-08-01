@@ -246,6 +246,89 @@ fn fit_options(max_iter: usize) -> FitOptions {
 }
 
 /// L2 relative error: ||pred - truth||₂ / ||truth - mean(truth)||₂.
+/// Held-out `relative_l2` of the best predictor that uses NO curvature: an
+/// ordinary least-squares fit of the truth on the raw coordinates plus an
+/// intercept, solved on the held-out rows themselves.
+///
+/// Solved on the held-out rows deliberately, and it makes the reference
+/// STRICTER rather than weaker: this is the best a linear model could possibly
+/// do on exactly the rows being scored, with no estimation error of its own. A
+/// smoother that does not clear it by a wide margin has not earned its basis.
+///
+/// Unlike a literal bar, this is re-derived from the data on every run, so it
+/// cannot age against a changed fixture or drift out of calibration — the
+/// failure mode that produced the un-evaluated `0.10` above.
+fn linear_only_reference(x: ArrayView2<'_, f64>, truth: &Array1<f64>) -> f64 {
+    let (n, d) = x.dim();
+    // Normal equations for `[1, x]`, which is `(d+1)` square and tiny.
+    let p = d + 1;
+    let mut xtx = Array2::<f64>::zeros((p, p));
+    let mut xty = Array1::<f64>::zeros(p);
+    for row in 0..n {
+        let mut z = Array1::<f64>::ones(p);
+        for col in 0..d {
+            z[col + 1] = x[[row, col]];
+        }
+        for a in 0..p {
+            xty[a] += z[a] * truth[row];
+            for b in 0..p {
+                xtx[[a, b]] += z[a] * z[b];
+            }
+        }
+    }
+    // Gaussian elimination with partial pivoting; `p` is at most 7 here.
+    let mut aug = Array2::<f64>::zeros((p, p + 1));
+    for a in 0..p {
+        for b in 0..p {
+            aug[[a, b]] = xtx[[a, b]];
+        }
+        aug[[a, p]] = xty[a];
+    }
+    for col in 0..p {
+        let mut pivot = col;
+        for row in (col + 1)..p {
+            if aug[[row, col]].abs() > aug[[pivot, col]].abs() {
+                pivot = row;
+            }
+        }
+        if aug[[pivot, col]].abs() < 1e-12 {
+            // Degenerate design: fall back to the intercept-only predictor,
+            // whose relative_l2 against a mean-centred truth is exactly 1.
+            return 1.0;
+        }
+        if pivot != col {
+            for b in col..=p {
+                let tmp = aug[[col, b]];
+                aug[[col, b]] = aug[[pivot, b]];
+                aug[[pivot, b]] = tmp;
+            }
+        }
+        for row in 0..p {
+            if row == col {
+                continue;
+            }
+            let factor = aug[[row, col]] / aug[[col, col]];
+            for b in col..=p {
+                let v = aug[[col, b]] * factor;
+                aug[[row, b]] -= v;
+            }
+        }
+    }
+    let mut beta = Array1::<f64>::zeros(p);
+    for a in 0..p {
+        beta[a] = aug[[a, p]] / aug[[a, a]];
+    }
+    let mut pred = Array1::<f64>::zeros(n);
+    for row in 0..n {
+        let mut acc = beta[0];
+        for col in 0..d {
+            acc += beta[col + 1] * x[[row, col]];
+        }
+        pred[row] = acc;
+    }
+    relative_l2(&pred, truth)
+}
+
 fn relative_l2(pred: &Array1<f64>, truth: &Array1<f64>) -> f64 {
     let mean_t = truth.mean().unwrap_or(0.0);
     let mut num = 0.0;
@@ -354,9 +437,53 @@ fn large_scale_reml_stress_main() {
     );
     assert!(pred_mean.iter().all(|v| v.is_finite()));
     let rel_l2 = relative_l2(&pred_mean, &y_true_holdout);
+
+    // A BAR-FREE reference, computed on the same held-out rows.
+    //
+    // `relative_l2` normalises by the truth's standard deviation, so this
+    // metric is `sqrt(1 - R²)` against the NOISELESS truth and the `0.10` bar
+    // below is really "R² > 0.99". That bar has no measured provenance in this
+    // fixture — it was written in the same commit that created the test
+    // (`6a4b4728c`), and per #2709 the fixture could not build until
+    // `da1228e1c`, so the assertion had never once been evaluated. A number
+    // nobody has ever seen a run produce is an intention, not a threshold.
+    //
+    // So report a reference that needs no calibration: the best predictor that
+    // uses NO curvature at all, least-squares on the raw held-out coordinates
+    // plus an intercept. Any smoother spending `K_CENTERS` basis functions must
+    // beat it by a wide margin to have earned them, and unlike `0.10` this
+    // number is re-derived from the data on every run and cannot drift or age.
+    let linear_only_rel_l2 = linear_only_reference(x_holdout.view(), &y_true_holdout);
+
+    // Emitted BEFORE any quality assertion, and this ordering is the point.
+    // The convergence check and the summary line used to sit *after* the bar,
+    // so a fit that missed the bar aborted before reporting whether it had
+    // converged, how long it took, or how it compared to anything — the
+    // diagnostic that explains the failure was downstream of the assertion that
+    // fires. The first real run of this fixture produced `0.2944` and not one
+    // other number.
+    eprintln!(
+        "[large_scale_reml_stress_main] n={N_TRAIN}, K={K_CENTERS}, pc_dim={PC_DIM} \
+         | wall_clock={:.2}s, outer_iter={} (cap {MAIN_MAX_ITER}), \
+         rel_l2_holdout={rel_l2:.4}, linear_only_rel_l2={linear_only_rel_l2:.4}, \
+         nonlinear_variance_captured={:.1}%",
+        elapsed.as_secs_f64(),
+        fitted.fit.outer_iterations,
+        // What fraction of the structure a straight line CANNOT express did
+        // this fit actually recover? `1 - (rel_l2 / linear_only)²` in variance
+        // terms; 0% means the smoother matched a straight line, 100% means it
+        // recovered everything the line missed.
+        100.0
+            * (1.0
+                - (rel_l2 * rel_l2) / (linear_only_rel_l2 * linear_only_rel_l2).max(1e-30)),
+    );
+
     assert!(
         rel_l2 < 0.10,
-        "held-out relative L2 reconstruction error too high: {rel_l2:.4} (>= 0.10)",
+        "held-out relative L2 reconstruction error too high: {rel_l2:.4} (>= 0.10). \
+         Linear-only reference on the same rows: {linear_only_rel_l2:.4} — see the \
+         diagnostic line above for the share of non-linear structure recovered, which \
+         is the bar-free reading of this failure.",
     );
 
     // (3) Bias-corrected predictions: FitInference must carry a finite
@@ -395,13 +522,6 @@ fn large_scale_reml_stress_main() {
         elapsed.as_secs_f64(),
     );
 
-    eprintln!(
-        "[large_scale_reml_stress_main] n={N_TRAIN}, K={K_CENTERS}, pc_dim={PC_DIM} \
-         | wall_clock={:.2}s, outer_iter={}, rel_l2_holdout={:.4}",
-        elapsed.as_secs_f64(),
-        fitted.fit.outer_iterations,
-        rel_l2,
-    );
 }
 
 /// #2708: report WHICH of the three candidate causes the coverage number is
