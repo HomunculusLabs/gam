@@ -479,10 +479,12 @@ pub enum SaeFitError {
         stage: SaeFitStage,
         result: Box<OuterResult>,
     },
-    /// #2691 — every atom's chart collapsed to a single point of its own
-    /// manifold. The dictionary would decode to a constant, and any consumer
-    /// reading a displacement out of it measures an exact zero. Refused rather
-    /// than returned with a healthy-looking trajectory.
+    /// #2691 — a LOAD-BEARING atom's chart collapsed to a single point of its
+    /// own manifold. That atom decodes to a constant, and any consumer reading a
+    /// displacement out of it measures an exact zero. Refused rather than
+    /// returned with a healthy-looking trajectory — including when a sibling
+    /// atom's chart is fine, because a dictionary that reports `K` manifolds and
+    /// contains `K − 1` is not the object the caller asked for.
     DegenerateChart {
         atoms: Vec<usize>,
         evidence: String,
@@ -504,9 +506,10 @@ impl std::fmt::Display for SaeFitError {
                 atoms, evidence, ..
             } => write!(
                 f,
-                "SAE manifold fit produced a DEGENERATE CHART on atom(s) {atoms:?}: every chart \
-                 axis collapsed to one point of its own manifold, so the dictionary decodes to a \
-                 constant and carries no displacements; refusing to mint a fit [{evidence}]"
+                "SAE manifold fit produced a DEGENERATE CHART on load-bearing atom(s) {atoms:?}: \
+                 every chart axis of those atoms collapsed to one point of its own manifold, so \
+                 they decode to a constant and carry no displacements; refusing to mint a fit \
+                 [{evidence}]"
             ),
             Self::OuterRun { stage, source } => {
                 write!(f, "SAE manifold {stage} outer search failed: {source}")
@@ -1423,12 +1426,34 @@ fn finalize_sae_fit_report(
     // reconstruction-denominated quantity is consulted: the #2691 ledger
     // measured the fully collapsed arm's EV BELOW a partially collapsed arm's,
     // so no EV-denominated gate can order these states.
+    //
+    // The condition is per-ATOM, not a fit-level aggregate: at `K ≥ 2` a
+    // healthy first chart carries the reconstruction while the second is a
+    // point, and any mean/min/`all` over atoms is dragged into range by the
+    // healthy one. An atom is refused when it has lost its whole chart AND is
+    // load-bearing — carries assignment mass that is representable against the
+    // dominant atom on some row, so its constant decode is part of the answer
+    // the caller receives. An atom carrying no representable mass anywhere has
+    // an UNOBSERVED chart, and refusing on it would refuse fits that are fine.
     let chart_degeneracy = term.chart_degeneracy_report();
     let collapsed_atoms = chart_degeneracy.atoms_without_a_chart();
-    if !collapsed_atoms.is_empty() && collapsed_atoms.len() == chart_degeneracy.atom_count {
+    let refused_atoms = if collapsed_atoms.is_empty() {
+        Vec::new()
+    } else {
+        let load_bearing = chart_degeneracy.chart_less_load_bearing_atoms(assignments.view());
+        if load_bearing.is_empty() && collapsed_atoms.len() == chart_degeneracy.atom_count {
+            // Every atom lost its chart and none of them carries representable
+            // mass: the dictionary decodes to a constant either way.
+            collapsed_atoms
+        } else {
+            load_bearing
+        }
+    };
+    if !refused_atoms.is_empty() {
+        let evidence = chart_degeneracy.atom_evidence(&refused_atoms);
         return Err(SaeFitError::DegenerateChart {
-            atoms: collapsed_atoms,
-            evidence: chart_degeneracy.collapsed_atom_evidence(),
+            atoms: refused_atoms,
+            evidence,
             report: Box::new(chart_degeneracy),
         });
     }

@@ -27,9 +27,41 @@
 //!    periodic axis is therefore measured by its circular variance
 //!    `1 − |mean exp(i κ t)|`, a Euclidean axis by its standard deviation.
 
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView2};
 
 use super::SaeManifoldTerm;
+
+/// Which atoms are LOAD-BEARING for the reconstruction, decided at the
+/// representation limit rather than by a tuned activity threshold.
+///
+/// Row `i` is reconstructed as `Σ_k a[i,k] · decode_k(t_ik)`. An atom whose
+/// weight on every row is below `ε · max_j a[i,j]` cannot change that sum at
+/// binary64 — adding it to the dominant term is the identity — so it does not
+/// participate in the fit and its chart is unobserved. Every other atom does
+/// participate: whatever its chart says is part of the answer the caller gets.
+///
+/// This is the same kind of quantity as the per-axis `floor` above (the
+/// resolution at which two values are the same f64 point at that axis's own
+/// magnitude), and for the same reason: the question "does this object affect
+/// the returned numbers?" has a representation answer, not a policy answer.
+pub fn load_bearing_atoms(assignments: ArrayView2<'_, f64>) -> Vec<bool> {
+    let k = assignments.ncols();
+    let mut load_bearing = vec![false; k];
+    for row in assignments.rows() {
+        let dominant = row.iter().fold(0.0_f64, |m, &a| m.max(a.abs()));
+        if !(dominant > 0.0) {
+            // No atom carries this row at all; it distinguishes nothing.
+            continue;
+        }
+        let representable = f64::EPSILON * dominant;
+        for (atom, &weight) in row.iter().enumerate() {
+            if weight.abs() > representable {
+                load_bearing[atom] = true;
+            }
+        }
+    }
+    load_bearing
+}
 
 /// The dispersion of one atom's chart axis, measured in that axis's own
 /// manifold, together with the floor below which the axis carries no
@@ -98,10 +130,36 @@ impl ChartDegeneracyReport {
         out
     }
 
-    /// One line per collapsed atom, for a refusal message.
-    pub fn collapsed_atom_evidence(&self) -> String {
+    /// The atoms that have lost their entire chart AND are load-bearing for the
+    /// reconstruction — the atoms whose collapse the caller actually receives.
+    ///
+    /// `atoms_without_a_chart` alone is not the refusal condition at `K ≥ 2`
+    /// for opposite reasons in the two directions: an atom that carries no
+    /// representable assignment mass has an unobserved chart and refusing on it
+    /// would refuse fits that are fine, while an atom that DOES carry mass and
+    /// has no chart is a point masquerading as a manifold inside an otherwise
+    /// healthy dictionary — the case where one atom's collapse hides behind
+    /// another's, which a fit-level aggregate cannot see.
+    pub fn chart_less_load_bearing_atoms(&self, assignments: ArrayView2<'_, f64>) -> Vec<usize> {
+        let load_bearing = load_bearing_atoms(assignments);
         self.atoms_without_a_chart()
             .into_iter()
+            .filter(|atom| load_bearing.get(*atom).copied().unwrap_or(true))
+            .collect()
+    }
+
+    /// One line per collapsed atom, for a refusal message.
+    pub fn collapsed_atom_evidence(&self) -> String {
+        self.atom_evidence(&self.atoms_without_a_chart())
+    }
+
+    /// One line per named atom, for a refusal message, plus the surviving atoms'
+    /// dispersions — so a partial collapse reads as "atom 0 is a point WHILE
+    /// atom 1 is a chart", which is the state a fit-level aggregate hides.
+    pub fn atom_evidence(&self, atoms: &[usize]) -> String {
+        let named = atoms
+            .iter()
+            .copied()
             .map(|atom| {
                 let detail = self
                     .axes
@@ -129,7 +187,27 @@ impl ChartDegeneracyReport {
                 format!("atom {atom} ('{name}'): {detail}")
             })
             .collect::<Vec<_>>()
-            .join(" | ")
+            .join(" | ");
+        let survivors = self
+            .axes
+            .iter()
+            .filter(|entry| !atoms.contains(&entry.atom) && !entry.degenerate())
+            .map(|entry| {
+                format!(
+                    "atom {} axis {} dispersion {:.6e} ({} chart point(s))",
+                    entry.atom, entry.axis, entry.dispersion, entry.resolved_points
+                )
+            })
+            .collect::<Vec<_>>();
+        if survivors.is_empty() {
+            named
+        } else {
+            format!(
+                "{named} || the chart(s) that did NOT collapse, which is why no fit-level \
+                 aggregate can see this: {}",
+                survivors.join("; ")
+            )
+        }
     }
 }
 

@@ -28,9 +28,11 @@ pub(crate) struct PlantedCircle {
     pub(crate) theta: Array1<f64>,
 }
 
-pub(crate) fn planted_circle_cloud(n: usize, p: usize, radius: f64, sigma: f64) -> PlantedCircle {
-    // Deterministic orthonormal 2-frame in R^p (Gram-Schmidt), so the planted
-    // ring is an exact circle and the sweep needs no RNG.
+/// The deterministic orthonormal 2-frame in `R^p` the ring is planted in
+/// (Gram-Schmidt), so the planted ring is an exact circle and the sweep needs no
+/// RNG. Shared by the generator and by anything that has to read a fit back out
+/// in the planted plane, so the two cannot drift apart.
+pub(crate) fn planted_frame(p: usize) -> (Array1<f64>, Array1<f64>) {
     let mut u = Array1::<f64>::zeros(p);
     let mut v = Array1::<f64>::zeros(p);
     for j in 0..p {
@@ -45,6 +47,11 @@ pub(crate) fn planted_circle_cloud(n: usize, p: usize, radius: f64, sigma: f64) 
     }
     let vn = v.dot(&v).sqrt();
     v.mapv_inplace(|x| x / vn);
+    (u, v)
+}
+
+pub(crate) fn planted_circle_cloud(n: usize, p: usize, radius: f64, sigma: f64) -> PlantedCircle {
+    let (u, v) = planted_frame(p);
 
     let theta =
         Array1::<f64>::from_shape_fn(n, |i| std::f64::consts::TAU * (i as f64 + 0.5) / n as f64);
@@ -1607,3 +1614,216 @@ fn zz_2691_is_the_dimensionless_gap_a_universal_constant() {
     }
 }
 
+
+/// #2691 REGRESSION, the `K >= 2` half — a dictionary in which ONE atom's chart
+/// has collapsed to a point while its sibling's is healthy must be NAMED, and
+/// the guard's own population filter must not name an atom nobody uses.
+///
+/// This is the case the first guard left open: it refused only when EVERY atom
+/// had lost its chart (`collapsed_atoms.len() == atom_count`), so a `K = 2` fit
+/// with one point-atom and one real chart passed. The reconstruction is carried
+/// by the healthy atom, so nothing denominated in reconstruction quality can
+/// order these states either — the same reason the `K = 1` witness above is not
+/// denominated in EV.
+///
+/// The collapse is PLACED (`set_flat` writes one point of the circle onto atom
+/// 0's chart) rather than searched for, so the witness measures the DECISION and
+/// cannot be a flaky optimizer outcome. The entry-level half — that
+/// `run_sae_manifold_fit` refuses on exactly this predicate — is held by
+/// `zz_2691_collapsed_chart_is_refused_by_the_production_entry` above.
+///
+/// MEASURED, and the reason this witness is at the predicate rather than at the
+/// entry: driving the same `K = 2` state through `run_sae_manifold_fit` at a
+/// fixed rho (alpha = 1e9 on atom 0, 1e-3 on atom 1, planted circle n=70 p=8
+/// sigma=0.352) never reaches the chart guard at all — the inner solve refuses
+/// first, at both the parent and this commit, with "inner solve did not converge
+/// at fixed rho ... refusing to rank an off-optimum Laplace criterion"
+/// (‖g‖=4.152980e-1 vs tolerance 2.897286e-4 after 5760 inner iterations). That
+/// is a refusal stack, not a second defect: no fit is minted either way. It does
+/// mean an entry-level `K = 2` fixture would have measured the inner solver, not
+/// this guard.
+#[test]
+fn zz_2691_a_collapsed_atom_beside_a_healthy_one_is_named() {
+    use ndarray::Array2;
+
+    let cloud = planted_circle_cloud(70, 8, 2.086, 0.352);
+    let (mut term, _disp) =
+        build_term(cloud.z.view(), 2, Topo::Circle, AssignmentMode::softmax(1.0));
+    let n = cloud.z.nrows();
+
+    // Place the collapse on atom 0 ONLY: every row sits on the chart origin,
+    // one point of the period-1 circle. Atom 1 keeps the seeded chart.
+    term.assignment.coords[0].set_flat(Array1::<f64>::zeros(n).view());
+
+    let report = term.chart_degeneracy_report();
+    let assignments = term.assignment.assignments();
+    for axis in report.axes.iter() {
+        eprintln!(
+            "[2691-k2] atom {} axis {} dispersion {:.6e} floor {:.6e} resolved_points {} \
+             degenerate {}",
+            axis.atom,
+            axis.axis,
+            axis.dispersion,
+            axis.floor,
+            axis.resolved_points,
+            axis.degenerate()
+        );
+    }
+    assert_eq!(
+        report.atom_count, 2,
+        "the fixture must be the K=2 case; got {} atoms",
+        report.atom_count
+    );
+    assert!(
+        report.axes.iter().any(|axis| axis.atom == 1 && !axis.degenerate()),
+        "#2691: this witness is only the partial-collapse case if atom 1's chart SURVIVED — \
+         otherwise it is the already-covered all-atoms collapse. Axes: {:?}",
+        report.axes
+    );
+    assert_eq!(
+        report.atoms_without_a_chart(),
+        vec![0],
+        "the placed collapse must be seen on atom 0 and only atom 0"
+    );
+
+    // THE DEFECT, stated as the predicate that used to decide the refusal: the
+    // fit-level aggregate reads "not every atom collapsed" and lets this state
+    // through.
+    assert!(
+        report.atoms_without_a_chart().len() != report.atom_count,
+        "#2691: the fit-level `all atoms collapsed` condition must be FALSE here — if it were \
+         true this fixture would not be the partial collapse the guard is being extended for"
+    );
+
+    // THE FIX: the per-atom condition names the collapsed atom, because it is
+    // load-bearing — it carries assignment mass that is representable against
+    // the dominant atom on some row.
+    let load_bearing = load_bearing_atoms(assignments.view());
+    eprintln!("[2691-k2] load_bearing={load_bearing:?}");
+    assert_eq!(
+        report.chart_less_load_bearing_atoms(assignments.view()),
+        vec![0],
+        "#2691: a collapsed atom that carries assignment mass must be named; assignments \
+         column sums = {:?}",
+        (0..assignments.ncols())
+            .map(|k| assignments.column(k).sum())
+            .collect::<Vec<_>>()
+    );
+    let evidence = report.atom_evidence(&[0]);
+    eprintln!("[2691-k2] evidence: {evidence}");
+    assert!(
+        evidence.contains("did NOT collapse"),
+        "#2691: the refusal evidence must show the surviving chart beside the collapsed one, \
+         because that pairing is what a fit-level aggregate hides; got: {evidence}"
+    );
+
+    // THE CONTROL on the population filter: an atom nobody uses has an
+    // UNOBSERVED chart, not a collapsed one, and must NOT be named — otherwise
+    // the guard would refuse fits that are fine.
+    let mut unused = Array2::<f64>::zeros(assignments.raw_dim());
+    for row in 0..unused.nrows() {
+        unused[[row, 1]] = 1.0;
+    }
+    assert_eq!(
+        load_bearing_atoms(unused.view()),
+        vec![false, true],
+        "an atom with zero assignment mass on every row cannot change the reconstruction at f64"
+    );
+    assert!(
+        report.chart_less_load_bearing_atoms(unused.view()).is_empty(),
+        "#2691: a collapsed atom that carries NO representable assignment mass must not be \
+         named — its chart is unobserved, and refusing on it would refuse fits that are fine"
+    );
+}
+/// #2691 — the recovered ring against the planted one, printed.
+///
+/// Diagnostic: it renders the fit in the plane the circle was planted in, so the
+/// collapse and the recovery are legible as pictures rather than as a scalar.
+/// Two arms, one variable (the ARD chart-coordinate precision): the healthy arm
+/// must trace the planted ring, the collapsed arm must be a single point.
+#[test]
+fn zz_2691_recovered_versus_planted_ring() {
+    let (n, p, sigma) = (70_usize, 8_usize, 0.352_f64);
+    let cloud = planted_circle_cloud(n, p, 2.086, sigma);
+    let (u, v) = planted_frame(p);
+    let z = &cloud.z;
+
+    for (label, alpha) in [("healthy", 1.0e-3_f64), ("collapsed", 1.0e9_f64)] {
+        let (mut term, _disp) = build_term(z.view(), 1, Topo::Circle, AssignmentMode::softmax(1.0));
+        let mut rho =
+            SaeManifoldRho::new(1.0e-3_f64.ln(), 1.0e-3_f64.ln(), vec![array![alpha.ln()]; 1]);
+        term.run_joint_fit_arrow_schur(z.view(), &mut rho, None, 40, 1.0, 1.0e-6, 1.0e-6)
+            .expect("inner joint fit");
+        let fitted = term.try_fitted().expect("fitted reconstruction");
+        let coord: Array1<f64> = term.assignment.coords[0].as_matrix().column(0).to_owned();
+        let chart = term.chart_degeneracy_report();
+
+        // Project both clouds onto the planted 2-frame. Only the plane is shared
+        // between them; nothing about the fit is used to choose it.
+        let project = |rows: ndarray::ArrayView2<'_, f64>| -> Vec<(f64, f64)> {
+            (0..rows.nrows())
+                .map(|i| {
+                    let row = rows.row(i);
+                    (row.dot(&u), row.dot(&v))
+                })
+                .collect()
+        };
+        let planted = project(z.view());
+        let recovered = project(fitted.view());
+        let extent = planted
+            .iter()
+            .chain(recovered.iter())
+            .fold(0.0_f64, |m, (a, b)| m.max(a.abs()).max(b.abs()))
+            .max(f64::MIN_POSITIVE);
+
+        // 25x49 character grid over [-extent, extent]^2; '.' planted, '#'
+        // recovered, '@' both.
+        const ROWS: usize = 25;
+        const COLS: usize = 49;
+        let mut grid = vec![vec![' '; COLS]; ROWS];
+        let mut mark = |points: &[(f64, f64)], glyph: char| {
+            for &(a, b) in points {
+                let col = (((a / extent) * 0.5 + 0.5) * (COLS - 1) as f64).round() as isize;
+                let row = ((0.5 - (b / extent) * 0.5) * (ROWS - 1) as f64).round() as isize;
+                if (0..COLS as isize).contains(&col) && (0..ROWS as isize).contains(&row) {
+                    let cell = &mut grid[row as usize][col as usize];
+                    *cell = if *cell == ' ' || *cell == glyph { glyph } else { '@' };
+                }
+            }
+        };
+        mark(&planted, '.');
+        mark(&recovered, '#');
+
+        let dispersion = chart.axes[0].dispersion;
+        let points = chart.axes[0].resolved_points;
+        let recovery = circular_recovery_r2(&coord, &cloud.theta);
+        eprintln!(
+            "[2691-ring] arm={label} alpha={alpha:.1e} circular_variance={dispersion:.6e} \
+             resolved_chart_points={points}/{n} recovery_R2={recovery:.4} extent={extent:.4} \
+             ('.' planted, '#' recovered, '@' both)"
+        );
+        for row in &grid {
+            eprintln!("[2691-ring] {label:>9} |{}|", row.iter().collect::<String>());
+        }
+        // The chart coordinate against the phase that generated it, so the
+        // picture above has the numbers beside it.
+        let sample: Vec<String> = (0..n)
+            .step_by(n / 10)
+            .map(|i| format!("({:.3},{:.4})", cloud.theta[i], coord[i]))
+            .collect();
+        eprintln!("[2691-ring] {label} (theta, chart t) = {}", sample.join(" "));
+
+        match label {
+            "healthy" => assert!(
+                dispersion > 0.5 && points == n && recovery > 0.9,
+                "#2691: the healthy arm must trace the planted ring (circular variance \
+                 {dispersion:.3e}, {points}/{n} chart points, recovery R2 {recovery:.4})"
+            ),
+            _ => assert!(
+                chart.axes[0].degenerate(),
+                "#2691: the alpha=1e9 arm must read as degenerate in the chart's own metric \
+                 (circular variance {dispersion:.3e}, {points}/{n} chart points)"
+            ),
+        }
+    }
+}
