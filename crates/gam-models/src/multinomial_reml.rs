@@ -3862,29 +3862,6 @@ mod tests {
                 .sum()
         }
 
-        fn timed_fisher_sample(
-            repetitions: usize,
-            rows: usize,
-            mut sweep: impl FnMut() -> f64,
-        ) -> f64 {
-            use std::time::Instant;
-
-            let started = Instant::now();
-            let mut checksum = 0.0;
-            for _ in 0..repetitions {
-                checksum += sweep();
-            }
-            assert!(
-                checksum.is_finite(),
-                "multinomial strongest-hand timing checksum must be finite"
-            );
-            started.elapsed().as_secs_f64() * 1.0e9 / (repetitions * rows) as f64
-        }
-
-        fn median(mut samples: [f64; 7]) -> f64 {
-            samples.sort_by(f64::total_cmp);
-            samples[3]
-        }
 
         /// Binding #932 release gate for multinomial higher-order production.
         ///
@@ -3910,6 +3887,8 @@ mod tests {
         /// likewise not ignored.
         #[test]
         fn release_measure_multinomial_fisher_vs_strongest_hand_932() {
+            use gam_math::paired_timing::paired_interleaved;
+
             fn measure<const M: usize>(seed: u64, repetitions: usize) {
                 const ROWS: usize = 256;
                 let mut rng = Lcg(seed);
@@ -3985,8 +3964,8 @@ mod tests {
                     return;
                 }
 
-                let compiled_first_sweep = |buffers: &mut FirstFisherBuffers| {
-                    let mut checksum = 0.0;
+                let compiled_first_sweep = |nudge: f64, buffers: &mut FirstFisherBuffers| {
+                    let mut checksum = nudge;
                     for row in 0..ROWS {
                         compiled_first_fisher(
                             &probability[row],
@@ -3998,8 +3977,8 @@ mod tests {
                     }
                     checksum
                 };
-                let hand_first_sweep = |buffers: &mut FirstFisherBuffers| {
-                    let mut checksum = 0.0;
+                let hand_first_sweep = |nudge: f64, buffers: &mut FirstFisherBuffers| {
+                    let mut checksum = nudge;
                     for row in 0..ROWS {
                         strongest_hand_first_fisher(
                             &probability[row],
@@ -4011,8 +3990,8 @@ mod tests {
                     }
                     checksum
                 };
-                let compiled_second_sweep = |buffers: &mut SecondFisherBuffers| {
-                    let mut checksum = 0.0;
+                let compiled_second_sweep = |nudge: f64, buffers: &mut SecondFisherBuffers| {
+                    let mut checksum = nudge;
                     for row in 0..ROWS {
                         compiled_second_fisher(
                             &probability[row],
@@ -4025,8 +4004,8 @@ mod tests {
                     }
                     checksum
                 };
-                let hand_second_sweep = |buffers: &mut SecondFisherBuffers| {
-                    let mut checksum = 0.0;
+                let hand_second_sweep = |nudge: f64, buffers: &mut SecondFisherBuffers| {
+                    let mut checksum = nudge;
                     for row in 0..ROWS {
                         strongest_hand_second_fisher(
                             &probability[row],
@@ -4040,62 +4019,53 @@ mod tests {
                     checksum
                 };
 
-                let mut compiled_first_samples = [0.0; 7];
-                let mut hand_first_samples = [0.0; 7];
-                let mut compiled_second_samples = [0.0; 7];
-                let mut hand_second_samples = [0.0; 7];
-                for round in 0..7 {
-                    for side in 0..2 {
-                        let run_compiled = (round + side) % 2 == 0;
-                        if run_compiled {
-                            compiled_first_samples[round] =
-                                timed_fisher_sample(repetitions, ROWS, || {
-                                    compiled_first_sweep(&mut compiled_first)
-                                });
-                        } else {
-                            hand_first_samples[round] =
-                                timed_fisher_sample(repetitions, ROWS, || {
-                                    hand_first_sweep(&mut hand_first)
-                                });
-                        }
-                    }
-                    for side in 0..2 {
-                        let run_compiled = (round + side) % 2 == 0;
-                        if run_compiled {
-                            compiled_second_samples[round] =
-                                timed_fisher_sample(repetitions, ROWS, || {
-                                    compiled_second_sweep(&mut compiled_second)
-                                });
-                        } else {
-                            hand_second_samples[round] =
-                                timed_fisher_sample(repetitions, ROWS, || {
-                                    hand_second_sweep(&mut hand_second)
-                                });
-                        }
-                    }
-                }
-
-                let compiled_first_ns = median(compiled_first_samples);
-                let hand_first_ns = median(hand_first_samples);
-                let compiled_second_ns = median(compiled_second_samples);
-                let hand_second_ns = median(hand_second_samples);
+                // One paired, interleaved, order-RANDOMISED measurement per
+                // channel. This gate was already the best-built of the #932
+                // population: it interleaved by round with `(round + side) % 2`
+                // and took a MEDIAN, not a minimum. What it still did was divide
+                // two PER-ARM medians -- so the pairing the interleave created
+                // was discarded at the last step, and nothing reported whether a
+                // verdict cleared the measurement's own resolution.
+                let sweeps = (repetitions / 2).max(1);
+                let first = paired_interleaved(
+                    15,
+                    sweeps,
+                    seed ^ 0x1111_1111,
+                    |nudge| compiled_first_sweep(nudge, &mut compiled_first),
+                    |nudge| hand_first_sweep(nudge, &mut hand_first),
+                );
+                let second = paired_interleaved(
+                    15,
+                    sweeps,
+                    seed ^ 0x2222_2222,
+                    |nudge| compiled_second_sweep(nudge, &mut compiled_second),
+                    |nudge| hand_second_sweep(nudge, &mut hand_second),
+                );
+                // `median_ratio` is hand / compiled, so above 1 means the
+                // compiled lowering is faster -- the same orientation as the
+                // `hand_over_compiled` token this gate has always printed. The
+                // unit is ns per SWEEP over ROWS rows, not the historical
+                // ns/row; the ratio the verdict rests on is unit-free either way.
                 eprintln!(
-                    "MULTINOMIAL-HAND-932 M={M} first_compiled={compiled_first_ns:.3} ns/row \
-                     first_hand={hand_first_ns:.3} ns/row first_hand_over_compiled={:.6} \
-                     second_compiled={compiled_second_ns:.3} ns/row \
-                     second_hand={hand_second_ns:.3} ns/row second_hand_over_compiled={:.6}",
-                    hand_first_ns / compiled_first_ns,
-                    hand_second_ns / compiled_second_ns,
+                    "MULTINOMIAL-HAND-932 M={M} rows={ROWS} first {}",
+                    first.summary("compiled", "strongest_hand"),
+                );
+                eprintln!(
+                    "MULTINOMIAL-HAND-932 M={M} rows={ROWS} second {}",
+                    second.summary("compiled", "strongest_hand"),
+                );
+                // CONTRACT UNCHANGED: the compiled lowering must beat the
+                // strongest hand restatement, on both channels. `wins_fraction`
+                // is what makes that a claim rather than a point estimate.
+                assert!(
+                    first.median_ratio() > 1.0 && first.wins_fraction() >= 0.75,
+                    "M={M} first canonical lowering must beat strongest hand: {}",
+                    first.summary("compiled", "strongest_hand"),
                 );
                 assert!(
-                    hand_first_ns > compiled_first_ns,
-                    "M={M} first canonical lowering must beat strongest hand: \
-                     compiled={compiled_first_ns:.3} ns hand={hand_first_ns:.3} ns"
-                );
-                assert!(
-                    hand_second_ns > compiled_second_ns,
-                    "M={M} second canonical lowering must beat strongest hand: \
-                     compiled={compiled_second_ns:.3} ns hand={hand_second_ns:.3} ns"
+                    second.median_ratio() > 1.0 && second.wins_fraction() >= 0.75,
+                    "M={M} second canonical lowering must beat strongest hand: {}",
+                    second.summary("compiled", "strongest_hand"),
                 );
             }
 
