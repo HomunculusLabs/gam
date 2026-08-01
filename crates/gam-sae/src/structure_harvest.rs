@@ -2979,7 +2979,9 @@ impl TopologyCandidateSpec {
 ///   ([`EuclideanPatchEvaluator`] degree 3). These are the line-vs-circle race
 ///   the #1026 curved-vs-linear rung adjudicates post-fit, lifted to BIRTH.
 /// * **`d = 2`** — `Torus` ([`TorusHarmonicEvaluator`]), `Sphere`
-///   ([`SphereChartEvaluator`]), a flat `Euclidean` patch
+///   ([`AmbientSphereHarmonicEvaluator`] — the candidate is built at
+///   `latent_dim = 3` on an ambient unit direction, which is the only sphere the
+///   geometry-plan authority accepts, #2698), a flat `Euclidean` patch
 ///   ([`EuclideanPatchEvaluator`] degree 2), and `Cylinder` `S¹ × ℝ`
 ///   ([`CylinderHarmonicEvaluator`]: a periodic circle axis tensored with a flat
 ///   line axis). The cylinder is now a first-class d=2 candidate (the basis
@@ -5117,8 +5119,8 @@ pub struct PrimaryTopologyChoice {
     /// `None` for every non-periodic kind, whose chart resolution is either a
     /// different knob (a torus winner carries its per-axis order in
     /// `n_torus_harmonics`; a flat/Duchon-sheet winner carries data-scaled
-    /// centers in `n_duchon_centers`) or genuinely fixed (the sphere lat/lon
-    /// chart and the Möbius double-cover basis are fixed-degree constructions).
+    /// centers in `n_duchon_centers`) or genuinely fixed (the ambient sphere
+    /// basis and the Möbius double-cover basis are fixed-degree constructions).
     pub n_harmonics: Option<usize>,
     /// Evidence-selected thin-plate center count for a Duchon-sheet winner
     /// (#2240, the #2243 resolution-growth pattern lifted to 2-D): the number
@@ -5150,9 +5152,10 @@ pub struct PrimaryTopologyChoice {
 /// at R² ≈ 0.5. This lifts the SAME evidence race to fit entry: each atom
 /// races a circle, a torus, a sphere and a flat 2-D patch — every candidate
 /// seeded with its own NATURAL chart of the atom's cluster (phase angles for
-/// the periodic forms, (lat, lon) for the sphere, standardized principal
-/// projections for the patch) so no candidate is handicapped by a chart built
-/// for a rival — and the proper REML marginal likelihood picks the winner.
+/// the periodic forms, the ambient unit direction for the sphere, standardized
+/// principal projections for the patch) so no candidate is handicapped by a
+/// chart built for a rival — and the proper REML marginal likelihood picks the
+/// winner.
 ///
 /// `labels` assigns each observation to its seed cluster (the same
 /// output-energy labels the periodic seed refinement uses); the race for atom
