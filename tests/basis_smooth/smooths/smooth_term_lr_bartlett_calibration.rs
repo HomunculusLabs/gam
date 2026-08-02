@@ -137,9 +137,23 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
         "lawley_lr_estimated_lambda",
         "Poisson/log smooth has closed-form Lawley jets — the correction must fire"
     );
+    // The Lawley factor is `c = 1 + Δε/d` for a mean shift Δε of EITHER sign, and
+    // the module header above derives why the sign here is negative: a penalized
+    // smooth under the null shrinks the alternative fit, pulling `E[W]` BELOW the
+    // χ²_d reference. `c > 1` is a property of an UNPENALIZED test.
+    //
+    // #2672: this file asserted `c > 1.0` here and a one-sided p-move below,
+    // while its own header recorded the derived value as `c ≈ 0.44 < 1`. Both
+    // assertions passed only because the assembly was reporting `c ≈ 1.003` — so
+    // they agreed with the defect and would have REJECTED its repair at a
+    // different line than the one a fixer was sent to, with a confident message
+    // asserting the opposite physics. The claim is two-sided; only a factor that
+    // is not a rescaling at all, or a p-move that contradicts the factor's own
+    // sign, is a defect.
     assert!(
-        probe.bartlett_factor > 1.0,
-        "small-n Lawley factor must inflate the χ² reference (c = 1 + Δε/d > 1); got {}",
+        probe.bartlett_factor.is_finite() && probe.bartlett_factor > 0.0,
+        "the Lawley factor must be a finite, strictly positive rescaling \
+         (c = 1 + Δε/d, either sign of Δε); got {}",
         probe.bartlett_factor
     );
     assert!(
@@ -149,10 +163,23 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
         probe.statistic_corrected,
         probe.statistic_lr / probe.bartlett_factor
     );
-    assert!(
-        probe.p_value_corrected >= probe.p_value_uncorrected - 1e-12,
-        "dividing W by c > 1 can only RAISE the p-value (less significant)"
-    );
+    if probe.bartlett_factor > 1.0 {
+        assert!(
+            probe.p_value_corrected >= probe.p_value_uncorrected - 1e-12,
+            "c = {} > 1 shrinks W, so the p-value can only RISE: p={} p*={}",
+            probe.bartlett_factor,
+            probe.p_value_uncorrected,
+            probe.p_value_corrected
+        );
+    } else if probe.bartlett_factor < 1.0 {
+        assert!(
+            probe.p_value_corrected <= probe.p_value_uncorrected + 1e-12,
+            "c = {} < 1 inflates W, so the p-value can only FALL: p={} p*={}",
+            probe.bartlett_factor,
+            probe.p_value_uncorrected,
+            probe.p_value_corrected
+        );
+    }
     // (a') Materiality diagnostic (#939 deliverable 4): a correction was applied,
     // so `material` must agree with the 10% rule it documents.
     {
@@ -292,9 +319,11 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
     let mut sum_factor = 0.0;
     let mut wood_missing = 0usize;
     let mut count = 0usize;
+    let mut unconverged = 0usize;
+    let mut floor_fired = 0usize;
     eprintln!(
-        "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4}",
-        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd"
+        "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4} {:>4} {:>6}",
+        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd", "conv", "floor"
     );
     for rep in 0..REPS {
         let data = null_replicate(N, 1000 + rep as u64);
@@ -307,11 +336,24 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
         if p.wood_edf1.is_none() {
             wood_missing += 1;
         }
+        if !p.outer_converged {
+            unconverged += 1;
+        }
+        if p.untrusted_dim_floor > 0.0 {
+            floor_fired += 1;
+        }
         if rep < 12 {
             eprintln!(
-                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4}",
-                r.statistic_lr, r.ref_df, wood, p.edf, p.rho_uncertainty, r.bartlett_factor,
-                p.null_dim
+                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4} {:>4} {:>6.1}",
+                r.statistic_lr,
+                r.ref_df,
+                wood,
+                p.edf,
+                p.rho_uncertainty,
+                r.bartlett_factor,
+                p.null_dim,
+                u8::from(p.outer_converged),
+                p.untrusted_dim_floor
             );
         }
         sum_w += r.statistic_lr;
@@ -326,7 +368,8 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
     let d = count as f64;
     eprintln!(
         "[zz2672] MEAN over {count} reps: W={:.4}  ref_df={:.4}  wood_edf1={:.4}  edf={:.4}  \
-         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing})",
+         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing}, \
+         non-converged {unconverged}, untrusted floor fired {floor_fired})",
         sum_w / d,
         sum_ref / d,
         sum_wood / d,

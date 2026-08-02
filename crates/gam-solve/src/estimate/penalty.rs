@@ -435,13 +435,42 @@ impl ParametricColumnConditioning {
                 .beta_covariance_frequentist
                 .take()
                 .map(|cov| self.backtransform_covariance(&cov));
-            // The influence matrix `F = H⁻¹·X'WX` is a mixed linear operator
-            // (it transforms by SIMILARITY `F_orig = M·F_int·M⁻¹`, not
-            // congruence). We do not carry the similarity primitive here, so
-            // drop `F` rather than applying the wrong map; downstream code can
-            // reconstruct it from the (now-preserved) original-basis `H` and
-            // `X'WX` when it needs it.
-            inf.coefficient_influence = None;
+            // The influence matrix `F = H⁻¹·X'WX` is a mixed linear operator: it
+            // transforms by SIMILARITY, not congruence. From `X_int = X_orig·M`,
+            //
+            //     H_int    = Mᵀ·H_orig·M,      (X'WX)_int = Mᵀ·(X'WX)_orig·M
+            //  ⇒  F_int    = H_int⁻¹(X'WX)_int = M⁻¹·F_orig·M
+            //  ⇒  F_orig   = M·F_int·M⁻¹,
+            //
+            // which is exactly [`Self::left_multiply_by_m`] composed with
+            // [`Self::right_multiply_by_m_inv`] — both primitives already exist on
+            // this type (they are what `backtransform_covariance` and
+            // `backtransform_penalized_hessian` are built from). This site used to
+            // drop `F` with the note "we do not carry the similarity primitive
+            // here"; that was not true, and the cost of the drop was invisible
+            // because every fixture that reads `F` back is a `y ~ s(x)` model with
+            // NO conditioned parametric column, i.e. `is_active() == false`, where
+            // this whole function returns early (#2672).
+            //
+            // What the drop cost: `F` is the sole input to Wood's
+            // smoothing-selection-corrected reference `edf1 = 2·tr(F_jj) −
+            // tr(F_jj²)`, so `wood_reference_df` returned `None` for EVERY model
+            // carrying a non-intercept parametric term and the smooth-term LR test
+            // silently fell back to the raw conditional EDF — the anti-conservative
+            // reference #1766 replaced, measured there at FPR ~0.15 against a
+            // nominal 0.05. `per_term_edf` and the smooth summary lost their
+            // primary channel the same way.
+            //
+            // The similarity map is exact, not an approximation: it preserves
+            // `tr(F) = edf` and the consistency identity `H·F = X'WX` in the
+            // original basis, because `H_orig·F_orig = M⁻ᵀH_int M⁻¹·M F_int M⁻¹ =
+            // M⁻ᵀ(H_int F_int)M⁻¹ = M⁻ᵀ(X'WX)_int M⁻¹ = (X'WX)_orig`, the same
+            // congruence the Gram gets below. `F` must NOT be symmetrized here for
+            // the reasons `optimizer.rs` records at its assembly.
+            inf.coefficient_influence = inf
+                .coefficient_influence
+                .take()
+                .map(|f_int| self.left_multiply_by_m(&self.right_multiply_by_m_inv(&f_int)));
             // X'WX is a genuine congruence object under column-conditioning —
             // it transforms by EXACTLY the same map as the penalized Hessian
             // `H` (both are `Mᵀ·(·)_orig·M` internally, so `(·)_orig =
@@ -609,6 +638,174 @@ mod weighted_gram_backtransform_tests {
             max_err < 1e-9,
             "back-transformed internal Gram must equal X_origᵀWX_orig; max |Δ| = {max_err:e}\n\
              actual=\n{gram_orig_actual:?}\nexpected=\n{gram_orig_expected:?}"
+        );
+    }
+
+    /// Dense inverse of a small square matrix by Gauss–Jordan with partial
+    /// pivoting. Test-local so the identity below is checked against ordinary
+    /// arithmetic rather than against the same factorization the production path
+    /// uses.
+    fn dense_inverse(a: &Array2<f64>) -> Array2<f64> {
+        let n = a.nrows();
+        let mut aug = Array2::<f64>::zeros((n, 2 * n));
+        for i in 0..n {
+            for j in 0..n {
+                aug[[i, j]] = a[[i, j]];
+            }
+            aug[[i, n + i]] = 1.0;
+        }
+        for col in 0..n {
+            let mut pivot = col;
+            for row in (col + 1)..n {
+                if aug[[row, col]].abs() > aug[[pivot, col]].abs() {
+                    pivot = row;
+                }
+            }
+            assert!(aug[[pivot, col]].abs() > 1e-12, "singular matrix in test");
+            if pivot != col {
+                for j in 0..(2 * n) {
+                    let tmp = aug[[col, j]];
+                    aug[[col, j]] = aug[[pivot, j]];
+                    aug[[pivot, j]] = tmp;
+                }
+            }
+            let d = aug[[col, col]];
+            for j in 0..(2 * n) {
+                aug[[col, j]] /= d;
+            }
+            for row in 0..n {
+                if row == col {
+                    continue;
+                }
+                let f = aug[[row, col]];
+                if f == 0.0 {
+                    continue;
+                }
+                for j in 0..(2 * n) {
+                    aug[[row, j]] -= f * aug[[col, j]];
+                }
+            }
+        }
+        let mut inv = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                inv[[i, j]] = aug[[i, n + j]];
+            }
+        }
+        inv
+    }
+
+    /// #2672: the coefficient influence `F = H⁻¹·X'WX` transforms by SIMILARITY
+    /// under column-conditioning, `F_orig = M·F_int·M⁻¹`, and that map is exactly
+    /// [`ParametricColumnConditioning::left_multiply_by_m`] composed with
+    /// [`ParametricColumnConditioning::right_multiply_by_m_inv`].
+    ///
+    /// This site used to drop `F` on the stated ground that "we do not carry the
+    /// similarity primitive here". Both halves of it are defined on this very
+    /// type, and the drop silently disabled Wood's `edf1` reference — the entire
+    /// #1766 smooth-term LR calibration — for every model carrying a conditioned
+    /// parametric column. The identity is checked against a directly-assembled
+    /// original-basis `F`, not against the production solve.
+    #[test]
+    fn backtransformed_influence_equals_original_basis_influence_2672() {
+        let n = 32usize;
+        let p = 3usize;
+        let mut x_orig = Array2::<f64>::ones((n, p));
+        for i in 0..n {
+            let t = i as f64;
+            x_orig[[i, 1]] = 4.0 + 0.9 * t;
+            x_orig[[i, 2]] = -2.5 + (t * 0.27).sin() * 3.0;
+        }
+        let w = Array1::from_shape_fn(n, |i| 0.4 + (i as f64 * 0.11).cos().abs());
+
+        let design = DesignMatrix::from(x_orig.clone());
+        let cond = ParametricColumnConditioning::from_column_indices(&design, &[0, 1, 2]);
+        assert!(cond.is_active(), "conditioning must be active");
+
+        // `M` and `M⁻¹` materialized from the two primitives themselves, so the
+        // composition below is checked rather than assumed to be inverse.
+        let eye = Array2::<f64>::eye(p);
+        let m = cond.left_multiply_by_m(&eye);
+        let m_inv = cond.right_multiply_by_m_inv(&eye);
+        let round_trip = m.dot(&m_inv);
+        let round_trip_err = round_trip
+            .iter()
+            .zip(eye.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            round_trip_err < 1e-12,
+            "left_multiply_by_m and right_multiply_by_m_inv must be mutually \
+             inverse; max |M·M⁻¹ − I| = {round_trip_err:e}"
+        );
+
+        let x_int = condition_design(&cond, &x_orig);
+        let gram_int = weighted_gram(&x_int, &w);
+        let gram_orig = weighted_gram(&x_orig, &w);
+
+        // A non-trivial symmetric PSD penalty in the ORIGINAL basis, pushed into
+        // the internal basis by the congruence `S_int = Mᵀ·S_orig·M` that the
+        // design change induces.
+        let mut s_orig = Array2::<f64>::zeros((p, p));
+        s_orig[[1, 1]] = 2.0;
+        s_orig[[2, 2]] = 5.0;
+        s_orig[[1, 2]] = -0.75;
+        s_orig[[2, 1]] = -0.75;
+        let s_int = m.t().dot(&s_orig).dot(&m);
+
+        let h_orig = &gram_orig + &s_orig;
+        let h_int = &gram_int + &s_int;
+        let f_orig_expected = dense_inverse(&h_orig).dot(&gram_orig);
+        let f_int = dense_inverse(&h_int).dot(&gram_int);
+
+        let f_orig_actual = cond.left_multiply_by_m(&cond.right_multiply_by_m_inv(&f_int));
+
+        let scale = f_orig_expected
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let max_err = f_orig_actual
+            .iter()
+            .zip(f_orig_expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_err < 1e-9 * scale,
+            "M·F_int·M⁻¹ must equal H_orig⁻¹·(X'WX)_orig; max |Δ| = {max_err:e} \
+             (scale {scale:e})\nactual=\n{f_orig_actual:?}\nexpected=\n{f_orig_expected:?}"
+        );
+
+        // The EDF channel every downstream consumer reads: tr(F) is a similarity
+        // invariant, so the back-transform cannot move it. This is also the
+        // property that makes the restored `F` agree with `edf_total`.
+        let tr = |a: &Array2<f64>| (0..a.nrows()).map(|i| a[[i, i]]).sum::<f64>();
+        assert!(
+            (tr(&f_orig_actual) - tr(&f_int)).abs() < 1e-9,
+            "tr(F) is similarity-invariant: internal {} vs back-transformed {}",
+            tr(&f_int),
+            tr(&f_orig_actual)
+        );
+
+        // And the consistency identity the whole inference block is tied to,
+        // asserted in the ORIGINAL basis where consumers read it.
+        let hf = h_orig.dot(&f_orig_actual);
+        let identity_err = hf
+            .iter()
+            .zip(gram_orig.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        let gram_scale = gram_orig
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        assert!(
+            identity_err < 1e-9 * gram_scale,
+            "H·F = X'WX must survive the back-transform; max |Δ| = {identity_err:e} \
+             (scale {gram_scale:e})"
         );
     }
 
