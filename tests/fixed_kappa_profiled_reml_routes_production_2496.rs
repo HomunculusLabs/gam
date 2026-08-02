@@ -57,6 +57,7 @@ fn collection_spec() -> TermCollectionSpec {
                         kappa: 0.0,
                         kappa_fixed: false,
                         length_scale: 0.55,
+                        length_scale_fixed: true,
                         double_penalty: false,
                         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
                     },

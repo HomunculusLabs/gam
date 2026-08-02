@@ -99,6 +99,7 @@ fn shipped_reml(
         kappa,
         kappa_fixed: false,
         length_scale: ell_ref,
+        length_scale_fixed: true,
         double_penalty: false,
         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
     };

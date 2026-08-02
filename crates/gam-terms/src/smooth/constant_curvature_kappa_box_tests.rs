@@ -37,6 +37,7 @@ fn spec_with(strategy: CenterStrategy, dim: usize) -> TermCollectionSpec {
                     kappa: 0.0,
                     kappa_fixed: false,
                     length_scale: 0.0,
+                    length_scale_fixed: false,
                     double_penalty: false,
                     identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
                 },

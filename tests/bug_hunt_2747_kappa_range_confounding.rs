@@ -25,7 +25,7 @@
 
 use gam::basis::{
     CenterStrategy, ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability,
-    build_constant_curvature_basis, constant_curvature_effective_length,
+    build_constant_curvature_basis,
 };
 use gam::gaussian_reml::gaussian_reml_multi_closed_form;
 use gam::utils::splitmix64;
@@ -48,6 +48,7 @@ fn spec_at(kappa: f64, centers: usize, length_scale: f64) -> ConstantCurvatureBa
         kappa,
         kappa_fixed: false,
         length_scale,
+        length_scale_fixed: false,
         double_penalty: false,
         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
     }
@@ -191,13 +192,7 @@ fn probe_range_profiled_kappa_criterion_versus_the_fill_slice() {
                     eprintln!("  k={kappa:<9.4} refused");
                     continue;
                 };
-                let l_fill = constant_curvature_effective_length(
-                    feats.view(),
-                    feats.view(),
-                    ell_ref,
-                    kappa,
-                )
-                .unwrap_or(f64::NAN);
+                let l_fill = ell_ref;
                 if v_fill < best_fill.0 {
                     best_fill = (v_fill, kappa);
                 }

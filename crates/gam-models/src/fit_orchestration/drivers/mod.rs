@@ -240,8 +240,10 @@ include!("adaptive_bounded_duchon_tests.rs");
 // — it moves the bound rather than the fit. Self-contained `#[cfg(test)] mod`.
 include!("constant_curvature_kappa_jet_fd_tests.rs");
 
-// PROBE (#2687/#2716): the κ criterion mapped across the whole admissible
-// interval on the fixture whose κ̂ is railed at the shipped box.
+// #2747: the curvature criterion must identify κ⋆ at a range it was NOT handed.
+// Three planted curvatures × three planted ranges, because the pre-#2747
+// criterion is correct on the one cell where the truth's range IS the auto
+// heuristic's — the cell the acceptance fixture happens to use.
 include!("constant_curvature_kappa_box_probe_tests.rs");
 
 include!("zz_measure_2425_kappa_tests.rs");

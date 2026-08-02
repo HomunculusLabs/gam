@@ -832,6 +832,26 @@ fn select_constant_curvature_centers(
     Ok(centers)
 }
 
+/// The REALIZED center set the builder will use for `spec` on `data` — the
+/// pole-aware selection, not the raw strategy output.
+///
+/// Public because the outer ψ machinery has to derive the range seed and the
+/// range window from the SAME centers the basis is built on: reading them from
+/// a re-derived plain strategy would put the ψ box and the objective on two
+/// different geometries.
+pub fn constant_curvature_realized_centers(
+    data: ArrayView2<'_, f64>,
+    spec: &ConstantCurvatureBasisSpec,
+) -> Result<Array2<f64>, BasisError> {
+    let centers = select_constant_curvature_centers(data, &spec.center_strategy)?;
+    if centers.nrows() < 2 {
+        return Err(BasisError::InsufficientColumnsForConstraint {
+            found: centers.nrows(),
+        });
+    }
+    Ok(centers)
+}
+
 /// Symmetrize `M` in place to `(M + Mᵀ)/2` (the realized penalty is built from
 /// the symmetric kernel Gram; the κ-derivative blocks inherit the same exact
 /// symmetrization the value path applies before normalization).
@@ -1177,65 +1197,158 @@ mod tests {
         eprintln!();
     }
 
-    /// The fill-invariant effective-length κ-jet `(L, L′, L″)` must be EXACT:
-    /// `L` solves the fill target `g(L,κ)=fill⋆` (verify the fill is held
-    /// κ-invariant), and `L′`, `L″` match central finite differences of the
-    /// implicit solution `L(κ)` itself (re-solving the Newton root at κ±h). This
-    /// is the gate the ψ-channel outer gradient depends on — `L′`,`L″` feed the
-    /// kernel quotient jets in `constant_curvature_kernel_kappa_jets_scaled`.
+    /// Every entry of the `(κ, η)` kernel tower must match a central finite
+    /// difference of the value (first order) and of the first derivatives
+    /// (second order), on BOTH branches and across the κ = 0 series/closed-form
+    /// seam. This is the gate the outer ψ gradient and the stationarity
+    /// certificate stand on: five blocks, so five FD comparisons, and the cross
+    /// term is differenced along the OTHER coordinate than the one it names so
+    /// a symmetric-by-construction bug cannot hide in it.
     #[test]
-    pub(crate) fn effective_length_jet_matches_fd_of_implicit_solution() {
+    pub(crate) fn kernel_psi_jets_match_central_differences_in_both_coordinates() {
         let (data, centers) = oracle_disk_design_centers();
-        let ell_ref = realized_constant_curvature_length_scale(centers.view(), 0.0)
+        let ell0 = realized_constant_curvature_length_scale(centers.view(), 0.0)
             .expect("fixture centers span a positive pairwise distance");
-        // Reference fill at κ = 0 (the target L(κ) is pinned to).
-        let fill_star = data_center_reference_fill(data.view(), centers.view(), ell_ref)
-            .expect("fixture data and centers share an ambient dimension");
-        // Solve-only helper: the converged Newton root L(κ) for FD of the jet.
-        let solve_l = |kappa: f64| -> f64 {
-            constant_curvature_effective_length_jet(data.view(), centers.view(), ell_ref, kappa)
-                .expect(
-                    "the Newton root for the effective length converges on the fixture geometry",
-                )
-                .0
+        let eta0 = ell0.ln();
+        let at = |kappa: f64, eta: f64| {
+            constant_curvature_kernel_psi_jets(data.view(), centers.view(), kappa, eta.exp())
+                .expect("the fixture disk is inside every probed chart")
         };
-        let h = 1e-5_f64;
+        let rel = |exact: &Array2<f64>, fd: &Array2<f64>| -> f64 {
+            let mut err = 0.0_f64;
+            let mut scale = 0.0_f64;
+            for (&a, &b) in exact.iter().zip(fd.iter()) {
+                err = err.max((a - b).abs());
+                scale = scale.max(a.abs()).max(b.abs());
+            }
+            err / scale.max(1.0)
+        };
+        let h = 1.0e-5_f64;
         for &kappa in &[-1.5_f64, -0.5, -1e-7, 0.0, 1e-7, 0.8, 1.7] {
-            let (l, l1, l2) = constant_curvature_effective_length_jet(
-                data.view(),
-                centers.view(),
-                ell_ref,
+            for &eta in &[eta0 - 0.7, eta0, eta0 + 0.7] {
+                let jets = at(kappa, eta);
+                let kp = at(kappa + h, eta);
+                let km = at(kappa - h, eta);
+                let ep = at(kappa, eta + h);
+                let em = at(kappa, eta - h);
+                let central = |plus: &Array2<f64>, minus: &Array2<f64>| -> Array2<f64> {
+                    (plus - minus) / (2.0 * h)
+                };
+                let checks = [
+                    ("∂K/∂κ", &jets.d_kappa, central(&kp.value, &km.value), 1e-6),
+                    ("∂K/∂η", &jets.d_eta, central(&ep.value, &em.value), 1e-6),
+                    (
+                        "∂²K/∂κ²",
+                        &jets.d_kappa2,
+                        central(&kp.d_kappa, &km.d_kappa),
+                        1e-5,
+                    ),
+                    (
+                        // Differenced along η of ∂K/∂κ — the opposite order from
+                        // the closed form's derivation, so equality is a real
+                        // check of the mixed partial rather than a tautology.
+                        "∂²K/∂κ∂η",
+                        &jets.d_kappa_eta,
+                        central(&ep.d_kappa, &em.d_kappa),
+                        1e-5,
+                    ),
+                    ("∂²K/∂η²", &jets.d_eta2, central(&ep.d_eta, &em.d_eta), 1e-5),
+                ];
+                for (label, exact, fd, tol) in checks {
+                    let error = rel(exact, &fd);
+                    assert!(
+                        error < tol,
+                        "κ={kappa} η={eta}: {label} disagrees with its central difference: rel={error:.6e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The κ = 0 build is the plain Euclidean exponential smooth in the doubled
+    /// chart gauge, and the design and the penalty are two blocks of ONE Gram at
+    /// ONE range at every κ (gam#2747). Reconstructing either at the metadata's
+    /// own `length_scale` must reproduce the realized block exactly — which is
+    /// the property the fill-invariant `L(κ)` / `L_S(κ)` pair broke, and the
+    /// reason the penalty was not the RKHS roughness of its own design.
+    #[test]
+    pub(crate) fn design_and_penalty_are_one_gram_at_one_range() {
+        let (data, centers) = oracle_disk_design_centers();
+        for kappa in [-1.2_f64, -0.4, 0.0, 0.4, 1.2] {
+            let spec = ConstantCurvatureBasisSpec {
+                center_strategy: CenterStrategy::UserProvided(centers.clone()),
                 kappa,
-            )
-            .expect("the Newton root for the effective length converges on the fixture geometry");
-            // L solves the fill target: g(L, κ) = fill⋆.
-            let (g, ..) = data_center_fill_partials(data.view(), centers.view(), kappa, l)
-                .expect("fixture data and centers share an ambient dimension");
-            assert!(
-                (g - fill_star).abs() <= 1e-10 * (1.0 + fill_star.abs()),
-                "κ={kappa}: fill not held invariant: g(L,κ)={g} vs fill⋆={fill_star}"
+                length_scale: 1.3,
+                ..Default::default()
+            };
+            let built = build_constant_curvature_basis(data.view(), &spec).expect("build");
+            let BasisMetadata::ConstantCurvature {
+                length_scale,
+                constraint_transform,
+                ..
+            } = &built.metadata
+            else {
+                panic!("expected ConstantCurvature metadata");
+            };
+            assert_eq!(
+                *length_scale, 1.3,
+                "the realized range is the spec's range, not a κ-remapped one"
             );
-            // κ = 0 ⇒ L = ℓ_ref exactly (the reference point).
-            if kappa == 0.0 {
+            let z = constraint_transform.as_ref().expect("constraint transform");
+            let k_dc =
+                constant_curvature_kernel_matrix(data.view(), centers.view(), kappa, *length_scale)
+                    .expect("design kernel");
+            let k_cc = constant_curvature_kernel_matrix(
+                centers.view(),
+                centers.view(),
+                kappa,
+                *length_scale,
+            )
+            .expect("penalty kernel");
+            let design = built.design.to_dense();
+            for (a, b) in design.iter().zip(k_dc.dot(z).iter()) {
                 assert!(
-                    (l - ell_ref).abs() <= 1e-10 * ell_ref,
-                    "L(0) must equal ℓ_ref; got {l} vs {ell_ref}"
+                    (a - b).abs() < 1e-12,
+                    "κ={kappa}: design != K(ℓ)·z ({a} vs {b})"
                 );
             }
-            // L′, L″ vs central FD of the re-solved implicit root.
-            let lp = solve_l(kappa + h);
-            let lm = solve_l(kappa - h);
-            let fd1 = (lp - lm) / (2.0 * h);
-            let fd2 = (lp - 2.0 * l + lm) / (h * h);
-            assert!(
-                (l1 - fd1).abs() <= 1e-5 * (1.0 + fd1.abs()),
-                "κ={kappa}: L′ analytic {l1} vs FD {fd1}"
-            );
-            assert!(
-                (l2 - fd2).abs() <= 1e-3 * (1.0 + fd2.abs()),
-                "κ={kappa}: L″ analytic {l2} vs FD {fd2}"
-            );
+            let gram = symmetrize(&z.t().dot(&k_cc).dot(z));
+            let primary = built
+                .active_penalties
+                .iter()
+                .find(|penalty| matches!(penalty.info.source, PenaltySource::Primary))
+                .expect("primary RKHS penalty");
+            for (a, b) in gram.iter().zip(primary.matrix.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-12,
+                    "κ={kappa}: penalty != zᵀK(ℓ)z at the SAME ℓ ({a} vs {b})"
+                );
+            }
         }
+    }
+
+    /// The range window is DERIVED from the center geometry and contains the
+    /// auto seed: `[d_min, d_max]` over the centers' own pairwise chart
+    /// distances, with the auto `ℓ_ref` their median.
+    #[test]
+    pub(crate) fn range_window_brackets_the_auto_seed() {
+        let (_, centers) = oracle_disk_design_centers();
+        let (lo, hi) =
+            constant_curvature_length_scale_bounds(centers.view()).expect("window is derivable");
+        let seed = realized_constant_curvature_length_scale(centers.view(), 0.0).expect("seed");
+        assert!(
+            lo > 0.0 && lo < seed && seed < hi,
+            "the auto seed {seed} must be strictly inside the derived window [{lo}, {hi}]"
+        );
+        // A two-center set has ONE pairwise distance, so d_min = d_max; the
+        // window must stay an interval rather than collapsing to a point.
+        let pair = ndarray::array![[0.0_f64, 0.0], [0.2, 0.0]];
+        let (plo, phi) = constant_curvature_length_scale_bounds(pair.view())
+            .expect("a two-center window is still derivable");
+        assert!(
+            plo < phi,
+            "a degenerate distance multiset must still yield a usable window, got [{plo}, {phi}]"
+        );
     }
 
     /// 8 data rows + 8 centers inside a disk of radius < 0.5 (valid in every

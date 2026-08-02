@@ -75,7 +75,8 @@ pub use constant_curvature_smooth::{
     build_constant_curvature_basis_psi_derivatives, constant_curvature_center_chart_radius2,
     constant_curvature_data_chart_radius2, constant_curvature_kernel_kappa_jets,
     constant_curvature_kernel_matrix, constant_curvature_kernel_psi_jets,
-    constant_curvature_length_scale_bounds, realized_constant_curvature_length_scale,
+    constant_curvature_length_scale_bounds, constant_curvature_realized_centers,
+    realized_constant_curvature_length_scale,
 };
 
 pub use measure_jet_moments::{

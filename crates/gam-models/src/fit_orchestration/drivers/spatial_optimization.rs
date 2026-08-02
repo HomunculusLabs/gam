@@ -2102,9 +2102,9 @@ pub fn fixed_kappa_profiled_reml_score(
     Ok(score)
 }
 
-/// Value and exact first AND second derivatives of the continuously
+/// Value, exact gradient and exact Hessian of the continuously
 /// smoothing-profiled Gaussian REML negative log evidence used for curvature
-/// inference.
+/// inference, in the smooth's TWO outer coordinates `ψ = (κ, η)`, `η = ln ℓ`.
 ///
 /// The likelihood-ratio statistic must compare values of this one likelihood.
 /// Subtracting a second REML fit to a response-dependent radial smoother would
@@ -2112,15 +2112,16 @@ pub fn fixed_kappa_profiled_reml_score(
 /// subtraction can manufacture curvature signal even when the response is
 /// constant plus noise.
 ///
-/// The second derivative is what lets this route run the SAME stationarity
-/// certificate every other route runs (#2458). The basis bundle already shipped
-/// `∂²X/∂κ²` / `∂²S/∂κ²`; this path used to request `derivatives.first` and drop
-/// the rest, so the route "had no Hessian" only because it never asked.
-fn constant_curvature_kappa_profile_value_jet(
+/// The range enters as a coordinate rather than as a heuristic because it is
+/// confounded with the curvature (#2747): pinning ℓ makes κ absorb the range
+/// error, and the criterion then rails, inverts the reported sign, or invents
+/// curvature from flat data. The exact second derivatives are what let this
+/// route run the SAME stationarity certificate every other route runs (#2458).
+fn constant_curvature_psi_profile_jet(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
-) -> Result<(f64, f64, f64), EstimationError> {
+) -> Result<ProfiledRemlPsiJet, EstimationError> {
     if y.len() != data.nrows() || y.is_empty() {
         crate::bail_invalid_estim!(
             "constant-curvature profile needs one non-empty response per row: data={}, response={}",
@@ -2133,80 +2134,105 @@ fn constant_curvature_kappa_profile_value_jet(
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
         .map_err(EstimationError::from)?;
-    let derivatives =
-        gam_terms::basis::build_constant_curvature_basis_kappa_derivatives(data, &profile_spec)
+    let jets =
+        gam_terms::basis::build_constant_curvature_basis_psi_derivatives(data, &profile_spec)
             .map_err(EstimationError::from)?;
-    if basis.active_penalties.len() != 1
-        || derivatives.first.penalties_derivative.len() != 1
-        || derivatives.second.penaltiessecond_derivative.len() != 1
-    {
+    let penalty_block_counts = [
+        basis.active_penalties.len(),
+        jets.penalties_kappa.len(),
+        jets.penalties_eta.len(),
+        jets.penalties_kappa2.len(),
+        jets.penalties_kappa_eta.len(),
+        jets.penalties_eta2.len(),
+    ];
+    if penalty_block_counts.iter().any(|&count| count != 1) {
         crate::bail_invalid_estim!(
-            "constant-curvature profile expected one primary penalty; value blocks={}, first-derivative blocks={}, second-derivative blocks={}",
-            basis.active_penalties.len(),
-            derivatives.first.penalties_derivative.len(),
-            derivatives.second.penaltiessecond_derivative.len(),
+            "constant-curvature profile expected exactly one primary penalty in every block; got {penalty_block_counts:?}"
         );
     }
 
     let smooth_design = basis.design.to_dense();
-    let smooth_design_kappa = &derivatives.first.design_derivative;
-    let smooth_design_kappa2 = &derivatives.second.designsecond_derivative;
-    let smooth_penalty = &basis.active_penalties[0].matrix;
-    let smooth_penalty_kappa = &derivatives.first.penalties_derivative[0];
-    let smooth_penalty_kappa2 = &derivatives.second.penaltiessecond_derivative[0];
     let n = smooth_design.nrows();
     let p = smooth_design.ncols();
-    if smooth_design_kappa.dim() != (n, p)
-        || smooth_design_kappa2.dim() != (n, p)
-        || smooth_penalty.dim() != (p, p)
-        || smooth_penalty_kappa.dim() != (p, p)
-        || smooth_penalty_kappa2.dim() != (p, p)
+    let smooth_penalty = &basis.active_penalties[0].matrix;
+    let smooth_design_blocks = [
+        &jets.design_kappa,
+        &jets.design_eta,
+        &jets.design_kappa2,
+        &jets.design_kappa_eta,
+        &jets.design_eta2,
+    ];
+    let smooth_penalty_blocks = [
+        &jets.penalties_kappa[0],
+        &jets.penalties_eta[0],
+        &jets.penalties_kappa2[0],
+        &jets.penalties_kappa_eta[0],
+        &jets.penalties_eta2[0],
+    ];
+    if smooth_penalty.dim() != (p, p)
+        || smooth_design_blocks.iter().any(|m| m.dim() != (n, p))
+        || smooth_penalty_blocks.iter().any(|m| m.dim() != (p, p))
     {
         crate::bail_invalid_estim!(
-            "constant-curvature kappa derivative bundle does not match its value basis"
+            "constant-curvature ψ derivative bundle does not match its value basis"
         );
     }
 
-    // The unpenalized intercept column is κ-independent, so it contributes zero
-    // to every κ-derivative and its coordinate stays in the penalty null space
-    // at all κ — the κ-fixed-null-space premise the jet verifies.
+    // The unpenalized intercept column is ψ-independent, so it contributes zero
+    // to every ψ-derivative and its coordinate stays in the penalty null space
+    // at all ψ — the ψ-fixed-null-space premise the jet verifies.
     let mut design = Array2::<f64>::ones((n, p + 1));
     design.slice_mut(s![.., 1..]).assign(&smooth_design);
-    let mut design_kappa = Array2::<f64>::zeros((n, p + 1));
-    design_kappa
-        .slice_mut(s![.., 1..])
-        .assign(smooth_design_kappa);
-    let mut design_kappa2 = Array2::<f64>::zeros((n, p + 1));
-    design_kappa2
-        .slice_mut(s![.., 1..])
-        .assign(smooth_design_kappa2);
-    let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
-    penalty.slice_mut(s![1.., 1..]).assign(smooth_penalty);
-    let mut penalty_kappa = Array2::<f64>::zeros((p + 1, p + 1));
-    penalty_kappa
-        .slice_mut(s![1.., 1..])
-        .assign(smooth_penalty_kappa);
-    let mut penalty_kappa2 = Array2::<f64>::zeros((p + 1, p + 1));
-    penalty_kappa2
-        .slice_mut(s![1.., 1..])
-        .assign(smooth_penalty_kappa2);
+    let bordered_design = |block: &Array2<f64>| -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((n, p + 1));
+        out.slice_mut(s![.., 1..]).assign(block);
+        out
+    };
+    let bordered_penalty = |block: &Array2<f64>| -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((p + 1, p + 1));
+        out.slice_mut(s![1.., 1..]).assign(block);
+        out
+    };
+    let penalty = bordered_penalty(smooth_penalty);
+    let design_blocks: Vec<Array2<f64>> = smooth_design_blocks
+        .iter()
+        .map(|block| bordered_design(block))
+        .collect();
+    let penalty_blocks: Vec<Array2<f64>> = smooth_penalty_blocks
+        .iter()
+        .map(|block| bordered_penalty(block))
+        .collect();
 
-    profiled_gaussian_reml_value_kappa_jet(
+    profiled_gaussian_reml_psi_jet(
         &design,
-        &design_kappa,
-        &design_kappa2,
         &penalty,
-        &penalty_kappa,
-        &penalty_kappa2,
+        &PsiCoordinateBlocks {
+            design_first: [&design_blocks[0], &design_blocks[1]],
+            design_second: [&design_blocks[2], &design_blocks[3], &design_blocks[4]],
+            penalty_first: [&penalty_blocks[0], &penalty_blocks[1]],
+            penalty_second: [&penalty_blocks[2], &penalty_blocks[3], &penalty_blocks[4]],
+        },
         y,
     )
 }
 
+/// The constant-curvature smooth's outer objective in its own two coordinates.
+///
+/// `ψ = (κ, η)` with `η = ln ℓ`: the signed sectional curvature and the log
+/// kernel range. Both move the design and the penalty, both are estimated, and
+/// the reason the second one exists is that it is confounded with the first
+/// (#2747) — a κ optimized at a pinned ℓ measures the range error, not the
+/// curvature.
 struct ConstantCurvatureProfile<'a> {
     data: ArrayView2<'a, f64>,
     response: ArrayView1<'a, f64>,
     spec: gam_terms::basis::ConstantCurvatureBasisSpec,
-    cache: std::cell::RefCell<std::collections::HashMap<u64, (f64, f64, f64)>>,
+    /// Derived `[ln ℓ_lo, ln ℓ_hi]` window; `None` when the user pinned the
+    /// range, in which case η is not a coordinate at all.
+    eta_bounds: Option<(f64, f64)>,
+    /// `η` seed — the auto rule's realized `ℓ_ref`, in logs.
+    eta_seed: f64,
+    cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), ProfiledRemlPsiJet>>,
 }
 
 impl<'a> ConstantCurvatureProfile<'a> {
@@ -2214,13 +2240,12 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// frame.
     ///
     /// A frozen transform is a predict-time replay artifact: it is the global
-    /// identifiability frame realized at one particular fitted κ. Reusing that
-    /// fixed frame while this profile varies κ changes the objective and omits
-    /// the frame's κ derivative. Inference must instead use the same local
+    /// identifiability frame realized at one particular fitted ψ. Reusing that
+    /// fixed frame while this profile varies ψ changes the objective and omits
+    /// the frame's ψ derivative. Inference must instead use the same local
     /// center-sum-to-zero quotient that produced the point estimate. Realized
-    /// centers and length scale remain valid frozen representations of their
-    /// deterministic fit-time choices, so only the κ-anchored transform is
-    /// removed.
+    /// centers remain a valid frozen representation of a deterministic fit-time
+    /// choice, so only the ψ-anchored transform is removed.
     fn new(
         data: ArrayView2<'a, f64>,
         response: ArrayView1<'a, f64>,
@@ -2234,28 +2259,161 @@ impl<'a> ConstantCurvatureProfile<'a> {
             );
         }
         spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::CenterSumToZero;
+        // The window and the seed are read from the realized center set, which
+        // is what the basis builder itself will use, and in the κ = 0 chart
+        // gauge — so both are κ-FIXED and the outer box does not move while the
+        // optimizer walks κ.
+        let centers = gam_terms::basis::constant_curvature_realized_centers(data, &spec)
+            .map_err(EstimationError::from)?;
+        let ell_seed =
+            gam_terms::basis::realized_constant_curvature_length_scale(centers.view(), spec.length_scale)
+                .map_err(EstimationError::from)?;
+        let eta_bounds = if spec.length_scale_fixed {
+            None
+        } else {
+            let (lo, hi) = gam_terms::basis::constant_curvature_length_scale_bounds(centers.view())
+                .map_err(EstimationError::from)?;
+            Some((lo.ln(), hi.ln()))
+        };
+        let eta_seed = match eta_bounds {
+            Some((lo, hi)) => ell_seed.ln().clamp(lo, hi),
+            None => ell_seed.ln(),
+        };
         Ok(Self {
             data,
             response,
             spec,
+            eta_bounds,
+            eta_seed,
             cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         })
     }
 
-    fn evaluate(&self, kappa: f64) -> Result<(f64, f64, f64), EstimationError> {
-        if !kappa.is_finite() {
-            crate::bail_invalid_estim!("constant-curvature profile probed a non-finite kappa");
+    /// The full `(κ, η)` jet at one point of the plane.
+    fn evaluate_psi(&self, kappa: f64, eta: f64) -> Result<ProfiledRemlPsiJet, EstimationError> {
+        if !(kappa.is_finite() && eta.is_finite()) {
+            crate::bail_invalid_estim!(
+                "constant-curvature profile probed a non-finite ψ = ({kappa}, {eta})"
+            );
         }
-        let key = kappa.to_bits();
-        if let Some(&cached) = self.cache.borrow().get(&key) {
-            return Ok(cached);
+        let key = (kappa.to_bits(), eta.to_bits());
+        if let Some(cached) = self.cache.borrow().get(&key) {
+            return Ok(cached.clone());
         }
         let mut probe_spec = self.spec.clone();
         probe_spec.kappa = kappa;
-        let sample =
-            constant_curvature_kappa_profile_value_jet(self.data, self.response, &probe_spec)?;
-        self.cache.borrow_mut().insert(key, sample);
+        probe_spec.length_scale = eta.exp();
+        let sample = constant_curvature_psi_profile_jet(self.data, self.response, &probe_spec)?;
+        self.cache.borrow_mut().insert(key, sample.clone());
         Ok(sample)
+    }
+
+    /// `η̂(κ) = argmin_η V(κ, η)` on the derived window, and the jet there.
+    ///
+    /// A coarse scan across the window brackets the basin before a safeguarded
+    /// Newton refines it, because the range coordinate is the one that can carry
+    /// a second, degenerate optimum at the collapsed-kernel corner and a pure
+    /// local descent from the seed could adopt it. `at_bound` reports whether
+    /// the accepted η̂ is a window endpoint rather than an interior stationary
+    /// point — the profile's second derivative reduction is different there.
+    fn minimize_over_eta(
+        &self,
+        kappa: f64,
+    ) -> Result<(f64, ProfiledRemlPsiJet, bool), EstimationError> {
+        let Some((lo, hi)) = self.eta_bounds else {
+            let jet = self.evaluate_psi(kappa, self.eta_seed)?;
+            return Ok((self.eta_seed, jet, true));
+        };
+        // Bracket: the window plus the seed, so a user-supplied or previously
+        // fitted range is always among the candidates.
+        const SCAN_POINTS: usize = 9;
+        let mut best: Option<(f64, ProfiledRemlPsiJet)> = None;
+        let consider = |eta: f64, best: &mut Option<(f64, ProfiledRemlPsiJet)>| {
+            if let Ok(jet) = self.evaluate_psi(kappa, eta)
+                && best.as_ref().is_none_or(|(_, b)| jet.value < b.value)
+            {
+                *best = Some((eta, jet));
+            }
+        };
+        for i in 0..SCAN_POINTS {
+            consider(
+                lo + (hi - lo) * (i as f64) / ((SCAN_POINTS - 1) as f64),
+                &mut best,
+            );
+        }
+        consider(self.eta_seed, &mut best);
+        let Some((mut eta, mut jet)) = best else {
+            crate::bail_invalid_estim!(
+                "constant-curvature profile could not evaluate the range window at κ = {kappa}"
+            );
+        };
+        // Safeguarded Newton on the η coordinate at fixed κ. The step is capped
+        // at one window width and backtracked on non-descent, so a non-convex
+        // stretch cannot throw the iterate across the window.
+        const MAX_NEWTON: usize = 40;
+        let width = hi - lo;
+        for _ in 0..MAX_NEWTON {
+            let g = jet.gradient[1];
+            let h = jet.hessian[1][1];
+            let at_lo = (eta - lo).abs() <= 1.0e-12 * (1.0 + width);
+            let at_hi = (hi - eta).abs() <= 1.0e-12 * (1.0 + width);
+            if (at_lo && g >= 0.0) || (at_hi && g <= 0.0) {
+                return Ok((eta, jet, true));
+            }
+            if g.abs() <= 1.0e-9 * (1.0 + jet.value.abs()) {
+                break;
+            }
+            let raw = if h.is_finite() && h > 0.0 {
+                -g / h
+            } else {
+                -g.signum() * 0.25 * width
+            };
+            let mut step = raw.clamp(-width, width);
+            let mut accepted = None;
+            for _ in 0..25 {
+                let trial = (eta + step).clamp(lo, hi);
+                if (trial - eta).abs() <= 1.0e-14 * (1.0 + eta.abs()) {
+                    break;
+                }
+                if let Ok(candidate) = self.evaluate_psi(kappa, trial)
+                    && candidate.value <= jet.value
+                {
+                    accepted = Some((trial, candidate));
+                    break;
+                }
+                step *= 0.5;
+            }
+            match accepted {
+                Some((next_eta, next_jet)) => {
+                    let moved = (next_eta - eta).abs();
+                    eta = next_eta;
+                    jet = next_jet;
+                    if moved <= 1.0e-12 * (1.0 + eta.abs()) {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let at_bound = (eta - lo).abs() <= 1.0e-9 * (1.0 + width)
+            || (hi - eta).abs() <= 1.0e-9 * (1.0 + width);
+        Ok((eta, jet, at_bound))
+    }
+
+    /// `(V_p(κ), V_p′(κ), V_p″(κ))` with the range PROFILED out — the
+    /// one-dimensional likelihood the CI and the flatness test consume.
+    ///
+    /// At an interior η̂ the envelope theorem gives `V_p′ = V_κ` and the Schur
+    /// complement gives `V_p″ = V_κκ − V_κη²/V_ηη`. At a railed η̂ (or a pinned
+    /// range) the selection is locally constant, `dη̂/dκ = 0`, and the reduction
+    /// is absent — exactly the premise this file already applies to a railed ρ̂.
+    fn evaluate(&self, kappa: f64) -> Result<(f64, f64, f64), EstimationError> {
+        let (_, jet, at_bound) = self.minimize_over_eta(kappa)?;
+        if at_bound {
+            Ok(jet.kappa_slice())
+        } else {
+            jet.eta_profiled_kappa_jet()
+        }
     }
 }
 
@@ -2282,19 +2440,36 @@ fn validate_constant_curvature_profile_inputs(
     Ok(())
 }
 
-/// Minimize the continuously smoothing-profiled Gaussian REML evidence on the
-/// chart-valid interval with the shared bounded analytic outer solver. The
-/// curvature coordinate is the sole auxiliary coordinate, so every accepted
-/// result has passed the solver's final box-KKT projected-gradient certificate.
-/// No sampled point is ever returned as the estimate: samples are only line-
-/// search probes for the continuous BFGS solve.
+/// The constant-curvature smooth's fitted outer coordinates.
+#[derive(Clone, Copy, Debug)]
+struct ConstantCurvatureOptimum {
+    /// Signed sectional curvature κ̂.
+    kappa: f64,
+    /// Kernel range ℓ̂ = exp(η̂). Equals the pinned value when the user set
+    /// `length_scale=`.
+    length_scale: f64,
+}
+
+/// Minimize the continuously smoothing-profiled Gaussian REML evidence over the
+/// smooth's OWN coordinates — the signed curvature on its chart-valid interval
+/// and the log kernel range on its derived window — with the shared bounded
+/// analytic outer solver, so every accepted result has passed the solver's final
+/// box-KKT projected-gradient certificate. No sampled point is ever returned as
+/// the estimate: samples are only line-search probes for the continuous solve.
+///
+/// The range joins the search because it is confounded with the curvature
+/// (#2747): the two enter `exp(−d_κ/ℓ)` through one exponent, so a κ optimized
+/// against a pinned ℓ reports the range error rather than the curvature — it
+/// rails, inverts the sign, or invents curvature from flat data. A user who
+/// pins `length_scale=` gets a one-dimensional κ search at that range, exactly
+/// as a user who pins `kappa=` gets fixed geometry.
 fn constant_curvature_kappa_profile_optimum(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     resolvedspec: &TermCollectionSpec,
     term_idx: usize,
     options: &FitOptions,
-) -> Result<f64, EstimationError> {
+) -> Result<ConstantCurvatureOptimum, EstimationError> {
     let (kappa_min, kappa_max) = constant_curvature_kappa_bounds(data, resolvedspec, term_idx);
     if !(kappa_min.is_finite() && kappa_max.is_finite() && kappa_max > kappa_min) {
         crate::bail_invalid_estim!(
@@ -2317,56 +2492,89 @@ fn constant_curvature_kappa_profile_optimum(
     };
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
     let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
+    let initial_kappa = profile.spec.kappa.clamp(kappa_min, kappa_max);
+    let eta_window = profile.eta_bounds;
+    let initial_eta = profile.eta_seed;
+
+    // The ψ vector: κ always, η only when the user left the range free. A pinned
+    // range must not become a degenerate axis with `lower == upper` — that
+    // manufactures a coordinate the criterion cannot move and spends the
+    // solver's certificate on it.
+    let (lower, upper, theta0) = match eta_window {
+        Some((eta_lo, eta_hi)) => (
+            vec![kappa_min, eta_lo],
+            vec![kappa_max, eta_hi],
+            vec![initial_kappa, initial_eta],
+        ),
+        None => (vec![kappa_min], vec![kappa_max], vec![initial_kappa]),
+    };
+    let dim = theta0.len();
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.bounds = (kappa_min, kappa_max);
     seed_config.max_seeds = 1;
     seed_config.seed_budget = 1;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
-    seed_config.num_auxiliary_trailing = 1;
+    seed_config.num_auxiliary_trailing = dim;
     seed_config.over_smoothing_probe_rho = None;
-    let initial_kappa = profile.spec.kappa.clamp(kappa_min, kappa_max);
-    let problem = gam_solve::rho_optimizer::OuterProblem::new(1)
+    let problem = gam_solve::rho_optimizer::OuterProblem::new(dim)
         .with_gradient(gam_problem::Derivative::Analytic)
-        // #2458: the κ profile supplies an EXACT d²V/dκ², so this route runs
+        // #2458: the ψ profile supplies an EXACT Hessian, so this route runs
         // the same curvature-denominated stationarity certificate every other
         // route runs. It previously declared `Unavailable` — not because the
         // curvature was unavailable, but because this call site never asked the
-        // basis bundle for the `.second` it already ships.
+        // basis bundle for the seconds it already ships.
         .with_hessian(gam_problem::DeclaredHessianForm::Dense)
         // Gradient-only SEARCH is retained deliberately: the change this makes
         // is the terminal certification, not the trajectory. Declaring the
         // Hessian while preferring gradient-only routes the planner through the
         // `(Analytic, Analytic) if prefer_gradient_only` arm to the same BFGS it
-        // used before, so kappa-hat is selected by the same solve -- but the
+        // used before, so ψ-hat is selected by the same solve -- but the
         // terminal mint can now MEASURE curvature and run the derived criterion
         // instead of the un-derived gradient band.
         .with_prefer_gradient_only(true)
         .with_disable_fixed_point(true)
         .with_fallback_policy(gam_solve::rho_optimizer::FallbackPolicy::Disabled)
-        .with_psi_dim(1)
+        .with_psi_dim(dim)
         .with_tolerance(options.tol.max(f64::EPSILON.sqrt()))
         .with_max_iter(options.max_iter.max(1))
         .with_bounds(
-            Array1::from_vec(vec![kappa_min]),
-            Array1::from_vec(vec![kappa_max]),
+            Array1::from_vec(lower.clone()),
+            Array1::from_vec(upper.clone()),
         )
-        .with_initial_rho(Array1::from_vec(vec![initial_kappa]))
+        .with_initial_rho(Array1::from_vec(theta0.clone()))
         .with_seed_config(seed_config);
+    let eta_at = move |theta: &Array1<f64>| -> f64 {
+        if theta.len() > 1 { theta[1] } else { initial_eta }
+    };
     let mut objective = problem.build_objective(
         profile,
-        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-            profile.evaluate(theta[0]).map(|(value, _, _)| value)
+        {
+            let eta_at = eta_at;
+            move |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
+                profile
+                    .evaluate_psi(theta[0], eta_at(theta))
+                    .map(|jet| jet.value)
+            }
         },
-        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-            let (cost, derivative, curvature) = profile.evaluate(theta[0])?;
-            Ok(gam_problem::OuterEval {
-                cost,
-                gradient: Array1::from_vec(vec![derivative]),
-                hessian: gam_problem::HessianValue::Dense(
-                    Array2::from_shape_vec((1, 1), vec![curvature]).expect("1x1 from one element"),
-                ),
-                inner_beta_hint: None,
-            })
+        {
+            let eta_at = eta_at;
+            move |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
+                let jet = profile.evaluate_psi(theta[0], eta_at(theta))?;
+                let dim = theta.len();
+                let gradient = Array1::from_vec(jet.gradient[..dim].to_vec());
+                let mut hessian = Array2::<f64>::zeros((dim, dim));
+                for i in 0..dim {
+                    for j in 0..dim {
+                        hessian[(i, j)] = jet.hessian[i][j];
+                    }
+                }
+                Ok(gam_problem::OuterEval {
+                    cost: jet.value,
+                    gradient,
+                    hessian: gam_problem::HessianValue::Dense(hessian),
+                    inner_beta_hint: None,
+                })
+            }
         },
         None::<fn(&mut ConstantCurvatureProfile<'_>)>,
         None::<
@@ -2382,7 +2590,7 @@ fn constant_curvature_kappa_profile_optimum(
     )?;
     if !result.converged() {
         crate::bail_invalid_estim!(
-            "constant-curvature likelihood-profile κ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
+            "constant-curvature likelihood-profile ψ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
             term_idx,
             result.iterations,
             result.final_value,
@@ -2390,14 +2598,23 @@ fn constant_curvature_kappa_profile_optimum(
         );
     }
     let kappa_hat = result.rho[0];
+    let length_scale_hat = if result.rho.len() > 1 {
+        result.rho[1].exp()
+    } else {
+        initial_eta.exp()
+    };
     log::info!(
         "[spatial-kappa] continuous likelihood-profile optimum kappa_hat={:.6} \
-         (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
+         length_scale_hat={:.6} (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
         kappa_hat,
+        length_scale_hat,
         result.final_value,
         result.final_grad_norm_report(),
     );
-    Ok(kappa_hat)
+    Ok(ConstantCurvatureOptimum {
+        kappa: kappa_hat,
+        length_scale: length_scale_hat,
+    })
 }
 
 fn try_exact_joint_spatial_length_scale_optimization(
@@ -8266,7 +8483,7 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
         validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)?;
     }
     for term_idx in free_curvature_terms {
-        let kappa_hat = constant_curvature_kappa_profile_optimum(
+        let psi_hat = constant_curvature_kappa_profile_optimum(
             data,
             y.view(),
             &resolvedspec,
@@ -8278,7 +8495,12 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
             .get_mut(term_idx)
             .map(|term| &mut term.basis)
         {
-            cc.kappa = kappa_hat;
+            cc.kappa = psi_hat.kappa;
+            // Write the fitted range back too (#2747). `length_scale_fixed` is
+            // left alone: it records whether the USER pinned the range, and a
+            // realized value frozen into the spec must not be mistaken for a
+            // pin on a later fit of the same spec.
+            cc.length_scale = psi_hat.length_scale;
         }
     }
 

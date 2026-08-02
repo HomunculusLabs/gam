@@ -1476,6 +1476,7 @@ mod tests {
             kappa,
             kappa_fixed: true,
             length_scale,
+            length_scale_fixed: true,
             double_penalty: false,
             identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
         };
@@ -1500,6 +1501,7 @@ mod tests {
                     kappa: scaled_kappa,
                     kappa_fixed: true,
                     length_scale: scaled_length,
+                    length_scale_fixed: true,
                     double_penalty: false,
                     identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
                 },

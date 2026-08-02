@@ -150,6 +150,7 @@ fn basis_is_continuous_through_kappa_zero() {
             kappa,
             kappa_fixed: false,
             length_scale: LENGTH_SCALE,
+            length_scale_fixed: true,
             double_penalty: false,
             identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
         };
@@ -255,6 +256,7 @@ fn penalty_is_constrained_kernel_gram() {
         kappa,
         kappa_fixed: false,
         length_scale: LENGTH_SCALE,
+        length_scale_fixed: true,
         double_penalty: true,
         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
     };
@@ -287,18 +289,11 @@ fn penalty_is_constrained_kernel_gram() {
         let s: f64 = z.column(col).sum();
         assert!(s.abs() < 1e-10, "constraint column {col} sum {s}");
     }
-    // Realized design = K(data, centers)·z. The build evaluates the kernel at
-    // the κ-invariant EFFECTIVE length L(κ) (the #944 fill-invariance fix), NOT
-    // at the κ=0 reference length stored in the metadata, so the reconstruction
-    // must use the same L(κ). At κ=0 the two coincide; here κ=0.4 so they differ.
-    let ell_eff = gam::basis::constant_curvature_effective_length(
-        pts.view(),
-        pts.view(),
-        LENGTH_SCALE,
-        kappa,
-    )
-    .expect("effective length");
-    let raw = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, ell_eff)
+    // Realized design = K(data, centers)·z at the spec's OWN range. Design and
+    // penalty are two blocks of ONE Gram at ONE ℓ (gam#2747): the fill-invariant
+    // `L(κ)` / `L_S(κ)` remapping is gone, so the reconstruction uses the length
+    // the metadata reports and matches at every κ, not only at κ = 0.
+    let raw = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, *length_scale)
         .expect("raw kernel");
     let expected_design = raw.dot(z);
     let design = built.design.to_dense();

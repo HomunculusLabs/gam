@@ -18,13 +18,14 @@
 //!    cancellation-free `atan2(|p×q|, p·q)` reference both give 0. This pins the
 //!    diagonal at exactly 1 and the off-diagonals against the stable reference.
 //!
-//! 2. CONSTRAINED-KERNEL-GRAM AT κ ≠ 0. The realized design is `K(L(κ))·z`
-//!    where `L(κ)` is the κ-invariant EFFECTIVE length (the #944/#1059
-//!    fill-invariance fix), NOT the κ = 0 reference length stored in metadata.
-//!    Reconstructing the design with the reference length (the way the failing
-//!    test did) is wrong at κ ≠ 0 (it reported `-0.2420` vs `-0.2317`). The fix
-//!    exposes `constant_curvature_effective_length`; reconstruction at `L(κ)`
-//!    matches exactly.
+//! 2. CONSTRAINED-KERNEL-GRAM AT κ ≠ 0. The realized design is `K(ℓ)·z` and the
+//!    realized penalty is `zᵀK(ℓ)z` at the SAME `ℓ` the metadata reports —
+//!    one Gram, one range (gam#2747). The two fill-invariant remappings that
+//!    used to sit between the spec's range and the realized kernel (`L(κ)` for
+//!    the design, `L_S(κ)` for the penalty) are gone: they were an attempt to
+//!    remove the κ/ℓ confounding by constraint, and the range is estimated
+//!    instead. Reconstruction at the metadata's own length now matches exactly
+//!    at every κ.
 //!
 //! 3. RAW RKHS PENALTY + NO CURVATURE-BLIND RIDGE. The primary penalty is the
 //!    RAW symmetric kernel Gram `zᵀKz` with `normalization_scale = 1`, not a
@@ -46,8 +47,8 @@
 
 use gam::basis::{
     CenterStrategy, ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability,
-    build_constant_curvature_basis, constant_curvature_effective_length,
-    constant_curvature_kernel_kappa_jets, constant_curvature_kernel_matrix,
+    build_constant_curvature_basis, constant_curvature_kernel_kappa_jets,
+    constant_curvature_kernel_matrix,
 };
 use gam::terms::basis::{BasisMetadata, PenaltySource};
 use ndarray::{Array2, array};
@@ -118,7 +119,7 @@ fn kappa_one_kernel_is_exact_great_circle_1404() {
 /// Reconstructing at the reference length is wrong at κ ≠ 0; at `L(κ)` it is
 /// exact.
 #[test]
-fn realized_design_uses_effective_length_kernel_gram_1404() {
+fn realized_design_and_penalty_are_one_kernel_gram_at_one_range_1404() {
     let pts = chart_points();
     let kappa = 0.4;
     let spec = ConstantCurvatureBasisSpec {
@@ -126,6 +127,7 @@ fn realized_design_uses_effective_length_kernel_gram_1404() {
         kappa,
         kappa_fixed: false,
         length_scale: LENGTH_SCALE,
+        length_scale_fixed: true,
         double_penalty: false,
         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
     };
@@ -146,36 +148,30 @@ fn realized_design_uses_effective_length_kernel_gram_1404() {
     );
     let z = constraint_transform.as_ref().expect("constraint transform");
 
-    let ell_eff = constant_curvature_effective_length(pts.view(), pts.view(), LENGTH_SCALE, kappa)
-        .expect("effective length");
-    assert!(
-        (ell_eff - LENGTH_SCALE).abs() > 1e-6,
-        "at κ=0.4 the effective length must differ from the reference (got {ell_eff})"
-    );
-
-    // Reconstructing at the EFFECTIVE length matches exactly.
-    let raw_eff = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, ell_eff)
-        .expect("raw kernel at L(κ)");
-    let expected = raw_eff.dot(z);
+    // Reconstructing at the metadata's OWN length matches exactly — the design
+    // is not evaluated at some κ-remapped length behind the caller's back.
+    let raw = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, LENGTH_SCALE)
+        .expect("raw kernel at the realized length");
+    let expected = raw.dot(z);
     let design = built.design.to_dense();
     for (a, b) in design.iter().zip(expected.iter()) {
-        assert!((a - b).abs() < 1e-10, "design != K(L(κ))·z: {a} vs {b}");
+        assert!((a - b).abs() < 1e-10, "design != K(ℓ)·z: {a} vs {b}");
     }
 
-    // Reconstructing at the κ=0 REFERENCE length does NOT match (the bug): this
-    // pins that the build genuinely uses L(κ), not the stored reference length.
-    let raw_ref = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, LENGTH_SCALE)
-        .expect("raw kernel at reference length");
-    let wrong = raw_ref.dot(z);
-    let max_gap = design
+    // And the PENALTY is the Gram of that same kernel at that same length — the
+    // property the #1464 `L_S(κ)` split broke, which is why the penalty had
+    // stopped being the RKHS roughness of the design it penalizes (gam#2747).
+    let gram = raw.t().dot(z);
+    let gram = z.t().dot(&gram.t().to_owned().t());
+    let primary = built
+        .active_penalties
         .iter()
-        .zip(wrong.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0_f64, f64::max);
-    assert!(
-        max_gap > 1e-4,
-        "reference-length reconstruction must visibly disagree (the #1404 bug); gap {max_gap}"
-    );
+        .find(|penalty| matches!(penalty.info.source, PenaltySource::Primary))
+        .expect("primary RKHS penalty");
+    let gram = (&gram + &gram.t()) * 0.5;
+    for (a, b) in gram.iter().zip(primary.matrix.iter()) {
+        assert!((a - b).abs() < 1e-10, "penalty != zᵀK(ℓ)z: {a} vs {b}");
+    }
 }
 
 /// #1404 (3): the default constant-curvature smooth carries NO curvature-blind
@@ -196,6 +192,7 @@ fn primary_penalty_is_raw_kernel_gram_no_ridge_1404() {
         kappa,
         kappa_fixed: false,
         length_scale: LENGTH_SCALE,
+        length_scale_fixed: true,
         double_penalty: false,
         identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
     };
@@ -223,9 +220,7 @@ fn primary_penalty_is_raw_kernel_gram_no_ridge_1404() {
         panic!("expected ConstantCurvature metadata");
     };
     let z = constraint_transform.as_ref().expect("constraint transform");
-    let ell_eff = constant_curvature_effective_length(pts.view(), pts.view(), LENGTH_SCALE, kappa)
-        .expect("effective length");
-    let raw = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, ell_eff)
+    let raw = constant_curvature_kernel_matrix(pts.view(), pts.view(), kappa, LENGTH_SCALE)
         .expect("raw kernel");
     let gram = z.t().dot(&raw).dot(z);
     let s_built = &primary.matrix;

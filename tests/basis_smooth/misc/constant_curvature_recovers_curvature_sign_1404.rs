@@ -84,6 +84,7 @@ fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
                     kappa: 0.0,
                     kappa_fixed: false,
                     length_scale: ell_ref,
+                    length_scale_fixed: true,
                     double_penalty: false,
                     identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
                 },
