@@ -8828,6 +8828,33 @@ pub fn smooth_term_lr_inference_forspec(
     // Full design as a dense n×p array for the Lawley pair-matrix reduction.
     let full_design_dense = full.design.design.to_dense();
     let influence = full.fit.coefficient_influence();
+    // `SmoothTerm::coeff_range` is BLOCK-LOCAL — 0-based within the smooth block
+    // — while the global coefficient layout is `[intercept | linear | random |
+    // smooth]`. Every consumer that indexes a global object with it has to shift
+    // by `smooth_start` first (`smooth_term_summary.rs`, the constraint audit and
+    // the anisotropic provider all do). This driver did not, and it indexes FOUR
+    // global objects with it: the influence matrix `F` (both the per-term EDF
+    // trace and Wood's `edf1`), the weighted Gram and correction inside the WPS
+    // trace, and — worst — the `tested` column set handed to Lawley, which
+    // decides WHICH HYPOTHESIS the mean shift is computed for.
+    //
+    // This is the #1360 defect in a fourth place: the window slides one column
+    // per preceding parametric column, folding the intercept and the linear
+    // terms into the smooth's block and dropping as many real smooth columns off
+    // the end. It is never zero — the intercept alone makes `smooth_start ≥ 1`.
+    //
+    // It was invisible because three of the four consumers were degraded to
+    // index-free fallbacks: `coefficient_influence` was `None` on every model
+    // with a conditioned parametric column (fixed alongside this, #2672), so
+    // `per_term_edf` fell through to the penalty-block-trace channel — which is
+    // indexed by PENALTY block, not by coefficient, and is therefore correct —
+    // and `wood_reference_df` returned `None` outright. Restoring `F` is what
+    // made the offset observable: on this issue's `y ~ x + s(z)` fixture the
+    // per-term EDF of a null smooth jumped from `0.054` (penalty-trace channel,
+    // correct) to `2.040` (influence trace over columns `0..9`), which is the
+    // unpenalized intercept's `1` plus the parametric `x`'s `1` plus the smooth's
+    // own `0.04` — the offset read off the arithmetic.
+    let smooth_start = p_total.saturating_sub(full.design.smooth.total_smooth_cols());
     let fitted_likelihood = resolved_likelihood_for_fit(&full.fit)?;
     let family_disp = lawley_dispersion_for_family(&fitted_likelihood, &full.fit)?;
     let coefficient_covariance_scale = fitted_likelihood
@@ -8848,7 +8875,9 @@ pub fn smooth_term_lr_inference_forspec(
         if design_term.shape != ShapeConstraint::None {
             continue;
         }
-        let coeff_range = design_term.coeff_range.clone();
+        // Shifted into the GLOBAL coefficient layout — see `smooth_start` above.
+        let coeff_range = (smooth_start + design_term.coeff_range.start)
+            ..(smooth_start + design_term.coeff_range.end);
         if coeff_range.start >= coeff_range.end || coeff_range.end > p_total {
             continue;
         }

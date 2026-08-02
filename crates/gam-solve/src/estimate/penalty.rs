@@ -496,6 +496,19 @@ impl ParametricColumnConditioning {
                 .bias_correction_beta
                 .take()
                 .map(|b| self.backtransform_beta(&b));
+            // TODO(#2672 follow-up): `bias_correction_jacobian` is `A = I + H⁻¹S
+            // = 2I − F`, the fixed-ρ linearization of the bias-corrected
+            // estimator — the SAME kind of object as `F` above and therefore the
+            // same similarity map, as `fit.rs`'s response-rescale path already
+            // recognizes (it applies `rescale_influence_coordinates` to
+            // `coefficient_influence` and `bias_correction_jacobian` together).
+            // Its own centre `b̂` is back-transformed one line above as a
+            // coefficient vector, but the Jacobian is left INTERNAL, so
+            // prediction's `A·V·Aᵀ` band (#1870) pairs an internal-basis `A` with
+            // an original-basis `V` on every conditioned model. Same missing
+            // primitive, same one-line repair — held back from this change only
+            // so its prediction-band blast radius gets its own before/after
+            // rather than being attributed to the reference-d.f. work.
             inf.smoothing_correction = inf
                 .smoothing_correction
                 .take()
