@@ -5,10 +5,15 @@
 //! projection of the NOISELESS truth onto the column span of the realized
 //! design on the held-out grid. That number is the floor no choice of
 //! smoothing parameter can beat, and it carries no fitting noise.
+//!
+//! Second arm: the same measurement for measure-jet as a function of the
+//! representer range ℓ, which measure-jet freezes at the median
+//! nearest-center spacing while Matérn REML-selects its own (κ).
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
+use gam::terms::smooth::measure_jet_term_spec;
 use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -69,7 +74,11 @@ fn build_test_latents(n: usize, seed: u64) -> Vec<f64> {
 }
 
 /// Dense materialization of the term-collection design on `latents`.
-fn dense_design(fit: &gam::StandardFitResult, ds: &gam::data::EncodedDataset, latents: &[f64]) -> Array2<f64> {
+fn dense_design(
+    fit: &gam::StandardFitResult,
+    ds: &gam::data::EncodedDataset,
+    latents: &[f64],
+) -> Array2<f64> {
     let x0_idx = ds.column_map()["x0"];
     let x1_idx = ds.column_map()["x1"];
     let x2_idx = ds.column_map()["x2"];
@@ -104,14 +113,11 @@ fn span_projection_rmse(x: &Array2<f64>, y: &[f64]) -> (f64, usize) {
     let floor = 1.0e-10 * scale.max(1.0);
     for j in 0..p {
         let mut v = x.column(j).to_owned();
-        for q in basis.iter() {
-            let c = q.dot(&v);
-            v.scaled_add(-c, q);
-        }
-        // one reorthogonalization pass
-        for q in basis.iter() {
-            let c = q.dot(&v);
-            v.scaled_add(-c, q);
+        for _pass in 0..2 {
+            for q in basis.iter() {
+                let c = q.dot(&v);
+                v.scaled_add(-c, q);
+            }
         }
         let nrm = v.dot(&v).sqrt();
         if nrm > floor {
@@ -129,7 +135,7 @@ fn span_projection_rmse(x: &Array2<f64>, y: &[f64]) -> (f64, usize) {
     (rmse(resid.as_slice().expect("contig"), &zero), basis.len())
 }
 
-fn arm(body: &str, ds: &gam::data::EncodedDataset, test_latents: &[f64], train_latents: &[f64]) {
+fn arm(body: &str, ds: &gam::data::EncodedDataset, test_latents: &[f64]) -> Option<f64> {
     let formula = format!("y ~ {body}");
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
@@ -139,27 +145,26 @@ fn arm(body: &str, ds: &gam::data::EncodedDataset, test_latents: &[f64], train_l
         Ok(r) => r,
         Err(e) => {
             println!("[span-2761] {body}: FIT REFUSED: {e}");
-            return;
+            return None;
         }
     };
     let FitResult::Standard(fit) = result else {
         println!("[span-2761] {body}: non-standard fit");
-        return;
+        return None;
     };
     let truth_test: Vec<f64> = test_latents.iter().map(|&t| truth(t)).collect();
-    let truth_train: Vec<f64> = train_latents.iter().map(|&t| truth(t)).collect();
-
     let x_test = dense_design(&fit, ds, test_latents);
-    let x_train = dense_design(&fit, ds, train_latents);
     let yhat: Vec<f64> = x_test.dot(&fit.fit.beta).to_vec();
     let fitted_rmse = rmse(&yhat, &truth_test);
     let (span_test, rank_test) = span_projection_rmse(&x_test, &truth_test);
-    let (span_train, rank_train) = span_projection_rmse(&x_train, &truth_train);
     let edf: f64 = fit.fit.edf;
+    let realized_ell = measure_jet_term_spec(&fit.resolvedspec, 0).map(|s| s.length_scale);
     println!(
-        "[span-2761] {body}: p={} rank(test)={rank_test} rank(train)={rank_train} edf={edf:.3} \
-         fitted_rmse={fitted_rmse:.6} span_floor_test={span_test:.6} span_floor_train={span_train:.6}"
+        "[span-2761] {body}: p={} rank={rank_test} edf={edf:.3} fitted_rmse={fitted_rmse:.6} \
+         span_floor={span_test:.6} realized_ell={realized_ell:?}",
+        x_test.ncols()
     );
+    realized_ell
 }
 
 #[test]
@@ -167,12 +172,25 @@ fn probe_2761_span_floor_of_each_basis() {
     init_parallelism();
     let ds = build_dataset(N_TRAIN, SIGMA, TRAIN_SEED);
     let test_latents = build_test_latents(N_TEST, TEST_SEED);
-    let train_latents = build_test_latents(N_TRAIN, TRAIN_SEED + 7);
-    for body in [
-        "mjs(x0, x1, x2, centers=16)",
-        "matern(x0, x1, x2, k=16)",
-        "duchon(x0, x1, x2, k=16)",
-    ] {
-        arm(body, &ds, &test_latents, &train_latents);
+
+    let auto_ell = arm("mjs(x0, x1, x2, centers=16)", &ds, &test_latents);
+    arm("matern(x0, x1, x2, k=16)", &ds, &test_latents);
+    arm("duchon(x0, x1, x2, k=16)", &ds, &test_latents);
+    arm(
+        "mjs(x0, x1, x2, centers=16, learn_length_scale=true)",
+        &ds,
+        &test_latents,
+    );
+
+    let base = auto_ell.expect("auto mjs fit resolves a length scale");
+    println!("[span-2761] auto ell = {base:.6}; sweeping multiples");
+    for factor in [0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0] {
+        let ell = base * factor;
+        arm(
+            &format!("mjs(x0, x1, x2, centers=16, length_scale={ell})"),
+            &ds,
+            &test_latents,
+        );
+        println!("[span-2761]   (above was factor {factor})");
     }
 }
