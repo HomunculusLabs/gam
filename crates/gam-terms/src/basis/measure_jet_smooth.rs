@@ -72,7 +72,10 @@
 //!
 //! Mirroring the constant-curvature κ-contract (#944): centers, masses, the
 //! band are deliberately hyperparameter-FIXED at build time; the representer
-//! range ℓ is the ONE opt-in design-moving dial (#1116). Consequences:
+//! range ℓ is the ONE design-moving dial, and it is REML-selected by default
+//! (#1116, restored in #2761) — λ shrinks inside a span and cannot move one, so
+//! the range that decides WHICH span the representers occupy has to be chosen
+//! by the criterion, exactly as the Matérn κ is. Consequences:
 //!
 //! - **Penalty-dial design drift is identically zero**: the (s, α, τ) dials
 //!   reweight only the jet-energy penalty, never the Gaussian representer
@@ -84,9 +87,13 @@
 //!   evaluation map `E = K(centers, centers; ℓ)·z` both depend on ℓ. The
 //!   center-value forms `Q` and `H₀` are ℓ-invariant, but their coefficient
 //!   pullbacks `EᵀQE` and `EᵀH₀E` are not; exact product-rule jets are shipped
-//!   alongside the design jets. When explicitly enabled, ℓ rebuilds the design
-//!   per outer trial; it does not change the frozen basis rank. FD-gated by
-//!   `psi_producer_matches_fd_length_scale`.
+//!   alongside the design jets. ℓ rebuilds the design per outer trial; it does
+//!   not change the frozen basis rank. FD-gated by
+//!   `psi_producer_matches_fd_length_scale`. Frozen only where a design-moving
+//!   kernel scale on covariates SHARED by two coupled blocks is an
+//!   identifiability hazard — the BMS marginal/log-slope pair, at its own entry
+//!   point (`freeze_measure_jet_length_scale_learning`, #1116/`a3afd17a2`) —
+//!   and where the user pins `length_scale=` outright.
 //! - **Exact (s, α) penalty jets are shipped**:
 //!   [`measure_jet_energy_form_with_jets`] returns `∂Q/∂s`, `∂²Q/∂s²`,
 //!   `∂Q/∂α`, `∂²Q/∂α²`, `∂²Q/∂s∂α` in closed form — both dials enter only
@@ -151,20 +158,33 @@ pub(crate) const MEASURE_JET_DEFAULT_ORDER_S: f64 = 1.5;
 pub(crate) const MEASURE_JET_MIN_AUTO_SCALES: usize = 3;
 pub(crate) const MEASURE_JET_MAX_AUTO_SCALES: usize = 8;
 
-/// Representer-range multiple of the median nearest-center spacing used by
-/// the `0.0` auto sentinel.
+/// Representer-range multiple of the median nearest-center spacing used by the
+/// `0.0` auto sentinel.
+///
+/// **This is the SEED of the ℓ outer coordinate, not the realized range.**
+/// [`MeasureJetBasisSpec::learn_length_scale`] is on by default, so what a fit
+/// ships is whatever REML certifies from here; this constant only has to put
+/// the optimizer somewhere feasible and well-conditioned. It is a starting
+/// point in exactly the sense the Matérn `MaternLengthScale::Auto` seed is one.
 ///
 /// Set to ×1: a Gaussian representer of range `ℓ = h` (the median
 /// nearest-center spacing) already overlaps its neighbors at
 /// `exp(−h²/(2ℓ²)) = exp(−1/2) ≈ 0.61`, so adjacent bumps blend smoothly while
-/// each center keeps a *distinct* response. The old ×2 made every column
-/// `exp(−1/8) ≈ 0.88` at its neighbor — the representers became nearly
-/// collinear, which (a) over-smoothed the fitted surface (the #1116/#1041
-/// accuracy deficit: measure-jet sat ~1.6× the matern/duchon truth-RMSE) and
-/// (b) drove the design Gram toward rank deficiency, so the inner PIRLS /
-/// outer REML conditioning degraded and the smoothing-parameter search cycled
-/// for hundreds of seconds (the #1116 timeout). One spacing-width kernel fixes
-/// both at the root without touching the energy penalty or the dials.
+/// each center keeps a *distinct* response and the design Gram is far from
+/// rank-deficient. The old ×2 seed made every column `exp(−1/8) ≈ 0.88` at its
+/// neighbor, driving the Gram toward rank deficiency so the inner PIRLS / outer
+/// REML conditioning degraded and the search cycled for hundreds of seconds
+/// (the #1116 timeout). ×1 is the resolving, well-conditioned end of the range
+/// axis — the right side to *start* a search from.
+///
+/// It is emphatically NOT the right place to *stop*. #1041 changed the factor
+/// ×2 → ×1 as a replacement for the ℓ dial it was turning off, on the argument
+/// that a spacing-width kernel "fixes both at the root". Measured on
+/// `measure_jet_perf_parity` at ×1, the design's least-squares span floor
+/// against the noiseless truth is `0.152` and REML moves ℓ 7.5× longer to a
+/// floor of `1.4e-5` (#2761). No fixed multiple of the center spacing is the
+/// answer, because the answer depends on the target's smoothness relative to
+/// the center layout — which is data, not geometry.
 pub(crate) const MEASURE_JET_AUTO_LENGTH_SCALE_FACTOR: f64 = 1.0;
 
 /// Memory budget (in f64 entries) above which the multi-form assembly stops
@@ -226,11 +246,13 @@ pub struct MeasureJetFrozenQuadrature {
     pub sigma_coord: Option<f64>,
 }
 
-/// Serde default for [`MeasureJetBasisSpec::learn_length_scale`]: freeze ℓ at
-/// the realized auto/user value unless a fit explicitly opts into the
-/// design-moving outer coordinate.
+/// Serde default for [`MeasureJetBasisSpec::learn_length_scale`]: REML-select
+/// ℓ, the same standing the Matérn κ has. A function (not a literal) because
+/// `#[serde(default)]` on a `bool` deserializes a missing field as `false`,
+/// which would silently freeze ℓ on every spec that predates the field — the
+/// opposite of the default. See the field's own docs for the measurement.
 fn measure_jet_learn_length_scale_default() -> bool {
-    false
+    true
 }
 
 /// Measure-jet smooth configuration (`mjs(x0, …, xd)`).
@@ -261,13 +283,55 @@ pub struct MeasureJetBasisSpec {
     /// Add a separate function-space affine/null-component penalty alongside
     /// the jet-energy penalty. Its strength is independently REML-selected.
     pub double_penalty: bool,
-    /// REML-learn the representer range ℓ as a design-moving outer dial
-    /// (opt-in), mirroring Matérn's `log_kappa`. The Gaussian kernel is
-    /// strictly PD for every ℓ > 0, so ℓ does NOT change the basis rank (always
-    /// `m` centers) — but it changes WHICH `m`-dim subspace the representers
-    /// span, i.e. the span alignment with the true surface. The stable default
-    /// freezes ℓ at the auto/user value; `true` enrolls the outer coordinate for
-    /// experiments that need REML-selected representer range.
+    /// REML-select the representer range ℓ as a design-moving outer dial,
+    /// mirroring Matérn's `log_kappa`. **Default `true`** — ℓ is a basis
+    /// coordinate of the same kind as the Matérn κ, not a smoothing parameter,
+    /// and a fitted model must choose it.
+    ///
+    /// # Why it cannot be a frozen geometric value (#2761)
+    ///
+    /// The Gaussian kernel is strictly PD for every ℓ > 0, so ℓ does NOT change
+    /// the basis rank (always `m` centers) — but it changes WHICH `m`-dim
+    /// subspace the representers span. λ can only shrink inside a span; it
+    /// cannot move one. So a mis-set ℓ is an error no smoothing parameter can
+    /// repair, and the size of that error is not small. Measured on
+    /// `measure_jet_perf_parity`'s 1-D-curve-in-3-D Gaussian fixture
+    /// (`n = 1500`, σ = 0.10, 16 centers, `p = 15`), where `span floor` is the
+    /// least-squares projection residual of the NOISELESS truth onto the
+    /// realized design's column span — the bound no λ can beat:
+    ///
+    /// ```text
+    ///   arm                       ell      edf   span floor  unpen. LS  held-out
+    ///   frozen (auto ell)      0.5144   14.684    0.152488   0.155484   0.155584
+    ///   REML-selected ell      3.8813   14.006    0.000014   0.008155   0.009642
+    ///   matern(k=16)                -   14.619    0.006077   0.011989   0.011639
+    ///   duchon(k=16)                -   15.016    0.002443   0.011308   0.010521
+    /// ```
+    ///
+    /// At the frozen range the fit is already at `edf/p = 0.98` and its held-out
+    /// RMSE *is* the span floor: unpenalized least squares on the same design
+    /// gives 0.1555, and dropping the null-component penalty moves the fourth
+    /// decimal. Freeing ℓ drops the floor by four orders and the held-out RMSE
+    /// by 16x, past both comparators, at LOWER edf — nothing is traded for it.
+    ///
+    /// # History (so a fourth flip needs new evidence)
+    ///
+    /// `299c83ffc` (#1116) introduced this dial default-ON precisely to remove
+    /// this fixture's 13x. `a3afd17a2` then found the one place it is unsafe —
+    /// a BMS fit shares ONE mjs basis between the marginal mean and the
+    /// log-slope surface, and a design-moving kernel scale on shared covariates
+    /// is an identifiability hazard that reached a separation runaway — and
+    /// contained it AT THE BMS ENTRY POINT with
+    /// [`crate::smooth::freeze_measure_jet_length_scale_learning`], which is
+    /// still what runs there. `b1d94d1a5` (#1041) nevertheless flipped the
+    /// GLOBAL default off, and the 13x returned as #2761. The scoped freeze is
+    /// the correct containment; the global one buys nothing it does not already
+    /// buy and costs every single-surface fit its span alignment.
+    ///
+    /// `false` freezes ℓ at the auto (or explicit) value with no outer
+    /// enrollment. The term builder selects that automatically when the user
+    /// pins `length_scale=` — an explicit range is a request, not a seed —
+    /// mirroring the Matérn `all_spatial_terms_kappa_fixed` short-circuit.
     #[serde(default = "measure_jet_learn_length_scale_default")]
     pub learn_length_scale: bool,
     /// Explicit opt-in for multiscale mode: the per-scale spectral penalty
@@ -309,7 +373,7 @@ impl Default for MeasureJetBasisSpec {
             num_scales: 0,
             length_scale: 0.0,
             double_penalty: true,
-            learn_length_scale: false,
+            learn_length_scale: true,
             multiscale: false,
             identifiability: MeasureJetIdentifiability::CenterSumToZero,
             frozen_quadrature: None,
