@@ -7976,43 +7976,28 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     // ordinary fixed-geometry fit below already profiles rho at the certified
     // pair.
     //
-    // A term enrolls when EITHER coordinate is free. Pinning `kappa=` alone used
-    // to take the whole term out of the profile and leave its range at the auto
-    // heuristic, which is a worse fit for no stated reason: pinning the geometry
-    // is not a statement about the kernel's resolution.
-    let curvature_terms: Vec<usize> = constant_curvature_term_indices(&resolvedspec)
+    // A PINNED `kappa=` still takes the whole term out of this profile, range
+    // included, and that is a deliberate stopping point rather than a
+    // conclusion. Enrolling a pinned-κ term for range estimation alone was
+    // implemented and MEASURED (gam#2747), and on a capacity-starved fixture the
+    // criterion turned out to be monotone in `ℓ` all the way to its asymptote —
+    // the realized design converges to its linear-in-distance limit, `V` goes
+    // flat, and `ℓ̂` ran to 1.5e6, a readout of the box rather than of the data.
+    // That is the same failure mode this issue is about, moved to the other
+    // coordinate, and it needs a derived stopping rule for a criterion that
+    // converges rather than turning over. The range is confounded with κ, which
+    // is why it must be estimated when κ is FREE; a pinned κ removes the
+    // confounding, so the case that motivates the estimation does not arise and
+    // shipping an unbounded search for it here would be trading a known
+    // heuristic for an unmeasured rail.
+    let free_curvature_terms: Vec<usize> = constant_curvature_term_indices(&resolvedspec)
         .into_iter()
-        .filter(|&term_idx| {
-            !constant_curvature_kappa_is_fixed(&resolvedspec, term_idx)
-                || !constant_curvature_length_scale_is_fixed(&resolvedspec, term_idx)
-        })
+        .filter(|&term_idx| !constant_curvature_kappa_is_fixed(&resolvedspec, term_idx))
         .collect();
-    // The profile is Gaussian-identity-only. A FREE κ is the headline estimand,
-    // so a family that cannot supply it must refuse rather than silently ship an
-    // unfitted curvature. A term whose κ is PINNED is asking only for its range,
-    // which is an improvement on the auto seed rather than an estimand the
-    // caller is owed — so it drops out with a log line instead of turning a
-    // working non-Gaussian fit into a refusal.
-    let profiled_curvature_terms: Vec<usize> = if curvature_terms.is_empty() {
-        Vec::new()
-    } else if curvature_terms
-        .iter()
-        .any(|&term_idx| !constant_curvature_kappa_is_fixed(&resolvedspec, term_idx))
-    {
+    if !free_curvature_terms.is_empty() {
         validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)?;
-        curvature_terms
-    } else if validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)
-        .is_ok()
-    {
-        curvature_terms
-    } else {
-        log::info!(
-            "[spatial-kappa] {} constant-curvature term(s) have a pinned κ and a free range, but              the curvature profile requires a Gaussian-identity likelihood with unit weights and              zero offset; their range stays at the auto seed",
-            curvature_terms.len()
-        );
-        Vec::new()
-    };
-    for term_idx in profiled_curvature_terms {
+    }
+    for term_idx in free_curvature_terms {
         let psi_hat = constant_curvature_kappa_profile_optimum(
             data,
             y.view(),

@@ -19,7 +19,6 @@
 //! issue's headline claims and are the stable single-dataset statements.
 
 use gam::estimate::FitOptions;
-use gam::geometry::constant_curvature::ConstantCurvature;
 use gam::geometry::curvature_estimand::CurvatureVerdict;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::parse_formula;
@@ -64,6 +63,11 @@ fn next_gauss(state: &mut u64) -> f64 {
 /// schema dataset must carry the actual feature values rather than a constant
 /// placeholder, or the `curv(x1, x2)` term is rejected as a constant-column
 /// smooth before it can ever be fitted.
+/// The ONE formula the generator and the fit share: the curved plant is built
+/// from THIS spec's realized centers and range, so a change here that did not
+/// reach the generator would silently re-misspecify the fixture.
+const FIT_FORMULA: &str = "y ~ curv(x1, x2, centers=10)";
+
 fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollectionSpec {
     let parsed = parse_formula(formula).expect("formula parses");
     let headers = vec!["y".to_string(), "x1".to_string(), "x2".to_string()];
@@ -97,30 +101,31 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 /// `n` chart points uniformly in a disk of radius `radius`, with a Gaussian
 /// response built so that the curvature is genuinely IDENTIFIABLE (#944):
 ///
-/// * **Curved truth (κ⋆ ≠ 0):** the mean is a smooth function of the M_{κ⋆}
-///   geodesic distance to the origin, `μ = 2·exp(−d_{κ⋆}) − 1`. The radius is
-///   chosen to span the chart (`radius ≈ 0.68` so `κ⋆ = ±2` genuinely bends it:
-///   `κ·radius² ≈ ±0.9`), so the distance-matrix SHAPE — hence the planted
-///   signal — depends sharply on κ⋆. The criterion the profile minimizes is
-///   range-PROFILED (`V_p(κ) = min_ℓ V(κ, ℓ)`, gam#2747), so the kernel's
-///   resolution is chosen by the data at every κ rather than pinned; without
-///   that, κ absorbs the range error instead of measuring curvature and `V_p`
-///   rails.
+/// * **Curved truth (κ⋆ ≠ 0):** a member of the κ⋆ span, built from the same
+///   center rule and the same auto range the fit will use, so the truth is in
+///   the model being estimated and in no other member of the family. The
+///   coefficient profile `w_j = 1/(1+j)` is deterministic and decaying, so the
+///   planted function is a genuinely smooth member of the span rather than a
+///   single kernel section, and the signal is standardized to unit SD before
+///   the noise is applied so `noise_sd` keeps meaning a signal-to-noise ratio.
 ///
-/// * **Flat truth (κ⋆ = 0):** the mean is constant (κ-NEUTRAL), and here that is
-///   a POWER statement rather than a bias one. This plant is a kernel section
-///   about the chart ORIGIN, and `d_κ(x, 0) = 2·arctan(√κ r)/√κ` is a strictly
-///   monotone reparametrization of the chart radius for EVERY κ — so a
-///   function of the origin distance is a function of the origin distance at
-///   every curvature and the plant carries no curvature information at all. κ
-///   is then identified only by which radial profiles the center set happens to
-///   be able to make, which is a knife edge; measured at κ⋆ = 0 with a genuine
-///   centre-peaked signal at this SNR, the criterion still rails (LR = 34
-///   against a χ²₁ threshold of 3.84). That is misspecification of the FIXTURE,
-///   not a size defect: the sibling `constant_curvature_kappa_coverage_sims`
-///   plants flat truth INSIDE the κ = 0 span, where the flatness test is
-///   correctly sized, and this file keeps the κ-neutral constant so its own
-///   claim stays about size rather than about curvature-blind plants.
+///   This generator used to plant `μ = 2·exp(−d_{κ⋆}(x,0)) − 1`, a kernel
+///   section at unit length about the chart ORIGIN, and that plant is
+///   **curvature-BLIND as a function class**: `d_κ(x,0) = 2·arctan(√κ r)/√κ` is
+///   a strictly monotone reparametrization of the chart radius for EVERY κ, so
+///   a function of the origin distance is a function of the origin distance at
+///   every curvature and the geometry carries no signal at all. κ is then
+///   identified only by which radial profiles the center set happens to be able
+///   to make, which is a knife edge — measured (gam#2747): on that plant at
+///   κ⋆ = 0 the criterion rails with an LR of 34 against a χ²₁ threshold of
+///   3.84, and at κ⋆ < 0 it recovers the wrong sign. The sibling
+///   `constant_curvature_kappa_coverage_sims` moved inside the span for the
+///   same reason under `#2687`; this file was the last one that had not.
+///
+/// * **Flat truth (κ⋆ = 0):** the mean is constant (κ-NEUTRAL). A flat space has
+///   no preferred geodesic-distance shape, so there is no curvature to plant,
+///   and the honest realization of "flat truth" is the absence of curvature
+///   structure rather than a curvature signal at κ = 0.
 fn dataset_on_m_kappa(
     n: usize,
     kappa_star: f64,
@@ -129,11 +134,8 @@ fn dataset_on_m_kappa(
     seed: u64,
 ) -> (Array2<f64>, Array1<f64>) {
     let mut st = seed;
-    let manifold = ConstantCurvature::new(2, kappa_star);
-    let reference = ndarray::array![0.0_f64, 0.0_f64];
-    let flat_truth = kappa_star == 0.0;
     let mut feats = Array2::<f64>::zeros((n, 2));
-    let mut y = Array1::<f64>::zeros(n);
+    let mut noise = Array1::<f64>::zeros(n);
     for i in 0..n {
         let (x1, x2) = loop {
             let a = 2.0 * next_unit(&mut st) - 1.0;
@@ -142,20 +144,48 @@ fn dataset_on_m_kappa(
                 break (a * radius, b * radius);
             }
         };
-        // Curved truth: a curvature-shaped signal of the M_{κ⋆} geodesic
-        // distance. Flat truth: a κ-neutral constant mean (no curvature signal).
-        let mu = if flat_truth {
-            0.0
-        } else {
-            let pt = ndarray::array![x1, x2];
-            let d = manifold
-                .distance(pt.view(), reference.view())
-                .expect("in-chart geodesic distance");
-            2.0 * (-d).exp() - 1.0
-        };
         feats[(i, 0)] = x1;
         feats[(i, 1)] = x2;
-        y[i] = mu + noise_sd * next_gauss(&mut st);
+        noise[i] = next_gauss(&mut st);
+    }
+    let mut y = Array1::<f64>::zeros(n);
+    if kappa_star != 0.0 {
+        let mut frame = Array2::<f64>::zeros((n, 3));
+        for i in 0..n {
+            frame[(i, 1)] = feats[(i, 0)];
+            frame[(i, 2)] = feats[(i, 1)];
+        }
+        let fitspec = termspec_for(FIT_FORMULA, &frame);
+        let gam::smooth::SmoothBasisSpec::ConstantCurvature { spec: cc, .. } =
+            &fitspec.smooth_terms[0].basis
+        else {
+            panic!("the fixture formula must resolve to a constant-curvature term");
+        };
+        let mut truth_spec = cc.clone();
+        truth_spec.kappa = kappa_star;
+        truth_spec.kappa_fixed = true;
+        truth_spec.double_penalty = false;
+        let basis = gam::basis::build_constant_curvature_basis(feats.view(), &truth_spec)
+            .expect("the planted κ⋆ geometry must be inside its own chart");
+        let design = basis.design.to_dense();
+        for j in 0..design.ncols() {
+            let w = 1.0 / (1.0 + j as f64);
+            for i in 0..n {
+                y[i] += w * design[(i, j)];
+            }
+        }
+        let mean = y.iter().sum::<f64>() / n as f64;
+        let sd = (y.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64).sqrt();
+        assert!(
+            sd > 0.0,
+            "the planted κ⋆ = {kappa_star} signal collapsed to a constant"
+        );
+        for i in 0..n {
+            y[i] = (y[i] - mean) / sd;
+        }
+    }
+    for i in 0..n {
+        y[i] += noise_sd * noise[i];
     }
     (feats, y)
 }
@@ -176,7 +206,7 @@ fn fit_and_infer(feats: &Array2<f64>, y: &Array1<f64>) -> CurvatureInference {
         frame[(i, 1)] = feats[(i, 0)];
         frame[(i, 2)] = feats[(i, 1)];
     }
-    let spec = termspec_for("y ~ curv(x1, x2, centers=10)", &frame);
+    let spec = termspec_for(FIT_FORMULA, &frame);
 
     let weights = Array1::<f64>::ones(n);
     let offset = Array1::<f64>::zeros(n);
@@ -214,9 +244,29 @@ fn fit_and_infer(feats: &Array2<f64>, y: &Array1<f64>) -> CurvatureInference {
     .expect("curvature inference")
 }
 
+/// The planted curvature must lie INSIDE the box the estimator is allowed to
+/// report (gam#2687's lesson, applied here by gam#2747).
+///
+/// The κ box is the half-margin to the antipodal fold, `±F/max‖x‖²`, so on this
+/// radius-0.68 disk it is `±0.5/0.4624 = ±1.081`. The pre-#2747 fixture planted
+/// `κ⋆ = ±2` — `κ⋆R² = ±0.925` against a cap of `F = 0.50`, i.e. **85% outside
+/// the interval the estimator may report**. That was survivable only while the
+/// criterion happened to turn over inside the box anyway; with the range
+/// profiled it does not, and the CI machinery refuses by name rather than
+/// manufacturing an interval: *"curvature profile is not outward-monotone at
+/// chart bound −1.083"*. The refusal is correct — the profile is still
+/// descending where the box ends, so the reported set would not be a truncation
+/// of a connected likelihood set anchored at κ̂ — and the repair is the one
+/// `#2687` applied to the sibling coverage fixture for the identical reason:
+/// plant where coverage can be measured.
+///
+/// `0.75` is 69% of the cap, matching the `71%` that fixture settled on, so the
+/// profile has room on both sides to close an interval.
+const KAPPA_STAR: f64 = 0.75;
+
 #[test]
 fn spherical_truth_recovers_positive_kappa_and_rejects_flat() {
-    let (feats, y) = dataset_on_m_kappa(n_obs(), 2.0, 0.68, 0.02, 0x5151_0001);
+    let (feats, y) = dataset_on_m_kappa(n_obs(), KAPPA_STAR, 0.68, 0.02, 0x5151_0001);
     let inf = fit_and_infer(&feats, &y);
     log::debug!(
         "[spherical] κ̂={:.4} CI=[{:.4}, {:.4}] verdict={:?} flat_p={:.4} lr={:.4}",
@@ -229,7 +279,7 @@ fn spherical_truth_recovers_positive_kappa_and_rejects_flat() {
     );
     assert!(
         inf.kappa_hat > 0.0,
-        "spherical truth κ⋆=+2 should give κ̂ > 0, got {}",
+        "spherical truth κ⋆=+{KAPPA_STAR} should give κ̂ > 0, got {}",
         inf.kappa_hat
     );
     assert_ne!(
@@ -274,7 +324,7 @@ fn flat_truth_does_not_reject_flatness() {
 
 #[test]
 fn hyperbolic_truth_recovers_negative_kappa_and_rejects_flat() {
-    let (feats, y) = dataset_on_m_kappa(n_obs(), -2.0, 0.68, 0.02, 0x5151_0003);
+    let (feats, y) = dataset_on_m_kappa(n_obs(), -KAPPA_STAR, 0.68, 0.02, 0x5151_0003);
     let inf = fit_and_infer(&feats, &y);
     log::debug!(
         "[hyperbolic] κ̂={:.4} CI=[{:.4}, {:.4}] verdict={:?} flat_p={:.4} lr={:.4}",

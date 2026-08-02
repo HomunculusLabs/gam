@@ -1300,14 +1300,18 @@ mod tests {
             message.contains("no") && message.contains("positive"),
             "the refusal must name what is missing; got {message}"
         );
-        // TWO distinct points are enough: one positive distance defines both
-        // ends, and the floating-point walls put them far apart.
+        // TWO distinct points are enough. With one distance both ends are the
+        // SAME `d`, so the box's width is a property of the FORMAT alone:
+        // `(d/√ε) / (d/(½ln(1/ε))) = ½ln(1/ε)/√ε ≈ 1.2e9`.
         let pair = ndarray::array![[0.0_f64, 0.0], [0.2, 0.0]];
         let (lo, hi) = constant_curvature_length_scale_bounds(pair.view(), pair.view())
             .expect("one positive pairwise distance is enough");
+        let format_width = (0.5 * -f64::EPSILON.ln()) / f64::EPSILON.sqrt();
         assert!(
-            lo > 0.0 && hi / lo > 1.0e10,
-            "even a two-point geometry gets the full evaluability box, got [{lo}, {hi}]"
+            lo > 0.0 && (hi / lo - format_width).abs() <= 1.0e-9 * format_width,
+            "a one-distance geometry's box width is the format's, {format_width}; got \
+             [{lo}, {hi}] with ratio {}",
+            hi / lo
         );
     }
 
@@ -1465,10 +1469,13 @@ mod tests {
         // AT `lo` the Gram's dynamic range is exactly one ε — the last one a
         // double-precision Cholesky can resolve; half an ℓ below, the Gram's
         // far entries have rounded into the diagonal.
+        // "Resolvable" stated operationally, so the boundary case cannot turn
+        // on which way a comparison against ε rounds: the quantity must still
+        // PERTURB 1, and must stop perturbing it just outside the wall.
         let gram_range = |ell: f64| (-2.0 * span_hi / ell).exp();
         assert!(
-            gram_range(lo) >= f64::EPSILON,
-            "at ℓ_lo the Gram must still span a full ε; got {}",
+            1.0 + gram_range(lo) != 1.0,
+            "at ℓ_lo the Gram's far entries must still perturb the diagonal; got {}",
             gram_range(lo)
         );
         assert!(
@@ -1482,8 +1489,8 @@ mod tests {
             c * c
         };
         assert!(
-            gram_contrast(hi) >= f64::EPSILON,
-            "at ℓ_hi the closest pair's SQUARED contrast must still be a full ε; got {}",
+            1.0 + gram_contrast(hi) != 1.0,
+            "at ℓ_hi the closest pair's SQUARED contrast must still perturb 1; got {}",
             gram_contrast(hi)
         );
         assert!(

@@ -650,23 +650,6 @@ fn constant_curvature_kappa_profile_optimum(
     };
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
     let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
-    if profile.spec.kappa_fixed {
-        // Fixed geometry: κ is the user's and stays the user's. What is left is
-        // the range, and `minimize_over_eta` already IS that solve — globally
-        // bracketed on the evaluability box, at the pinned κ. When the range is
-        // pinned too this term never reaches here (it enrolls no coordinate).
-        let kappa = profile.spec.kappa;
-        let (eta_hat, _, _) = profile.minimize_over_eta(kappa)?;
-        log::info!(
-            "[spatial-kappa] term {term_idx}: κ pinned at {kappa:.6}; range profiled to \
-             length_scale_hat={:.6}",
-            eta_hat.exp()
-        );
-        return Ok(ConstantCurvatureOptimum {
-            kappa,
-            length_scale: eta_hat.exp(),
-        });
-    }
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.bounds = (kappa_min, kappa_max);
     seed_config.max_seeds = 1;

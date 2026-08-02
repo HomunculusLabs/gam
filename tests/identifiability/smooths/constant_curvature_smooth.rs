@@ -445,6 +445,18 @@ fn fit_and_score(
     let FitResult::Standard(fit) = result else {
         panic!("expected standard fit");
     };
+    // What geometry did the fit actually realize? The range is the smooth's
+    // second outer coordinate (gam#2747) and this file's whole subject is what
+    // limits the recovery, so the realized κ and ℓ belong in the record rather
+    // than being inferred from the formula.
+    for term in fit.resolvedspec.smooth_terms.iter() {
+        if let gam::smooth::SmoothBasisSpec::ConstantCurvature { spec, .. } = &term.basis {
+            eprintln!(
+                "[2687-realized] {formula}  ->  kappa={} (pinned={})  length_scale={} (pinned={})",
+                spec.kappa, spec.kappa_fixed, spec.length_scale, spec.length_scale_fixed
+            );
+        }
+    }
     let mut m = Array2::<f64>::zeros((rows.len(), 3));
     for (i, (x1, x2, _, _)) in rows.iter().enumerate() {
         m[(i, 0)] = *x1;
@@ -512,11 +524,19 @@ fn kappa_zero_fit_recovers_planted_flat_signal() {
 ///
 /// `measure_2687_kappa_one_spherical_recovery_against_capacity_and_baselines`
 /// above records what actually limits it: the basis is capacity-starved at 30
-/// centers (0.9402 at 60, 0.9550 at 120), the auto length scale is ~6× broader
-/// than the sweep's optimum (0.9523 at ℓ = 0.3 with the same 30 centers), and
-/// `matern` at the same budget reaches 0.99988 — 885× less residual — on data
-/// generated on the very sphere this basis models. The baseline named in the
-/// line above is still not the one this assertion makes.
+/// centers (0.9384 at 60), the auto length scale is ~6× broader than the
+/// sweep's optimum (0.9428 at ℓ = 0.3 with the same 30 centers), and `matern` at
+/// the same budget reaches 0.99988 — 900× less residual — on data generated on
+/// the very sphere this basis models. The baseline named in the line above is
+/// still not the one this assertion makes.
+///
+/// The number moved from 0.8937 to 0.8910 under gam#2747, and the 0.003 is the
+/// whole of the effect: the design is now evaluated at the range the spec
+/// states, where it used to be silently re-evaluated at the fill-invariant
+/// `L(κ)`, which at κ = 1 happened to be shorter and therefore slightly closer
+/// to this fixture's R²-optimal 0.3. Honouring the stated range is the point;
+/// the remedy the measurement names — more centers, or a range chosen for this
+/// data — is unchanged and is not what this assertion tests.
 #[test]
 fn kappa_one_fit_recovers_planted_spherical_signal() {
     use rand::RngExt;
@@ -712,6 +732,18 @@ fn fitted_kappa_and_pin(formula: &str, rows: &[(f64, f64, f64, f64)]) -> (f64, b
     let FitResult::Standard(fit) = result else {
         panic!("expected standard fit");
     };
+    // What geometry did the fit actually realize? The range is the smooth's
+    // second outer coordinate (gam#2747) and this file's whole subject is what
+    // limits the recovery, so the realized κ and ℓ belong in the record rather
+    // than being inferred from the formula.
+    for term in fit.resolvedspec.smooth_terms.iter() {
+        if let gam::smooth::SmoothBasisSpec::ConstantCurvature { spec, .. } = &term.basis {
+            eprintln!(
+                "[2687-realized] {formula}  ->  kappa={} (pinned={})  length_scale={} (pinned={})",
+                spec.kappa, spec.kappa_fixed, spec.length_scale, spec.length_scale_fixed
+            );
+        }
+    }
     let SmoothBasisSpec::ConstantCurvature { spec, .. } = &fit.resolvedspec.smooth_terms[0].basis
     else {
         panic!("expected a ConstantCurvature term after fit");
