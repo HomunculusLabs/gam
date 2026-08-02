@@ -1,5 +1,57 @@
 ## Unreleased
 
+- **SAE post-fit certification no longer costs `dim³`: the residual-gauge
+  curvature is `p` blocks of `D × D`, not one `(p·D)²` Gram (#2757).**
+  `fit_diagnostics_report` was materializing the curvature `H = RᵀR` as a dense
+  `param_dim × param_dim` matrix and taking its dense symmetric
+  eigendecomposition — 45.97 GiB and 60.5% of the whole fit at `p = 4096`, on
+  a quantity that is *certification*, not the fit.
+
+  It is block diagonal. The certificate's parameter vector is the atoms'
+  flattened frames, so column `c = offset_k + i·d_k + a` names (atom, **output
+  coordinate**, axis), and a frame perturbation of output coordinate `i` moves
+  the reconstruction only on `i`. The per-row pinning Jacobian is therefore
+  output-coordinate diagonal, and
+
+  ```
+  H[(k,i,a), (k',i',a')] = Σ_n M_n[i,i'] · g_n[i,(k,a)] · g_n[i',(k',a')]
+  ```
+
+  inherits exactly the row metric's output-coordinate coupling and nothing
+  else. Under the metric `diagnostic_metric()` installs whenever no
+  output-Fisher harvest ran, `M_n = I`, and every off-block entry is never
+  written — measured at bit-zero, on a fixture whose decoder touches every
+  output coordinate. So the object is `p·D²` numbers and `p·D³` flops
+  (`D = Σ_k d_k`), against `(p·D)²` and `(p·D)³` before: a factor of `p` in
+  memory and `p²` in time, i.e. 45.1 GiB → 11 MB at the `p = 4096, D = 19`
+  shape. Measured end to end on the issue's own fixture:
+
+  | `p` | `param_dim` | before | after |
+  |---|---|---|---|
+  | 256 | 1024 | 0.316 s | 0.131 s |
+  | 512 | 2048 | 1.318 s | 0.152 s |
+  | 1024 | 4096 | 7.960 s | 0.206 s |
+
+  Growth per doubling of `p` falls from 6.0× (cubic) to 1.36×.
+
+  **The reported `pinning_rank` was also wrong, for a related reason, and is
+  now right.** The rank decision is `σ_i(R) > α·ε·max(m, param_dim)·σ_max` with
+  `α = 100` — deliberately 100× *above* an SVD's backward error, which is what
+  makes it meaningful. Testing the algebraically equivalent `λ > τ²` on the
+  Gram instead puts the threshold a factor `α²·ε·N` *below* a symmetric
+  eigensolver's own resolution, so every roundoff eigenvalue clears it: a
+  curvature of true rank 12 in 80 parameters was reported as rank **45**. The
+  blocks are now accumulated as triangular roots by streaming Givens rotations
+  (same memory, same cost, no squaring) and the rank is read off their singular
+  values; the dense fallback floors its threshold at the standard
+  `|λ̃ − λ| ≤ dim·ε·‖H‖` resolution bound. All representations now agree and all
+  respect `rank(RᵀR) ≤ rows(R)`.
+
+  Certificate output is otherwise unchanged: verdicts, group signature,
+  residual gauge dimension and per-generator energy fractions are identical
+  whichever representation the reduction ran on, which is gated from four
+  independent angles in `tests_frame_curvature_2757`.
+
 - **The measure-jet representer range is a basis coordinate again, so REML
   selects it (#2761).** `lambda` shrinks a coefficient vector INSIDE a span; it
   never moves the span. The measure-jet design is
