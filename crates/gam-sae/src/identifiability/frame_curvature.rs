@@ -488,25 +488,35 @@ impl BlockPlusRowsSpectrum {
     /// `n₊(H − sI)` — how many eigenvalues of `H` exceed `shift`.
     ///
     /// `shift` must not sit on a block eigenvalue, where `(B − sI)⁻¹` does not
-    /// exist. A shift within rounding of one is nudged upward by a relative
-    /// amount: the predicate is a strict `>`, so a value sitting exactly on the
-    /// boundary is already a tie the certificate breaks arbitrarily, and moving
-    /// it by `2⁻⁴⁰` of the operator scale cannot change any decision that was
-    /// not already at the resolution limit.
+    /// exist. A shift within rounding of one is nudged just past it.
+    ///
+    /// The collision test is **relative to the eigenvalue**, not to the
+    /// operator's overall scale, and that distinction is load-bearing. The rank
+    /// shift is `τ² ≈ (α·ε·N)²·λ_max`, which at `N = 10⁵` is `~10⁻²⁵·λ_max` —
+    /// so an absolute guard of even `2⁻⁴⁰·λ_max` would declare every
+    /// structurally zero block "in collision" with it and push the shift up
+    /// thirteen orders of magnitude, silently dropping every genuine singular
+    /// value in between from the reported rank. A relative guard fires only
+    /// where `λ − s` has actually lost its significant digits, which is the only
+    /// place the identity is in trouble and is already a tie the certificate
+    /// breaks arbitrarily.
     pub fn count_above(&self, shift: f64) -> Result<usize, String> {
         let (p, d) = self.block_eigenvalues.dim();
-        let scale = self.block_lambda_max.max(shift.abs()).max(1.0);
-        let guard = scale * 2.0_f64.powi(-40);
         let mut shift = shift;
-        for _ in 0..4 {
-            let collides = self
-                .block_eigenvalues
-                .iter()
-                .any(|lambda| (lambda - shift).abs() <= guard);
-            if !collides {
-                break;
+        // Each pass clears the highest colliding eigenvalue; a handful suffices
+        // because the shift only ever moves upward past distinct values.
+        for _ in 0..8 {
+            let mut collided: Option<f64> = None;
+            for lambda in self.block_eigenvalues.iter() {
+                let tol = 8.0 * f64::EPSILON * lambda.abs().max(shift.abs());
+                if (lambda - shift).abs() <= tol {
+                    collided = Some(collided.map_or(*lambda, |worst: f64| worst.max(*lambda)));
+                }
             }
-            shift += 2.0 * guard;
+            let Some(lambda) = collided else { break };
+            let step = (16.0 * f64::EPSILON * lambda.abs().max(shift.abs()))
+                .max(f64::MIN_POSITIVE * 16.0);
+            shift = lambda + step;
         }
         let mut count = 0usize;
         for i in 0..p {
@@ -893,6 +903,52 @@ mod tests {
             !(1.0e200_f64 * 1.0e200).is_finite(),
             "the Gram entry does overflow"
         );
+    }
+
+    #[test]
+    fn the_inertia_shift_guard_is_relative_to_the_eigenvalue_not_the_operator() {
+        // Four 1x1 blocks with eigenvalues {1, 0, 0, 1e-14} and a negligible
+        // rank-one update, counted above 1e-20. The answer is 2, analytically:
+        // the update's squared norm is 4e-60, far below every gap.
+        //
+        // This is the regression for an ABSOLUTE collision guard. One of
+        // `2^-40 * lambda_max` would see the zero blocks as colliding with a
+        // shift of 1e-20 and push the shift to ~1.8e-12 -- past the genuine
+        // 1e-14 eigenvalue, which then vanishes from the reported rank. That is
+        // not hypothetical at production scale: the rank shift is
+        // `tau^2 ~ (alpha*eps*N)^2 * lambda_max`, which at `N = 1e5` is
+        // `1e-25 * lambda_max`, thirteen orders below such a guard.
+        let layout = FrameColumnLayout::new(4, &[1]);
+        let mut roots = Array3::<f64>::zeros((4, 1, 1));
+        roots[[0, 0, 0]] = 1.0;
+        roots[[3, 0, 0]] = 1.0e-7;
+        let dense_rows = Array2::<f64>::from_elem((1, layout.param_dim()), 1.0e-30);
+        let spectrum =
+            BlockPlusRowsSpectrum::new(&roots, &dense_rows, &layout).expect("inertia machinery");
+        assert_eq!(
+            spectrum.count_above(1.0e-20).expect("count"),
+            2,
+            "both the unit eigenvalue and the 1e-14 one are above 1e-20"
+        );
+        // And the shift still lands correctly on either side of each.
+        assert_eq!(spectrum.count_above(1.0e-16).expect("count"), 2);
+        assert_eq!(spectrum.count_above(1.0e-12).expect("count"), 1);
+        assert_eq!(spectrum.count_above(2.0).expect("count"), 0);
+    }
+
+    #[test]
+    fn a_degenerate_layout_yields_an_empty_curvature_rather_than_an_error() {
+        for axes in [vec![], vec![0usize], vec![1usize, 2]] {
+            for p in [0usize, 3] {
+                let layout = FrameColumnLayout::new(p, &axes);
+                let curvature = OutputBlockRootAccumulator::new(layout.clone()).finish(0);
+                assert_eq!(curvature.param_dim(), layout.param_dim());
+                assert!(curvature.is_finite());
+                let gram = curvature.to_dense_gram();
+                assert_eq!(gram.dim(), (layout.param_dim(), layout.param_dim()));
+                assert!(gram.iter().all(|v| *v == 0.0));
+            }
+        }
     }
 
     #[test]
