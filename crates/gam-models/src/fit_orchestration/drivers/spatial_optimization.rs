@@ -9206,6 +9206,41 @@ impl SmoothLrCorrection {
     }
 }
 
+/// The additive assembly behind [`SmoothTermLrInference::ref_df`], reported
+/// component by component (#2672).
+///
+/// `ref_df` is the χ² reference the whole test is scored against AND — through
+/// `E[W] = d + Δε` in [`gam_terms::inference::lawley::lawley_lr_bartlett_factor`]
+/// — the *leading term of the statistic's own null mean*. A single scalar
+/// cannot say which of its four candidate suppliers produced it, so a
+/// disagreement between the analytic mean and the empirical one is
+/// unattributable from the report alone. That is the shape #2672 spent three
+/// measurement rounds on: `mean(W) = 2.03` against `d = 5.71` with a Bartlett
+/// factor of `1.0027`, and no way to tell an over-counted reference from a
+/// missing cumulant term without instrumenting the driver.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmoothLrReferenceDf {
+    /// Wood's smoothing-selection-corrected `edf1 = 2·tr(F_bb) − tr(F_bb²)` on
+    /// the term's coefficient-influence block, or `None` when the influence
+    /// matrix was unavailable or the block trace was non-finite/non-positive (a
+    /// fully collapsed term), in which case the `edf` floor below supplies the
+    /// base.
+    pub wood_edf1: Option<f64>,
+    /// The term's conditional effective degrees of freedom (`per_term_edf`), the
+    /// floor under `wood_edf1` and the fallback base when it is `None`.
+    pub edf: f64,
+    /// The Wood–Pya–Säfken smoothing-parameter-uncertainty inflation
+    /// `tr(X'WX · J Var(ρ̂) Jᵀ)/φ` restricted to the term's coefficient block, or
+    /// `0.0` when the correction artifacts were not computed.
+    pub rho_uncertainty: f64,
+    /// The term's joint unpenalized null-space dimension `dim(∩_k null(S_k))`,
+    /// the degenerate-collapse floor.
+    pub null_dim: usize,
+    /// The resolved reference actually used:
+    /// `max(max(wood_edf1, edf) + rho_uncertainty, null_dim, 1)`.
+    pub resolved: f64,
+}
+
 /// The Bartlett-corrected per-term significance report for one penalized smooth
 /// term (#1063). Unlike the summary table's Wood rank-truncated **Wald**
 /// statistic, this is a genuine **likelihood-ratio** statistic from a
@@ -9220,9 +9255,17 @@ pub struct SmoothTermLrInference {
     /// The uncorrected likelihood-ratio statistic `W = 2(ℓ_full − ℓ_null)`,
     /// floored at zero (a non-negative LR by construction).
     pub statistic_lr: f64,
-    /// Reference degrees of freedom `d` (the Wood truncation `tr(F)²/tr(F²)` on
-    /// the term's influence block, falling back to the term EDF).
+    /// Reference degrees of freedom `d`: Wood's smoothing-selection-corrected
+    /// `edf1 = 2·tr(F_bb) − tr(F_bb²)` on the term's influence block, floored at
+    /// the term EDF, inflated by the WPS ρ̂-uncertainty df, and floored again at
+    /// the term's unpenalized null-space dimension and at one. See
+    /// [`Self::ref_df_provenance`] for the component-by-component assembly.
     pub ref_df: f64,
+    /// Which component supplied [`Self::ref_df`] (#2672). Reported rather than
+    /// inferable because `ref_df` doubles as the leading term of the null mean
+    /// `E[W] = d + Δε`, so an error in any one component is indistinguishable
+    /// from a missing Lawley cumulant when only the total is published.
+    pub ref_df_provenance: SmoothLrReferenceDf,
     /// Lawley LR Bartlett factor `c = E[W]/d = 1 + Δε/d` when computable, else
     /// `1.0` (no correction).
     pub bartlett_factor: f64,
@@ -9470,15 +9513,20 @@ pub fn smooth_term_lr_inference_forspec(
             Some(extra_df) => extra_df,
             None => 0.0,
         };
-        let ref_df = (wood_reference_df(influence, &coeff_range)
-            .unwrap_or(0.0)
-            .max(edf)
-            + rho_uncertainty_df)
+        let wood_edf1 = wood_reference_df(influence, &coeff_range);
+        let ref_df = (wood_edf1.unwrap_or(0.0).max(edf) + rho_uncertainty_df)
             .max(null_dim as f64)
             .max(1.0);
         if !(ref_df.is_finite() && ref_df > 0.0) {
             continue;
         }
+        let ref_df_provenance = SmoothLrReferenceDf {
+            wood_edf1,
+            edf,
+            rho_uncertainty: rho_uncertainty_df,
+            null_dim,
+            resolved: ref_df,
+        };
 
         // Null model: drop this smooth term from the spec and refit. The term's
         // name pins which spec entry to remove (design and spec share names).
@@ -9621,6 +9669,7 @@ pub fn smooth_term_lr_inference_forspec(
             term_idx,
             statistic_lr,
             ref_df,
+            ref_df_provenance,
             bartlett_factor,
             bartlett_factor_conditional,
             rho_variation_shift,

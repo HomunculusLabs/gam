@@ -259,6 +259,88 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     );
 }
 
+/// DIAGNOSTIC (not a contract, #2672): decompose the reference d.f. `d` against
+/// the empirical null mean of `W`, component by component.
+///
+/// `d` is BOTH the χ² reference the test is scored against AND — through
+/// `E[W] = d + Δε` inside `lawley_lr_bartlett_factor` — the leading term of the
+/// statistic's own null mean. So `mean(W) = 2.03` against `d = 5.71` with a
+/// Bartlett factor of `1.0027` has two readings that the published scalars
+/// cannot separate:
+///
+/// * the Lawley cumulant assembly is missing the term that would supply
+///   `Δε ≈ −3.67`, or
+/// * `d` itself is over-counted and the assembly is right that `Δε ≈ 0`.
+///
+/// `ref_df_provenance` names the supplier. Read the printed table as: `wood_edf1`
+/// tracking `mean(W)` ⇒ the reference is sound and the shift is missing;
+/// `wood_edf1 + rho_uncertainty` overshooting `mean(W)` by the observed factor ⇒
+/// the reference is inflated by a component that does not belong in the null
+/// mean of this statistic.
+#[test]
+fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
+    init_parallelism();
+
+    const N: usize = 60;
+    const REPS: usize = 40;
+
+    let mut sum_w = 0.0;
+    let mut sum_wood = 0.0;
+    let mut sum_edf = 0.0;
+    let mut sum_rho = 0.0;
+    let mut sum_ref = 0.0;
+    let mut sum_factor = 0.0;
+    let mut wood_missing = 0usize;
+    let mut count = 0usize;
+    eprintln!(
+        "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4}",
+        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd"
+    );
+    for rep in 0..REPS {
+        let data = null_replicate(N, 1000 + rep as u64);
+        let Some(r) = run_one(&data) else { continue };
+        if !(r.statistic_lr.is_finite() && r.ref_df.is_finite()) {
+            continue;
+        }
+        let p = r.ref_df_provenance;
+        let wood = p.wood_edf1.unwrap_or(f64::NAN);
+        if p.wood_edf1.is_none() {
+            wood_missing += 1;
+        }
+        if rep < 12 {
+            eprintln!(
+                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4}",
+                r.statistic_lr, r.ref_df, wood, p.edf, p.rho_uncertainty, r.bartlett_factor,
+                p.null_dim
+            );
+        }
+        sum_w += r.statistic_lr;
+        sum_wood += if wood.is_finite() { wood } else { 0.0 };
+        sum_edf += p.edf;
+        sum_rho += p.rho_uncertainty;
+        sum_ref += r.ref_df;
+        sum_factor += r.bartlett_factor;
+        count += 1;
+    }
+    assert!(count > 0, "no replicate produced a finite LR report");
+    let d = count as f64;
+    eprintln!(
+        "[zz2672] MEAN over {count} reps: W={:.4}  ref_df={:.4}  wood_edf1={:.4}  edf={:.4}  \
+         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing})",
+        sum_w / d,
+        sum_ref / d,
+        sum_wood / d,
+        sum_edf / d,
+        sum_rho / d,
+        sum_factor / d,
+    );
+    eprintln!(
+        "[zz2672] read: mean(W)/mean(wood_edf1) = {:.4}, mean(W)/mean(ref_df) = {:.4}",
+        (sum_w / d) / (sum_wood / d).max(f64::MIN_POSITIVE),
+        (sum_w / d) / (sum_ref / d).max(f64::MIN_POSITIVE),
+    );
+}
+
 /// #939 deliverable (2), the ρ̂-variation arm — VALIDATION BY SIMULATION over
 /// the sampling distribution of ρ̂.
 ///
