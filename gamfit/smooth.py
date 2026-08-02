@@ -469,8 +469,9 @@ class MeasureJet(Smooth):
     no graph, mesh, or neighbor-set inside the statistical object. Every
     option is auto-derived from the data when omitted; set a field only to
     pin it or explicitly opt into an outer coordinate. The default uses one
-    fused penalty at Duchon-class cost; per-scale multiscale penalties and
-    learned representer range are explicit opt-ins.
+    fused penalty at Duchon-class cost and REML-selects the representer
+    range (a basis coordinate, like the Matérn ``kappa``); per-scale
+    multiscale penalties are an explicit opt-in.
 
     Parameters
     ----------
@@ -487,10 +488,17 @@ class MeasureJet(Smooth):
         local slope Gram; ``0`` selects the exact pseudo-inverse.
     scales : optional int — number of scale nodes in the multiscale band.
     length_scale : optional positive float — representer (Gaussian RBF)
-        range.
-    learn_length_scale : optional bool — opt into REML learning of the
-        representer range. ``None`` defers to the engine default (fixed);
-        pass ``True`` to add the design-moving outer coordinate.
+        range. Supplying it PINS the range: an explicit value is read as a
+        request, not as a starting guess, so it also switches
+        ``learn_length_scale`` off unless you pass that explicitly too.
+    learn_length_scale : optional bool — REML-select the representer range.
+        ``None`` defers to the engine default, which is on (and off when
+        ``length_scale`` is pinned). The range decides which subspace the
+        representers span, and a smoothing parameter can only shrink inside
+        a span, never move one — so freezing it is an error no ``lambda``
+        can repair (#2761 measured 13.4x held-out RMSE from a frozen range
+        on a 1-D curve in 3-D). Pass ``False`` to drop the design-moving
+        outer coordinate.
     double_penalty : optional bool — add the ridge-like shrinkage penalty
         alongside the jet-energy penalty. ``None`` defers to the engine
         default (on); pass ``False`` to disable it explicitly.

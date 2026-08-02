@@ -1,5 +1,51 @@
 ## Unreleased
 
+- **The measure-jet representer range is a basis coordinate again, so REML
+  selects it (#2761).** `lambda` shrinks a coefficient vector INSIDE a span; it
+  never moves the span. The measure-jet design is
+  `X = K(data, centers; ell) * z`, so `ell` decides WHICH m-dimensional subspace
+  the representers occupy — the same standing the Matern `kappa` has, and the
+  module header already called it "matern's log_kappa analog". Freezing it at a
+  geometric heuristic therefore makes an error no smoothing parameter can
+  repair.
+
+  Measured on `measure_jet_perf_parity`'s 1-D-curve-in-3-D Gaussian fixture
+  (n=1500, sigma=0.10, 16 centers, p=15), where `span floor` is the
+  least-squares projection residual of the NOISELESS truth onto the realized
+  design's column span — the bound no `lambda` can beat:
+
+  | arm | ell | edf | span floor | unpen. LS | held-out |
+  |---|---|---|---|---|---|
+  | frozen (auto ell) | 0.5144 | 14.684 | 0.152488 | 0.155484 | 0.155584 |
+  | REML-selected ell | 3.8813 | 14.006 | 0.000014 | 0.008155 | 0.009642 |
+  | `matern(k=16)` | - | 14.619 | 0.006077 | 0.011989 | 0.011639 |
+  | `duchon(k=16)` | - | 15.016 | 0.002443 | 0.011308 | 0.010521 |
+
+  At the frozen range the fitted `0.1556` IS the span floor: unpenalized least
+  squares on the same design gives `0.1555`, dropping the null-component penalty
+  moves the fourth decimal, and `edf/p = 0.98` says the fit was already spending
+  everything it had. Freeing `ell` puts measure-jet past both comparators at
+  LOWER edf, so nothing is traded for the accuracy.
+
+  The dial itself was not new: `299c83ffc` introduced it default-ON precisely to
+  remove this fixture's 13x, `a3afd17a2` found its one hazard — a BMS fit shares
+  one measure-jet basis between the marginal mean and the log-slope surface,
+  where a design-moving kernel scale on shared covariates reached a
+  separation-scale runaway — and contained it AT THE BMS ENTRY POINT, and
+  `b1d94d1a5` then flipped the GLOBAL default off anyway. The 13x came back. The
+  scoped freeze is untouched and still runs where the hazard is.
+
+  Rejected: raising `MEASURE_JET_AUTO_LENGTH_SCALE_FACTOR`. That is what #1041
+  did (x2 -> x1) as the dial's replacement and it is what main measured 13.4x
+  with. No fixed multiple of the center spacing can be the answer, because the
+  range that aligns the span depends on the target's smoothness relative to the
+  center layout — data, not geometry. The constant survives as the SEED of the
+  outer coordinate and its doc now says so.
+
+  Behaviour change for callers: an explicit `mjs(..., length_scale=X)` now PINS
+  the range instead of seeding a search, mirroring the short-circuit an
+  explicitly-scaled Matern gets. `learn_length_scale=` overrides either way.
+
 - **The constant-curvature smooth stops pinning its kernel range, so `kappa_hat`
   measures curvature instead of the range error (#2747).** `exp(-d_kappa/ell)`
   carries a curvature and a range in one exponent and they are strongly
