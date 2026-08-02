@@ -1,0 +1,139 @@
+//! #2672: Wood's smoothing-selection-corrected `edf1` must reach the smooth-term
+//! LR reference d.f. on models that carry a PARAMETRIC term, not only on the
+//! `y ~ s(x)` shape every other fixture uses.
+//!
+//! `edf1 = 2·tr(F_jj) − tr(F_jj²)` is computed from the coefficient influence
+//! `F = H⁻¹X'WX`. `F` transforms by SIMILARITY under the parametric column
+//! conditioning — `F_orig = M·F_int·M⁻¹` — and the back-transform used to drop it
+//! rather than apply that map, on the stated ground that the primitive was not
+//! carried. It was: `left_multiply_by_m` and `right_multiply_by_m_inv` are both
+//! defined on the same type. The drop was invisible because
+//! `backtransform_external_result` returns early when the conditioning is
+//! inactive, and the conditioning is active exactly when the model has a
+//! non-intercept parametric column — which no fixture reading `F` back had.
+//!
+//! With `F` gone, `wood_reference_df` returned `None` for every such model and
+//! the whole-term LR test silently fell back to the raw conditional EDF: the
+//! anti-conservative reference #1766 replaced, measured there at a 5%-level FPR
+//! of ~0.15. The two `smooth_term_lr_size_calibration` fixtures are exactly this
+//! shape (`y ~ x + s(z)`).
+//!
+//! The guard is stated as a CONTRAST rather than as a bare "must be Some", so it
+//! cannot pass by the reference d.f. becoming unconditionally available for some
+//! unrelated reason: the parametric-term model and the pure-smooth control must
+//! BOTH publish `wood_edf1`, and both must satisfy Wood's analytic band
+//! `edf ≤ edf1 ≤ 2·edf`.
+
+use gam::smooth::smooth_term_lr_inference_forspec;
+use gam::{
+    FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
+};
+
+use csv::StringRecord;
+use rand::RngExt;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand_distr::{Distribution, Poisson};
+
+/// `y ~ Poisson(exp(0.3 + 0.8·x + 0.9·sin(2π z)))` — a genuine smooth signal in
+/// `z` so the fitted term has healthy effective d.f. and the `edf1` band below is
+/// a real constraint rather than a statement about a collapsed term.
+fn dataset(n: usize, seed: u64) -> gam::data::EncodedDataset {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let headers = vec!["y".to_string(), "x".to_string(), "z".to_string()];
+    let mut rows = Vec::<StringRecord>::with_capacity(n);
+    for i in 0..n {
+        let x = i as f64 / (n as f64 - 1.0);
+        let z: f64 = rng.random_range(0.0..1.0);
+        let eta = 0.3 + 0.8 * x + 0.9 * (std::f64::consts::TAU * z).sin();
+        let lambda: f64 = eta.exp();
+        let y = Poisson::new(lambda).expect("poisson rate").sample(&mut rng) as f64;
+        rows.push(StringRecord::from(vec![
+            y.to_string(),
+            x.to_string(),
+            z.to_string(),
+        ]));
+    }
+    encode_recordswith_inferred_schema(headers, rows).expect("encode")
+}
+
+/// The `s(z)` LR report for one formula on one dataset.
+fn report(formula: &str, data: &gam::data::EncodedDataset) -> gam::smooth::SmoothTermLrInference {
+    let cfg = FitConfig {
+        family: Some("poisson".to_string()),
+        ..FitConfig::default()
+    };
+    let mat = materialize(formula, data, &cfg).expect("materialize");
+    let FitRequest::Standard(req) = mat.request else {
+        panic!("expected a standard fit request for {formula}");
+    };
+    let reports = smooth_term_lr_inference_forspec(
+        req.data.view(),
+        req.y.view(),
+        req.weights.view(),
+        req.offset.view(),
+        &req.spec,
+        req.family,
+        &req.options,
+    )
+    .expect("smooth-term LR inference");
+    reports
+        .into_iter()
+        .find(|r| r.name.contains('z'))
+        .unwrap_or_else(|| panic!("no s(z) report for {formula}"))
+}
+
+#[test]
+fn wood_edf1_reaches_the_reference_df_with_a_parametric_term_2672() {
+    init_parallelism();
+    let data = dataset(150, 20672);
+
+    // The model shape the size-calibration fixtures use: a parametric `x`
+    // alongside the smooth, so parametric column conditioning is ACTIVE.
+    let conditioned = report("y ~ x + s(z)", &data);
+    // The control: no non-intercept parametric column, so the conditioning is
+    // inactive and `F` was never dropped even before the repair.
+    let unconditioned = report("y ~ s(z)", &data);
+
+    for (label, r) in [
+        ("y ~ x + s(z)", &conditioned),
+        ("y ~ s(z)", &unconditioned),
+    ] {
+        let p = r.ref_df_provenance;
+        let edf1 = p.wood_edf1.unwrap_or_else(|| {
+            panic!(
+                "{label}: Wood's edf1 must reach the LR reference d.f.; \
+                 `wood_reference_df` returned None, which means the coefficient \
+                 influence F = H⁻¹X'WX was unavailable — the #2672 similarity-map \
+                 drop. Provenance: {p:?}"
+            )
+        });
+        // Wood's analytic band. `edf1 = 2·tr(F) − tr(F²) = Σ_i λ_i(2 − λ_i)` with
+        // the block's influence eigenvalues `λ_i ∈ [0, 1]`, so it can neither
+        // fall below `tr(F) = edf` nor exceed `2·edf`. A violation means the
+        // block being differenced is not the block whose trace produced `edf`.
+        let slack = 1e-6 * p.edf.abs().max(1.0);
+        assert!(
+            edf1 >= p.edf - slack && edf1 <= 2.0 * p.edf + slack,
+            "{label}: edf1 = {edf1} must lie in Wood's band [edf, 2·edf] = \
+             [{}, {}]; provenance {p:?}",
+            p.edf,
+            2.0 * p.edf
+        );
+        // The fixture must actually exercise a term with fitted complexity —
+        // otherwise the band above is a statement about zero.
+        assert!(
+            p.edf > 1.5,
+            "{label}: the planted sin(2πz) signal must give s(z) real effective \
+             d.f. for this guard to constrain anything; got edf = {}",
+            p.edf
+        );
+        // And the reference the test is scored against must be at least that
+        // band's lower end: the assembly floors, it never truncates.
+        assert!(
+            r.ref_df >= edf1 - slack,
+            "{label}: ref_df = {} must not fall below edf1 = {edf1}; provenance {p:?}",
+            r.ref_df
+        );
+    }
+}
