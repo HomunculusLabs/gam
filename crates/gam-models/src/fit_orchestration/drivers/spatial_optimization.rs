@@ -2424,6 +2424,19 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// box stops it. Making the bracket deterministic (rather than warm-starting
     /// from the previous κ) is what makes `V_p` a function of κ alone, which the
     /// CI walk and the LR test both require.
+    ///
+    /// # What this costs, and why it is paid
+    ///
+    /// Roughly seventeen criterion evaluations per κ where the pinned-range
+    /// criterion needed one — thirteen bracket points and a handful of Newton
+    /// steps — of which only the accepted iterates pay for derivative blocks
+    /// (see [`Self::evaluate_value`]). That is the intrinsic price of profiling
+    /// a nuisance coordinate rather than guessing it, and the alternative is the
+    /// defect: a κ estimated against a heuristic range is an estimate of the
+    /// range error. Warm-starting from the previous κ would cut the bracket, but
+    /// it makes `V_p` depend on the ORDER the CI walk visits κ, and a profile
+    /// likelihood that is not a function of its own argument cannot support an
+    /// interval.
     fn minimize_over_eta(
         &self,
         kappa: f64,

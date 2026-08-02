@@ -3404,12 +3404,17 @@ pub fn spatial_term_supports_hyper_optimization(
         return measure_jet_enrolls_psi(mj);
     }
 
-    // Constant-curvature smooths always enroll their single signed curvature κ
-    // as an outer ψ-coordinate (#944 stage 3): κ̂ is the headline estimand, so
-    // unlike a fixed-ℓ kernel it is fitted by default, not gated on a
-    // user-supplied scale. The coordinate is raw κ (interior κ = 0), and its
-    // exact design/penalty κ-derivatives come from
-    // `build_constant_curvature_basis_kappa_derivatives`.
+    // Constant-curvature smooths always enroll (#944 stage 3): κ̂ is the headline
+    // estimand, so unlike a fixed-ℓ kernel the geometry is fitted by default and
+    // not gated on a user-supplied scale. The term carries TWO outer
+    // coordinates — the raw signed κ (interior κ = 0) and the log range
+    // η = ln ℓ, which must be estimated because it is confounded with κ
+    // (gam#2747) — but both are owned by the term-local curvature profile
+    // (`constant_curvature_kappa_profile_optimum`), which certifies them BEFORE
+    // the joint spatial solve and is why `fit_term_collectionwith_spatial_
+    // length_scale_optimization` filters constant-curvature terms out of its
+    // `spatial_terms` list. Enrolling here keeps the term in the eligibility
+    // scan that reaches that profile.
     if constant_curvature_term_spec(spec, term_idx).is_some() {
         return true;
     }

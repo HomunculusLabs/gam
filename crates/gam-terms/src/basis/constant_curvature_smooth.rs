@@ -1275,6 +1275,31 @@ mod tests {
         (data, centers)
     }
 
+    /// Degenerate geometries must refuse the range box by name rather than
+    /// returning a collapsed or infinite one: a box is a claim about where the
+    /// design is evaluable, and there is no such claim to make when every
+    /// evaluated pair is coincident.
+    #[test]
+    pub(crate) fn range_box_refuses_a_degenerate_geometry() {
+        let coincident = ndarray::array![[0.3_f64, -0.2], [0.3, -0.2]];
+        let error = constant_curvature_length_scale_bounds(coincident.view(), coincident.view())
+            .expect_err("a cloud with no positive pairwise distance has no range box");
+        let message = format!("{error}");
+        assert!(
+            message.contains("no") && message.contains("positive"),
+            "the refusal must name what is missing; got {message}"
+        );
+        // TWO distinct points are enough: one positive distance defines both
+        // ends, and the floating-point walls put them far apart.
+        let pair = ndarray::array![[0.0_f64, 0.0], [0.2, 0.0]];
+        let (lo, hi) = constant_curvature_length_scale_bounds(pair.view(), pair.view())
+            .expect("one positive pairwise distance is enough");
+        assert!(
+            lo > 0.0 && hi / lo > 1.0e10,
+            "even a two-point geometry gets the full evaluability box, got [{lo}, {hi}]"
+        );
+    }
+
     /// Every entry of the `(κ, η)` kernel tower must match a central finite
     /// difference of the value (first order) and of the first derivatives
     /// (second order), on BOTH branches and across the κ = 0 series/closed-form

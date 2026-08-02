@@ -211,6 +211,54 @@ mod constant_curvature_kappa_range_identification_tests {
         }
     }
 
+    /// An explicit `length_scale=` PINS the range, exactly as an explicit
+    /// `kappa=` pins the geometry — the same mgcv-`sp=` convention on the
+    /// smooth's other coordinate.
+    ///
+    /// Pinned means pinned: the inner solve must report `LocallyFixed` at every
+    /// κ, hand back the user's value verbatim, and take the plain κ slice for
+    /// the profile's derivatives, because a range the criterion may not move has
+    /// `dη̂/dκ = 0` and the envelope/Schur reduction does not apply to it. The
+    /// resulting κ̂ is a conditional estimate and the report says so
+    /// (`length_scale_estimated = false`).
+    #[test]
+    fn a_pinned_range_is_honoured_verbatim_and_never_profiled() {
+        let n = 240usize;
+        let centers = 6usize;
+        let radius = 0.6_f64;
+        let seed = 0x5EED_2747_0000_0002_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, radius, 1.0, centers, 0.0, seed);
+        let (ell_ref, _) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, 1.0, radius, ell_ref, centers, 0.03, seed);
+
+        let pinned = ell_ref * 0.37;
+        let mut spec = spec_at(0.0, centers, pinned);
+        spec.length_scale_fixed = true;
+        let profile = ConstantCurvatureProfile::new(feats.view(), y.view(), spec)
+            .expect("profile is constructible with a pinned range");
+        for &kappa in &[-1.0_f64, 0.0, 0.7] {
+            let (eta_hat, jet, outcome) = profile
+                .minimize_over_eta(kappa)
+                .expect("a pinned range still evaluates");
+            assert_eq!(
+                outcome,
+                RangeSolveOutcome::LocallyFixed,
+                "a pinned range is never an interior minimizer of the profile"
+            );
+            assert!(
+                (eta_hat.exp() - pinned).abs() <= 1.0e-12 * pinned,
+                "κ={kappa}: the pinned range must be honoured verbatim, got {}",
+                eta_hat.exp()
+            );
+            let (value, first, second) = profile.evaluate(kappa).expect("profiled jet");
+            assert_eq!(
+                (value, first, second),
+                jet.kappa_slice(),
+                "κ={kappa}: a pinned range must take the plain κ slice"
+            );
+        }
+    }
+
     /// The range coordinate must actually be estimated, and estimated WELL:
     /// `ℓ̂` at the criterion's own argmin must track the planted range across a
     /// factor of four, not sit at the heuristic seed.

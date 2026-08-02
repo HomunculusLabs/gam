@@ -1,5 +1,65 @@
 ## Unreleased
 
+- **The constant-curvature smooth stops pinning its kernel range, so `kappa_hat`
+  measures curvature instead of the range error (#2747).** `exp(-d_kappa/ell)`
+  carries a curvature and a range in one exponent and they are strongly
+  confounded: to first order `d_kappa = d_0*(1 + kappa*a(x,y))`, so the MEAN of
+  `a` over the evaluated pairs acts exactly like a rescaling of `ell` and only
+  its VARIATION is genuine curvature. The smooth fitted `kappa` while pinning
+  `ell` to a heuristic (median chart center spacing, doubled), so `kappa`
+  absorbed whatever range error the heuristic carried — and range
+  mis-specification is monotone in one direction, which is the railed
+  `V_p(kappa)` the issue reported.
+
+  Measured on truths planted INSIDE the fitted span, three planted curvatures x
+  three planted ranges: with `ell` pinned the criterion recovers `kappa*` only in
+  the one cell where the truth's own radial length scale IS the auto `ell_ref`.
+  At half or twice that range it rails at a box endpoint, reports the WRONG SIGN
+  (`kappa_hat = -0.35` against a planted `+1.0`), or reads a confident interior
+  `kappa_hat = -0.94` / `+0.94` on genuinely FLAT data. That one working cell is
+  the configuration the acceptance fixture happened to use, which is why the
+  fixture was green while the estimator was not.
+
+  The construction is now one kernel at one range —
+  `X = K_{kappa,ell}(data,C)z` and `S = z' K_{kappa,ell}(C,C) z` at the same
+  `ell`, so `S` is again the RKHS roughness of the function `X` realizes and the
+  model is the ordinary subset-of-regressors GP. `#944`'s fill-invariant
+  `L(kappa)` and `#1464`'s separate penalty length `L_S(kappa)` are deleted with
+  their implicit-function jets and the two 100-iteration Newton solves they cost
+  on every basis build; both were attempts to remove the confounding by
+  CONSTRAINT, and pinning a scalar summary of the design selects a
+  one-dimensional curve through the `(kappa, ell)` plane a priori, on which
+  `dV/dkappa = V_kappa + V_ell*L'(kappa)` keeps a range term that vanishes only
+  if `ell_ref` was already optimal. On the profile curve it vanishes identically
+  by the envelope theorem.
+
+  `psi = (kappa, eta = ln ell)` now carries a full second-order tower, the outer
+  solve is one-dimensional over the range-PROFILED criterion
+  `V_p(kappa) = min_eta V(kappa, eta)` so the point estimate, the profile CI and
+  the flatness LR are extrema of the same object, and `length_scale=` follows the
+  same mgcv-`sp=` convention `kappa=` does: explicit pins, omitted estimates.
+  `Model.curvature(...)` rows gain `length_scale_hat` and
+  `length_scale_estimated`, because every statistic in the row is a profile over
+  the range and a reader who cannot see it cannot tell an estimate anchored at a
+  sensible resolution from one anchored at a degenerate corner.
+
+  With the range profiled, `kappa_hat` lands within 0.19 of the planted
+  curvature in all nine cells (median 0.07), `ell_hat` recovers the planted range
+  to 3%, and there are no rails and no sign inversions. The acceptance fixture
+  now cycles the planted range `{0.5, 1, 2}x ell_ref` across its replicates, and
+  its flat arm is a real signal again rather than the constant mean the
+  confounding had forced on it.
+
+  NOT fixed by this, and stated so the next reader does not have to rediscover
+  it: on truths that are in NO fitted span the criterion still prefers `+kappa`.
+  An origin-radial plant is curvature-blind as a function class
+  (`d_kappa(x,0) = 2*arctan(sqrt(kappa) r)/sqrt(kappa)` is a strictly monotone
+  reparametrization of the chart radius at every `kappa`), and a multi-reference
+  plant that does carry curvature still rails with a sign that flips as the
+  center count sweeps 6 -> 12 -> 24 -> 40. That is span-approximation ordering
+  under misspecification — the residue of `#1464` — and a different root cause
+  from the range confounding.
+
 - **A monotone link warp no longer ships an unpenalized rescale of the index it
   is composed onto (#2647).** `binomial_location_scalewiggle_termswith_matern_spatial_blocks_fit_finitely`
   refused all four startup seeds with `did not converge after 48 cycle(s)`, which
