@@ -600,11 +600,18 @@ fn measure_jet_primary_structural_null_frame(
     // `rrqr_nullspace_basis(B)` returns `null(Bᵀ)`, so pass the transpose of the
     // representer rows to get the coefficient-space null vectors.
     let representer_rows = z.slice(ndarray::s![..representer_count, ..]).to_owned();
-    let (frame, _) = rrqr_nullspace_basis(&representer_rows.t().to_owned(), default_rrqr_rank_alpha())
-        .map_err(BasisError::LinalgError)?;
-    if frame.ncols() == 0 {
-        return Ok(None);
-    }
+    let (frame, _) =
+        rrqr_nullspace_basis(&representer_rows.t().to_owned(), default_rrqr_rank_alpha())
+            .map_err(BasisError::LinalgError)?;
+    // An EMPTY frame is a declaration, not a missing one: it says the chart has
+    // absorbed every affine-head direction, so the Primary has no null space
+    // here. That is the answer in a composed frozen chart, where the global
+    // parametric orthogonalization has already taken the head — and it is
+    // exactly the chart every ψ trial rebuilds in. Returning `None` there would
+    // send the topology decision back to the rank test the declaration exists
+    // to replace, reinstating the ℓ-dependence on the one path that cannot
+    // tolerate it. `None` is reserved for "this construction does not apply"
+    // (multiscale, no head).
     Ok(Some(frame))
 }
 

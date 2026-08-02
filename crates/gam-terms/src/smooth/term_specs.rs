@@ -9752,8 +9752,9 @@ pub fn build_smooth_design_withworkspace_unvalidated(
                     // `Q` is orthogonal, so `null(Qᵀ S Q) = Qᵀ null(S)` and the
                     // image of an orthonormal frame is orthonormal — a declared
                     // structural null frame transports EXACTLY here (unlike the
-                    // non-orthogonal shape-constraint chart below, which has to
-                    // withdraw it). Rotating it alongside `null_eigenvectors`
+                    // non-orthogonal shape-constraint chart in
+                    // `build_single_local_smooth_term`, which has to withdraw
+                    // it). Rotating it alongside `null_eigenvectors`
                     // is what keeps the declaration a statement about the same
                     // subspace after the rotation instead of a stale frame in
                     // the pre-rotation coordinates (#2761).
