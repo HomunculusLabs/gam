@@ -6,3 +6,4 @@ mod measure_jet_near_miss_decoupling;
 mod measure_jet_perf_parity;
 mod measure_jet_scale_smoke;
 mod measure_jet_web_quality;
+mod probe_2761_span;
