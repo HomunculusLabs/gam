@@ -13,11 +13,11 @@
 //! empirical-geometry estimator stay within 2x Duchon's analytic penalty (or
 //! 1.10x its exact-interpolant accuracy) is ill-posed by design.
 //!
-//! ## This header used to claim measure-jet BEATS Matern on accuracy. It does not (#2761).
+//! ## The 13.4x this file measured for a month was a FROZEN representer range (#2761)
 //!
-//! Measured on THIS fixture at both ends of the interval #2697 suspected of
-//! carrying a regression, with each basis fitted and scored INDEPENDENTLY so that
-//! one basis refusing cannot abort the arm and suppress the others:
+//! #2697 read the miss as a regression and #2761 measured it at both ends of the
+//! suspected interval, each basis fitted and scored INDEPENDENTLY so one basis
+//! refusing cannot abort the arm and suppress the others:
 //!
 //! ```text
 //!                    mjs         matern      duchon
@@ -25,25 +25,35 @@
 //!   665dce521       0.155584    0.011639    0.010521
 //! ```
 //!
-//! At `665dce521` mjs is 13.4x Matern's held-out RMSE and 14.8x Duchon's, so the
-//! `mjs_rmse <= 1.10 * matern_rmse` assertion below misses by more than an order of
-//! magnitude. At `7b0776e15^` Matern refuses (outer non-convergence), so no
-//! mjs/matern ratio exists at that commit and the assertion cannot be evaluated
-//! there at all.
+//! mjs agrees across the interval to 5.1e-5 relative and duchon to five
+//! significant figures, so nothing about measure-jet's accuracy CHANGED there and
+//! `7b0776e15` is exonerated. The deficit was older than the interval, and it was
+//! not a basis-capacity limit either. Measured through `fit_from_formula` on this
+//! fixture, with `span floor` = the least-squares projection residual of the
+//! NOISELESS truth onto the realized design's column span -- the bound no `lambda`
+//! can beat, since `lambda` shrinks inside a span and never moves one:
 //!
-//! It is NOT failing because of a regression. mjs agrees across the interval to
-//! 5.1e-5 relative and duchon to five significant figures, so nothing about
-//! measure-jet's accuracy on this fixture changed and `7b0776e15` is exonerated.
-//! Duchon fitting at BOTH ends is the control proving the fixture is fittable at
-//! the earlier commit, so the mjs number there is not an artifact of a broken tree.
-//! What remains is a basis-design question about measure-jet on a 1-D curve
-//! embedded in 3-D at matched `p`; it is tracked in #2761 and must not be closed by
-//! widening the 1.10x bound.
+//! ```text
+//!   arm                       ell      edf   span floor  unpen. LS  held-out
+//!   frozen (auto ell)      0.5144   14.684    0.152488   0.155484   0.155584
+//!   REML-selected ell      3.8813   14.006    0.000014   0.008155   0.009642
+//!   matern(k=16)                -   14.619    0.006077   0.011989   0.011639
+//!   duchon(k=16)                -   15.016    0.002443   0.011308   0.010521
+//! ```
 //!
-//! The SPEED half of the old claim is untouched by that measurement -- the probe
-//! scored accuracy only -- so the 2.0x-vs-Matern speed bound is neither confirmed
-//! nor challenged here, and still guards against the prior 12x regression
-//! returning.
+//! At the frozen range the fitted `0.1556` IS the span floor: unpenalized least
+//! squares on the same design gives `0.1555`, dropping the null-component penalty
+//! moves the fourth decimal, and `edf/p = 0.98` says the fit is already spending
+//! everything it has. `mjs`'s representer range had been frozen at the median
+//! nearest-center spacing since `b1d94d1a5` turned its REML coordinate off by
+//! default; restoring it (#2761) puts mjs at `0.0096`, which beats matern by 1.21x
+//! and duchon by 1.09x at LOWER edf. So the match-or-beat-matern bar below is
+//! honest again, and it must still not be closed by widening the `1.10x` bound.
+//!
+//! The SPEED half is what pays for that: a design-moving outer coordinate rebuilds
+//! the representer design per outer trial. The `2.0x`-vs-matern bound is where that
+//! cost is measured (matern carries the same kind of coordinate in its `kappa`), and
+//! it still guards against the prior 12x regression returning.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
@@ -208,5 +218,90 @@ fn measure_jet_single_scale_mode_accuracy_parity() {
         mjs_rmse <= 1.10 * matern_rmse,
         "measure-jet single-scale mode accuracy parity failed vs matern: mjs={mjs_rmse:.5} \
          matern={matern_rmse:.5} duchon={duchon_rmse:.5}"
+    );
+}
+
+/// Dense materialization of a design operator, column by column.
+fn dense_of(op: &dyn LinearOperator) -> Array2<f64> {
+    let (n, p) = (op.nrows(), op.ncols());
+    let mut dense = Array2::<f64>::zeros((n, p));
+    for j in 0..p {
+        let mut e = ndarray::Array1::<f64>::zeros(p);
+        e[j] = 1.0;
+        dense.column_mut(j).assign(&op.apply(&e));
+    }
+    dense
+}
+
+/// #2761 control, from the direction the accuracy gates cannot see.
+///
+/// Every accuracy number in the measure-jet cluster — this file's, the sweep's,
+/// the BMS logslope correlation — is scored by applying the fitted coefficients
+/// to a design **rebuilt from the frozen spec** on a fresh grid, not to the
+/// design they were estimated on. So a freeze/replay defect and a smoothing
+/// defect are indistinguishable from any of those numbers alone: both show up
+/// only as a held-out miss. Diagnosing #2761 required ruling the replay out
+/// first, by hand. This makes that a standing check instead.
+///
+/// Measure-jet has by far the largest replay surface of the kernel bases — the
+/// realized quadrature (cell barycenters + masses), the scale band, the support
+/// anchors, the penalty normalization scales, the composed identifiability
+/// transform, the standardized representer range and the ambient-affine head
+/// lift all have to come back identically from the frozen spec, and the head
+/// lift is *recomputed* at predict time from the frozen centers and masses
+/// rather than persisted. The tolerance here is machine-precision, not
+/// statistical: the contract is that the rebuild reproduces the fit-time design,
+/// not that it approximates it.
+#[test]
+fn measure_jet_predict_rebuild_replays_the_fit_time_design_2761() {
+    init_parallelism();
+    let ds = build_dataset(N_TRAIN, SIGMA, TRAIN_SEED);
+    let fit = fit_and_time(MJS_BODY, &ds).1;
+
+    let fit_time = dense_of(&fit.design.design);
+    let x0 = ds.column_map()["x0"];
+    let x1 = ds.column_map()["x1"];
+    let x2 = ds.column_map()["x2"];
+    let mut rows = Array2::<f64>::zeros((ds.values.nrows(), ds.headers.len()));
+    for c in [x0, x1, x2] {
+        rows.column_mut(c).assign(&ds.values.column(c));
+    }
+    let rebuilt = dense_of(
+        &build_term_collection_design(rows.view(), &fit.resolvedspec)
+            .expect("predict-time rebuild of the frozen measure-jet spec")
+            .design,
+    );
+
+    assert_eq!(
+        fit_time.dim(),
+        rebuilt.dim(),
+        "the predict-time rebuild must have the fit-time shape"
+    );
+    let scale = fit_time.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let worst = fit_time
+        .iter()
+        .zip(rebuilt.iter())
+        .fold(0.0_f64, |a, (l, r)| a.max((l - r).abs()));
+    assert!(
+        worst <= 1.0e-11 * scale.max(1.0),
+        "the predict-time measure-jet design must REPLAY the fit-time one, not \
+         approximate it: worst column entry differs by {worst:.3e} against a design \
+         scale of {scale:.3e}. Every accuracy bar in this cluster applies fitted \
+         coefficients to this rebuild, so a drift here is scored as a smoothing miss \
+         (#2761)"
+    );
+
+    // The same statement where it is actually consumed: the linear predictor.
+    let eta_fit = fit_time.dot(&fit.fit.beta);
+    let eta_replay = rebuilt.dot(&fit.fit.beta);
+    let eta_scale = eta_fit.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let eta_worst = eta_fit
+        .iter()
+        .zip(eta_replay.iter())
+        .fold(0.0_f64, |a, (l, r)| a.max((l - r).abs()));
+    assert!(
+        eta_worst <= 1.0e-11 * eta_scale.max(1.0),
+        "fitted values through the rebuilt design must match the fit-time ones: \
+         worst row differs by {eta_worst:.3e} against |eta|_inf = {eta_scale:.3e}"
     );
 }
