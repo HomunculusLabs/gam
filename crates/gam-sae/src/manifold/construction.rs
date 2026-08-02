@@ -2700,37 +2700,16 @@ impl SaeManifoldTerm {
         // and read out on output coordinate `i = i'` (a frame perturbation of
         // output `i'` moves only the row's output coordinate `i'`).
         //
-        // The pinned certificate still consumes the legacy row-block contract.
-        // The unpinned exact path consumes only `RᵀR`, so stream each transient
-        // row Jacobian through the metric whitening and discard it immediately.
-        let (jacobian_rows, streamed_curvature) = if isometry_pin_active {
-            let mut jacobian_rows: Vec<Vec<f64>> = Vec::with_capacity(n);
-            let mut tangent = vec![0.0_f64; p];
-            for row in 0..n {
-                let mut j_flat = vec![0.0_f64; p * param_dim];
-                for (atom_idx, atom) in self.atoms.iter().enumerate() {
-                    let a_nk = assignments[[row, atom_idx]];
-                    if !(a_nk > 0.0) {
-                        continue;
-                    }
-                    let base = layout.local_axis_base(atom_idx);
-                    for axis in 0..atom_axis_dim[atom_idx] {
-                        atom.fill_decoded_derivative_row(row, axis, &mut tangent);
-                        for i in 0..p {
-                            // Frame coordinate `(k, i, axis)` sits at column
-                            // `layout.column(i, ·)`; it sources output coordinate `i`.
-                            j_flat[i * param_dim + layout.column(i, base + axis)] +=
-                                a_nk * tangent[i];
-                        }
-                    }
-                }
-                jacobian_rows.push(j_flat);
-            }
-            (jacobian_rows, None)
-        } else {
-            let streamed = self.residual_gauge_streamed_data_curvature(&metric, &layout)?;
-            (Vec::new(), Some(streamed))
-        };
+        // Both certificate branches consume the SAME structured curvature, and
+        // neither materializes the per-row pinning Jacobian as a dense
+        // `p x param_dim` block. That block has `p*D` nonzeros, so storing it
+        // densely is a factor of `p` too much -- 2.55 GiB PER OBSERVATION at
+        // `p = 4096, D = 19`, times `n`. The isometry-pin branch was the last
+        // caller of that layout (#2757); the field remains on
+        // `FittedSaeManifold` for callers that hand-build a model whose
+        // Jacobian is NOT frame-structured, where the general
+        // `stacked_curvature_root` path still applies.
+        let jacobian_rows: Vec<Vec<f64>> = Vec::new();
 
         // Isometry-penalty curvature root over the frame parameter space. When
         // the isometry gauge pin is active it gives curvature along every fitted
@@ -2769,6 +2748,21 @@ impl SaeManifoldTerm {
             Array2::<f64>::zeros((0, param_dim))
         };
 
+        // The curvature the certificate consumes: the data half streamed into
+        // output-coordinate block roots, plus the isometry root's rows. Those
+        // rows are the one part of `R` the output-coordinate grouping does NOT
+        // diagonalize -- each carries an atom's frame column across every
+        // output coordinate -- so they ride along as a rank-`Sum_k d_k`
+        // symmetric update rather than being folded in (a Givens elimination
+        // of such a row fills in every block). The reduction counts the sum's
+        // eigenvalues above any shift exactly, by inertia, so nothing is
+        // approximated by carrying them separately.
+        let streamed_curvature = self.residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            isometry_penalty_root.clone(),
+        )?;
+
         Ok((
             FittedSaeManifold {
                 atoms: fitted_atoms,
@@ -2776,7 +2770,7 @@ impl SaeManifoldTerm {
                 isometry_penalty_root,
                 metric,
             },
-            streamed_curvature,
+            Some(streamed_curvature),
         ))
     }
 
@@ -2800,10 +2794,23 @@ impl SaeManifoldTerm {
     ///   root is returned whole when it has no more rows than columns, because
     ///   `spec(RᵀR) = spec(RRᵀ) ∪ {0}` makes the small side sufficient; the
     ///   dense Gram is assembled only when the root is the larger object.
+    /// `dense_rows` carries the rows of the curvature root that are NOT
+    /// output-coordinate diagonal — the isometry pin's, one per
+    /// `(atom, frame axis)`, each spread across every output coordinate; empty
+    /// when no pin is installed.
+    ///
+    /// They cannot be folded into the blocks: eliminating such a row against
+    /// block `i` scatters that block's row into every other block, so the QR of
+    /// `[⊕R_i ; L]` fills in completely and the sum's spectrum is genuinely
+    /// global. It is nevertheless exact and cheap — see
+    /// [`crate::identifiability::BlockPlusRowsSpectrum`] — so they ride along
+    /// as a rank-`Σ_k d_k` symmetric update instead of forcing the whole
+    /// certificate back onto a dense `param_dim × param_dim` operator.
     pub(crate) fn residual_gauge_streamed_data_curvature(
         &self,
         metric: &gam_problem::RowMetric,
         layout: &FrameColumnLayout,
+        dense_rows: Array2<f64>,
     ) -> Result<ResidualGaugeCurvature, String> {
         let n = self.n_obs();
         let p = self.output_dim();
@@ -2825,9 +2832,10 @@ impl SaeManifoldTerm {
         let rank = metric.metric_rank();
         let param_dim = layout.param_dim();
         let d_total = layout.block_dim();
-        let root_rows = n * rank;
+        let root_rows = n * rank + dense_rows.nrows();
         if param_dim == 0 || n == 0 || rank == 0 {
-            return Ok(OutputBlockRootAccumulator::new(layout.clone()).finish(root_rows));
+            return OutputBlockRootAccumulator::new(layout.clone())
+                .finish_with_rows(dense_rows, root_rows);
         }
 
         let assignments = self.assignment.assignments();
@@ -2844,7 +2852,7 @@ impl SaeManifoldTerm {
                 }
                 accumulator.push_row_jacobian(&g);
             }
-            return Ok(accumulator.finish(root_rows));
+            return accumulator.finish_with_rows(dense_rows, root_rows);
         }
 
         // Gauge-driving metric: `M_n = U_n U_nᵀ`, so the row contributes the
@@ -2857,6 +2865,7 @@ impl SaeManifoldTerm {
         } else {
             Array2::<f64>::zeros((root_rows, param_dim))
         };
+        let pin_rows = dense_rows.nrows();
         let mut gram = if dense {
             Array2::<f64>::zeros((param_dim, param_dim))
         } else {
@@ -2885,6 +2894,18 @@ impl SaeManifoldTerm {
                         root[[out_index, c]] = *v;
                     }
                 }
+            }
+        }
+        // A gauge-driving metric already couples every output coordinate, so the
+        // pin's rows are simply more rows of the same root -- no structure is
+        // lost by appending them, and none was available to exploit.
+        for j in 0..pin_rows {
+            let pin_row = dense_rows.row(j);
+            if dense {
+                let owned: Vec<f64> = pin_row.iter().copied().collect();
+                Self::accumulate_residual_gauge_gram_row(&mut gram, &owned);
+            } else {
+                root.row_mut(n * rank + j).assign(&pin_row);
             }
         }
         if dense {

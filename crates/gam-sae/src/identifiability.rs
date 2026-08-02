@@ -2650,11 +2650,13 @@ enum CurvatureReduction {
         sigma_max_sq: f64,
         gram: Array2<f64>,
     },
-    /// `H` as `p` independent `D × D` output-coordinate block roots.
+    /// `H` as `p` independent `D × D` output-coordinate block roots, plus the
+    /// isometry pin's dense rows when one is installed.
     OutputBlockRoots {
         pinning_rank: usize,
         sigma_max_sq: f64,
         roots: Array3<f64>,
+        dense_rows: Array2<f64>,
         layout: FrameColumnLayout,
     },
     /// `H = RᵀR` held as `R` (`m × param_dim`, `m ≤ param_dim`), decided on
@@ -2778,15 +2780,42 @@ impl CurvatureReduction {
 
     /// Reduce whichever representation the streaming builder produced.
     ///
-    /// `param_dim` is the certificate model's own parameter dimension; the
-    /// curvature must agree with it, which is the one cross-check that catches a
-    /// builder and a model that were derived from different atom lists.
-    fn from_curvature(curvature: ResidualGaugeCurvature, param_dim: usize) -> Result<Self, String> {
+    /// The curvature is checked against the model it will certify — in shape,
+    /// in parameterization, and in finiteness — because a streamed builder and
+    /// a certificate model are two objects that must have been derived from the
+    /// same atom list, and nothing downstream of here can tell that they were
+    /// not.
+    fn from_curvature(
+        curvature: ResidualGaugeCurvature,
+        model: &FittedSaeManifold,
+    ) -> Result<Self, String> {
+        let param_dim = model.param_dim();
         if curvature.param_dim() != param_dim {
             return Err(format!(
                 "residual_gauge: curvature is over {} parameters but param_dim = {param_dim}",
                 curvature.param_dim()
             ));
+        }
+        // A matching `param_dim` is not the same as a matching PARAMETERIZATION:
+        // two models with different atom shapes can agree on `Σ_k p·d_k` and
+        // disagree on every `(i, l) ↦ c`, which would silently reindex the
+        // certificate's generators against the curvature. A block
+        // representation carries the layout it was built in, so require it to
+        // be the model's own.
+        if let ResidualGaugeCurvature::OutputBlockRoots { layout, .. } = &curvature {
+            let expected = FrameColumnLayout::for_frames(model.atoms.iter().map(|a| &a.frame))
+                .ok_or_else(|| {
+                    "residual_gauge: a block-structured curvature needs one shared output \
+                     dimension across the fitted frames"
+                        .to_string()
+                })?;
+            if *layout != expected {
+                return Err(
+                    "residual_gauge: the curvature's frame-column layout is not the fitted \
+                     model's"
+                        .to_string(),
+                );
+            }
         }
         // A non-finite curvature is a broken fit, not a certificate with an
         // unusual spectrum. The dense path used to get this refusal for free
@@ -2804,9 +2833,12 @@ impl CurvatureReduction {
         }
         let root_rows = curvature.root_rows();
         match curvature {
-            ResidualGaugeCurvature::OutputBlockRoots { roots, layout, .. } => {
-                Self::from_output_block_roots(roots, layout, root_rows)
-            }
+            ResidualGaugeCurvature::OutputBlockRoots {
+                roots,
+                dense_rows,
+                layout,
+                ..
+            } => Self::from_output_block_roots(roots, dense_rows, layout, root_rows),
             ResidualGaugeCurvature::DualRoot { root, .. } => {
                 Self::from_dual_root(root, root_rows, param_dim)
             }
@@ -2826,6 +2858,7 @@ impl CurvatureReduction {
     /// output coordinates has most of its blocks in that state.
     fn from_output_block_roots(
         roots: Array3<f64>,
+        dense_rows: Array2<f64>,
         layout: FrameColumnLayout,
         root_rows: usize,
     ) -> Result<Self, String> {
@@ -2838,37 +2871,70 @@ impl CurvatureReduction {
                 roots.dim()
             ));
         }
+        if dense_rows.nrows() > 0 && dense_rows.ncols() != layout.param_dim() {
+            return Err(format!(
+                "residual_gauge: curvature dense rows have {} columns but param_dim = {}",
+                dense_rows.ncols(),
+                layout.param_dim()
+            ));
+        }
         if layout.param_dim() == 0 || root_rows == 0 {
             return Ok(Self::OutputBlockRoots {
                 pinning_rank: 0,
                 sigma_max_sq: 0.0,
                 roots,
+                dense_rows,
                 layout,
             });
         }
-        let mut singular_values: Vec<f64> = Vec::with_capacity(p * d);
-        for i in 0..p {
-            let block = roots.slice(s![i, .., ..]);
-            if block.iter().all(|v| *v == 0.0) {
-                continue;
+        if dense_rows.nrows() == 0 {
+            // No pin: `H` is exactly the direct sum of the blocks, so its
+            // singular values are the union of theirs and the decision needs no
+            // global instrument at all.
+            let mut singular_values: Vec<f64> = Vec::with_capacity(p * d);
+            for i in 0..p {
+                let block = roots.slice(s![i, .., ..]);
+                if block.iter().all(|v| *v == 0.0) {
+                    continue;
+                }
+                if d == 1 {
+                    // A 1-by-1 factor IS its own singular value; routing it
+                    // through a decomposition would only add a validation pass.
+                    singular_values.push(block[[0, 0]].abs());
+                    continue;
+                }
+                let (_u, sv, _vt) = block.to_owned().svd(false, false).map_err(|e| {
+                    format!("residual_gauge: SVD of curvature block root {i} failed: {e}")
+                })?;
+                singular_values.extend(sv.iter().copied());
             }
-            if d == 1 {
-                // A 1×1 factor IS its own singular value; routing it through a
-                // decomposition would only add a validation pass.
-                singular_values.push(block[[0, 0]].abs());
-                continue;
-            }
-            let (_u, sv, _vt) = block.to_owned().svd(false, false).map_err(|e| {
-                format!("residual_gauge: SVD of curvature block root {i} ({d}x{d}) failed: {e}")
-            })?;
-            singular_values.extend(sv.iter().copied());
+            let (sigma_max_sq, pinning_rank) =
+                root_spectral_rank(&singular_values, root_rows, layout.param_dim());
+            return Ok(Self::OutputBlockRoots {
+                pinning_rank,
+                sigma_max_sq,
+                roots,
+                dense_rows,
+                layout,
+            });
         }
-        let (sigma_max_sq, pinning_rank) =
-            root_spectral_rank(&singular_values, root_rows, layout.param_dim());
+        // With a pin installed the curvature is block diagonal PLUS a symmetric
+        // update of rank at most `D`, whose rows are spread across every output
+        // coordinate. That sum's spectrum is genuinely global -- a Givens
+        // elimination of such a row fills in every block -- but its eigenvalue
+        // COUNT above any shift is exactly computable from Sylvester's law of
+        // inertia in `O(p*D*k^2)`, and a count above a shift is all either
+        // consumer needs: the rank is the count above the squared tolerance, and
+        // `lambda_max` is the shift at which the count reaches zero.
+        let spectrum = frame_curvature::BlockPlusRowsSpectrum::new(&roots, &dense_rows, &layout)?;
+        let sigma_max_sq = spectrum.lambda_max()?;
+        let rank_tol = curvature_rank_tolerance(sigma_max_sq.sqrt(), root_rows, layout.param_dim());
+        let pinning_rank = spectrum.count_above(rank_tol * rank_tol)?;
         Ok(Self::OutputBlockRoots {
             pinning_rank,
             sigma_max_sq,
             roots,
+            dense_rows,
             layout,
         })
     }
@@ -2966,7 +3032,12 @@ impl CurvatureReduction {
             // because `H` has no entries between two of them, and each term is
             // read off that block's root rather than its Gram. `p·D²` flops
             // instead of `(p·D)²`.
-            Self::OutputBlockRoots { roots, layout, .. } => {
+            Self::OutputBlockRoots {
+                roots,
+                dense_rows,
+                layout,
+                ..
+            } => {
                 let d = layout.block_dim();
                 let mut xi = vec![0.0_f64; d];
                 let mut total = 0.0_f64;
@@ -2982,6 +3053,10 @@ impl CurvatureReduction {
                         }
                         total += row * row;
                     }
+                }
+                if dense_rows.nrows() > 0 {
+                    let l_xi = dense_rows.dot(unit);
+                    total += l_xi.iter().map(|c| c * c).sum::<f64>();
                 }
                 total.max(0.0)
             }
@@ -3087,8 +3162,7 @@ pub fn residual_gauge_exact_from_curvature(
     penalty_ops: &[Option<OrbitPenaltyOperator>],
     curvature: ResidualGaugeCurvature,
 ) -> Result<ResidualGaugeReport, String> {
-    let param_dim = model.param_dim();
-    let curvature = CurvatureReduction::from_curvature(curvature, param_dim)?;
+    let curvature = CurvatureReduction::from_curvature(curvature, model)?;
     let exact = residual_gauge_exact_inputs(model, views, penalty_ops)?;
     residual_gauge_inner(model, Some(exact), Some(curvature))
 }

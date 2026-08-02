@@ -53,6 +53,7 @@
 //! decision costs `m³` instead of `param_dim³`), and the dense Gram only when
 //! neither applies.
 
+use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use ndarray::{Array2, Array3, ArrayView1, ArrayViewMut2, s};
 
 /// One atom's slot in the joint frame-column layout.
@@ -299,12 +300,285 @@ impl OutputBlockRootAccumulator {
         }
     }
 
-    pub fn finish(self, root_rows: usize) -> ResidualGaugeCurvature {
-        ResidualGaugeCurvature::OutputBlockRoots {
+    /// Close the accumulation. `dense_rows` is the part of the curvature root
+    /// that is NOT output-coordinate diagonal — the isometry pin's `Σ_k d_k`
+    /// rows, each spread across every output coordinate — as a
+    /// `(rows, param_dim)` matrix. Empty when no pin is installed.
+    pub fn finish_with_rows(
+        self,
+        dense_rows: Array2<f64>,
+        root_rows: usize,
+    ) -> Result<ResidualGaugeCurvature, String> {
+        if dense_rows.nrows() > 0 && dense_rows.ncols() != self.layout.param_dim() {
+            return Err(format!(
+                "residual gauge curvature: dense rows have {} columns but param_dim = {}",
+                dense_rows.ncols(),
+                self.layout.param_dim()
+            ));
+        }
+        Ok(ResidualGaugeCurvature::OutputBlockRoots {
             roots: self.roots,
+            dense_rows,
             layout: self.layout,
             root_rows,
+        })
+    }
+
+    pub fn finish(self, root_rows: usize) -> ResidualGaugeCurvature {
+        let param_dim = self.layout.param_dim();
+        self.finish_with_rows(Array2::<f64>::zeros((0, param_dim)), root_rows)
+            .expect("an empty dense-row block is conformable with any layout")
+    }
+}
+
+/// The exact spectrum machinery for `H = ⊕_i B_i + VVᵀ` — a block-diagonal
+/// operator plus a symmetric update of rank `k = V.ncols()`.
+///
+/// # Why this exists
+///
+/// The isometry pin's curvature root has one row per `(atom, frame axis)` and
+/// each of those rows is spread across *every* output coordinate, so it is
+/// exactly the part of `R` that the output-coordinate grouping does not
+/// diagonalize. It cannot be folded into the blocks: a Givens elimination of
+/// such a row against block `i` scatters that block's row into every other
+/// block, so the QR of `[⊕R_i ; L]` fills in completely. The rank and `σ_max`
+/// of the sum genuinely are global quantities.
+///
+/// They are nevertheless **exactly computable in `O(p·D·k²)`**, without forming
+/// `H`, from Sylvester's law of inertia. Border the shifted operator:
+///
+/// ```text
+/// M = [ B − sI   V ]      Schur on (1,1):  In(M) = In(B−sI) + In(−I − Vᵀ(B−sI)⁻¹V)
+///     [   Vᵀ    −I ]      Schur on (2,2):  In(M) = In(−I_k) + In(B − sI + VVᵀ)
+/// ```
+///
+/// so, since `In(−I_k) = (0, 0, k)`,
+///
+/// ```text
+/// n₊(H − sI) = n₊(B − sI) + n₊(−I_k − Vᵀ(B − sI)⁻¹V)
+/// ```
+///
+/// The first term is a comparison against the block eigenvalues, which are
+/// already known. The second is the positive-eigenvalue count of a `k × k`
+/// matrix, and `Vᵀ(B−sI)⁻¹V` is assembled blockwise from each block's own
+/// eigenbasis. Counting eigenvalues above an arbitrary shift is therefore
+/// cheap and exact — which gives BOTH consumers:
+///
+/// * the pinning rank is `n₊(H − τ²I)` at the rank tolerance `τ`;
+/// * `λ_max(H)` is `inf{ s : n₊(H − sI) = 0 }`, found by bisection on the same
+///   counter, with `λ_max(B) ≤ λ_max(H) ≤ λ_max(B) + ‖V‖_F²` as the bracket.
+///
+/// Both are the *same* decisions the dense `param_dim × param_dim`
+/// eigendecomposition would make, at `p·D·k²` instead of `(p·D)³`.
+pub struct BlockPlusRowsSpectrum {
+    /// `(p, D)` — the eigenvalues of each block `B_i = R_iᵀR_i`, obtained as
+    /// the squared singular values of `R_i` so they are non-negative by
+    /// construction rather than by rounding.
+    block_eigenvalues: Array2<f64>,
+    /// `(p, k, D)` — `Q_iᵀ v_j(i)`, each update column expressed in each
+    /// block's eigenbasis. Independent of the shift, so it is built once.
+    projected: Array3<f64>,
+    update_rank: usize,
+    block_lambda_max: f64,
+    update_norm_sq: f64,
+}
+
+impl BlockPlusRowsSpectrum {
+    /// Decompose every block root and project the update columns into the
+    /// blocks' eigenbases. `O(p·D³ + p·k·D²)`.
+    pub fn new(
+        roots: &Array3<f64>,
+        dense_rows: &Array2<f64>,
+        layout: &FrameColumnLayout,
+    ) -> Result<Self, String> {
+        let p = layout.output_dim();
+        let d = layout.block_dim();
+        let k = dense_rows.nrows();
+        let mut block_eigenvalues = Array2::<f64>::zeros((p, d));
+        let mut projected = Array3::<f64>::zeros((p, k, d));
+        let mut gathered = vec![0.0_f64; d];
+        let mut block_lambda_max = 0.0_f64;
+        for i in 0..p {
+            let block = roots.slice(s![i, .., ..]);
+            // `B_i = R_iᵀR_i = V Σ² Vᵀ` for `R_i = U Σ Vᵀ`, so the block's
+            // eigenvalues are the squared singular values (non-negative by
+            // construction) and its eigenvectors are the right singular vectors.
+            //
+            // `None` means "the identity is already an eigenbasis": a zero
+            // block, whose eigenvalues are all zero so ANY orthonormal basis
+            // diagonalizes it, and a 1×1 block, whose eigenvector is ±1 and
+            // whose sign cancels because only products of two projections are
+            // ever read. A zero block must still be projected — its output
+            // coordinate lies entirely in `null(B)`, which is exactly where the
+            // update's mass decides the rank, so skipping it would silently
+            // drop that mass (measured: `λ_max` short by 13% on a fixture with
+            // one empty output coordinate).
+            let basis_t = if block.iter().all(|v| *v == 0.0) || d == 1 {
+                if d == 1 {
+                    block_eigenvalues[[i, 0]] = block[[0, 0]] * block[[0, 0]];
+                    block_lambda_max = block_lambda_max.max(block_eigenvalues[[i, 0]]);
+                }
+                None
+            } else {
+                let (_u, sv, vt) = block.to_owned().svd(false, true).map_err(|e| {
+                    format!("residual gauge curvature: SVD of block {i} failed: {e}")
+                })?;
+                let vt = vt.ok_or_else(|| {
+                    format!("residual gauge curvature: block {i} SVD returned no right factor")
+                })?;
+                for (t, sigma) in sv.iter().enumerate() {
+                    block_eigenvalues[[i, t]] = sigma * sigma;
+                    block_lambda_max = block_lambda_max.max(block_eigenvalues[[i, t]]);
+                }
+                Some(vt)
+            };
+            for j in 0..k {
+                layout.gather_output(dense_rows.row(j), i, &mut gathered);
+                match &basis_t {
+                    // Row `t` of `Vᵀ` is eigenvector `t`, so `(Qᵀw)[t] = Vᵀ w`.
+                    Some(vt) => {
+                        for t in 0..d {
+                            let mut acc = 0.0_f64;
+                            for a in 0..d {
+                                acc += vt[[t, a]] * gathered[a];
+                            }
+                            projected[[i, j, t]] = acc;
+                        }
+                    }
+                    None => {
+                        for t in 0..d {
+                            projected[[i, j, t]] = gathered[t];
+                        }
+                    }
+                }
+            }
         }
+        let update_norm_sq = dense_rows.iter().map(|v| v * v).sum::<f64>();
+        Ok(Self {
+            block_eigenvalues,
+            projected,
+            update_rank: k,
+            block_lambda_max,
+            update_norm_sq,
+        })
+    }
+
+    /// `n₊(H − sI)` — how many eigenvalues of `H` exceed `shift`.
+    ///
+    /// `shift` must not sit on a block eigenvalue, where `(B − sI)⁻¹` does not
+    /// exist. A shift within rounding of one is nudged upward by a relative
+    /// amount: the predicate is a strict `>`, so a value sitting exactly on the
+    /// boundary is already a tie the certificate breaks arbitrarily, and moving
+    /// it by `2⁻⁴⁰` of the operator scale cannot change any decision that was
+    /// not already at the resolution limit.
+    pub fn count_above(&self, shift: f64) -> Result<usize, String> {
+        let (p, d) = self.block_eigenvalues.dim();
+        let scale = self.block_lambda_max.max(shift.abs()).max(1.0);
+        let guard = scale * 2.0_f64.powi(-40);
+        let mut shift = shift;
+        for _ in 0..4 {
+            let collides = self
+                .block_eigenvalues
+                .iter()
+                .any(|lambda| (lambda - shift).abs() <= guard);
+            if !collides {
+                break;
+            }
+            shift += 2.0 * guard;
+        }
+        let mut count = 0usize;
+        for i in 0..p {
+            for t in 0..d {
+                if self.block_eigenvalues[[i, t]] > shift {
+                    count += 1;
+                }
+            }
+        }
+        let k = self.update_rank;
+        if k == 0 {
+            return Ok(count);
+        }
+        // `reduced = −I_k − Vᵀ(B − sI)⁻¹V`, assembled blockwise in each block's
+        // eigenbasis where the inverse is diagonal.
+        let mut reduced = Array2::<f64>::zeros((k, k));
+        for j in 0..k {
+            reduced[[j, j]] = -1.0;
+        }
+        for i in 0..p {
+            for t in 0..d {
+                let denom = self.block_eigenvalues[[i, t]] - shift;
+                if denom == 0.0 {
+                    return Err(
+                        "residual gauge curvature: inertia shift collides with a block eigenvalue"
+                            .to_string(),
+                    );
+                }
+                let inv = 1.0 / denom;
+                for j in 0..k {
+                    let pj = self.projected[[i, j, t]];
+                    if pj == 0.0 {
+                        continue;
+                    }
+                    for l in 0..=j {
+                        reduced[[j, l]] -= pj * self.projected[[i, l, t]] * inv;
+                    }
+                }
+            }
+        }
+        for j in 0..k {
+            for l in 0..j {
+                reduced[[l, j]] = reduced[[j, l]];
+            }
+        }
+        let (evals, _) = reduced.eigh(faer::Side::Lower).map_err(|e| {
+            format!("residual gauge curvature: inertia of the {k}x{k} reduced matrix failed: {e}")
+        })?;
+        count += evals.iter().filter(|v| **v > 0.0).count();
+        Ok(count)
+    }
+
+    /// `λ_max(H)`, by bisection on [`Self::count_above`].
+    ///
+    /// `λ_max(B) ≤ λ_max(H) ≤ λ_max(B) + ‖V‖_F²` because `VVᵀ ⪰ 0` and
+    /// `λ_max(VVᵀ) ≤ tr(VVᵀ) = ‖V‖_F²`, so the bracket is valid without any
+    /// spectral information about the update.
+    pub fn lambda_max(&self) -> Result<f64, String> {
+        if self.update_rank == 0 || self.update_norm_sq == 0.0 {
+            return Ok(self.block_lambda_max);
+        }
+        let mut lo = self.block_lambda_max;
+        let mut hi = self.block_lambda_max + self.update_norm_sq;
+        if self.count_above(lo)? == 0 {
+            return Ok(lo);
+        }
+        // 100 halvings drives the bracket below any representable relative
+        // width; the loop exits on the width test long before that, and the
+        // bound only exists so a pathological counter cannot spin.
+        for _ in 0..100 {
+            if hi - lo <= f64::EPSILON * hi.abs().max(1.0) {
+                break;
+            }
+            let mid = lo + 0.5 * (hi - lo);
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if self.count_above(mid)? > 0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(hi)
+    }
+
+    /// The largest block eigenvalue, i.e. `λ_max(B)`.
+    pub fn block_lambda_max(&self) -> f64 {
+        self.block_lambda_max
+    }
+
+    /// The rank of the symmetric update.
+    pub fn update_rank(&self) -> usize {
+        self.update_rank
     }
 }
 
@@ -322,13 +596,25 @@ impl OutputBlockRootAccumulator {
 pub enum ResidualGaugeCurvature {
     /// `p` independent `D × D` upper-triangular roots, one per output
     /// coordinate, in `layout`'s `(i, l)` coordinates:
-    /// `roots[i]ᵀ roots[i] = H[(i,·), (i,·)]`, and `H` has no entries between
-    /// two output coordinates at all.
+    /// `roots[i]ᵀ roots[i]` is the data curvature's block at output coordinate
+    /// `i`, and the data curvature has no entries between two output
+    /// coordinates at all.
     ///
     /// Produced exactly when the per-row metric does not couple output
     /// coordinates.
     OutputBlockRoots {
         roots: Array3<f64>,
+        /// The rows of `R` that are NOT output-coordinate diagonal: the
+        /// isometry pin contributes one per `(atom, frame axis)`, each carrying
+        /// that atom's frame column across every output coordinate. Empty
+        /// (`0 × param_dim`) when no pin is installed, which is exactly the
+        /// certificate's `diffeomorphism-unpinned` escalation condition.
+        ///
+        /// `H = ⊕_i R_iᵀR_i + dense_rowsᵀ·dense_rows` — block diagonal plus a
+        /// symmetric update of rank at most `Σ_k d_k`, which is a shape whose
+        /// spectrum is exactly computable without ever forming `H`
+        /// ([`BlockPlusRowsSpectrum`]).
+        dense_rows: Array2<f64>,
         layout: FrameColumnLayout,
         root_rows: usize,
     },
@@ -365,7 +651,9 @@ impl ResidualGaugeCurvature {
     /// makes it the regression gate a wall-clock threshold cannot be.
     pub fn stored_scalars(&self) -> usize {
         match self {
-            Self::OutputBlockRoots { roots, .. } => roots.len(),
+            Self::OutputBlockRoots {
+                roots, dense_rows, ..
+            } => roots.len() + dense_rows.len(),
             Self::DualRoot { root, .. } => root.len(),
             Self::DenseGram { gram, .. } => gram.len(),
         }
@@ -378,7 +666,9 @@ impl ResidualGaugeCurvature {
     /// rather than on the fit that produced it, so it holds for every builder.
     pub fn is_finite(&self) -> bool {
         match self {
-            Self::OutputBlockRoots { roots, .. } => roots.iter().all(|v| v.is_finite()),
+            Self::OutputBlockRoots {
+                roots, dense_rows, ..
+            } => roots.iter().all(|v| v.is_finite()) && dense_rows.iter().all(|v| v.is_finite()),
             Self::DualRoot { root, .. } => root.iter().all(|v| v.is_finite()),
             Self::DenseGram { gram, .. } => gram.iter().all(|v| v.is_finite()),
         }
@@ -411,7 +701,12 @@ impl ResidualGaugeCurvature {
     /// a checked claim rather than an argued one.
     pub fn to_dense_gram(&self) -> Array2<f64> {
         match self {
-            Self::OutputBlockRoots { roots, layout, .. } => {
+            Self::OutputBlockRoots {
+                roots,
+                dense_rows,
+                layout,
+                ..
+            } => {
                 let n = layout.param_dim();
                 let d = layout.block_dim();
                 let mut gram = Array2::<f64>::zeros((n, n));
@@ -424,6 +719,9 @@ impl ResidualGaugeCurvature {
                             gram[[ca, layout.column(i, b)]] = dense[[a, b]];
                         }
                     }
+                }
+                if dense_rows.nrows() > 0 {
+                    gram = gram + dense_rows.t().dot(dense_rows);
                 }
                 gram
             }
@@ -582,6 +880,7 @@ mod tests {
         roots[[0, 0, 0]] = 1.0;
         let clean = ResidualGaugeCurvature::OutputBlockRoots {
             roots: roots.clone(),
+            dense_rows: Array2::<f64>::zeros((0, layout.param_dim())),
             layout: layout.clone(),
             root_rows: 3,
         };
@@ -589,6 +888,7 @@ mod tests {
         roots[[1, 0, 0]] = f64::NAN;
         let dirty = ResidualGaugeCurvature::OutputBlockRoots {
             roots,
+            dense_rows: Array2::<f64>::zeros((0, layout.param_dim())),
             layout,
             root_rows: 3,
         };
@@ -622,6 +922,7 @@ mod tests {
         }
         let curvature = ResidualGaugeCurvature::OutputBlockRoots {
             roots,
+            dense_rows: Array2::<f64>::zeros((0, layout.param_dim())),
             layout: layout.clone(),
             root_rows: 7,
         };

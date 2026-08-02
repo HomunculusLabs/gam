@@ -222,7 +222,11 @@ fn output_block_curvature_equals_the_dense_gram_and_has_no_off_block_mass() {
     );
     let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
     let curvature = term
-        .residual_gauge_streamed_data_curvature(&metric, &layout)
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
         .expect("streamed curvature");
     assert_eq!(curvature.structure_tag(), "output_block_roots");
     assert_eq!(curvature.root_rows(), n * metric.metric_rank());
@@ -288,7 +292,11 @@ fn output_block_curvature_stores_p_times_fewer_scalars_than_the_dense_gram() {
     let metric = term.diagnostic_metric().expect("metric");
     let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
     let curvature = term
-        .residual_gauge_streamed_data_curvature(&metric, &layout)
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
         .expect("streamed curvature");
     let param_dim = layout.param_dim();
     let d = layout.block_dim();
@@ -419,7 +427,11 @@ fn gauge_driving_metric_falls_back_to_a_root_that_reproduces_the_dense_gram() {
 
     let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
     let curvature = term
-        .residual_gauge_streamed_data_curvature(&metric, &layout)
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
         .expect("streamed curvature");
     // n·rank = 36 root rows against param_dim = 20 columns, so the root is the
     // larger object and the dense Gram is the right store.
@@ -478,7 +490,11 @@ fn dual_root_and_dense_gram_agree_on_a_rank_neither_may_exceed() {
 
     let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
     let curvature = term
-        .residual_gauge_streamed_data_curvature(&metric, &layout)
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
         .expect("streamed curvature");
     // n*rank = 12 root rows against param_dim = 80 columns.
     assert_eq!(curvature.structure_tag(), "dual_root");
@@ -579,6 +595,7 @@ fn a_non_finite_curvature_is_refused_in_every_representation() {
     let arms = [
         ResidualGaugeCurvature::OutputBlockRoots {
             roots: poisoned,
+            dense_rows: Array2::<f64>::zeros((0, layout.param_dim())),
             layout: layout.clone(),
             root_rows,
         },
@@ -684,6 +701,223 @@ fn the_certification_decomposes_nothing_at_the_parameter_dimension() {
     );
 }
 
+/// A curvature built in a DIFFERENT parameterization must be refused even when
+/// its `param_dim` matches.
+///
+/// `param_dim = Σ_k p·d_k` is not injective in the atom shapes: two atoms of
+/// `d = 1` and one atom of `d = 2` give the same total over the same `p`, and
+/// the same block dimension `D = 2` — but every `(i, l) ↦ c` differs, so a
+/// curvature from one silently reindexes the other's generators. The layout is
+/// carried on the representation precisely so this is checkable.
+#[test]
+fn a_curvature_from_a_different_frame_layout_is_refused() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms) = (16usize, 8usize, 2usize);
+    let term = planted_term(n, p, k_atoms, true);
+    let metric = term.diagnostic_metric().expect("metric");
+    let (model, streamed) = term
+        .to_residual_gauge_model(metric, None, false)
+        .expect("certificate model");
+    let curvature = streamed.expect("unpinned path streams its curvature");
+    let root_rows = curvature.root_rows();
+    let mine = FrameColumnLayout::new(p, &[1usize, 1]);
+    // One atom of d = 2 rather than two of d = 1: same param_dim, same D.
+    let impostor = FrameColumnLayout::new(p, &[2usize]);
+    assert_eq!(impostor.param_dim(), mine.param_dim());
+    assert_eq!(impostor.block_dim(), mine.block_dim());
+    assert_ne!(
+        impostor.column(1, 1),
+        mine.column(1, 1),
+        "the two layouts must disagree somewhere for this gate to bite"
+    );
+
+    let views: Vec<Option<crate::identifiability::AtomParameterView>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let relabelled = ResidualGaugeCurvature::OutputBlockRoots {
+        roots: ndarray::Array3::<f64>::zeros((p, 2, 2)),
+        dense_rows: Array2::<f64>::zeros((0, impostor.param_dim())),
+        layout: impostor,
+        root_rows,
+    };
+    let message = residual_gauge_exact_from_curvature(&model, &views, &ops, relabelled)
+        .err()
+        .expect("a curvature from another parameterization must be refused");
+    assert!(
+        message.contains("frame-column layout"),
+        "refusal must name the cause, got {message:?}"
+    );
+}
+
+/// The pin-active branch: same function, same root cause, worse blowup.
+///
+/// With the isometry pin ACTIVE `to_residual_gauge_model` used to materialize
+/// each per-row pinning Jacobian as a dense `p x param_dim` block and retain
+/// all `n` of them -- `8*n*p^2*D` bytes, which is 2.55 GiB PER OBSERVATION at
+/// `p = 4096, D = 19`. It now streams the same block roots the unpinned branch
+/// does and carries the pin's `sum_k d_k` rows as a symmetric update, so the
+/// retained Jacobian is gone entirely.
+#[test]
+fn the_pin_active_branch_streams_instead_of_retaining_a_dense_jacobian() {
+    let (n, k_atoms) = (12usize, 2usize);
+    for &p in &[16usize, 32, 64] {
+        let term = planted_term(n, p, k_atoms, true);
+        let metric = term.diagnostic_metric().expect("metric");
+        let (model, streamed) = term
+            .to_residual_gauge_model(metric, None, true)
+            .expect("pin-active certificate model");
+        assert!(
+            model.jacobian_rows.is_empty(),
+            "the pin-active branch must not retain a dense per-row Jacobian"
+        );
+        let curvature = streamed.expect("both branches stream their curvature");
+        assert_eq!(curvature.structure_tag(), "output_block_roots");
+        assert!(
+            model.isometry_penalty_root.nrows() > 0,
+            "the pin must actually be installed for this gate to bite"
+        );
+        // `p*D^2` block roots plus the pin's `D'*(p*D)` rows -- linear in `p`,
+        // against the `n*p^2*D` the dense layout retained.
+        let expected =
+            p * k_atoms * k_atoms + model.isometry_penalty_root.nrows() * model.param_dim();
+        assert_eq!(curvature.stored_scalars(), expected);
+        assert!(
+            curvature.stored_scalars() < n * p * model.param_dim(),
+            "the structured curvature must be smaller than one dense Jacobian stack"
+        );
+    }
+}
+
+/// The pin-active certificate must equal the dense one it replaces.
+///
+/// `H = (+)_i R_i^T R_i + L^T L` is block diagonal plus a rank-`sum_k d_k`
+/// update, and that sum's spectrum is genuinely global -- the pin's rows cannot
+/// be folded into the blocks. It is still exactly computable by inertia, so the
+/// rank, the stiffness scale and every generator verdict must match the dense
+/// Gram's to the last decision.
+#[test]
+fn the_pin_active_certificate_matches_the_dense_gram_exactly() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms) = (24usize, 12usize, 3usize);
+    let term = planted_term(n, p, k_atoms, true);
+    let metric = term.diagnostic_metric().expect("metric");
+    let (model, streamed) = term
+        .to_residual_gauge_model(metric, None, true)
+        .expect("pin-active certificate model");
+    let structured = streamed.expect("pin-active branch streams its curvature");
+    assert!(model.isometry_penalty_root.nrows() > 0);
+    let dense = ResidualGaugeCurvature::DenseGram {
+        gram: structured.to_dense_gram(),
+        root_rows: structured.root_rows(),
+    };
+    let views: Vec<Option<crate::identifiability::AtomParameterView>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let from_blocks = residual_gauge_exact_from_curvature(&model, &views, &ops, structured)
+        .expect("structured pin-active certificate");
+    let from_dense = residual_gauge_exact_from_curvature(&model, &views, &ops, dense)
+        .expect("dense certificate");
+    assert_eq!(
+        from_blocks.pinning_rank, from_dense.pinning_rank,
+        "the inertia count must agree with the dense spectrum"
+    );
+    assert!(!from_blocks.generators.is_empty());
+    for (b, d) in from_blocks
+        .generators
+        .iter()
+        .zip(from_dense.generators.iter())
+    {
+        assert_eq!(b.description, d.description);
+        assert_eq!(
+            b.unpinned, d.unpinned,
+            "generator '{}' verdict must not depend on the representation",
+            b.description
+        );
+        let gap = (b.pinned_energy_fraction - d.pinned_energy_fraction).abs();
+        assert!(
+            gap <= 1.0e-10,
+            "generator '{}' energy fraction differs by {gap:.3e}",
+            b.description
+        );
+    }
+    assert_eq!(from_blocks.group_signature(), from_dense.group_signature());
+}
+
+/// The inertia counter itself, against a dense eigendecomposition, on a
+/// deliberately awkward operator: a structurally empty output coordinate, a
+/// rank-deficient block, and an update that reaches into the blocks' null
+/// spaces.
+#[test]
+fn block_plus_rows_inertia_matches_a_dense_eigendecomposition() {
+    use crate::identifiability::frame_curvature::BlockPlusRowsSpectrum;
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let layout = FrameColumnLayout::new(5, &[2usize, 1]);
+    let (p, d) = (layout.output_dim(), layout.block_dim());
+    let mut seed = 0x2757_11E4_71A0_0001u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+    };
+    let mut roots = ndarray::Array3::<f64>::zeros((p, d, d));
+    for i in 0..p {
+        if i == 2 {
+            continue; // a structurally empty output coordinate
+        }
+        for a in 0..d {
+            for b in a..d {
+                // Block 3 keeps its last row zero: rank deficient without being
+                // the zero block.
+                if i == 3 && a == d - 1 {
+                    continue;
+                }
+                roots[[i, a, b]] = next();
+            }
+        }
+    }
+    let mut dense_rows = Array2::<f64>::zeros((2, layout.param_dim()));
+    for j in 0..2 {
+        for c in 0..layout.param_dim() {
+            dense_rows[[j, c]] = next();
+        }
+    }
+    let curvature = ResidualGaugeCurvature::OutputBlockRoots {
+        roots: roots.clone(),
+        dense_rows: dense_rows.clone(),
+        layout: layout.clone(),
+        root_rows: p * d + 2,
+    };
+    let gram = curvature.to_dense_gram();
+    let (evals, _) = gram.eigh(faer::Side::Lower).expect("dense reference");
+    let spectrum =
+        BlockPlusRowsSpectrum::new(&roots, &dense_rows, &layout).expect("inertia machinery");
+
+    let lambda_max = spectrum.lambda_max().expect("lambda_max");
+    let reference_max = evals.iter().cloned().fold(0.0_f64, f64::max);
+    assert!(
+        (lambda_max - reference_max).abs() <= 1.0e-10 * reference_max.max(1.0),
+        "lambda_max {lambda_max:.12e} against the dense {reference_max:.12e}"
+    );
+
+    // The eigenvalue COUNT above a shift must match at every scale, including
+    // shifts inside the spectrum where the update has moved eigenvalues across.
+    for exponent in -13i32..=1 {
+        let shift = reference_max * 10.0_f64.powi(exponent);
+        let counted = spectrum.count_above(shift).expect("inertia count");
+        let reference = evals.iter().filter(|v| **v > shift).count();
+        assert_eq!(
+            counted, reference,
+            "shift {shift:.3e}: inertia says {counted}, the dense spectrum says {reference}"
+        );
+    }
+}
+
 /// The wall #2757 was filed on, measured on the fixed path. The dense path's
 /// own numbers on this fixture (committed in `854ed7caa`) were
 /// `eigh_s` 0.157 / 0.970 / 7.013 at `p` = 256 / 512 / 1024 — a clean cubic and
@@ -702,7 +936,11 @@ fn diagnostics_report_no_longer_grows_cubically_in_the_output_dimension() {
         let metric = term.diagnostic_metric().expect("metric");
         let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
         let curvature = term
-            .residual_gauge_streamed_data_curvature(&metric, &layout)
+            .residual_gauge_streamed_data_curvature(
+                &metric,
+                &layout,
+                Array2::<f64>::zeros((0, layout.param_dim())),
+            )
             .expect("streamed curvature");
         assert_eq!(curvature.structure_tag(), "output_block_roots");
         assert_eq!(curvature.stored_scalars(), p * k_atoms * k_atoms);
