@@ -1465,15 +1465,21 @@ mod tests {
             "one e-fold below ℓ_lo the farthest evaluated pair must underflow out of the design"
         );
         // AT `hi` the closest evaluated pair is still distinguishable from a
-        // coincident one; a factor of e above it, it is not.
+        // coincident one, and by exactly one ULP: `ℓ_hi = d_min⁺/ε` puts
+        // `1 − exp(−d_min⁺/ℓ_hi)` at `ε`, the smallest contrast the format can
+        // express next to 1. Below half an ULP (`q < 2⁻⁵⁴`) the exponential
+        // rounds to 1 and the contrast is gone, which is a factor of four
+        // further out — so the wall sits one ULP inside the vanishing point,
+        // not at it.
         assert!(
-            1.0 - (-span_lo / hi).exp() > 0.0,
-            "1 − exp(−d_min/ℓ_hi) must still be nonzero"
+            1.0 - (-span_lo / hi).exp() >= f64::EPSILON,
+            "1 − exp(−d_min/ℓ_hi) must still carry a full ULP of contrast"
         );
+        let vanishes = hi * 4.0 * (1.0 + f64::EPSILON);
         assert_eq!(
-            1.0 - (-span_lo / (hi * std::f64::consts::E)).exp(),
+            1.0 - (-span_lo / vanishes).exp(),
             0.0,
-            "one e-fold above ℓ_hi the closest evaluated pair must round into coincidence"
+            "past four ℓ_hi the closest evaluated pair must round into coincidence"
         );
     }
 

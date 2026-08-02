@@ -138,6 +138,10 @@ include!("design_construction.rs");
 include!("spatial_optimization.rs");
 // #2458: the κ-profile derivative jet, kept out of the 9k-line driver file.
 include!("constant_curvature_kappa_jet.rs");
+// #2747: the constant-curvature smooth's outer objective in its own two
+// coordinates (κ, ln ℓ) — the value path, the ψ jet, the profile that owns both
+// and the bounded solve that mints κ̂. Same reason as the jet above.
+include!("constant_curvature_profile.rs");
 
 #[cfg(test)]
 mod test_support {
