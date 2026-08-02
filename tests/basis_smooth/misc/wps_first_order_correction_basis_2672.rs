@@ -29,6 +29,20 @@
 //! are in the same frame" from "one of them is not" without needing to know
 //! which frame is right — a rescaling of an input column cannot change a
 //! model's effective degrees of freedom.
+//!
+//! ## Positive control
+//!
+//! Measured by reverting the one-line back-transform and rebuilding, because a
+//! green test is byte-identical to a test that could never have gone red:
+//!
+//! ```text
+//! the WPS ρ̂-uncertainty d.f. must not depend on the units of a parametric
+//! covariate: 8.400237523e-2 at x-scale 1 vs 7.393816819e0 at x-scale 1000
+//! ```
+//!
+//! An 88× move from a pure change of units, and the conditional-EDF guard above
+//! it passes on the same pair — so the two arms really are one model in two
+//! coordinate systems and the gap is the basis, not the fit.
 
 use csv::StringRecord;
 use gam::inference::model_comparison::model_comparison_from_unified;
