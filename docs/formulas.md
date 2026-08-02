@@ -292,6 +292,14 @@ path through a distinct `type=`:
 - `mjs(...)` (aliases `measurejet`, `measure_jet`, `web`) — measure-jet
   spline for a response varying along an unknown low-dimensional set
   inside a higher-dimensional ambient space.
+  Its design is a Gaussian representer basis `K(data, centers; ℓ)`, so the
+  range `ℓ` is an outer coordinate on the same mgcv-`sp=` convention: an
+  explicit `length_scale=` pins it, an omitted one estimates it. `ℓ` decides
+  which subspace the representers span, and a smoothing parameter can only
+  shrink inside a span, never move one — pinning it at a value that does not
+  suit the target is an error no `λ` can repair (a frozen range cost 13.4×
+  the held-out RMSE on a 1-D curve in 3-D, #2761). `learn_length_scale=`
+  overrides the convention in either direction.
 - `curv(...)` (aliases `curvature`, `constant_curvature`, `mkappa`) —
   constant-curvature `M_κ` geodesic-kernel smooth, the κ-generic sibling
   of `sphere()` that interpolates `Sᵈ → ℝᵈ → Hᵈ` via `kappa=` (default
