@@ -2438,28 +2438,33 @@ impl<'a> ConstantCurvatureProfile<'a> {
         const SCAN_POINTS: usize = 13;
         let scan_lo = self.eta_bracket.0.clamp(lo, hi);
         let scan_hi = self.eta_bracket.1.clamp(lo, hi);
-        let mut best: Option<(f64, f64)> = None;
-        let consider = |eta: f64, best: &mut Option<(f64, f64)>| {
-            if let Ok(value) = self.evaluate_value(kappa, eta)
-                && best.as_ref().is_none_or(|&(_, b)| value < b)
-            {
-                *best = Some((eta, value));
+        let mut candidates: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
+        let consider = |eta: f64, into: &mut Vec<(f64, f64)>| {
+            if let Ok(value) = self.evaluate_value(kappa, eta) {
+                into.push((value, eta));
             }
         };
         for i in 0..SCAN_POINTS {
             consider(
                 scan_lo + (scan_hi - scan_lo) * (i as f64) / ((SCAN_POINTS - 1) as f64),
-                &mut best,
+                &mut candidates,
             );
         }
-        consider(self.eta_seed, &mut best);
-        let Some((bracket_eta, _)) = best else {
+        consider(self.eta_seed, &mut candidates);
+        candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // The jet carries checks the value path does not (the ψ-fixed null-space
+        // premise, and the chart's reproduction of the forward score), so a point
+        // the value accepts can still be one the jet refuses. Walk the scan in
+        // value order and start from the best point that yields a jet, rather
+        // than failing the whole profile at that κ.
+        let started = candidates.iter().find_map(|&(_, eta)| {
+            self.evaluate_psi(kappa, eta).ok().map(|jet| (eta, jet))
+        });
+        let Some((mut eta, mut jet)) = started else {
             crate::bail_invalid_estim!(
                 "constant-curvature profile could not evaluate the range box at κ = {kappa}"
             );
         };
-        let mut eta = bracket_eta;
-        let mut jet = self.evaluate_psi(kappa, eta)?;
         // Safeguarded Newton on η at fixed κ. The trust step is capped at the
         // BRACKET width rather than the (deliberately enormous) box width, so a
         // flat or non-convex stretch cannot throw the iterate fifteen orders of
@@ -2504,11 +2509,13 @@ impl<'a> ConstantCurvatureProfile<'a> {
                     break;
                 }
                 // Screen the trial with the cheap value; only the ACCEPTED point
-                // pays for a jet.
+                // pays for a jet. A trial the value accepts but the jet refuses
+                // is treated as a rejected trial and the step keeps shrinking.
                 if let Ok(value) = self.evaluate_value(kappa, trial)
                     && value <= jet.value
+                    && let Ok(next) = self.evaluate_psi(kappa, trial)
                 {
-                    accepted = Some((trial, self.evaluate_psi(kappa, trial)?));
+                    accepted = Some((trial, next));
                     break;
                 }
                 step *= 0.5;
