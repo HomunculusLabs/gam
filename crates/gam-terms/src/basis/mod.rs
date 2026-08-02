@@ -69,11 +69,13 @@ pub mod radial_profile;
 // ---- Flat re-exports: preserve the external `basis::X` path surface ----
 
 pub use constant_curvature_smooth::{
-    ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, build_constant_curvature_basis,
-    build_constant_curvature_basis_kappa_derivatives, constant_curvature_center_chart_radius2,
-    constant_curvature_data_chart_radius2, constant_curvature_effective_length,
-    constant_curvature_kernel_kappa_jets, constant_curvature_kernel_matrix,
-    realized_constant_curvature_length_scale,
+    ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, ConstantCurvatureKernelPsiJets,
+    ConstantCurvaturePsiJets, build_constant_curvature_basis,
+    build_constant_curvature_basis_kappa_derivatives,
+    build_constant_curvature_basis_psi_derivatives, constant_curvature_center_chart_radius2,
+    constant_curvature_data_chart_radius2, constant_curvature_kernel_kappa_jets,
+    constant_curvature_kernel_matrix, constant_curvature_kernel_psi_jets,
+    constant_curvature_length_scale_bounds, realized_constant_curvature_length_scale,
 };
 
 pub use measure_jet_moments::{

@@ -2868,7 +2868,15 @@ pub fn build_smooth_basis(
             if !kappa.is_finite() {
                 return Err("curvature smooth requires a finite kappa".to_string());
             }
-            let length_scale = option_f64(options, "length_scale").unwrap_or(0.0);
+            // `length_scale=` follows the SAME mgcv-`sp=` convention as `kappa=`
+            // (gam#2747): an EXPLICIT value pins the kernel resolution and the fit
+            // honours it verbatim; an OMITTED one leaves η = ln ℓ free for the
+            // outer estimation, seeded by the auto rule. The range must be fitted
+            // by default because it is confounded with κ — pinning it makes κ
+            // absorb the range error rather than measure curvature.
+            let length_scale_opt = option_f64(options, "length_scale");
+            let length_scale_fixed = length_scale_opt.is_some();
+            let length_scale = length_scale_opt.unwrap_or(0.0);
             if !length_scale.is_finite() || length_scale < 0.0 {
                 return Err(format!(
                     "curvature smooth length_scale must be positive (or omitted for auto); got {length_scale}"
@@ -2896,6 +2904,7 @@ pub fn build_smooth_basis(
                     // 0.0 sentinel = κ-independent auto initialization in the
                     // basis builder (median chart center spacing, doubled).
                     length_scale,
+                    length_scale_fixed,
                     // Curvature smooth defaults to NO double-penalty ridge
                     // (#1464): the curvature-blind ridge `I` absorbs the data fit
                     // independently of κ and rails the fitted curvature to the
