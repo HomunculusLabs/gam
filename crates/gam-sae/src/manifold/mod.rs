@@ -359,6 +359,9 @@ mod tests_2111_dense_torus_acceptance;
 mod tests_rank_charge_2101;
 
 #[cfg(test)]
+mod tests_probe_2757_curvature_gram;
+
+#[cfg(test)]
 mod tests_sure_dispersion_2133;
 
 #[cfg(test)]
