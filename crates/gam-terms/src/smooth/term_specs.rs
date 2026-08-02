@@ -9512,6 +9512,15 @@ pub fn build_single_local_smooth_term(
             penalty.matrix = fast_ab(&tt_s, &t);
             penalty.op = None;
             penalty.info.kronecker_factors = None;
+            // A declared structural null frame does NOT survive this chart.
+            // `null(Tᵀ S T) = T⁻¹ null(S)`, and `T` is a cumulative-sum /
+            // derivative-control transform — invertible but not orthogonal, so
+            // the image of an orthonormal frame is not orthonormal and the
+            // declaration's own contract cannot carry it. Withdraw it here
+            // rather than ship a frame that no longer spans the null space:
+            // consumers measure when nothing is declared, which is the honest
+            // fallback, whereas a stale frame is a wrong theorem.
+            penalty.info.structural_null_frame = None;
         }
     }
     let penalty_candidates = penalties_t
@@ -9545,11 +9554,32 @@ pub fn build_single_local_smooth_term(
                 }
                 factors
             });
-            Ok(PenaltyCandidate {
-                matrix: ConstructiveQuadratic::try_from_dense_psd(
-                    matrix,
-                    "shape-constrained transformed penalty",
+            // Re-attach the structural null frame the basis factory declared
+            // (#2445, extended in #2761). This is the SECOND chokepoint where
+            // `try_from_dense_psd` sees only a dense matrix — the first, in
+            // `term_design`, already re-attaches — and a declaration dropped
+            // here never reaches the double-penalty rebuild, which then decides
+            // the ridge's existence by a rank test on the shipped matrix. For a
+            // basis whose Primary loses numerical rank as an outer coordinate
+            // moves (measure-jet's representer range: rank 47 of 48 at the auto
+            // seed, 14 of 48 at 8x it), that turns the penalty TOPOLOGY into a
+            // function of ψ and aborts the incremental realizer mid-search.
+            // A positive Frobenius rescale does not move a null space, so the
+            // frame transports verbatim through this chart.
+            let structural_null_frame = info.structural_null_frame;
+            let matrix = ConstructiveQuadratic::try_from_dense_psd(
+                matrix,
+                "shape-constrained transformed penalty",
+            )?;
+            let matrix = match structural_null_frame {
+                Some(frame) => matrix.with_structural_null_frame(
+                    frame,
+                    "renormalized smooth penalty structural frame",
                 )?,
+                None => matrix,
+            };
+            Ok(PenaltyCandidate {
+                matrix,
                 source: info.source,
                 normalization_scale,
                 kronecker_factors,
@@ -9719,6 +9749,19 @@ pub fn build_smooth_design_withworkspace_unvalidated(
                         .null_eigenvectors
                         .as_ref()
                         .map(|basis| gam_linalg::faer_ndarray::fast_atb(q, basis));
+                    // `Q` is orthogonal, so `null(Qᵀ S Q) = Qᵀ null(S)` and the
+                    // image of an orthonormal frame is orthonormal — a declared
+                    // structural null frame transports EXACTLY here (unlike the
+                    // non-orthogonal shape-constraint chart below, which has to
+                    // withdraw it). Rotating it alongside `null_eigenvectors`
+                    // is what keeps the declaration a statement about the same
+                    // subspace after the rotation instead of a stale frame in
+                    // the pre-rotation coordinates (#2761).
+                    penalty.info.structural_null_frame = penalty
+                        .info
+                        .structural_null_frame
+                        .as_ref()
+                        .map(|frame| gam_linalg::faer_ndarray::fast_atb(q, frame));
                     penalty.op = None;
                     penalty.info.kronecker_factors = None;
                 }

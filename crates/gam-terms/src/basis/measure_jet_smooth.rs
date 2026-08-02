@@ -557,6 +557,57 @@ fn pullback_center_form_log_length_cross(
     (&cross_raw + &cross_raw.t()) * 0.5
 }
 
+/// The Primary energy's structural null frame in whatever coefficient chart
+/// `z` realizes: the coefficients whose REPRESENTER block vanishes, i.e. the
+/// pure ambient-affine-head directions.
+///
+/// This is a theorem of the construction, not a measurement, and it is the
+/// reason the double-penalty topology can be ψ-invariant (#2445's mechanism,
+/// applied here for #2761):
+///
+/// * the energy annihilates ambient-affine center values EXACTLY (the module's
+///   no-mass / exact-affine-projection contract), so a coefficient whose center
+///   values are `head_cc·b_head` — pure affine — is annihilated for EVERY `ℓ`;
+/// * the single-scale gauge restricts the representer block to `null(AᵀW K_cc)`,
+///   so its center values are mass-orthogonal to the affine space. A nonzero
+///   representer part therefore cannot land in the energy's null space:
+///   `K_cc z_rbf b_rbf ∈ A ∩ A^⊥ = {0}` forces `z_rbf b_rbf = 0`.
+///
+/// So `null(Primary) = { b : (z·b)|representer rows = 0 }` exactly, in the
+/// fit-time chart AND in any composed frozen chart, because both statements are
+/// about `z` alone. Nothing here reads `ℓ`.
+///
+/// Without the declaration the topology is decided by a rank test on the
+/// pullback `kzᵀ Q kz`, whose numerical rank falls as the range grows and the
+/// representers go collinear (measured on a 1-D 50-center term: rank 47 of 48 at
+/// the auto seed, 14 of 48 at 8x it). A design-moving `ℓ` then adds or removes
+/// the double-penalty ridge between outer trials — the `incremental realizer
+/// topology changed` abort, and the `#860` penalty-count desync class.
+///
+/// Returns `None` in multiscale mode, where there is no affine head: the
+/// energy's null space is then a genuinely `ℓ`-dependent subspace of the
+/// representer block, and declaring an EMPTY frame would assert the opposite of
+/// the truth (that the Primary has no null space at all) and silently delete the
+/// null component. Measuring is the honest fallback there.
+fn measure_jet_primary_structural_null_frame(
+    z: &Array2<f64>,
+    representer_count: usize,
+    head_rank: usize,
+) -> Result<Option<Array2<f64>>, BasisError> {
+    if head_rank == 0 || representer_count == 0 || z.ncols() == 0 {
+        return Ok(None);
+    }
+    // `rrqr_nullspace_basis(B)` returns `null(Bᵀ)`, so pass the transpose of the
+    // representer rows to get the coefficient-space null vectors.
+    let representer_rows = z.slice(ndarray::s![..representer_count, ..]).to_owned();
+    let (frame, _) = rrqr_nullspace_basis(&representer_rows.t().to_owned(), default_rrqr_rank_alpha())
+        .map_err(BasisError::LinalgError)?;
+    if frame.ncols() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(frame))
+}
+
 /// Fixed-rank constructive witness for the affine/null quadratic in center-value
 /// space. Rank is decided here, where `H₀` is independent of `ℓ`, rather than
 /// after its coefficient pullback has acquired `ℓ`-dependent roundoff modes.
@@ -1943,11 +1994,23 @@ pub fn build_measure_jet_basis(
         let penalty = pullback_center_form(&kz, &q_form);
         let (penalty_norm, c_primary) = normalize_penalty(&penalty);
         fused_penalty_normalization_scale = Some(c_primary);
+        // Declare the energy's structural null frame on the shipped Primary
+        // (#2761, the #2445 mechanism): the affine head is null by theorem, and
+        // the pullback's NUMERICAL rank falls as the representer range grows, so
+        // a rank test on the shipped matrix would let a design-moving ℓ decide
+        // the double-penalty topology between outer trials.
+        let mut primary = ConstructiveQuadratic::try_from_dense_psd(
+            penalty_norm,
+            "measure-jet primary penalty",
+        )?;
+        if let Some(frame) = measure_jet_primary_structural_null_frame(&z, m, head_rank)? {
+            primary = primary.with_structural_null_frame(
+                frame,
+                "measure-jet primary structural null declaration",
+            )?;
+        }
         candidates.push(PenaltyCandidate {
-            matrix: ConstructiveQuadratic::try_from_dense_psd(
-                penalty_norm,
-                "measure-jet primary penalty",
-            )?,
+            matrix: primary,
             source: PenaltySource::Primary,
             normalization_scale: c_primary,
             kronecker_factors: None,

@@ -35,20 +35,23 @@ use ndarray::{Array1, Array2};
 const N: usize = 1_200;
 const CENTERS: usize = 16;
 
-/// A 1-D curve in 3-D: a helix-like arc whose ambient speed varies, so an
-/// ambient-maximin center set is not uniform in the intrinsic coordinate.
+/// A 1-D curve in 3-D whose ambient speed varies by ~3x along its length, so an
+/// ambient-maximin center set is deliberately NOT uniform in the intrinsic
+/// coordinate and the median nearest-center spacing is a poor summary of the
+/// resolution the target needs. That mismatch is the geometry measure-jet
+/// exists for and the one its auto seed is weakest on.
 fn latent_to_coords(t: f64) -> [f64; 3] {
     [
         t,
-        0.4 * (2.0 * std::f64::consts::PI * t).cos(),
-        0.4 * (2.0 * std::f64::consts::PI * t).sin(),
+        0.45 * (2.0 * std::f64::consts::PI * t).sin(),
+        0.45 * t * t * t,
     ]
 }
 
-/// Two intrinsic cycles: smooth, but finer than one center spacing's worth of
+/// Three intrinsic cycles: smooth, but finer than one center spacing's worth of
 /// ambient resolution, which is exactly where the range matters.
 fn truth(t: f64) -> f64 {
-    (4.0 * std::f64::consts::PI * t).sin() + 0.4 * (2.0 * std::f64::consts::PI * t).cos()
+    (6.0 * std::f64::consts::PI * t).sin() + 0.4 * (2.0 * std::f64::consts::PI * t).cos()
 }
 
 /// Golden-ratio additive recurrence: deterministic and equidistributed, so the
@@ -64,7 +67,7 @@ fn latents(n: usize) -> Vec<f64> {
 fn span_floor(x: &Array2<f64>, y: &[f64]) -> (f64, usize) {
     let n = x.nrows();
     let mut basis: Vec<Array1<f64>> = Vec::new();
-    let mut absorb = |mut v: Array1<f64>, basis: &mut Vec<Array1<f64>>| {
+    let absorb = |mut v: Array1<f64>, basis: &mut Vec<Array1<f64>>| {
         let raw = v.dot(&v).sqrt();
         for _ in 0..2 {
             for q in basis.iter() {
@@ -168,15 +171,22 @@ fn representer_range_moves_the_span_so_lambda_cannot_stand_in_for_it_2761() {
          lose numerical rank; a rank drop would make this a conditioning test"
     );
 
-    // The seed range genuinely cannot represent this target. Stated against the
-    // flat fit so the bar is a property of the fixture, not a magic number: a
-    // floor at 15% of the flat-fit residual is a fit that has thrown away most
-    // of the signal before any smoothing parameter is chosen.
+    // Anti-vacuity: the seed range's shortfall has to be a bias that MATTERS,
+    // not a rounding artifact that the ratio below could then inflate for free.
+    // The bar is derived rather than chosen — a fit of this width at the noise
+    // level the measure-jet Gaussian fixtures use carries sampling error
+    // `sigma * sqrt(p/n)`, so requiring the seed floor to exceed twice that
+    // says the approximation bias dominates the variance, which is exactly the
+    // regime where a smoothing parameter cannot rescue it.
+    const REFERENCE_SIGMA: f64 = 0.10;
+    let sampling_noise = REFERENCE_SIGMA * (seed_p as f64 / N as f64).sqrt();
     assert!(
-        seed_floor > 0.15 * flat,
+        seed_floor > 2.0 * sampling_noise,
         "precondition: the auto seed range must be the hard case this test is about \
-         (seed_floor={seed_floor:.3e}, flat={flat:.6}); if the seed already spans the \
-         truth, this fixture has stopped exercising #2761 and needs a finer target"
+         (seed_floor={seed_floor:.3e} against 2x the sampling error {:.3e} of a p={seed_p} \
+         fit at sigma={REFERENCE_SIGMA}, flat-fit residual {flat:.6}); if the seed already \
+         spans the truth, this fixture has stopped exercising #2761 and needs a finer target",
+        2.0 * sampling_noise
     );
 
     // ...and a longer range does, by more than two orders of magnitude. This is
