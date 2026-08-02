@@ -49,6 +49,18 @@ fn lcg(s: &mut u64) -> f64 {
 /// block-diagonality claim would be indistinguishable from "the fixture's
 /// decoder happens to be sparse".
 fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeManifoldTerm {
+    planted_term_with_gate(n, p, k_atoms, dense_tail, 3.0)
+}
+
+/// As [`planted_term`], with an explicit gate logit so a caller can plant a term
+/// that claims no rows at all.
+fn planted_term_with_gate(
+    n: usize,
+    p: usize,
+    k_atoms: usize,
+    dense_tail: bool,
+    gate_logit: f64,
+) -> SaeManifoldTerm {
     let mut s = 0x2757_0000_0000_0001u64;
     let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("harmonic order 3"));
     let mut atoms = Vec::with_capacity(k_atoms);
@@ -86,9 +98,54 @@ fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeMani
         coord_blocks.push(coords);
         manifolds.push(LatentManifold::Circle { period: 1.0 });
     }
-    let logits = Array2::<f64>::from_elem((n, k_atoms), 3.0);
+    let logits = Array2::<f64>::from_elem((n, k_atoms), gate_logit);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,
+        coord_blocks,
+        manifolds,
+        AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
+    )
+    .expect("assignment blocks agree");
+    let mut term = SaeManifoldTerm::new(atoms, assignment).expect("term");
+    term.set_guards_enabled(false);
+    term
+}
+
+/// A term whose decoder carries only the constant harmonic, so every decoded
+/// tangent — and therefore the whole residual-gauge curvature — is exactly zero.
+fn planted_constant_decoder_term(n: usize, p: usize, k_atoms: usize) -> SaeManifoldTerm {
+    let mut s = 0x2757_0000_0000_0009u64;
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("harmonic order 3"));
+    let mut atoms = Vec::with_capacity(k_atoms);
+    let mut coord_blocks = Vec::with_capacity(k_atoms);
+    let mut manifolds = Vec::with_capacity(k_atoms);
+    for k in 0..k_atoms {
+        let coords = Array2::<f64>::from_shape_fn((n, 1), |_| lcg(&mut s));
+        let (phi, jet) = evaluator
+            .evaluate(coords.view())
+            .expect("periodic evaluate");
+        let mut decoder = Array2::<f64>::zeros((3, p));
+        for c in 0..p {
+            decoder[[0, c]] = 0.3 + 0.01 * c as f64;
+        }
+        atoms.push(
+            SaeManifoldAtom::new_with_provided_function_gram(
+                format!("flat{k}"),
+                SaeAtomBasisKind::Periodic,
+                1,
+                phi,
+                jet,
+                decoder,
+                Array2::<f64>::eye(3),
+            )
+            .expect("atom blocks agree")
+            .with_basis_second_jet(evaluator.clone()),
+        );
+        coord_blocks.push(coords);
+        manifolds.push(LatentManifold::Circle { period: 1.0 });
+    }
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::from_elem((n, k_atoms), 3.0),
         coord_blocks,
         manifolds,
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
@@ -484,6 +541,147 @@ fn dual_root_and_dense_gram_agree_on_a_rank_neither_may_exceed() {
             r.description
         );
     }
+}
+
+/// A non-finite curvature must be REFUSED, not summarised.
+///
+/// The dense path got this for free: `FaerEigh::eigh` validates its input and
+/// returns a typed error. `FaerSvd::svd` does not, so a NaN singular value
+/// would silently fail every `σ > τ` test and be reported as a rank-zero,
+/// fully-unpinned model — the most permissive verdict the certificate can
+/// issue, from the least trustworthy input.
+#[test]
+fn a_non_finite_curvature_is_refused_in_every_representation() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms) = (16usize, 8usize, 2usize);
+    let term = planted_term(n, p, k_atoms, true);
+    let metric = term.diagnostic_metric().expect("metric");
+    let (model, streamed) = term
+        .to_residual_gauge_model(metric, None, false)
+        .expect("certificate model");
+    let clean = streamed.expect("unpinned path streams its curvature");
+    let root_rows = clean.root_rows();
+    let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
+    let views: Vec<Option<crate::identifiability::AtomParameterView>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+
+    // The clean curvature certifies.
+    assert!(
+        residual_gauge_exact_from_curvature(&model, &views, &ops, clean).is_ok(),
+        "the fixture must certify before the poisoned arms mean anything"
+    );
+
+    let mut poisoned = ndarray::Array3::<f64>::zeros((p, k_atoms, k_atoms));
+    poisoned[[p - 1, k_atoms - 1, k_atoms - 1]] = f64::NAN;
+    let arms = [
+        ResidualGaugeCurvature::OutputBlockRoots {
+            roots: poisoned,
+            layout: layout.clone(),
+            root_rows,
+        },
+        ResidualGaugeCurvature::DualRoot {
+            root: Array2::<f64>::from_elem((2, layout.param_dim()), f64::NAN),
+            root_rows,
+        },
+        ResidualGaugeCurvature::DenseGram {
+            gram: Array2::<f64>::from_elem((layout.param_dim(), layout.param_dim()), f64::NAN),
+            root_rows,
+        },
+    ];
+    for arm in arms {
+        let tag = arm.structure_tag();
+        let refusal = residual_gauge_exact_from_curvature(&model, &views, &ops, arm);
+        let message = refusal
+            .err()
+            .unwrap_or_else(|| panic!("{tag}: a non-finite curvature must be refused"));
+        assert!(
+            message.contains("non-finite"),
+            "{tag}: refusal must name the cause, got {message:?}"
+        );
+    }
+}
+
+/// A term carrying no assignment mass anywhere: the curvature is exactly zero,
+/// which is a certificate (rank 0, everything unpinned), not an error and not a
+/// panic. The old dense path reached this through an eigendecomposition of a
+/// zero matrix; the block path never decomposes anything.
+#[test]
+fn an_unassigned_term_certifies_at_rank_zero() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms) = (12usize, 6usize, 2usize);
+    // A decoder with no harmonic content at all: every decoded tangent is
+    // identically zero, so the curvature is the zero operator.
+    let term = planted_constant_decoder_term(n, p, k_atoms);
+    for row in 0..n {
+        for atom in &term.atoms {
+            let tangent = atom.decoded_derivative_row(row, 0);
+            assert!(
+                tangent.iter().all(|v| *v == 0.0),
+                "the fixture must have no decoded tangent for this gate to bite"
+            );
+        }
+    }
+    let metric = term.diagnostic_metric().expect("metric");
+    let (model, streamed) = term
+        .to_residual_gauge_model(metric, None, false)
+        .expect("certificate model");
+    let curvature = streamed.expect("unpinned path streams its curvature");
+    assert_eq!(curvature.structure_tag(), "output_block_roots");
+    let views: Vec<Option<crate::identifiability::AtomParameterView>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
+        (0..model.atoms.len()).map(|_| None).collect();
+    let report = residual_gauge_exact_from_curvature(&model, &views, &ops, curvature)
+        .expect("a zero curvature is a certificate, not an error");
+    assert_eq!(report.pinning_rank, 0);
+}
+
+/// The independent instrument: the process's own eigendecomposition census
+/// (`#2267`) must show that nothing at the joint parameter dimension is
+/// decomposed at all.
+///
+/// `stored_scalars` proves the memory claim; this proves the *flops* claim
+/// without a stopwatch. The census's per-thread tallies are monotone, so the
+/// region runs on a freshly spawned thread where they start at zero and
+/// `max_dim` is exactly the largest decomposition the report performed.
+#[test]
+fn the_certification_decomposes_nothing_at_the_parameter_dimension() {
+    let (n, p, k_atoms) = (32usize, 48usize, 4usize);
+    let param_dim = p * k_atoms;
+    let observed = std::thread::spawn(move || {
+        assert_eq!(
+            gam_linalg::faer_ndarray::eigh_census_this_thread().calls,
+            0,
+            "a freshly spawned thread starts with an empty census, which is what makes \
+             `max_dim` below a property of THIS region"
+        );
+        let term = planted_term(n, p, k_atoms, true);
+        let rho = unit_rho(k_atoms);
+        let fitted = term
+            .try_fitted_target_aware(Array2::<f64>::zeros((n, p)).view(), Some(&rho))
+            .expect("fitted");
+        term.fit_diagnostics_report(None, false, None, fitted.view(), None)
+            .expect("diagnostics report");
+        gam_linalg::faer_ndarray::eigh_census_this_thread()
+    })
+    .join()
+    .expect("certification thread");
+    assert!(
+        observed.max_dim < param_dim as u64,
+        "the certification must not decompose anything at the joint parameter dimension \
+         ({param_dim}); the census saw {} across {} calls",
+        observed.max_dim,
+        observed.calls
+    );
+    assert!(
+        observed.max_dim <= p as u64,
+        "and in fact nothing wider than the output dimension {p}; the census saw {}",
+        observed.max_dim
+    );
 }
 
 /// The wall #2757 was filed on, measured on the fixed path. The dense path's

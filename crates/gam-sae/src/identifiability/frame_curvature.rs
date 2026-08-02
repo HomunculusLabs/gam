@@ -371,6 +371,19 @@ impl ResidualGaugeCurvature {
         }
     }
 
+    /// Whether every stored entry is finite.
+    ///
+    /// The certificate's refusal contract: a non-finite curvature must produce
+    /// a typed error, not a spectrum. Checked on the stored representation
+    /// rather than on the fit that produced it, so it holds for every builder.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Self::OutputBlockRoots { roots, .. } => roots.iter().all(|v| v.is_finite()),
+            Self::DualRoot { root, .. } => root.iter().all(|v| v.is_finite()),
+            Self::DenseGram { gram, .. } => gram.iter().all(|v| v.is_finite()),
+        }
+    }
+
     /// A stable tag for the representation, for diagnostics and gates.
     pub fn structure_tag(&self) -> &'static str {
         match self {
@@ -487,6 +500,113 @@ mod tests {
         assert_eq!(layout.block_dim(), 2);
         assert_eq!(layout.param_dim(), 12);
         assert_eq!(layout.local_axis_base(1), 0);
+    }
+
+    #[test]
+    fn folding_rows_into_a_triangular_factor_reproduces_their_gram() {
+        // The Givens accumulator's whole contract: after folding rows
+        // `v_1 … v_m`, `rᵀr = Σ_j v_j v_jᵀ` — exactly the Gram it replaces,
+        // without ever forming it.
+        let d = 5usize;
+        let mut seed = 0x2757_ACC0_0000_0001u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64) - 0.5
+        };
+        let rows: Vec<Vec<f64>> = (0..17).map(|_| (0..d).map(|_| next()).collect()).collect();
+        let mut expected = Array2::<f64>::zeros((d, d));
+        for row in &rows {
+            for a in 0..d {
+                for b in 0..d {
+                    expected[[a, b]] += row[a] * row[b];
+                }
+            }
+        }
+        let mut factor = Array2::<f64>::zeros((d, d));
+        for row in &rows {
+            let mut v = row.clone();
+            fold_row_into_triangular_factor(&mut factor.view_mut(), &mut v);
+        }
+        // Upper triangular by construction.
+        for a in 0..d {
+            for b in 0..a {
+                assert_eq!(factor[[a, b]], 0.0, "({a},{b}) below the diagonal");
+            }
+        }
+        let recovered = factor.t().dot(&factor);
+        let scale = expected.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let worst = recovered
+            .iter()
+            .zip(expected.iter())
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        assert!(
+            worst <= 1.0e-13 * scale,
+            "rᵀr must equal the accumulated Gram: worst |Δ| {worst:.3e} against {scale:.3e}"
+        );
+    }
+
+    #[test]
+    fn folding_survives_magnitudes_that_overflow_a_gram() {
+        // `hypot` is not a convenience here: a Gram accumulation squares its
+        // entries, so a decoder tangent near `1e200` overflows to infinity
+        // before any decomposition sees it. The root accumulation never
+        // squares, so the same rows stay finite and the singular value is
+        // recovered exactly.
+        let mut factor = Array2::<f64>::zeros((2, 2));
+        for scale in [1.0e200_f64, 2.0e200] {
+            let mut v = vec![scale, 0.0];
+            fold_row_into_triangular_factor(&mut factor.view_mut(), &mut v);
+        }
+        assert!(
+            factor.iter().all(|v| v.is_finite()),
+            "the triangular factor must stay finite where the Gram would overflow"
+        );
+        let expected = (1.0e200_f64).hypot(2.0e200);
+        assert!(
+            ((factor[[0, 0]] - expected) / expected).abs() <= 1.0e-14,
+            "σ = {} against {expected}",
+            factor[[0, 0]]
+        );
+        assert!(
+            !(1.0e200_f64 * 1.0e200).is_finite(),
+            "the Gram entry does overflow"
+        );
+    }
+
+    #[test]
+    fn is_finite_refuses_a_nan_in_any_representation() {
+        let layout = FrameColumnLayout::new(2, &[1]);
+        let mut roots = Array3::<f64>::zeros((2, 1, 1));
+        roots[[0, 0, 0]] = 1.0;
+        let clean = ResidualGaugeCurvature::OutputBlockRoots {
+            roots: roots.clone(),
+            layout: layout.clone(),
+            root_rows: 3,
+        };
+        assert!(clean.is_finite());
+        roots[[1, 0, 0]] = f64::NAN;
+        let dirty = ResidualGaugeCurvature::OutputBlockRoots {
+            roots,
+            layout,
+            root_rows: 3,
+        };
+        assert!(!dirty.is_finite());
+        assert!(
+            !ResidualGaugeCurvature::DualRoot {
+                root: Array2::<f64>::from_elem((1, 2), f64::INFINITY),
+                root_rows: 1,
+            }
+            .is_finite()
+        );
+        assert!(
+            !ResidualGaugeCurvature::DenseGram {
+                gram: Array2::<f64>::from_elem((2, 2), f64::NAN),
+                root_rows: 1,
+            }
+            .is_finite()
+        );
     }
 
     #[test]

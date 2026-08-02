@@ -2788,6 +2788,20 @@ impl CurvatureReduction {
                 curvature.param_dim()
             ));
         }
+        // A non-finite curvature is a broken fit, not a certificate with an
+        // unusual spectrum. The dense path used to get this refusal for free
+        // from `FaerEigh::eigh`, which validates its input; `FaerSvd::svd` does
+        // not, so a NaN would otherwise flow through as `sigma > tol == false`
+        // and be reported as a rank-zero, fully-unpinned model — the most
+        // permissive verdict the certificate can issue, from the least
+        // trustworthy input. Refuse here, once, for every representation.
+        if !curvature.is_finite() {
+            return Err(
+                "residual_gauge: streamed curvature contains a non-finite entry; the fitted \
+                 decoder Jacobian or the row metric is not finite"
+                    .to_string(),
+            );
+        }
         let root_rows = curvature.root_rows();
         match curvature {
             ResidualGaugeCurvature::OutputBlockRoots { roots, layout, .. } => {
