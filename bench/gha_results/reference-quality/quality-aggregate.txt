@@ -2,15 +2,15 @@ execution record: /tmp/quality-report/quality_results.tsv
 === #1561 whole-suite quality meta-gate ===
 category        n scored GAMwin REFwin   medlogR  p(1-sided)      p_BH
 factors         3      3      1      2    0.0170      0.9093    0.9782
-families       66     65     35     30   -0.0034      0.2070    0.4123
+families       66     65     35     30   -0.0034      0.2126    0.4123
 manifolds      15     14     11      2   -0.1652      0.0087    0.0525
 misc           38     38     10     26    0.0015      0.9782    0.9782
 smooths        40     40     20     20    0.0000      0.2749    0.4123
 survival       14     14     10      4   -0.0176      0.0450    0.1351
 ------------------------------------------------------------------------
-OVERALL       176    174     87     84    0.0000      0.0993 
+OVERALL       176    174     87     84    0.0000      0.1028 
 
-CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.0993, median log(gam/ref)=0.0000, wins 87 / losses 84)
+CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.1028, median log(gam/ref)=0.0000, wins 87 / losses 84)
 NOTE: 2 pair(s) dropped (nonfinite/nonpositive).
 
 --- execution vs emission (silent-attrition guard) ---
