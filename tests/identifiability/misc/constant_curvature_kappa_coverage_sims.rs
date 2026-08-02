@@ -109,22 +109,40 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 /// kernel section, and the signal is standardized to unit SD before the noise is
 /// applied so `noise_sd` keeps meaning a signal-to-noise ratio across κ⋆.
 ///
-/// ## Flat truth (`κ⋆ = 0`) is a CONSTANT mean
+/// ## The planted RANGE has to move too (gam#2747)
 ///
-/// A flat space has no preferred geodesic-distance shape, so there is no
-/// curvature to plant; but any centre-peaked radial signal is fitted better by a
-/// renormalized kernel at `κ ≠ 0` even at matched effective degrees of freedom,
-/// a residual lean that spuriously rejects flatness. The sibling
-/// `constant_curvature_kappa_inference_e2e` generator of the same name reached
-/// this conclusion and carries the fix in its own doc comment; this copy did not,
-/// and the lean was measured: `κ̂` railed at the box's upper end (`≈ +1.41`,
-/// spherical) in **6 of 9** genuinely flat replicates, at a residual sum of
-/// squares falling monotonically in κ while `edf` stayed pinned at 5.978.
+/// Planting inside the κ⋆ span is necessary and was not sufficient. The truth
+/// was built from the fit's own spec, so it also inherited the fit's own AUTO
+/// length scale — and that is precisely the one configuration in which a
+/// range-blind criterion works. Measured on a 3 curvatures × 3 ranges grid: with
+/// `ℓ` pinned at the auto `ℓ_ref`, the criterion recovers κ⋆ in the `1×` column
+/// and nowhere else — railed at a box endpoint at `0.5×` and `2×`, sign-inverted
+/// on the spherical arm, and reporting a confident interior `κ̂ = ∓0.94` on
+/// genuinely flat data. A fixture that plants only at `1×` cannot see any of it.
+///
+/// So `range_multiplier` cycles `{0.5, 1, 2}` across the replicates. The
+/// binomial bar below is unchanged: the replicates are still `R` independent
+/// datasets, they now just draw from a mixture over the range as well as over
+/// the noise, which makes the same coverage claim strictly stronger.
+///
+/// ## Flat truth (`κ⋆ = 0`) is a real signal again
+///
+/// This generator used to plant a CONSTANT mean for flat truth, because *"any
+/// centre-peaked radial signal is fitted better by a renormalized kernel at
+/// κ ≠ 0 even at matched effective degrees of freedom"* — measured as `κ̂` railed
+/// at the box's upper end in 6 of 9 genuinely flat replicates. That lean was the
+/// range confounding (gam#2747): a flat signal at a range the criterion could
+/// not move was fitted better by buying resolution with κ. With the range
+/// estimated the lean is gone, and a constant mean is no longer an honest size
+/// test — it asks whether the flatness test survives a signal with no shape at
+/// all, which is the easy case. Flat truth is now a genuine member of the κ = 0
+/// span at the replicate's own range, exactly like the curved arms.
 fn dataset_on_m_kappa(
     n: usize,
     kappa_star: f64,
     radius: f64,
     noise_sd: f64,
+    range_multiplier: f64,
     seed: u64,
 ) -> (Array2<f64>, Array1<f64>) {
     let mut st = seed;
@@ -149,12 +167,12 @@ fn dataset_on_m_kappa(
         noise[i] = next_gauss(&mut st);
     }
     let mut y = Array1::<f64>::zeros(n);
-    // Flat truth: a κ-neutral constant mean, no curvature signal to plant.
-    if kappa_star != 0.0 {
-        // Curved truth: a member of the κ⋆ span, built from the SAME spec the
-        // fit will use — same center strategy, same auto length scale — so the
-        // truth is in the model being estimated and in no other member of the
-        // family.
+    // A member of the κ⋆ span at the replicate's own range, built from the SAME
+    // spec the fit will use — same center strategy, same auto rule for the
+    // reference range — so the truth is in the model being estimated and in no
+    // other member of the family. `range_multiplier` moves it OFF the auto
+    // range, which is the configuration a range-blind criterion cannot handle.
+    {
         let mut frame = Array2::<f64>::zeros((n, 3));
         for i in 0..n {
             frame[(i, 1)] = feats[(i, 0)];
@@ -169,6 +187,12 @@ fn dataset_on_m_kappa(
         truth_spec.kappa = kappa_star;
         truth_spec.kappa_fixed = true;
         truth_spec.double_penalty = false;
+        let centers = gam::basis::constant_curvature_realized_centers(feats.view(), &truth_spec)
+            .expect("the fixture cloud yields a realized center set");
+        let ell_ref = gam::basis::realized_constant_curvature_length_scale(centers.view(), 0.0)
+            .expect("the realized centers span a positive pairwise distance");
+        truth_spec.length_scale = ell_ref * range_multiplier;
+        truth_spec.length_scale_fixed = true;
         let basis = build_constant_curvature_basis(feats.view(), &truth_spec)
             .expect("the planted κ⋆ geometry must be inside its own chart");
         let design = basis.design.to_dense();
@@ -282,6 +306,13 @@ const REPLICATE_COUNT: usize = 9;
 /// with [`REPLICATE_COUNT`]; see its table.
 const MAX_MISSES: usize = 2;
 
+/// The planted RANGE multipliers, cycled across replicates (gam#2747). `1.0` is
+/// the fit's own auto rule — the single configuration a range-blind criterion
+/// handles — so a fixture that used only it could not see the defect. The
+/// factor-of-two span on each side is where the pre-#2747 criterion railed,
+/// inverted the sign, or invented curvature from flat data.
+const RANGE_MULTIPLIERS: [f64; 3] = [0.5, 1.0, 2.0];
+
 fn replicate_count() -> usize {
     REPLICATE_COUNT
 }
@@ -364,7 +395,8 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     let mut khats = Vec::with_capacity(reps);
     for r in 0..reps {
         let seed = 0x5EED_0944_0000_0000 ^ ((r as u64) << 8);
-        let (feats, y) = dataset_on_m_kappa(120, kappa_star, 0.6, 0.10, seed);
+        let range_multiplier = RANGE_MULTIPLIERS[r % RANGE_MULTIPLIERS.len()];
+        let (feats, y) = dataset_on_m_kappa(120, kappa_star, 0.6, 0.10, range_multiplier, seed);
         let inf = fit_and_infer(&feats, &y);
         match resolve(&inf, kappa_star) {
             Resolution::Covered => covered += 1,
@@ -380,8 +412,8 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
         sum_khat += inf.kappa_hat;
         khats.push(inf.kappa_hat);
         eprintln!(
-            "[cov κ⋆=+{kappa_star}] r={r} κ̂={:+.3} support={} CI=[{:+.3},{:+.3}] \
-             open=[{},{}] -> {:?}",
+            "[cov κ⋆=+{kappa_star}] r={r} range={range_multiplier}×ℓ_ref κ̂={:+.3} \
+             support={} CI=[{:+.3},{:+.3}] open=[{},{}] -> {:?}",
             inf.kappa_hat,
             inf.ci.kappa_hat_support.label(),
             inf.ci.ci_lo,
@@ -457,7 +489,8 @@ fn flatness_test_holds_size_across_flat_replicates() {
     let mut pvals = Vec::with_capacity(reps);
     for r in 0..reps {
         let seed = 0x71A7_0944_0000_0000 ^ ((r as u64) << 8);
-        let (feats, y) = dataset_on_m_kappa(120, 0.0, 0.6, 0.10, seed);
+        let range_multiplier = RANGE_MULTIPLIERS[r % RANGE_MULTIPLIERS.len()];
+        let (feats, y) = dataset_on_m_kappa(120, 0.0, 0.6, 0.10, range_multiplier, seed);
         let inf = fit_and_infer(&feats, &y);
         if inf.flatness.p_value < alpha {
             rejections += 1;
@@ -472,7 +505,8 @@ fn flatness_test_holds_size_across_flat_replicates() {
         }
         pvals.push(inf.flatness.p_value);
         eprintln!(
-            "[size κ⋆=0] r={r} κ̂={:+.3} support={} p={:.4} CI=[{:+.3},{:+.3}] -> {:?}",
+            "[size κ⋆=0] r={r} range={range_multiplier}×ℓ_ref κ̂={:+.3} support={} \
+             p={:.4} CI=[{:+.3},{:+.3}] -> {:?}",
             inf.kappa_hat,
             inf.ci.kappa_hat_support.label(),
             inf.flatness.p_value,
