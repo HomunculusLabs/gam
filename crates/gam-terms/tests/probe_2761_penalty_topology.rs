@@ -183,3 +183,92 @@ fn probe_term_collection_topology_versus_range() {
         }
     }
 }
+
+/// The chart the incremental realizer actually rebuilds in: the FROZEN composed
+/// transform the collection produced. Its local topology must equal the
+/// collection's cached one, at every range.
+#[test]
+fn probe_frozen_chart_local_topology_versus_range() {
+    use gam_terms::basis::{BasisMetadata, MeasureJetFrozenQuadrature};
+
+    let ds = dataset_1d(200);
+    let col_map = ds.column_map();
+    let parsed = parse_formula("y ~ s(x, bs=\"mjs\")").expect("parse");
+    let base = build_termspec(
+        &parsed.terms,
+        &ds,
+        &col_map,
+        &mut Vec::new(),
+        &gam_runtime::resource::ResourcePolicy::default_library(),
+    )
+    .expect("term spec");
+    let feature = ds.values.clone();
+    let realized = build_term_collection_design(feature.view(), &base).expect("auto design");
+    println!(
+        "[frozen] collection cached penalties = {}",
+        realized.penalties.len()
+    );
+    let BasisMetadata::MeasureJet {
+        centers,
+        length_scale,
+        eps_band,
+        order_s,
+        alpha,
+        tau0,
+        masses,
+        support_means,
+        penalty_normalization_scales,
+        raw_penalty_normalization_scales,
+        fused_penalty_normalization_scale,
+        constraint_transform,
+        sigma_coord,
+        ..
+    } = &realized.smooth.terms[0].metadata
+    else {
+        panic!("expected measure-jet metadata");
+    };
+    let frozen = MeasureJetBasisSpec {
+        center_strategy: CenterStrategy::UserProvided(centers.clone()),
+        order_s: *order_s,
+        alpha: *alpha,
+        tau0: *tau0,
+        num_scales: eps_band.len(),
+        length_scale: length_scale.standardized_value(),
+        double_penalty: true,
+        learn_length_scale: true,
+        multiscale: false,
+        identifiability: MeasureJetIdentifiability::FrozenTransform {
+            transform: constraint_transform.clone().expect("fit-time z"),
+        },
+        frozen_quadrature: Some(MeasureJetFrozenQuadrature {
+            masses: masses.clone(),
+            eps_band: eps_band.clone(),
+            support_means: support_means.clone(),
+            penalty_normalization_scales: penalty_normalization_scales.clone(),
+            raw_penalty_normalization_scales: raw_penalty_normalization_scales.clone(),
+            fused_penalty_normalization_scale: *fused_penalty_normalization_scale,
+            sigma_coord: *sigma_coord,
+        }),
+    };
+    // The frozen replay evaluates on the SAME (standardized) coordinates the
+    // centers live in, so feed the term its own feature column.
+    let feature_col = feature.slice(ndarray::s![.., 1..2]).to_owned();
+    for f in [0.25_f64, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0] {
+        let mut spec = frozen.clone();
+        spec.length_scale = frozen.length_scale * f;
+        match build_measure_jet_basis(feature_col.view(), &spec) {
+            Ok(built) => println!(
+                "[frozen] f={f:<5} ell={:.6} p={} local_penalties={} sources={:?}",
+                spec.length_scale,
+                built.design.ncols(),
+                built.active_penalties.len(),
+                built
+                    .active_penalties
+                    .iter()
+                    .map(|p| format!("{:?}", p.info.source))
+                    .collect::<Vec<_>>()
+            ),
+            Err(e) => println!("[frozen] f={f:<5} BUILD FAILED: {e}"),
+        }
+    }
+}

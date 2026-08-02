@@ -4380,6 +4380,16 @@ fn wrap_local_build_as_realization(
                     .null_eigenvectors
                     .as_ref()
                     .map(|basis| gam_linalg::faer_ndarray::fast_atb(q, basis));
+                // Same transport the aggregation loop this mirrors performs:
+                // `Q` is orthogonal, so `null(Qᵀ S Q) = Qᵀ null(S)` and a
+                // declared structural null frame moves with it. Leaving it in
+                // pre-rotation coordinates would hand the double-penalty
+                // rebuild a frame for the wrong chart (#2761).
+                penalty.info.structural_null_frame = penalty
+                    .info
+                    .structural_null_frame
+                    .as_ref()
+                    .map(|frame| gam_linalg::faer_ndarray::fast_atb(q, frame));
                 penalty.op = None;
                 penalty.info.kronecker_factors = None;
             }

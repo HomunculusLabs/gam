@@ -2040,6 +2040,62 @@ pub fn build_measure_jet_basis(
             kronecker_factors: None,
             op: None,
         });
+        // Decide the ridge's fate in THIS chart, the way the term-collection
+        // chokepoint decides it in its own (#2433's repair, which periodic
+        // Duchon already carries verbatim, extended here for #2761).
+        //
+        // The collection applies its global gauge and then rebuilds the ridge
+        // from `null(Primary_constrained)`; a chart that has taken the last
+        // structural null direction leaves nothing for the ridge to shrink and
+        // the collection drops it. A frozen composed chart — which is what
+        // every outer ψ trial and every predict-time replay rebuilds in — is
+        // exactly such a chart for a 1-D measure-jet term, where the parametric
+        // orthogonalization absorbs the whole affine head. Emitting the raw
+        // ridge there produces a LOCAL topology of 2 against the collection's
+        // cached 1, and the incremental realizer aborts the outer search with
+        // `topology changed ... active_penalties=2, cached_penalties=1`.
+        //
+        // Running the same rebuild locally makes the two layers agree by
+        // construction instead of by coincidence. In the cold chart the head is
+        // still present, the rebuild keeps the ridge, and this is a no-op on
+        // the shipped topology.
+        let primary_physical = candidates
+            .iter()
+            .find(|candidate| matches!(candidate.source, PenaltySource::Primary))
+            .map(|candidate| {
+                candidate
+                    .matrix
+                    .scaled(candidate.normalization_scale, "physical measure-jet primary")
+            })
+            .transpose()?;
+        if let Some(primary_physical) = primary_physical {
+            let width = primary_physical.nrows();
+            for candidate in &mut candidates {
+                if !matches!(candidate.source, PenaltySource::DoublePenaltyNullspace) {
+                    continue;
+                }
+                let ridge_physical = candidate.matrix.scaled(
+                    candidate.normalization_scale,
+                    "physical measure-jet null-function penalty",
+                )?;
+                match super::rebuild_metric_consistent_ridge(&primary_physical, &ridge_physical)? {
+                    Some(rebuilt) => {
+                        let normalized = super::normalize_constructive_penalty_candidate(
+                            rebuilt,
+                            PenaltySource::DoublePenaltyNullspace,
+                        )?;
+                        candidate.matrix = normalized.matrix;
+                        candidate.normalization_scale = normalized.normalization_scale;
+                    }
+                    None => {
+                        candidate.matrix = ConstructiveQuadratic::zero(width);
+                        candidate.normalization_scale = 1.0;
+                    }
+                }
+                candidate.kronecker_factors = None;
+                candidate.op = None;
+            }
+        }
     }
     let filtered = filter_penalty_candidates(candidates)?;
     // #2225: compute the errors-in-variables input-noise scale while `centers`
