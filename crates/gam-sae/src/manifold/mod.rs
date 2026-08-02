@@ -100,7 +100,10 @@
 //! * `outer_objective` — the generic-engine REML outer objective and the
 //!   curvature-homotopy entry walk.
 
-use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayViewMut2, s};
+use ndarray::{
+    Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayViewMut2,
+    s,
+};
 
 use std::sync::Arc;
 
@@ -315,17 +318,17 @@ mod tests_collateral_e2_2234;
 mod tests_collateral_noncyclic_2234;
 
 #[cfg(test)]
+mod tests_edf_census_bounds_2502;
+#[cfg(test)]
 mod tests_indefinite_a_refusal_2336;
 #[cfg(test)]
 mod tests_schur_seed_refusal_1782;
 #[cfg(test)]
 mod tests_smooth_clamp_2339;
 #[cfg(test)]
-mod tests_threshold_gate_majorizer_2520;
-#[cfg(test)]
 mod tests_sparse_curvature_operator_2500;
 #[cfg(test)]
-mod tests_edf_census_bounds_2502;
+mod tests_threshold_gate_majorizer_2520;
 
 #[cfg(test)]
 mod tests_streaming_materialize_chunk_1801;
@@ -359,7 +362,7 @@ mod tests_2111_dense_torus_acceptance;
 mod tests_rank_charge_2101;
 
 #[cfg(test)]
-mod tests_probe_2757_curvature_gram;
+mod tests_frame_curvature_2757;
 
 #[cfg(test)]
 mod tests_sure_dispersion_2133;

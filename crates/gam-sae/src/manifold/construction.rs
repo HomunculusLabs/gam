@@ -3,6 +3,9 @@ use super::*;
 // its ρ-local refusals instead of restating them, so the classifier and the
 // producer cannot disagree about the phrase again.
 use super::outer_objective::ProbeRefusalKind;
+use crate::identifiability::{
+    FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature,
+};
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 
@@ -161,12 +164,7 @@ impl VanishedAtomsProof {
             Self::Certified {
                 signal_upper_bounds,
                 ..
-            } => Some(
-                signal_upper_bounds
-                    .iter()
-                    .copied()
-                    .fold(0.0_f64, f64::max),
-            ),
+            } => Some(signal_upper_bounds.iter().copied().fold(0.0_f64, f64::max)),
             Self::Unavailable { .. } => None,
         }
     }
@@ -1794,10 +1792,9 @@ impl SaeManifoldTerm {
                 self.output_dim(),
             ));
         }
-        let scalar_count = self
-            .n_obs()
-            .checked_mul(self.output_dim())
-            .ok_or_else(|| "decoder-vanishing residual scalar count overflowed usize".to_string())?;
+        let scalar_count = self.n_obs().checked_mul(self.output_dim()).ok_or_else(|| {
+            "decoder-vanishing residual scalar count overflowed usize".to_string()
+        })?;
         if scalar_count == 0 {
             return Err("decoder-vanishing residual scalar count is zero".to_string());
         }
@@ -1901,8 +1898,7 @@ impl SaeManifoldTerm {
         let signal_vanish_boundary = if residual_roundoff_floor == 0.0 {
             0.0
         } else {
-            let relative_amplitude =
-                residual_gamma / ((1.0 + residual_gamma).sqrt() + 1.0);
+            let relative_amplitude = residual_gamma / ((1.0 + residual_gamma).sqrt() + 1.0);
             residual_scale_upper * relative_amplitude * relative_amplitude
         };
         if !signal_vanish_boundary.is_finite() {
@@ -2007,9 +2003,7 @@ impl SaeManifoldTerm {
                 gram_trace * decoder_frobenius_squared / scalar_count as f64;
             if raw_signal_upper_bound == 0.0 {
                 return Ok(VanishedAtomsProof::Unavailable {
-                    reason: format!(
-                        "atom {atom} gated-signal bound underflowed to zero"
-                    ),
+                    reason: format!("atom {atom} gated-signal bound underflowed to zero"),
                 });
             }
             let signal_upper_bound = raw_signal_upper_bound / (1.0 - state_gamma);
@@ -2223,7 +2217,7 @@ impl SaeManifoldTerm {
         let atom_two_lens =
             crate::inference::atom_lens::atom_two_lens(self, &metric, assignments_override)?;
 
-        let (certificate_model, streamed_curvature) =
+        let (certificate_model, streamed_curvature): (_, Option<ResidualGaugeCurvature>) =
             self.to_residual_gauge_model(metric, per_atom_ard_variances, isometry_pin_active)?;
         // #998: within-atom gauge families are certified on their EXACT orbits
         // in the model's own (decoder, coordinate) parameter space — compensated
@@ -2264,16 +2258,15 @@ impl SaeManifoldTerm {
             // through the non-streamed exact entry point.
             crate::identifiability::residual_gauge_exact(&certificate_model, &views, &ops)?
         } else {
-            let (curvature_gram, root_rows) = streamed_curvature.ok_or_else(|| {
+            let curvature = streamed_curvature.ok_or_else(|| {
                 "fit_diagnostics_report: missing streamed residual-gauge curvature for unpinned exact path"
                     .to_string()
             })?;
-            crate::identifiability::residual_gauge_exact_from_curvature_gram(
+            crate::identifiability::residual_gauge_exact_from_curvature(
                 &certificate_model,
                 &views,
                 &ops,
-                curvature_gram,
-                root_rows,
+                curvature,
             )?
         };
 
@@ -2548,7 +2541,7 @@ impl SaeManifoldTerm {
     ) -> Result<
         (
             crate::identifiability::FittedSaeManifold,
-            Option<(Array2<f64>, usize)>,
+            Option<ResidualGaugeCurvature>,
         ),
         String,
     > {
@@ -2559,13 +2552,14 @@ impl SaeManifoldTerm {
         let k = self.k_atoms();
         let assignments = self.assignment.assignments();
 
-        // Per-atom frame `(p, d)` = active-mass-weighted mean decoder tangent,
-        // and the flattened-frame column offset bookkeeping for the joint
-        // parameter vector (`vec(frame_0) ⊕ …`, row-major within each frame).
+        // Per-atom frame `(p, d)` = active-mass-weighted mean decoder tangent.
+        // The flattened-frame column bookkeeping for the joint parameter vector
+        // (`vec(frame_0) ⊕ …`, row-major within each frame) is the
+        // [`FrameColumnLayout`] built below: one object owning the
+        // `c = offset_k + i·d_k + a` arithmetic, rather than an offsets vector
+        // and an axis vector every consumer re-multiplies for itself.
         let mut fitted_atoms: Vec<FittedAtom> = Vec::with_capacity(k);
-        let mut atom_offsets: Vec<usize> = Vec::with_capacity(k);
         let mut atom_axis_dim: Vec<usize> = Vec::with_capacity(k);
-        let mut cursor = 0usize;
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
             let d = atom.latent_dim();
             let topology = match (atom.basis_kind(), d) {
@@ -2695,11 +2689,10 @@ impl SaeManifoldTerm {
                     .and_then(|fits| fits.get(atom_idx))
                     .and_then(|slot| slot.clone()),
             });
-            atom_offsets.push(cursor);
             atom_axis_dim.push(d);
-            cursor += p * d;
         }
-        let param_dim = cursor;
+        let layout = FrameColumnLayout::new(p, &atom_axis_dim);
+        let param_dim = layout.param_dim();
 
         // Per-row pinning Jacobian `J_n ∈ ℝ^{p × param_dim}` flattened row-major
         // (`J_n[i, c] = jacobian_rows[n][i · param_dim + c]`). Column `(k, i', a)`
@@ -2720,14 +2713,14 @@ impl SaeManifoldTerm {
                     if !(a_nk > 0.0) {
                         continue;
                     }
-                    let d = atom_axis_dim[atom_idx];
-                    let base = atom_offsets[atom_idx];
-                    for axis in 0..d {
+                    let base = layout.local_axis_base(atom_idx);
+                    for axis in 0..atom_axis_dim[atom_idx] {
                         atom.fill_decoded_derivative_row(row, axis, &mut tangent);
                         for i in 0..p {
                             // Frame coordinate `(k, i, axis)` sits at column
-                            // `base + i·d + axis`; it sources output coordinate `i`.
-                            j_flat[i * param_dim + base + i * d + axis] += a_nk * tangent[i];
+                            // `layout.column(i, ·)`; it sources output coordinate `i`.
+                            j_flat[i * param_dim + layout.column(i, base + axis)] +=
+                                a_nk * tangent[i];
                         }
                     }
                 }
@@ -2735,12 +2728,7 @@ impl SaeManifoldTerm {
             }
             (jacobian_rows, None)
         } else {
-            let streamed = self.residual_gauge_streamed_data_curvature(
-                &metric,
-                &atom_offsets,
-                &atom_axis_dim,
-                param_dim,
-            )?;
+            let streamed = self.residual_gauge_streamed_data_curvature(&metric, &layout)?;
             (Vec::new(), Some(streamed))
         };
 
@@ -2755,17 +2743,17 @@ impl SaeManifoldTerm {
         let isometry_penalty_root = if isometry_pin_active && param_dim > 0 {
             let mut root_rows: Vec<Array1<f64>> = Vec::new();
             for (atom_idx, fitted) in fitted_atoms.iter().enumerate() {
-                let d = atom_axis_dim[atom_idx];
-                let base = atom_offsets[atom_idx];
-                for axis in 0..d {
+                let base = layout.local_axis_base(atom_idx);
+                for axis in 0..atom_axis_dim[atom_idx] {
                     let mut r = Array1::<f64>::zeros(param_dim);
                     let mut any = false;
+                    let local = base + axis;
                     for i in 0..p {
                         let v = fitted.frame[[i, axis]];
                         if v != 0.0 {
                             any = true;
                         }
-                        r[base + i * d + axis] = v;
+                        r[layout.column(i, local)] = v;
                     }
                     if any {
                         root_rows.push(r);
@@ -2792,13 +2780,31 @@ impl SaeManifoldTerm {
         ))
     }
 
+    /// The data half of the residual-gauge curvature, `H_data = Σ_n J_nᵀ M_n J_n`,
+    /// built in the structure the frame parameterization gives it (#2757).
+    ///
+    /// The per-row pinning Jacobian is **output-coordinate diagonal**: its
+    /// column `(k, i, a)` lives at `layout.column(i, ·)` and sources output
+    /// coordinate `i` only, so `J_n` carries `p·D` numbers, not `p · param_dim`.
+    /// Everything here follows from writing that down instead of padding it
+    /// into a dense `p × param_dim` block:
+    ///
+    /// * a metric that does not couple output coordinates (`M_n` diagonal — in
+    ///   particular Euclidean, which is what `diagnostic_metric` installs
+    ///   without an output-Fisher harvest) leaves `H_data` **exactly** block
+    ///   diagonal, `p` blocks of `D × D`. Off-block entries are not small,
+    ///   they are never written. Cost `n·p·D²`, memory `p·D²`.
+    /// * a metric that does couple them contributes `rank` rank-one rows per
+    ///   observation, each computable in `param_dim` flops rather than
+    ///   `p · param_dim` (only one output coordinate reaches each column). The
+    ///   root is returned whole when it has no more rows than columns, because
+    ///   `spec(RᵀR) = spec(RRᵀ) ∪ {0}` makes the small side sufficient; the
+    ///   dense Gram is assembled only when the root is the larger object.
     pub(crate) fn residual_gauge_streamed_data_curvature(
         &self,
         metric: &gam_problem::RowMetric,
-        atom_offsets: &[usize],
-        atom_axis_dim: &[usize],
-        param_dim: usize,
-    ) -> Result<(Array2<f64>, usize), String> {
+        layout: &FrameColumnLayout,
+    ) -> Result<ResidualGaugeCurvature, String> {
         let n = self.n_obs();
         let p = self.output_dim();
         if metric.p_out() != p {
@@ -2807,64 +2813,121 @@ impl SaeManifoldTerm {
                 metric.p_out()
             ));
         }
+        if layout.output_dim() != p || layout.atom_count() != self.k_atoms() {
+            return Err(format!(
+                "residual_gauge_streamed_data_curvature: frame layout is ({}, {} atoms) but the \
+                 term is ({p}, {} atoms)",
+                layout.output_dim(),
+                layout.atom_count(),
+                self.k_atoms()
+            ));
+        }
         let rank = metric.metric_rank();
-        let mut gram = Array2::<f64>::zeros((param_dim, param_dim));
+        let param_dim = layout.param_dim();
+        let d_total = layout.block_dim();
+        let root_rows = n * rank;
         if param_dim == 0 || n == 0 || rank == 0 {
-            return Ok((gram, n * rank));
+            return Ok(OutputBlockRootAccumulator::new(layout.clone()).finish(root_rows));
         }
 
         let assignments = self.assignment.assignments();
         let mut tangent = vec![0.0_f64; p];
-        let mut j_flat = vec![0.0_f64; p * param_dim];
-        let mut root_row = Array1::<f64>::zeros(param_dim);
-        for row in 0..n {
-            j_flat.fill(0.0);
-            for (atom_idx, atom) in self.atoms.iter().enumerate() {
-                let a_nk = assignments[[row, atom_idx]];
-                if !(a_nk > 0.0) {
+        // `g[i, l]` is the whole content of `J_n`, in `p*D` numbers: the local
+        // axis `l = (k, a)` column's sensitivity on output coordinate `i`.
+        let mut g = Array2::<f64>::zeros((p, d_total));
+
+        if !metric.drives_gauge() {
+            let mut accumulator = OutputBlockRootAccumulator::new(layout.clone());
+            for row in 0..n {
+                if !self.fill_row_frame_jacobian(row, &assignments, layout, &mut tangent, &mut g) {
                     continue;
                 }
-                let d = atom_axis_dim[atom_idx];
-                let base = atom_offsets[atom_idx];
-                for axis in 0..d {
-                    atom.fill_decoded_derivative_row(row, axis, &mut tangent);
-                    for i in 0..p {
-                        j_flat[i * param_dim + base + i * d + axis] += a_nk * tangent[i];
-                    }
-                }
+                accumulator.push_row_jacobian(&g);
             }
+            return Ok(accumulator.finish(root_rows));
+        }
 
-            if metric.drives_gauge() {
-                for r in 0..rank {
-                    root_row.fill(0.0);
-                    for c in 0..param_dim {
-                        let mut acc = 0.0_f64;
-                        for i in 0..p {
-                            acc += metric.factor_entry(row, i, r) * j_flat[i * param_dim + c];
-                        }
-                        root_row[c] = acc;
-                    }
-                    let row_slice = root_row.as_slice().ok_or_else(|| {
-                        "residual_gauge_streamed_data_curvature: non-contiguous root row"
-                            .to_string()
-                    })?;
-                    Self::accumulate_residual_gauge_gram_row(&mut gram, row_slice);
-                }
-            } else {
+        // Gauge-driving metric: `M_n = U_n U_nᵀ`, so the row contributes the
+        // `rank` root rows `v_r[(k,i,a)] = U_n[i,r] · g[i,(k,a)]`. Each is a
+        // `param_dim`-vector built in `param_dim` flops — the whitening reaches
+        // exactly one output coordinate per column.
+        let dense = root_rows > param_dim;
+        let mut root = if dense {
+            Array2::<f64>::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((root_rows, param_dim))
+        };
+        let mut gram = if dense {
+            Array2::<f64>::zeros((param_dim, param_dim))
+        } else {
+            Array2::<f64>::zeros((0, 0))
+        };
+        let mut root_row = vec![0.0_f64; param_dim];
+        for row in 0..n {
+            if !self.fill_row_frame_jacobian(row, &assignments, layout, &mut tangent, &mut g) {
+                // No assignment mass: every root row this observation would
+                // contribute is exactly zero, and a zero row changes neither the
+                // Gram nor the (already zero) stored root row.
+                continue;
+            }
+            for r in 0..rank {
+                let out_index = row * rank + r;
                 for i in 0..p {
-                    let start = i * param_dim;
-                    let end = start + param_dim;
-                    Self::accumulate_residual_gauge_gram_row(&mut gram, &j_flat[start..end]);
+                    let w = metric.factor_entry(row, i, r);
+                    for l in 0..d_total {
+                        root_row[layout.column(i, l)] = w * g[[i, l]];
+                    }
+                }
+                if dense {
+                    Self::accumulate_residual_gauge_gram_row(&mut gram, &root_row);
+                } else {
+                    for (c, v) in root_row.iter().enumerate() {
+                        root[[out_index, c]] = *v;
+                    }
                 }
             }
         }
+        if dense {
+            for a in 0..param_dim {
+                for b in 0..a {
+                    gram[[b, a]] = gram[[a, b]];
+                }
+            }
+            return Ok(ResidualGaugeCurvature::DenseGram { gram, root_rows });
+        }
+        Ok(ResidualGaugeCurvature::DualRoot { root, root_rows })
+    }
 
-        for a in 0..param_dim {
-            for b in 0..a {
-                gram[[b, a]] = gram[[a, b]];
+    /// Fill `g[i, l] = a_{nk} · ∂g_k/∂t_a(row)[i]` (local axis `l = (k, a)`)
+    /// for one observation, returning whether the row carries any assignment
+    /// mass at all. `g` is zeroed here, so callers may reuse one buffer.
+    fn fill_row_frame_jacobian(
+        &self,
+        row: usize,
+        assignments: &Array2<f64>,
+        layout: &FrameColumnLayout,
+        tangent: &mut [f64],
+        g: &mut Array2<f64>,
+    ) -> bool {
+        g.fill(0.0);
+        let p = self.output_dim();
+        let mut any = false;
+        for (atom_idx, atom) in self.atoms.iter().enumerate() {
+            let a_nk = assignments[[row, atom_idx]];
+            if !(a_nk > 0.0) {
+                continue;
+            }
+            any = true;
+            let base = layout.local_axis_base(atom_idx);
+            for axis in 0..atom.latent_dim() {
+                atom.fill_decoded_derivative_row(row, axis, tangent);
+                let l = base + axis;
+                for i in 0..p {
+                    g[[i, l]] += a_nk * tangent[i];
+                }
             }
         }
-        Ok((gram, n * rank))
+        any
     }
 
     pub(crate) fn accumulate_residual_gauge_gram_row(gram: &mut Array2<f64>, row: &[f64]) {

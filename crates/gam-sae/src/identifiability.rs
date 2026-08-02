@@ -80,6 +80,10 @@
 //! about a decomposition of tangent directions, and the report is that
 //! decomposition made data-legible.
 
+pub mod frame_curvature;
+
+pub use frame_curvature::{FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature};
+
 use crate::chart_canonicalization::CanonicalChartTopology;
 use crate::inference::layer_transport::{ChartTopology, TransportLadderReport, transport_ladder};
 use crate::inference::riesz::{RieszInput, SmoothFunctional, debias_with_dense_hessian};
@@ -88,8 +92,7 @@ use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_with_permutation,
 };
 use gam_math::score_opt::{
-    AffineRemlProfile, ScoreOptimumLocation, certified_exp_representative,
-    certified_ln_positive,
+    AffineRemlProfile, ScoreOptimumLocation, certified_exp_representative, certified_ln_positive,
 };
 use gam_problem::{MetricProvenance, RowMetric};
 use gam_terms::inference::structure_evidence::{StructureCertificate, StructureLedger};
@@ -546,12 +549,9 @@ pub fn ridge_reml_select_weight(
             "ridge_reml_select_weight: could not enclose the full-shrinkage response log"
                 .to_string()
         })?
-        .sub(
-            certified_ln_positive(scalar_observations).ok_or_else(|| {
-                "ridge_reml_select_weight: could not enclose the observation-count log"
-                    .to_string()
-            })?,
-        )
+        .sub(certified_ln_positive(scalar_observations).ok_or_else(|| {
+            "ridge_reml_select_weight: could not enclose the observation-count log".to_string()
+        })?)
         .scale(scalar_observations);
     let boundary_score = boundary_score_enclosure.lo
         + 0.5 * (boundary_score_enclosure.hi - boundary_score_enclosure.lo);
@@ -599,14 +599,12 @@ pub fn ridge_reml_select_weight(
     // represented by an arbitrary large finite weight.
     let rho_lo = certified_ln_positive(f64::MIN_POSITIVE)
         .ok_or_else(|| {
-            "ridge_reml_select_weight: could not enclose the finite-domain lower bound"
-                .to_string()
+            "ridge_reml_select_weight: could not enclose the finite-domain lower bound".to_string()
         })?
         .lo;
     let rho_hi = certified_ln_positive(f64::MAX / 2.0)
         .ok_or_else(|| {
-            "ridge_reml_select_weight: could not enclose the finite-domain upper bound"
-                .to_string()
+            "ridge_reml_select_weight: could not enclose the finite-domain upper bound".to_string()
         })?
         .hi;
     let rho_tolerance = f64::EPSILON.sqrt();
@@ -625,14 +623,11 @@ pub fn ridge_reml_select_weight(
             score: boundary_score,
         });
     }
-    if search.value_certificate.maximum_excess
-        > search.value_certificate.comparison_resolution
-    {
+    if search.value_certificate.maximum_excess > search.value_certificate.comparison_resolution {
         return Err(format!(
             "ridge_reml_select_weight: finite REML candidates are not globally ordered \
              (maximum excess {}, comparison resolution {})",
-            search.value_certificate.maximum_excess,
-            search.value_certificate.comparison_resolution
+            search.value_certificate.maximum_excess, search.value_certificate.comparison_resolution
         ));
     }
     if search.location == ScoreOptimumLocation::LowerBoundary {
@@ -2303,11 +2298,7 @@ fn exact_orbit_fields(
                     view.coords[[row, 2]],
                 ];
                 // `e_x × u`, `e_y × u`, `e_z × u`.
-                let generators = [
-                    [0.0, -u[2], u[1]],
-                    [u[2], 0.0, -u[0]],
-                    [-u[1], u[0], 0.0],
-                ];
+                let generators = [[0.0, -u[2], u[1]], [u[2], 0.0, -u[0]], [-u[1], u[0], 0.0]];
                 for axis in 0..3 {
                     rotation_x[[row, axis]] = generators[0][axis];
                     rotation_y[[row, axis]] = generators[1][axis];
@@ -2632,6 +2623,22 @@ fn stacked_curvature_root(model: &FittedSaeManifold) -> Result<Array2<f64>, Stri
     Ok(r_mat)
 }
 
+/// The curvature `H = H_data + H_isometry`, reduced to exactly the three things
+/// the certificate reads off it: the pinning rank, the stiffness scale
+/// `σ_max(R)²`, and the quadratic form `ξᵀHξ` along a unit generator.
+///
+/// The variants are not implementation choices — each is a different *exact*
+/// representation of the same operator, and the builder picks the one the fit's
+/// structure makes available (#2757):
+///
+/// * [`Self::OutputBlocks`] — the pinning Jacobian is output-coordinate
+///   diagonal, so with a metric that does not couple output coordinates `H` is
+///   block diagonal: `p` blocks of `D × D`. Spectrum = the union of the block
+///   spectra, `p·D³` flops instead of `(p·D)³`.
+/// * [`Self::DualRoot`] — `H = RᵀR` with `R` having fewer rows `m` than
+///   columns. `spec(RᵀR) = spec(RRᵀ) ∪ {0}^{param_dim − m}`, so the same
+///   spectral decisions come from an `m × m` eigenproblem.
+/// * [`Self::Gram`] / [`Self::Root`] — the unstructured fallbacks.
 enum CurvatureReduction {
     Root {
         pinning_rank: usize,
@@ -2643,6 +2650,89 @@ enum CurvatureReduction {
         sigma_max_sq: f64,
         gram: Array2<f64>,
     },
+    /// `H` as `p` independent `D × D` output-coordinate block roots.
+    OutputBlockRoots {
+        pinning_rank: usize,
+        sigma_max_sq: f64,
+        roots: Array3<f64>,
+        layout: FrameColumnLayout,
+    },
+    /// `H = RᵀR` held as `R` (`m × param_dim`, `m ≤ param_dim`), decided on
+    /// `R`'s own singular values.
+    DualRoot {
+        pinning_rank: usize,
+        sigma_max_sq: f64,
+        root: Array2<f64>,
+    },
+}
+
+/// The pinning-rank tolerance, in singular values of `R`.
+///
+/// The same shape as [`gam_linalg::faer_ndarray::rrqr_with_permutation`]'s own
+/// threshold (`α · ε · max(rows, cols) · max(scale, 1)`), so the streamed
+/// reductions and the RRQR path make one decision rather than two. Written once
+/// here so no reduction can drift into a tolerance of its own.
+fn curvature_rank_tolerance(sigma_max: f64, root_rows: usize, param_dim: usize) -> f64 {
+    default_rrqr_rank_alpha()
+        * f64::EPSILON
+        * (root_rows.max(param_dim).max(1) as f64)
+        * sigma_max.max(1.0)
+}
+
+/// The rank decision taken where it belongs — on singular values of `R`.
+///
+/// `singular_values` is the multiset of *nonzero* singular values; the
+/// structural zeros a rank-deficient representation omits never clear a
+/// positive tolerance, so omitting them is exact rather than an approximation.
+fn root_spectral_rank(singular_values: &[f64], root_rows: usize, param_dim: usize) -> (f64, usize) {
+    let sigma_max = singular_values
+        .iter()
+        .cloned()
+        .fold(0.0_f64, f64::max)
+        .max(0.0);
+    let rank_tol = curvature_rank_tolerance(sigma_max, root_rows, param_dim);
+    let pinning_rank = singular_values
+        .iter()
+        .filter(|&&sigma| sigma > rank_tol)
+        .count();
+    (sigma_max * sigma_max, pinning_rank)
+}
+
+/// The same decision when only `H = RᵀR` survives: `σ > τ ⟺ λ > τ²`, floored
+/// at the eigendecomposition's own resolution.
+///
+/// Algebraically `λ > τ²` is identical to [`root_spectral_rank`]'s `σ > τ`.
+/// Numerically it is not, and the gap is not marginal. The tolerance is
+/// `τ = α·ε·N·σ_max` with `α = 100`, i.e. deliberately **100× above** the
+/// backward error `≈ ε·N·σ_max` of a singular-value decomposition of `R` — that
+/// margin is what makes the decision meaningful. Squaring it gives
+/// `τ² = α²·ε²·N²·σ_max²` against a symmetric eigensolver's backward error
+/// `≈ ε·N·σ_max²`, so the threshold lands a factor `α²·ε·N ≈ 2·10⁻¹²·N`
+/// **below** the instrument's resolution: every roundoff eigenvalue clears it
+/// and the reported rank is the matrix dimension whatever the true rank is.
+/// Measured on the #2757 fixture, a curvature of true rank 12 in 80 parameters
+/// was reported as rank 45 by exactly this route.
+///
+/// So a Gram-side decision must not claim resolution below `ε·dim·λ_max`, the
+/// standard `|λ̃ − λ| ≤ c·ε·‖H‖₂` bound with the conservative `c = dim`. That
+/// floor is derived from the instrument, not chosen: it is the smallest
+/// eigenvalue this decomposition can distinguish from zero, and below it
+/// "nonzero" is not a statement the Gram can make.
+///
+/// Every representation that retains a root avoids the whole question and uses
+/// [`root_spectral_rank`]; this exists for
+/// [`ResidualGaugeCurvature::DenseGram`], which by construction has no root to
+/// ask — it is reached only when the root is the larger object.
+fn gram_spectral_rank(spectrum: &[f64], root_rows: usize, param_dim: usize) -> (f64, usize) {
+    let sigma_max_sq = spectrum.iter().cloned().fold(0.0_f64, f64::max).max(0.0);
+    let rank_tol = curvature_rank_tolerance(sigma_max_sq.sqrt(), root_rows, param_dim);
+    let resolution_floor = f64::EPSILON * (param_dim.max(1) as f64) * sigma_max_sq;
+    let lambda_tol = (rank_tol * rank_tol).max(resolution_floor);
+    let pinning_rank = spectrum
+        .iter()
+        .filter(|&&lambda| lambda.max(0.0) > lambda_tol)
+        .count();
+    (sigma_max_sq, pinning_rank)
 }
 
 impl CurvatureReduction {
@@ -2686,6 +2776,123 @@ impl CurvatureReduction {
         })
     }
 
+    /// Reduce whichever representation the streaming builder produced.
+    ///
+    /// `param_dim` is the certificate model's own parameter dimension; the
+    /// curvature must agree with it, which is the one cross-check that catches a
+    /// builder and a model that were derived from different atom lists.
+    fn from_curvature(curvature: ResidualGaugeCurvature, param_dim: usize) -> Result<Self, String> {
+        if curvature.param_dim() != param_dim {
+            return Err(format!(
+                "residual_gauge: curvature is over {} parameters but param_dim = {param_dim}",
+                curvature.param_dim()
+            ));
+        }
+        let root_rows = curvature.root_rows();
+        match curvature {
+            ResidualGaugeCurvature::OutputBlockRoots { roots, layout, .. } => {
+                Self::from_output_block_roots(roots, layout, root_rows)
+            }
+            ResidualGaugeCurvature::DualRoot { root, .. } => {
+                Self::from_dual_root(root, root_rows, param_dim)
+            }
+            ResidualGaugeCurvature::DenseGram { gram, .. } => {
+                Self::from_gram(gram, root_rows, param_dim)
+            }
+        }
+    }
+
+    /// `H` as `p` output-coordinate block ROOTS: `R = ⊕_i R_i` up to a row
+    /// permutation, so `R`'s singular values are the union of the blocks', and
+    /// the rank decision is taken on them directly.
+    ///
+    /// A block that is identically zero is skipped rather than decomposed: its
+    /// `D` singular values are exact zeros, which never clear a positive rank
+    /// tolerance, and a fitted dictionary whose atoms touch a minority of the
+    /// output coordinates has most of its blocks in that state.
+    fn from_output_block_roots(
+        roots: Array3<f64>,
+        layout: FrameColumnLayout,
+        root_rows: usize,
+    ) -> Result<Self, String> {
+        let p = layout.output_dim();
+        let d = layout.block_dim();
+        if roots.dim() != (p, d, d) {
+            return Err(format!(
+                "residual_gauge: curvature block roots have shape {:?} but the frame layout is \
+                 ({p}, {d}, {d})",
+                roots.dim()
+            ));
+        }
+        if layout.param_dim() == 0 || root_rows == 0 {
+            return Ok(Self::OutputBlockRoots {
+                pinning_rank: 0,
+                sigma_max_sq: 0.0,
+                roots,
+                layout,
+            });
+        }
+        let mut singular_values: Vec<f64> = Vec::with_capacity(p * d);
+        for i in 0..p {
+            let block = roots.slice(s![i, .., ..]);
+            if block.iter().all(|v| *v == 0.0) {
+                continue;
+            }
+            if d == 1 {
+                // A 1×1 factor IS its own singular value; routing it through a
+                // decomposition would only add a validation pass.
+                singular_values.push(block[[0, 0]].abs());
+                continue;
+            }
+            let (_u, sv, _vt) = block.to_owned().svd(false, false).map_err(|e| {
+                format!("residual_gauge: SVD of curvature block root {i} ({d}x{d}) failed: {e}")
+            })?;
+            singular_values.extend(sv.iter().copied());
+        }
+        let (sigma_max_sq, pinning_rank) =
+            root_spectral_rank(&singular_values, root_rows, layout.param_dim());
+        Ok(Self::OutputBlockRoots {
+            pinning_rank,
+            sigma_max_sq,
+            roots,
+            layout,
+        })
+    }
+
+    /// `H = RᵀR` with `m ≤ param_dim` rows: `R` has at most `m` nonzero
+    /// singular values and `H` has `param_dim − m` structural zeros, so the
+    /// whole decision comes from an `m`-sized decomposition of the root itself.
+    fn from_dual_root(
+        root: Array2<f64>,
+        root_rows: usize,
+        param_dim: usize,
+    ) -> Result<Self, String> {
+        if root.ncols() != param_dim {
+            return Err(format!(
+                "residual_gauge: curvature root has {} columns but param_dim = {param_dim}",
+                root.ncols()
+            ));
+        }
+        if param_dim == 0 || root_rows == 0 || root.nrows() == 0 {
+            return Ok(Self::DualRoot {
+                pinning_rank: 0,
+                sigma_max_sq: 0.0,
+                root,
+            });
+        }
+        let (_u, sv, _vt) = root
+            .svd(false, false)
+            .map_err(|e| format!("residual_gauge: SVD of the curvature root failed: {e}"))?;
+        let singular_values: Vec<f64> = sv.iter().copied().collect();
+        let (sigma_max_sq, pinning_rank) =
+            root_spectral_rank(&singular_values, root_rows, param_dim);
+        Ok(Self::DualRoot {
+            pinning_rank,
+            sigma_max_sq,
+            root,
+        })
+    }
+
     fn from_gram(gram: Array2<f64>, root_rows: usize, param_dim: usize) -> Result<Self, String> {
         if gram.nrows() != param_dim || gram.ncols() != param_dim {
             return Err(format!(
@@ -2704,17 +2911,8 @@ impl CurvatureReduction {
         let (evals, _) = gram.eigh(Side::Lower).map_err(|e| {
             format!("residual_gauge: eigendecomposition of curvature gram failed: {e}")
         })?;
-        let sigma_max_sq = evals.iter().cloned().fold(0.0_f64, f64::max).max(0.0);
-        let sigma_max = sigma_max_sq.sqrt();
-        let rank_tol = default_rrqr_rank_alpha()
-            * f64::EPSILON
-            * (root_rows.max(param_dim).max(1) as f64)
-            * sigma_max.max(1.0);
-        let lambda_tol = rank_tol * rank_tol;
-        let pinning_rank = evals
-            .iter()
-            .filter(|&&lambda| lambda.max(0.0) > lambda_tol)
-            .count();
+        let spectrum: Vec<f64> = evals.iter().copied().collect();
+        let (sigma_max_sq, pinning_rank) = gram_spectral_rank(&spectrum, root_rows, param_dim);
         Ok(Self::Gram {
             pinning_rank,
             sigma_max_sq,
@@ -2724,25 +2922,54 @@ impl CurvatureReduction {
 
     fn pinning_rank(&self) -> usize {
         match self {
-            Self::Root { pinning_rank, .. } | Self::Gram { pinning_rank, .. } => *pinning_rank,
+            Self::Root { pinning_rank, .. }
+            | Self::Gram { pinning_rank, .. }
+            | Self::OutputBlockRoots { pinning_rank, .. }
+            | Self::DualRoot { pinning_rank, .. } => *pinning_rank,
         }
     }
 
     fn sigma_max_sq(&self) -> f64 {
         match self {
-            Self::Root { sigma_max_sq, .. } | Self::Gram { sigma_max_sq, .. } => *sigma_max_sq,
+            Self::Root { sigma_max_sq, .. }
+            | Self::Gram { sigma_max_sq, .. }
+            | Self::OutputBlockRoots { sigma_max_sq, .. }
+            | Self::DualRoot { sigma_max_sq, .. } => *sigma_max_sq,
         }
     }
 
     fn unit_generator_energy(&self, unit: &Array1<f64>) -> f64 {
         match self {
-            Self::Root { root, .. } => {
+            Self::Root { root, .. } | Self::DualRoot { root, .. } => {
                 let r_xi = root.dot(unit);
                 r_xi.iter().map(|c| c * c).sum::<f64>()
             }
             Self::Gram { gram, .. } => {
                 let h_xi = gram.dot(unit);
                 unit.dot(&h_xi).max(0.0)
+            }
+            // `ξᵀHξ = Σ_i ‖R_i ξ_i‖²` — the sum runs over output coordinates
+            // because `H` has no entries between two of them, and each term is
+            // read off that block's root rather than its Gram. `p·D²` flops
+            // instead of `(p·D)²`.
+            Self::OutputBlockRoots { roots, layout, .. } => {
+                let d = layout.block_dim();
+                let mut xi = vec![0.0_f64; d];
+                let mut total = 0.0_f64;
+                for i in 0..layout.output_dim() {
+                    layout.gather_output(unit.view(), i, &mut xi);
+                    if xi.iter().all(|v| *v == 0.0) {
+                        continue;
+                    }
+                    for a in 0..d {
+                        let mut row = 0.0_f64;
+                        for b in a..d {
+                            row += roots[[i, a, b]] * xi[b];
+                        }
+                        total += row * row;
+                    }
+                }
+                total.max(0.0)
             }
         }
     }
@@ -2824,23 +3051,30 @@ pub fn residual_gauge_exact(
     residual_gauge_inner(model, Some(exact), None)
 }
 
-/// Exact-orbit residual-gauge certificate with a pre-reduced streamed curvature
-/// Gram `RᵀR`.
+/// Exact-orbit residual-gauge certificate with a pre-reduced streamed
+/// curvature `H = RᵀR`.
 ///
 /// This is the memory-scaled entry point for callers that can stream their
 /// metric-whitened Jacobian rows into the reductions the certificate consumes,
-/// instead of retaining every per-row `p × param_dim` Jacobian block. The Gram
-/// must include the same rows `stacked_curvature_root` would have placed in
-/// `R`; `root_rows` is that row count for the rank tolerance scale.
-pub fn residual_gauge_exact_from_curvature_gram(
+/// instead of retaining every per-row `p × param_dim` Jacobian block. The
+/// curvature must cover the same rows `stacked_curvature_root` would have
+/// placed in `R`; its [`ResidualGaugeCurvature::root_rows`] is that row count,
+/// which sets the rank tolerance scale.
+///
+/// The caller passes the *structure* it was able to build, not a dense matrix:
+/// a curvature that is output-coordinate block diagonal (#2757) is reduced
+/// through `p` `D × D` eigenproblems rather than one `(p·D)³` one, and a
+/// curvature whose root has fewer rows than columns is reduced through its dual
+/// Gram. Both are exact — same spectrum, same rank decision — so the variant is
+/// a cost statement, never an accuracy one.
+pub fn residual_gauge_exact_from_curvature(
     model: &FittedSaeManifold,
     views: &[Option<AtomParameterView>],
     penalty_ops: &[Option<OrbitPenaltyOperator>],
-    curvature_gram: Array2<f64>,
-    root_rows: usize,
+    curvature: ResidualGaugeCurvature,
 ) -> Result<ResidualGaugeReport, String> {
     let param_dim = model.param_dim();
-    let curvature = CurvatureReduction::from_gram(curvature_gram, root_rows, param_dim)?;
+    let curvature = CurvatureReduction::from_curvature(curvature, param_dim)?;
     let exact = residual_gauge_exact_inputs(model, views, penalty_ops)?;
     residual_gauge_inner(model, Some(exact), Some(curvature))
 }
@@ -3548,7 +3782,6 @@ pub fn dictionary_report(
 // the Python driver can design and absorb interventional probes against the same
 // fitted term and evidence ledger the certificate is built from.
 
-
 /// Produce the paired certificate plus #1096 per-atom layer-transport ladders.
 ///
 /// This is the strict wiring seam for callers that already have canonical
@@ -3810,8 +4043,7 @@ mod tests {
         for (_, field, _) in &sphere_fields {
             for row in 0..2 {
                 let point = if row == 0 { u } else { [0.0, 0.0, 1.0] };
-                let radial: f64 =
-                    (0..3).map(|axis| field[[row, axis]] * point[axis]).sum();
+                let radial: f64 = (0..3).map(|axis| field[[row, axis]] * point[axis]).sum();
                 assert!(
                     radial.abs() <= 1.0e-12,
                     "a Killing field of S² is tangent, so u·K(u) = 0; got {radial:.3e}"
