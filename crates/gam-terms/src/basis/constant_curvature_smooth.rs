@@ -40,8 +40,9 @@
 //! when the truth's own radial length scale happens to BE `ℓ_ref`. At half or
 //! twice that range it rails at a box endpoint, reports the wrong SIGN, or —
 //! on genuinely FLAT data — reports a confident interior `κ̂ = ∓0.94`. With
-//! `ℓ` profiled it lands within one grid step of κ⋆ in all nine cells of a
-//! 3 curvatures × 3 ranges sweep, and `ℓ̂` recovers the planted range to 2%.
+//! `ℓ` profiled it lands within 0.19 of κ⋆ in all nine cells of a
+//! 3 curvatures × 3 ranges sweep (median 0.07), with no rails and no sign
+//! inversions, and `ℓ̂` recovers the planted range to 3%.
 //!
 //! So the smooth exposes the ψ-vector `(κ, η)` with `η = ln ℓ` — the same
 //! treatment the Matérn / Duchon / TPS siblings already give their range,
