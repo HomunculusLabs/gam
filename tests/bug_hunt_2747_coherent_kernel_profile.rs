@@ -27,7 +27,7 @@ use gam::basis::{
     build_constant_curvature_basis, constant_curvature_kernel_matrix,
 };
 use gam::gaussian_reml::gaussian_reml_multi_closed_form;
-use gam::geometry::constant_curvature::ConstantCurvature;
+
 use gam::utils::splitmix64;
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -164,19 +164,25 @@ fn fixture(
     dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let ell_ref = dists[dists.len() / 2];
 
+    // The truth must be a member of the SPAN the fit searches, not merely of
+    // the raw kernel's column space: the realized design is `K·z` with `z` the
+    // sum-to-zero frame, so a plant `K·w` with `Σw ≠ 0` leaves a component
+    // along `K·1` that lies in NO κ-span and adds a second misspecification on
+    // top of the range one this probe is about. Planting `X·v` in the model-C
+    // design at (κ⋆, truth_ell) makes the truth exactly reachable at κ⋆ and at
+    // no other curvature.
     let truth_ell = ell_ref * truth_ell_mult;
-    let manifold = ConstantCurvature::new(2, kappa_star);
-    let signs = [1.0_f64, -1.0, 1.0, -1.0, 1.0, -1.0];
+    let z = sum_to_zero_frame(m);
+    let k_truth =
+        constant_curvature_kernel_matrix(feats.view(), centers.view(), kappa_star, truth_ell)
+            .expect("truth kernel");
+    let x_truth = k_truth.dot(&z);
     let mut y = Array1::<f64>::zeros(n);
-    for i in 0..n {
-        let pt = ndarray::array![feats[(i, 0)], feats[(i, 1)]];
-        let mut mu = 0.0;
-        for k in 0..m {
-            let c = ndarray::array![centers[(k, 0)], centers[(k, 1)]];
-            let d = manifold.distance(pt.view(), c.view()).expect("in-chart");
-            mu += signs[k % signs.len()] / (1.0 + k as f64) * (-d / truth_ell).exp();
+    for j in 0..x_truth.ncols() {
+        let w = 1.0 / (1.0 + j as f64);
+        for i in 0..n {
+            y[i] += w * x_truth[(i, j)];
         }
-        y[i] = mu;
     }
     let mean = y.iter().sum::<f64>() / n as f64;
     let sd = (y.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64).sqrt();
