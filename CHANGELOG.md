@@ -33,6 +33,16 @@
   if `ell_ref` was already optimal. On the profile curve it vanishes identically
   by the envelope theorem.
 
+  Pinning `kappa=` no longer pins the range with it. It used to take the whole
+  term out of the curvature profile — the only owner of either coordinate — and
+  leave the range at the auto heuristic, which is a worse fit for no stated
+  reason: fixing the geometry is not a statement about the kernel's resolution.
+  A pinned-`kappa=` term now gets its range profiled at that curvature, and
+  because the profile is Gaussian-identity-only it drops out with a log line
+  rather than turning a working non-Gaussian fit into a refusal (a FREE `kappa`
+  still refuses, since `kappa_hat` is the estimand the caller asked for and
+  shipping it unfitted would be worse).
+
   `psi = (kappa, eta = ln ell)` now carries a full second-order tower, the outer
   solve is one-dimensional over the range-PROFILED criterion
   `V_p(kappa) = min_eta V(kappa, eta)` so the point estimate, the profile CI and
