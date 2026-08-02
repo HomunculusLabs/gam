@@ -26,7 +26,8 @@
 
 use gam::smooth::smooth_term_lr_inference_forspec;
 use gam::{
-    FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
+    FitConfig, FitRequest, FitResult, encode_recordswith_inferred_schema, fit_from_formula,
+    init_parallelism, materialize,
 };
 
 use csv::StringRecord;
@@ -40,10 +41,14 @@ use rand_distr::{Distribution, Poisson};
 /// `amplitude = 0` makes `z` a pure nuisance covariate and the smooth null-true.
 fn dataset(n: usize, seed: u64, amplitude: f64) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(seed);
-    let headers = vec!["y".to_string(), "x".to_string(), "z".to_string()];
+    let headers = ["y", "x", "w", "v", "z"].into_iter().map(String::from).collect();
     let mut rows = Vec::<StringRecord>::with_capacity(n);
     for i in 0..n {
         let x = i as f64 / (n as f64 - 1.0);
+        // Two further parametric covariates with NO effect on the mean, present
+        // only to widen the unpenalized block so the offset's overshoot is large.
+        let w: f64 = rng.random_range(-1.0..1.0);
+        let v: f64 = rng.random_range(-1.0..1.0);
         let z: f64 = rng.random_range(0.0..1.0);
         let eta = 0.3 + 0.8 * x + amplitude * (std::f64::consts::TAU * z).sin();
         let lambda: f64 = eta.exp();
@@ -51,10 +56,31 @@ fn dataset(n: usize, seed: u64, amplitude: f64) -> gam::data::EncodedDataset {
         rows.push(StringRecord::from(vec![
             y.to_string(),
             x.to_string(),
+            w.to_string(),
+            v.to_string(),
             z.to_string(),
         ]));
     }
     encode_recordswith_inferred_schema(headers, rows).expect("encode")
+}
+
+/// `edf_total = tr(F)` for one formula on one dataset, from the ordinary fit
+/// entry point. The LR driver refits internally from the same spec and options,
+/// and the fit is deterministic, so this is the same fit seen from outside.
+fn fit_edf_total(formula: &str, data: &gam::data::EncodedDataset) -> f64 {
+    let cfg = FitConfig {
+        family: Some("poisson".to_string()),
+        ..FitConfig::default()
+    };
+    let FitResult::Standard(std_fit) =
+        fit_from_formula(formula, data, &cfg).unwrap_or_else(|e| panic!("fit {formula}: {e}"))
+    else {
+        panic!("expected a standard fit for {formula}");
+    };
+    std_fit
+        .fit
+        .edf_total()
+        .unwrap_or_else(|| panic!("edf_total retained for {formula}"))
 }
 
 /// The `s(z)` LR report for one formula on one dataset.
@@ -83,7 +109,8 @@ fn report(formula: &str, data: &gam::data::EncodedDataset) -> gam::smooth::Smoot
         .unwrap_or_else(|| panic!("no s(z) report for {formula}"))
 }
 
-/// The block-offset guard, stated so it cannot be satisfied by a coincidence.
+/// The block-offset guard, stated as an exact accounting identity so no seed can
+/// make it pass or fail by luck.
 ///
 /// `SmoothTerm::coeff_range` is BLOCK-LOCAL while the global coefficient layout
 /// is `[intercept | linear | random | smooth]`, so every consumer that indexes a
@@ -94,46 +121,49 @@ fn report(formula: &str, data: &gam::data::EncodedDataset) -> gam::smooth::Smoot
 /// mean shift is computed for. `smooth_start` is never zero: the intercept alone
 /// makes it at least one.
 ///
-/// A NULL smooth is the cleanest probe. REML shrinks `s(z)` onto ~nothing, so
-/// its effective d.f. must be well under one — while the columns the unshifted
-/// window would fold in are the *unpenalized* intercept and parametric `x`,
-/// which carry exactly one degree of freedom each. The measured contrast on this
-/// fixture was `edf = 0.054` (the penalty-block-trace channel, which is indexed
-/// by penalty and therefore immune) against `edf = 2.040` (the influence trace
-/// over the unshifted window) — 1 + 1 + 0.04, the offset read off the arithmetic.
+/// The identity: an UNPENALIZED column spends exactly one effective degree of
+/// freedom, and `edf_total = tr(F)` sums every column's share. So for a model
+/// with `u` unpenalized columns (intercept plus the parametric block) and a
+/// single smooth,
+///
+/// ```text
+///     edf(smooth) + u  ==  edf_total
+/// ```
+///
+/// exactly. An unshifted window makes the smooth's own EDF *include* those `u`
+/// columns, so the left side overshoots by `u` — a margin set by the fixture's
+/// own design rather than by a tolerance. Measured on the n=60 fixture before the
+/// repair, `y ~ x + s(z)` reported `edf = 2.0404` for a null smooth whose
+/// penalty-block-trace value was `0.0537`: `1 + 1 + 0.04`.
+///
+/// Run with a THREE-column parametric block so the overshoot is 4, not 1, and
+/// with the smooth both null and signal-bearing so the identity is exercised at
+/// both ends of the shrinkage range.
 #[test]
-fn a_null_smooth_does_not_absorb_the_parametric_columns_edf_2672() {
+fn per_term_edf_plus_unpenalized_columns_equals_edf_total_2672() {
     init_parallelism();
-    for seed in 0..3u64 {
-        let data = dataset(150, 990 + seed, 0.0);
-        let with_parametric = report("y ~ x + s(z)", &data);
-        let without = report("y ~ s(z)", &data);
-        for (label, r, folded) in [
-            ("y ~ x + s(z)", &with_parametric, "the intercept and `x`"),
-            ("y ~ s(z)", &without, "the intercept"),
-        ] {
-            let p = r.ref_df_provenance;
-            assert!(
-                p.edf < 1.0,
-                "{label} (seed {seed}): a null-true s(z) must be shrunk below one \
-                 effective degree of freedom; got edf = {} with wood_edf1 = {:?}. \
-                 An edf at or above the number of unpenalized parametric columns \
-                 means the term's coefficient window is unshifted and has folded \
-                 in {folded}, each of which carries exactly 1 d.f.",
-                p.edf,
-                p.wood_edf1
-            );
-            // Wood's band must hold on the same block, which it cannot if the
-            // window straddles unpenalized columns whose influence eigenvalue is
-            // pinned at 1.
-            if let Some(edf1) = p.wood_edf1 {
-                let slack = 1e-6 * p.edf.abs().max(1.0);
+    // (formula, unpenalized column count = intercept + parametric columns)
+    let shapes = [("y ~ s(z)", 1usize), ("y ~ x + w + v + s(z)", 4usize)];
+    for amplitude in [0.0_f64, 0.9] {
+        for seed in 0..2u64 {
+            let data = dataset(180, 4400 + seed, amplitude);
+            for (formula, unpenalized) in shapes {
+                let r = report(formula, &data);
+                let edf_total = fit_edf_total(formula, &data);
+                let p = r.ref_df_provenance;
+                let lhs = p.edf + unpenalized as f64;
+                let slack = 1e-3 * edf_total.abs().max(1.0);
                 assert!(
-                    edf1 >= p.edf - slack && edf1 <= 2.0 * p.edf + slack,
-                    "{label} (seed {seed}): edf1 = {edf1} outside Wood's band \
-                     [edf, 2·edf] = [{}, {}]",
-                    p.edf,
-                    2.0 * p.edf
+                    (lhs - edf_total).abs() <= slack,
+                    "{formula} (amplitude {amplitude}, seed {seed}): the smooth's own \
+                     effective d.f. plus its {unpenalized} unpenalized column(s) must \
+                     equal the model total exactly — an unpenalized column spends one \
+                     full degree of freedom and `edf_total = tr(F)` sums them all. \
+                     Got edf(s(z)) = {} and edf_total = {edf_total}, so the left side \
+                     is {lhs}. An overshoot of about {unpenalized} means the term's \
+                     coefficient window is unshifted and has folded the unpenalized \
+                     block into the smooth. Provenance: {p:?}",
+                    p.edf
                 );
             }
         }

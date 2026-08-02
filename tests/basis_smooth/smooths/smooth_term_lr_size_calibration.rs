@@ -114,7 +114,7 @@ fn run_one(
     family: NullFamily,
     k: usize,
     data: &gam::data::EncodedDataset,
-) -> Option<SmoothTermLrInference> {
+) -> Result<Option<SmoothTermLrInference>, String> {
     let cfg = FitConfig {
         family: Some(family.family_name().to_string()),
         ..FitConfig::default()
@@ -124,6 +124,15 @@ fn run_one(
     let FitRequest::Standard(req) = mat.request else {
         panic!("expected a standard fit request");
     };
+    // A REPLICATE WHOSE FIT REFUSES IS NOT A CALIBRATION DATUM, and it is not a
+    // calibration failure either — the outer optimizer declining to certify a
+    // stationary optimum on one null draw is the #2664 line-search cluster, a
+    // different subsystem. It used to `.expect(...)` here, which converted the
+    // first such draw anywhere in the grid into a panic that withdrew the verdict
+    // for every cell, exactly the way a timeout does. Return the refusal instead
+    // so the caller can COUNT it: the grid already has a floor on how many
+    // replicates must produce a finite report, and a refusal that is common
+    // enough to matter will trip it and say so with the message (#2672).
     let reports = smooth_term_lr_inference_forspec(
         req.data.view(),
         req.y.view(),
@@ -133,8 +142,8 @@ fn run_one(
         req.family,
         &req.options,
     )
-    .expect("smooth-term LR inference");
-    reports.into_iter().find(|r| r.name.contains('z'))
+    .map_err(|error| error.to_string())?;
+    Ok(reports.into_iter().find(|r| r.name.contains('z')))
 }
 
 /// Empirical-size accumulators for one grid cell, across the three lanes.
@@ -203,6 +212,9 @@ struct CellResult {
     k: usize,
     label: &'static str,
     used: usize,
+    /// Replicates whose FIT refused (the LR call returned `Err`). Counted rather
+    /// than fatal: a refusal is a missing datum, not a calibration verdict.
+    refused: usize,
     est_applied: usize,
     size_first_05: f64,
     size_fixed_05: f64,
@@ -250,18 +262,33 @@ fn exhaustive_null_simulation_size_grid() {
         for &k in &ks {
             for &n in ns {
                 let mut counts = SizeCounts::default();
+                let mut refused = 0usize;
+                let mut first_refusal: Option<String> = None;
                 for rep in 0..reps {
                     let seed = mix_seed(family.label(), n, k, rep);
                     let data = null_replicate(family, n, seed);
-                    if let Some(r) = run_one(family, k, &data) {
-                        counts.ingest(&r);
+                    match run_one(family, k, &data) {
+                        Ok(Some(r)) => counts.ingest(&r),
+                        Ok(None) => {}
+                        Err(message) => {
+                            refused += 1;
+                            first_refusal.get_or_insert(message);
+                        }
                     }
+                }
+                if let Some(message) = first_refusal.as_ref() {
+                    eprintln!(
+                        "[#939 grid] {} n={n} k={k}: {refused}/{reps} replicate fits \
+                         REFUSED and contribute no calibration datum. First: {message}",
+                        family.label()
+                    );
                 }
                 cells.push(CellResult {
                     n,
                     k,
                     label: family.label(),
                     used: counts.used,
+                    refused,
                     est_applied: counts.est_lambda_applied,
                     size_first_05: counts.size(counts.rej_first_05),
                     size_fixed_05: counts.size(counts.rej_fixed_05),
@@ -305,10 +332,20 @@ fn null_simulation_size_is_calibrated_small_n() {
         for &k in &ks {
             for &n in &ns {
                 let mut counts = SizeCounts::default();
+                let mut refused = 0usize;
+                let mut first_refusal: Option<String> = None;
                 for rep in 0..REPS {
                     let seed = mix_seed(family.label(), n, k, rep);
                     let data = null_replicate(family, n, seed);
-                    if let Some(r) = run_one(family, k, &data) {
+                    let report = match run_one(family, k, &data) {
+                        Ok(report) => report,
+                        Err(message) => {
+                            refused += 1;
+                            first_refusal.get_or_insert(message);
+                            None
+                        }
+                    };
+                    if let Some(r) = report {
                         // Materiality (#939 deliverable 4): when a correction is
                         // applied, the `material` flag must follow the 10% rule.
                         if !matches!(r.correction, SmoothLrCorrection::None) {
@@ -332,11 +369,19 @@ fn null_simulation_size_is_calibrated_small_n() {
                         counts.ingest(&r);
                     }
                 }
+                if let Some(message) = first_refusal.as_ref() {
+                    eprintln!(
+                        "[#939 small-n] {} n={n} k={k}: {refused}/{REPS} replicate fits \
+                         REFUSED and contribute no calibration datum. First: {message}",
+                        family.label()
+                    );
+                }
                 cells.push(CellResult {
                     n,
                     k,
                     label: family.label(),
                     used: counts.used,
+                    refused,
                     est_applied: counts.est_lambda_applied,
                     size_first_05: counts.size(counts.rej_first_05),
                     size_fixed_05: counts.size(counts.rej_fixed_05),
@@ -361,16 +406,17 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
     // Diagnostic dump (printed on failure / with --nocapture).
     eprintln!("=== #939 null-simulation size grid ({tag}), REPS={reps} ===");
     eprintln!(
-        "{:>16} {:>4} {:>3} {:>5} {:>6} | size@.05  first/fixed/est   size@.01 first/est",
-        "family", "n", "k", "used", "estΛ"
+        "{:>16} {:>4} {:>3} {:>5} {:>4} {:>6} | size@.05  first/fixed/est   size@.01 first/est",
+        "family", "n", "k", "used", "ref!", "estΛ"
     );
     for c in cells {
         eprintln!(
-            "{:>16} {:>4} {:>3} {:>5} {:>6} |   {:.3} / {:.3} / {:.3}     {:.3} / {:.3}",
+            "{:>16} {:>4} {:>3} {:>5} {:>4} {:>6} |   {:.3} / {:.3} / {:.3}     {:.3} / {:.3}",
             c.label,
             c.n,
             c.k,
             c.used,
+            c.refused,
             c.est_applied,
             c.size_first_05,
             c.size_fixed_05,
@@ -393,11 +439,13 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
         assert!(
             c.used >= reps * 7 / 10,
             "{} n={} k={}: too many replicates failed to produce a finite report \
-             ({}/{reps})",
+             ({}/{reps}; {} of the losses were FIT REFUSALS, which are a solver \
+             verdict rather than a calibration one)",
             c.label,
             c.n,
             c.k,
-            c.used
+            c.used,
+            c.refused
         );
 
         // CLAIM 1 — estimated-λ size lands inside the MC band of nominal at α=0.05.
@@ -534,7 +582,7 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
                 for rep in 0..REPS {
                     let seed = mix_seed(family.label(), n, k, rep);
                     let data = null_replicate(family, n, seed);
-                    let Some(r) = run_one(family, k, &data) else {
+                    let Ok(Some(r)) = run_one(family, k, &data) else {
                         continue;
                     };
                     if !(r.statistic_lr.is_finite() && r.ref_df.is_finite() && r.ref_df > 0.0) {
