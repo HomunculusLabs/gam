@@ -5199,6 +5199,86 @@ mod tests {
         );
     }
 
+    /// #2761 gate on the DEFAULT itself, not on a fixture.
+    ///
+    /// The measure-jet representer range ℓ has now been default-on (`299c83ffc`,
+    /// which introduced it to remove a 13x deficit), default-off (`b1d94d1a5`,
+    /// one line, no measurement), and default-on again (#2761, after measuring
+    /// that the design's own span floor at a frozen ℓ *is* the 13.4x). Each flip
+    /// was invisible to the test suite until an accuracy fixture noticed months
+    /// later, because nothing asserted the default. This does.
+    ///
+    /// It also pins the two overrides that make the default safe to hold:
+    /// a typed `length_scale=` is a request and pins ℓ, and an explicit
+    /// `learn_length_scale=` beats both.
+    #[test]
+    fn measure_jet_reml_selects_the_representer_range_by_default_2761() {
+        let ds = continuous_dataset(
+            &["y", "x1", "x2"],
+            (0..40)
+                .map(|i| {
+                    let t = i as f64 / 39.0;
+                    vec![(6.0 * t).sin(), t, 0.5 + 0.5 * (6.0 * t).cos()]
+                })
+                .collect(),
+        );
+        let col_map = ds.column_map();
+        let learns = |body: &str| -> bool {
+            let parsed = parse_formula(&format!("y ~ {body}")).expect("parse mjs formula");
+            let terms = build_termspec(
+                &parsed.terms,
+                &ds,
+                &col_map,
+                &mut Vec::new(),
+                &gam_runtime::resource::ResourcePolicy::default_library(),
+            )
+            .expect("build mjs term");
+            let SmoothBasisSpec::MeasureJet { spec, .. } = &terms.smooth_terms[0].basis else {
+                panic!("expected a measure-jet smooth for '{body}'");
+            };
+            // Read through the SAME accessors the outer engine's θ-layout uses,
+            // so a default that stops reaching ψ enrollment fails here too.
+            let learns = crate::smooth::measure_jet_learns_length_scale(spec);
+            assert_eq!(
+                spec.learn_length_scale, learns,
+                "'{body}': the ψ accessor and the spec field must not disagree"
+            );
+            assert_eq!(
+                crate::smooth::measure_jet_psi_dim(spec),
+                usize::from(learns),
+                "'{body}': single-scale ψ dimension is exactly the ℓ coordinate"
+            );
+            assert_eq!(
+                crate::smooth::measure_jet_enrolls_psi(spec),
+                learns,
+                "'{body}': single-scale enrollment is exactly the ℓ coordinate"
+            );
+            learns
+        };
+
+        assert!(
+            learns("mjs(x1, x2, centers=8)"),
+            "a plain measure-jet smooth must REML-select its representer range: λ shrinks \
+             inside a span and cannot move one, so a frozen ℓ is an error no smoothing \
+             parameter can repair (#2761 measured 13.4x held-out RMSE, with the design's \
+             own least-squares span floor sitting AT the fitted value)"
+        );
+        assert!(
+            !learns("mjs(x1, x2, centers=8, length_scale=0.3)"),
+            "a typed length_scale= is a request, not a seed, and must pin ℓ — the same \
+             short-circuit an explicitly-scaled Matérn gets"
+        );
+        assert!(
+            !learns("mjs(x1, x2, centers=8, learn_length_scale=false)"),
+            "an explicit opt-out must be honored"
+        );
+        assert!(
+            learns("mjs(x1, x2, centers=8, length_scale=0.3, learn_length_scale=true)"),
+            "an explicit opt-in must beat the length_scale= pin, so a caller can seed the \
+             search at a range of their choosing"
+        );
+    }
+
     fn continuous_dataset(headers: &[&str], rows: Vec<Vec<f64>>) -> Dataset {
         let nrows = rows.len();
         let ncols = headers.len();
