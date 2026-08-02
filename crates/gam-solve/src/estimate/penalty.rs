@@ -500,6 +500,20 @@ impl ParametricColumnConditioning {
                 .smoothing_correction
                 .take()
                 .map(|cov| self.backtransform_covariance(&cov));
+            // The RETAINED first-order correction `J·Var(ρ)·Jᵀ` is the same kind
+            // of object as the primary one above — a coefficient-space covariance
+            // — and takes the same congruence. It was left in the INTERNAL basis
+            // while every matrix it is contracted against (`weighted_gram`, the
+            // penalized Hessian) was carried to the original one, so
+            // `tr(X'WX · C)` mixed two frames on any conditioned model. The two
+            // corrections are read by different consumers — `model_comparison`'s
+            // WPS corrected EDF and, since #2672, the smooth-term LR reference
+            // d.f. — which is exactly why the primary being mapped did not imply
+            // this one was: nothing pairs them, so nothing compared them (#2672).
+            inf.smoothing_correction_first_order = inf
+                .smoothing_correction_first_order
+                .take()
+                .map(|cov| self.backtransform_covariance(&cov));
             inf.reparam_qs = None;
         }
         result.constraint_kkt = None;

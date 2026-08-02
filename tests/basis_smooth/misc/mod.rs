@@ -22,3 +22,4 @@ mod periodic_quality_batch_c;
 mod ridge_ledger_invariants;
 mod te_k_consistency_easy_truth;
 mod thin_plate_integration;
+mod wps_first_order_correction_basis_2672;
