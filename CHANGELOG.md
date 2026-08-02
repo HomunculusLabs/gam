@@ -47,10 +47,32 @@
   `|λ̃ − λ| ≤ dim·ε·‖H‖` resolution bound. All representations now agree and all
   respect `rank(RᵀR) ≤ rows(R)`.
 
+  **The other branch of the same function was worse.** With an isometry pin
+  installed — reachable from the shipped `IsometryPenalty` API —
+  `to_residual_gauge_model` materialized each per-row pinning Jacobian as a
+  dense `p × param_dim` block and retained all `n` of them: `8·n·p²·D` bytes,
+  which is **2.55 GiB per observation** at `p = 4096, D = 19`. The pin's rows
+  genuinely cannot be folded into the blocks — eliminating one against block
+  `i` scatters that block's row into every other, so the QR of `[⊕R_i ; L]`
+  fills in completely — but `H = ⊕_i B_i + VVᵀ` is block diagonal plus a
+  symmetric update of rank `Σ_k d_k`, and Sylvester's law of inertia gives
+
+  ```
+  n₊(H − sI) = n₊(B − sI) + n₊(−I_k − Vᵀ(B − sI)⁻¹V)
+  ```
+
+  — its eigenvalue count above *any* shift, exactly, in `O(p·D·k²)`. That is
+  all both consumers need: the rank is the count above `τ²`, and `λ_max` is the
+  shift at which the count reaches zero. Both branches now stream the same
+  structured curvature through one entry point, and no production path
+  materializes a per-row Jacobian at all.
+
   Certificate output is otherwise unchanged: verdicts, group signature,
   residual gauge dimension and per-generator energy fractions are identical
-  whichever representation the reduction ran on, which is gated from four
-  independent angles in `tests_frame_curvature_2757`.
+  whichever representation the reduction ran on, which is gated from fifteen
+  independent angles in `tests_frame_curvature_2757` — including #2267's own
+  eigendecomposition census showing that nothing at the parameter dimension is
+  decomposed at all.
 
 - **The measure-jet representer range is a basis coordinate again, so REML
   selects it (#2761).** `lambda` shrinks a coefficient vector INSIDE a span; it

@@ -42,16 +42,38 @@
 //! factor of `p` in memory and `p²` in time. At the `p = 4096` shape #2757 was
 //! filed on that is 45.1 GiB and ~1.7·10⁷× the necessary work.
 //!
+//! # The one part the grouping does not diagonalize
+//!
+//! An installed isometry pin adds one curvature-root row per
+//! `(atom, frame axis)`, and each carries that atom's frame column across
+//! *every* output coordinate. Those rows cannot be folded into the blocks:
+//! eliminating one against block `i` scatters that block's row into every other
+//! block, so the QR of `[⊕R_i ; L]` fills in completely and the sum's spectrum
+//! is genuinely global.
+//!
+//! It is exact and cheap regardless. `H = ⊕_i B_i + VVᵀ` is block diagonal plus
+//! a symmetric update of rank `k = Σ_k d_k`, and Sylvester's law of inertia
+//! gives its eigenvalue count above **any** shift from a `k × k` determinant
+//! ([`BlockPlusRowsSpectrum`]) — which is all the certificate ever asks: the
+//! pinning rank is the count above `τ²`, and `λ_max` is the shift at which the
+//! count reaches zero.
+//!
 //! # What this module provides
 //!
-//! [`FrameColumnLayout`] — the `c ↔ (i, l)` bijection above, the single place
-//! the frame-column index arithmetic is written down — and
-//! [`ResidualGaugeCurvature`], the curvature as the streaming builder is able
-//! to produce it: output-coordinate blocks when the metric does not couple
-//! output coordinates, the stacked root `R` when `H = RᵀR` has fewer rows than
-//! columns (its nonzero spectrum is the dual Gram `RRᵀ`'s, so the same rank
-//! decision costs `m³` instead of `param_dim³`), and the dense Gram only when
-//! neither applies.
+//! * [`FrameColumnLayout`] — the `c ↔ (i, l)` bijection above, the single place
+//!   the frame-column index arithmetic is written down.
+//! * [`OutputBlockRootAccumulator`] — the streaming builder, which keeps each
+//!   block's triangular **root** by Givens rotations rather than its Gram, so
+//!   the cheap representation is also the accurate one (a Gram squares the
+//!   condition number under a rank tolerance chosen to sit just above an SVD's
+//!   backward error).
+//! * [`ResidualGaugeCurvature`] — the curvature as the builder is able to
+//!   produce it: output-coordinate block roots plus the pin's dense rows when
+//!   the metric does not couple output coordinates; the stacked root `R` when
+//!   `H = RᵀR` has fewer rows than columns; and the dense Gram only when
+//!   neither applies, which is also the only representation whose rank decision
+//!   must be taken on `λ = σ²`.
+//! * [`BlockPlusRowsSpectrum`] — the inertia machinery above.
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use ndarray::{Array2, Array3, ArrayView1, ArrayViewMut2, s};
