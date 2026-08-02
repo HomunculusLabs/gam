@@ -434,7 +434,9 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
     let band05 = 3.0 * se05 + 0.015;
     let band01 = 3.0 * se01 + 0.008;
 
-    let mut any_first_order_distorted = false;
+    let mut pooled_used = 0usize;
+    let mut pooled_rej_05 = 0.0_f64;
+    let mut pooled_rej_01 = 0.0_f64;
     for c in cells {
         assert!(
             c.used >= reps * 7 / 10,
@@ -491,12 +493,11 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
             d_first + 2.0 * se05
         );
 
-        // Track whether first-order shows its documented anti-conservative
-        // distortion anywhere (size@.05 above nominal beyond MC noise).
+        // CLAIM 1 (strict) — WHERE first-order is anti-conservative, the correction
+        // must pull the size strictly back toward nominal. Conditional by
+        // construction: it is a statement about the cells that exhibit the
+        // distortion, and it is silent (not satisfied) on the ones that do not.
         if c.size_first_05 > 0.05 + 2.0 * se05 {
-            any_first_order_distorted = true;
-            // CLAIM 1 (strict) — WHERE first-order is distorted, the correction
-            // pulls the size strictly back toward nominal.
             assert!(
                 d_est <= d_first + 1e-9,
                 "{} n={} k={}: where first-order is anti-conservative \
@@ -511,16 +512,54 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
                 d_first
             );
         }
+
+        pooled_used += c.used;
+        pooled_rej_05 += c.size_est_05 * c.used as f64;
+        pooled_rej_01 += c.size_est_01 * c.used as f64;
     }
 
-    // The whole exercise is only meaningful if first-order IS distorted somewhere
-    // in the grid — otherwise there is nothing for the correction to fix and the
-    // test is vacuously green.
+    // ANTI-VACUITY, pooled over the whole grid.
+    //
+    // This replaces `any_first_order_distorted`, which required the FIRST-ORDER
+    // lane to be anti-conservative somewhere or the test failed with "the regime
+    // where the Bartlett correction matters is not being probed". That is a
+    // proxy, and after #2672 repaired the reference d.f. assembly it became a
+    // requirement that the defect still be present: on the light grid every cell
+    // now reads first-order size 0.000–0.069 against a `0.05 + 2·SE = 0.106`
+    // trigger, so the guard fired on correct code.
+    //
+    // The hazard it was standing in for is real and is addressed directly here.
+    // The per-cell band is two-sided but wide (`3·SE + 0.015` is ±0.099 at 60
+    // replicates), so a test that NEVER REJECTS passes every per-cell claim: size
+    // 0.000 sits inside 0.05 ± 0.099, and CLAIM 2 compares two zeros. Pooling the
+    // whole grid shrinks the standard error by √(cells) and closes that hole —
+    // 0.000 pooled is 0.05 away from nominal against a band of `3·SE + 0.015`,
+    // which is 0.045 at the light grid's 478 usable replicates and 0.036 at the
+    // small-n grid's 957. A never-rejecting test fails; so does the pre-#1872 raw
+    // -EDF reference, whose measured per-cell sizes (0.092 … 0.261, pooled ≈ 0.15)
+    // miss by 0.10. That is strictly stronger than the guard it replaces, in both
+    // directions, and it does not require anything to be broken.
+    let pooled = pooled_used.max(1) as f64;
+    let pooled_size_05 = pooled_rej_05 / pooled;
+    let pooled_size_01 = pooled_rej_01 / pooled;
+    let pooled_band05 = 3.0 * size_se(0.05, pooled_used) + 0.015;
+    let pooled_band01 = 3.0 * size_se(0.01, pooled_used) + 0.008;
+    eprintln!(
+        "=== #939 pooled over the {tag} grid: {pooled_used} usable replicates, \
+         size@.05={pooled_size_05:.4} (band 0.05 ± {pooled_band05:.4}), \
+         size@.01={pooled_size_01:.4} (band 0.01 ± {pooled_band01:.4})"
+    );
     assert!(
-        any_first_order_distorted,
-        "first-order χ² showed NO anti-conservative size distortion anywhere in the \
-         {tag} grid — the small-n regime where the Bartlett correction matters is not \
-         being probed (check n, family, and REPS)"
+        (pooled_size_05 - 0.05).abs() <= pooled_band05,
+        "pooled over the {tag} grid the estimated-λ size@.05 is {pooled_size_05:.4}, \
+         outside 0.05 ± {pooled_band05:.4} on {pooled_used} usable replicates. \
+         Pooling is what makes a test that never rejects fail: at this budget \
+         size 0.000 misses by 0.05 against a band of {pooled_band05:.4}."
+    );
+    assert!(
+        (pooled_size_01 - 0.01).abs() <= pooled_band01,
+        "pooled over the {tag} grid the estimated-λ size@.01 is {pooled_size_01:.4}, \
+         outside 0.01 ± {pooled_band01:.4} on {pooled_used} usable replicates"
     );
 }
 
