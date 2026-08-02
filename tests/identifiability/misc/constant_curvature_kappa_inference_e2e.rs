@@ -101,19 +101,26 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 ///   geodesic distance to the origin, `μ = 2·exp(−d_{κ⋆}) − 1`. The radius is
 ///   chosen to span the chart (`radius ≈ 0.68` so `κ⋆ = ±2` genuinely bends it:
 ///   `κ·radius² ≈ ±0.9`), so the distance-matrix SHAPE — hence the planted
-///   signal — depends sharply on κ⋆. Combined with the fill-invariant effective
-///   length `L(κ)` (which holds the kernel's effective DoF κ-invariant so only
-///   the geometry shape, not the basis flexibility, moves with κ), the profiled
-///   REML criterion `V_p(κ)` then has its minimum at the correct sign of κ⋆.
+///   signal — depends sharply on κ⋆. The criterion the profile minimizes is
+///   range-PROFILED (`V_p(κ) = min_ℓ V(κ, ℓ)`, gam#2747), so the kernel's
+///   resolution is chosen by the data at every κ rather than pinned; without
+///   that, κ absorbs the range error instead of measuring curvature and `V_p`
+///   rails.
 ///
-/// * **Flat truth (κ⋆ = 0):** there is NO curvature to plant — a flat space has
-///   no preferred geodesic-distance shape — so the mean is constant (κ-NEUTRAL).
-///   Any function-of-position signal at κ = 0 is still center-peaked, which a
-///   hyperbolic-renormalized kernel fits marginally better even at matched DoF
-///   (a residual lean that spuriously rejects flatness); a constant mean carries
-///   no such shape, so `V_p(κ)` is flat in κ and the flatness test has correct
-///   size. This is the honest realization of "flat truth": absence of curvature
-///   structure, not a curvature signal at κ = 0.
+/// * **Flat truth (κ⋆ = 0):** the mean is constant (κ-NEUTRAL), and here that is
+///   a POWER statement rather than a bias one. This plant is a kernel section
+///   about the chart ORIGIN, and `d_κ(x, 0) = 2·arctan(√κ r)/√κ` is a strictly
+///   monotone reparametrization of the chart radius for EVERY κ — so a
+///   function of the origin distance is a function of the origin distance at
+///   every curvature and the plant carries no curvature information at all. κ
+///   is then identified only by which radial profiles the center set happens to
+///   be able to make, which is a knife edge; measured at κ⋆ = 0 with a genuine
+///   centre-peaked signal at this SNR, the criterion still rails (LR = 34
+///   against a χ²₁ threshold of 3.84). That is misspecification of the FIXTURE,
+///   not a size defect: the sibling `constant_curvature_kappa_coverage_sims`
+///   plants flat truth INSIDE the κ = 0 span, where the flatness test is
+///   correctly sized, and this file keeps the κ-neutral constant so its own
+///   claim stays about size rather than about curvature-blind plants.
 fn dataset_on_m_kappa(
     n: usize,
     kappa_star: f64,

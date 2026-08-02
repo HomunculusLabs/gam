@@ -1,18 +1,117 @@
-"""#2747 follow-up: what does `V(κ⋆, ℓ)` actually look like, and how wide does
-the range window have to be to contain its minimum?
+"""#2747: the numpy replication of the constant-curvature criterion.
 
-Uses the COHERENT single-range model (which is now the shipped basis) and the
-same λ-profiled Gaussian REML criterion, re-implemented in numpy from the
-crate's own formulas so it is independent of the Rust build.
+Re-implements, from the crate's own formulas and independently of the Rust
+build:
+
+  * the kappa-stereographic Moebius addition and geodesic distance
+    (`gam-geometry::manifolds::constant_curvature`),
+  * the realized design/penalty pair `X = K(data,C)z`, `S = z'K(C,C)z` at ONE
+    range (`build_constant_curvature_basis`),
+  * the lambda-profiled Gaussian REML criterion the kappa profile minimises
+    (`profiled_gaussian_reml_psi_jet`'s value block).
+
+Three things it settled for #2747:
+
+  1. `V(kappa*, ell)` is sharply unimodal with an interior minimum that recovers
+     the planted range, rising monotonically on both sides across four
+     log-units -- which is why the range box is an evaluability wall and not a
+     statistical one.
+  2. As `ell -> infinity` the criterion CONVERGES rather than falling (stable to
+     two decimals out to `ell = 1.6e12`), so a permissive upper wall cannot be
+     walked into by a descent method.
+  3. The sampling spread of `kappa-hat` at n=240 / SNR 33, from which the
+     regression gate's bias bar is derived.
+
+The REML criterion is invariant to the choice of frame for the constrained
+coefficient subspace, so this uses explicit Helmert contrasts rather than the
+crate's transform.
 """
 
 import numpy as np
 
-from probe_2747_kappa_range import (  # noqa: E402
-    distance,
-    reml_profile,
-    sum_to_zero_frame,
-)
+# ---------------------------------------------------------------- geometry ---
+def mobius_neg_x_plus_y(x, y, kappa):
+    """w = (−x) ⊕_κ y, vectorised over leading axes of x (n,d) and y (m,d)."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    xy = -(x[:, None, :] * y[None, :, :]).sum(-1)  # ⟨−x, y⟩
+    xx = (x * x).sum(-1)[:, None]
+    yy = (y * y).sum(-1)[None, :]
+    a = 1.0 - kappa * (2.0 * xy + yy)
+    b = 1.0 + kappa * xx
+    denom = kappa * kappa * (xx * yy) - kappa * (2.0 * xy) + 1.0
+    return (a[..., None] * (-x)[:, None, :] + b[..., None] * y[None, :, :]) / denom[..., None]
+
+
+def distance(x, y, kappa):
+    w = mobius_neg_x_plus_y(x, y, kappa)
+    nw = np.linalg.norm(w, axis=-1)
+    if kappa > 0:
+        s = np.sqrt(kappa)
+        return 2.0 * np.arctan(s * nw) / s
+    if kappa < 0:
+        s = np.sqrt(-kappa)
+        return 2.0 * np.arctanh(np.clip(s * nw, 0.0, 1 - 1e-15)) / s
+    return 2.0 * nw
+
+
+# ------------------------------------------------------------------- REML ----
+def sum_to_zero_frame(m):
+    z = np.zeros((m, m - 1))
+    for k in range(1, m):
+        nrm = np.sqrt(k * (k + 1))
+        z[:k, k - 1] = 1.0 / nrm
+        z[k, k - 1] = -k / nrm
+    return z
+
+
+def reml_profile(design, penalty, y, rho_lo=-30.0, rho_hi=30.0):
+    """min over ρ = log λ of the Gaussian REML negative log evidence."""
+    n, p = design.shape
+    a = design.T @ design
+    b = design.T @ y
+    yty = y @ y
+    evals = np.linalg.eigvalsh(penalty)
+    tol = max(evals.max(), 0.0) * p * np.finfo(float).eps * 16
+    pos = evals[evals > tol]
+    rank = pos.size
+    nullity = p - rank
+    logdet_s = np.log(pos).sum()
+    nu = n - nullity
+
+    def v(rho):
+        h = a + np.exp(rho) * penalty
+        try:
+            c = np.linalg.cholesky(h)
+        except np.linalg.LinAlgError:
+            return np.inf
+        logdet_h = 2.0 * np.log(np.diag(c)).sum()
+        beta = np.linalg.solve(h, b)
+        dp = yty - b @ beta
+        if dp <= 0:
+            return np.inf
+        return 0.5 * (logdet_h - logdet_s - rank * rho) + 0.5 * nu * (
+            1.0 + np.log(2.0 * np.pi * dp / nu)
+        )
+
+    grid = np.linspace(rho_lo, rho_hi, 241)
+    vals = np.array([v(r) for r in grid])
+    i = int(np.nanargmin(vals))
+    lo = grid[max(i - 1, 0)]
+    hi = grid[min(i + 1, grid.size - 1)]
+    for _ in range(80):  # golden-section refine
+        m1 = lo + 0.382 * (hi - lo)
+        m2 = lo + 0.618 * (hi - lo)
+        if v(m1) < v(m2):
+            hi = m2
+        else:
+            lo = m1
+    rho = 0.5 * (lo + hi)
+    best = v(rho)
+    # edf at the optimum
+    h = a + np.exp(rho) * penalty
+    edf = np.trace(np.linalg.solve(h, a))
+    return best, rho, edf
 
 
 def farthest_point_centers(data, m):

@@ -88,8 +88,8 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
 ///
 /// This generator used to plant `μ = 2·exp(−d_{κ⋆}(x,0)) − 1`: a kernel section
 /// at unit length about the chart origin. That function is in **no** realized
-/// span — the basis is built on a handful of centers at the fill-invariant
-/// `L(κ)`, not at length 1 — so at every κ, including κ⋆, the fit is
+/// span — the basis is built on a handful of centers at the smooth's own range,
+/// not at length 1 — so at every κ, including κ⋆, the fit is
 /// approximating rather than estimating. The κ-spans then happen to be ORDERED
 /// in approximation power, and the profiled criterion faithfully follows that
 /// order instead of the curvature: `V_p` descends monotonically across the whole
