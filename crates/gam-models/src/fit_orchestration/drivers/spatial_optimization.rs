@@ -2102,6 +2102,48 @@ pub fn fixed_kappa_profiled_reml_score(
     Ok(score)
 }
 
+/// The profile's VALUE alone at one `(κ, η)`, with no derivative blocks built.
+///
+/// The bracketing scan calls this and the Newton refinement calls the full jet.
+/// The split is worth its own function because the two costs are not close: the
+/// value needs one kernel pass (`distance`), the jet needs the Tower2 κ-jet of
+/// every pair plus five more `n×p` blocks. A thirteen-point deterministic
+/// bracket at jet cost would multiply a production `curv(...)` fit's outer work
+/// by an order of magnitude for information the bracket does not use.
+fn constant_curvature_psi_profile_value(
+    data: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
+) -> Result<f64, EstimationError> {
+    let mut profile_spec = spec.clone();
+    profile_spec.double_penalty = false;
+    let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
+        .map_err(EstimationError::from)?;
+    if basis.active_penalties.len() != 1 {
+        crate::bail_invalid_estim!(
+            "constant-curvature profile expected exactly one primary penalty; got {}",
+            basis.active_penalties.len()
+        );
+    }
+    let smooth_design = basis.design.to_dense();
+    let (n, p) = smooth_design.dim();
+    let mut design = Array2::<f64>::ones((n, p + 1));
+    design.slice_mut(s![.., 1..]).assign(&smooth_design);
+    let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
+    penalty
+        .slice_mut(s![1.., 1..])
+        .assign(&basis.active_penalties[0].matrix);
+    let response_2d = y.insert_axis(ndarray::Axis(1));
+    let fit = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
+        design.view(),
+        response_2d.view(),
+        penalty.view(),
+        None,
+        None,
+    )?;
+    Ok(fit.reml_score)
+}
+
 /// Value, exact gradient and exact Hessian of the continuously
 /// smoothing-profiled Gaussian REML negative log evidence used for curvature
 /// inference, in the smooth's TWO outer coordinates `ψ = (κ, η)`, `η = ln ℓ`.
@@ -2240,6 +2282,8 @@ struct ConstantCurvatureProfile<'a> {
     /// `η` seed — the auto rule's realized `ℓ_ref`, in logs.
     eta_seed: f64,
     cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), ProfiledRemlPsiJet>>,
+    /// Value-only cache for the bracketing scan (see [`Self::evaluate_value`]).
+    value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), f64>>,
 }
 
 /// How the inner range solve at one κ terminated.
@@ -2321,7 +2365,34 @@ impl<'a> ConstantCurvatureProfile<'a> {
             eta_bracket: (span_lo.ln(), span_hi.ln()),
             eta_seed,
             cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            value_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// The profile VALUE at one point of the plane, without derivative blocks.
+    ///
+    /// Shares the jet cache: a point already evaluated at full order answers
+    /// from there, so the bracket never re-pays for a point the Newton has
+    /// visited and vice versa.
+    fn evaluate_value(&self, kappa: f64, eta: f64) -> Result<f64, EstimationError> {
+        if !(kappa.is_finite() && eta.is_finite()) {
+            crate::bail_invalid_estim!(
+                "constant-curvature profile probed a non-finite ψ = ({kappa}, {eta})"
+            );
+        }
+        let key = (kappa.to_bits(), eta.to_bits());
+        if let Some(cached) = self.cache.borrow().get(&key) {
+            return Ok(cached.value);
+        }
+        if let Some(&cached) = self.value_cache.borrow().get(&key) {
+            return Ok(cached);
+        }
+        let mut probe_spec = self.spec.clone();
+        probe_spec.kappa = kappa;
+        probe_spec.length_scale = eta.exp();
+        let value = constant_curvature_psi_profile_value(self.data, self.response, &probe_spec)?;
+        self.value_cache.borrow_mut().insert(key, value);
+        Ok(value)
     }
 
     /// The full `(κ, η)` jet at one point of the plane.
@@ -2367,12 +2438,12 @@ impl<'a> ConstantCurvatureProfile<'a> {
         const SCAN_POINTS: usize = 13;
         let scan_lo = self.eta_bracket.0.clamp(lo, hi);
         let scan_hi = self.eta_bracket.1.clamp(lo, hi);
-        let mut best: Option<(f64, ProfiledRemlPsiJet)> = None;
-        let consider = |eta: f64, best: &mut Option<(f64, ProfiledRemlPsiJet)>| {
-            if let Ok(jet) = self.evaluate_psi(kappa, eta)
-                && best.as_ref().is_none_or(|(_, b)| jet.value < b.value)
+        let mut best: Option<(f64, f64)> = None;
+        let consider = |eta: f64, best: &mut Option<(f64, f64)>| {
+            if let Ok(value) = self.evaluate_value(kappa, eta)
+                && best.as_ref().is_none_or(|&(_, b)| value < b)
             {
-                *best = Some((eta, jet));
+                *best = Some((eta, value));
             }
         };
         for i in 0..SCAN_POINTS {
@@ -2382,17 +2453,25 @@ impl<'a> ConstantCurvatureProfile<'a> {
             );
         }
         consider(self.eta_seed, &mut best);
-        let Some((mut eta, mut jet)) = best else {
+        let Some((bracket_eta, _)) = best else {
             crate::bail_invalid_estim!(
                 "constant-curvature profile could not evaluate the range box at κ = {kappa}"
             );
         };
+        let mut eta = bracket_eta;
+        let mut jet = self.evaluate_psi(kappa, eta)?;
         // Safeguarded Newton on η at fixed κ. The trust step is capped at the
         // BRACKET width rather than the (deliberately enormous) box width, so a
         // flat or non-convex stretch cannot throw the iterate fifteen orders of
         // magnitude away from the geometry.
         const MAX_NEWTON: usize = 60;
         let width = (scan_hi - scan_lo).max(1.0);
+        // The criterion's own forward resolution in η. A value-comparing line
+        // search cannot separate two η closer than this — the values differ
+        // below the rounding of `V` — so an iterate that stops moving at this
+        // scale HAS converged, and demanding a smaller gradient than the value
+        // can resolve would classify every successful solve as a stall.
+        let eta_resolution = |eta: f64| f64::EPSILON.sqrt() * (1.0 + eta.abs());
         let mut converged = false;
         for _ in 0..MAX_NEWTON {
             let g = jet.gradient[1];
@@ -2403,6 +2482,12 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
             }
             if g.abs() <= 1.0e-9 * (1.0 + jet.value.abs()) {
+                converged = true;
+                break;
+            }
+            if h.is_finite() && h > 0.0 && (g / h).abs() <= eta_resolution(eta) {
+                // The exact Newton step is already inside the resolution: the
+                // remaining gradient is below what the value can express.
                 converged = true;
                 break;
             }
@@ -2418,10 +2503,12 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 if (trial - eta).abs() <= 1.0e-14 * (1.0 + eta.abs()) {
                     break;
                 }
-                if let Ok(candidate) = self.evaluate_psi(kappa, trial)
-                    && candidate.value <= jet.value
+                // Screen the trial with the cheap value; only the ACCEPTED point
+                // pays for a jet.
+                if let Ok(value) = self.evaluate_value(kappa, trial)
+                    && value <= jet.value
                 {
-                    accepted = Some((trial, candidate));
+                    accepted = Some((trial, self.evaluate_psi(kappa, trial)?));
                     break;
                 }
                 step *= 0.5;
@@ -2431,8 +2518,8 @@ impl<'a> ConstantCurvatureProfile<'a> {
                     let moved = (next_eta - eta).abs();
                     eta = next_eta;
                     jet = next_jet;
-                    if moved <= 1.0e-12 * (1.0 + eta.abs()) {
-                        converged = jet.gradient[1].abs() <= 1.0e-7 * (1.0 + jet.value.abs());
+                    if moved <= eta_resolution(eta) {
+                        converged = true;
                         break;
                     }
                 }

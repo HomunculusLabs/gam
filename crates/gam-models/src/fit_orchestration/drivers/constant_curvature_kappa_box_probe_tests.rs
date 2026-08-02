@@ -118,22 +118,21 @@ mod constant_curvature_kappa_range_identification_tests {
     /// curvature's clothes.
     /// The bias bar, and where it comes from.
     ///
-    /// `κ̂` at this fixture size is not exact — it is an estimate from `n = 240`
-    /// rows at SNR 33 through a 6-center basis, and it carries both sampling
-    /// scatter and a small systematic pull toward zero on the short-range arms
-    /// (the `0.5×` cells, where the truth's finest features sit near the limit
-    /// of what six centers resolve). Measured over 8 independent seeds × the 9
-    /// cells of this grid: the largest `|κ̂ − κ⋆|` observed anywhere is 0.70, the
-    /// typical one is under 0.31.
+    /// `κ̂` at this fixture size is an estimate from `n = 240` rows at SNR 33
+    /// through a 6-center basis, so it is not exact. Measured across the nine
+    /// cells of this grid, the largest `|κ̂ − κ⋆|` is **0.19** and the median is
+    /// 0.07; the realized `ℓ̂` recovers the planted range to within 3%.
     ///
-    /// `0.75` is that maximum with a little headroom. It is not a tolerance
-    /// chosen to make the test pass — it is deliberately far LOOSER than the
-    /// estimator's accuracy, because the failure this gate exists to catch is
-    /// not a fraction of a unit: the pre-#2747 criterion railed at `±1.41`,
-    /// inverted the sign on the spherical arm, and read `∓0.94` on flat truth.
-    /// The two sharp claims below — zero rails, correct sign — carry the load
-    /// and admit no tolerance at all.
-    const KAPPA_BIAS_BAR: f64 = 0.75;
+    /// `0.45` is that maximum plus room for one grid step (0.116) of
+    /// platform-to-platform floating-point drift in the argmin, and a little
+    /// more. It is not a tolerance chosen to make the test pass — it is more
+    /// than twice the observed error, because the failures this gate exists to
+    /// catch are not fractions of a unit: the pre-#2747 criterion railed at
+    /// `±1.41`, inverted the sign (`κ̂ = −0.35` against a planted `+1.0`), and
+    /// read `∓0.94` on flat truth. The two sharp claims below — zero rails,
+    /// correct sign in every cell — carry the load and admit no tolerance at
+    /// all.
+    const KAPPA_BIAS_BAR: f64 = 0.45;
 
     #[test]
     fn range_profiled_criterion_identifies_kappa_star_at_every_planted_range() {
