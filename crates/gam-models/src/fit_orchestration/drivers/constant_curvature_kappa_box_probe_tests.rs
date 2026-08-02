@@ -211,6 +211,56 @@ mod constant_curvature_kappa_range_identification_tests {
         }
     }
 
+    /// The cheap value path and the full jet must be the SAME criterion.
+    ///
+    /// The inner range solve brackets and line-searches on
+    /// `constant_curvature_psi_profile_value` and refines on
+    /// `constant_curvature_psi_profile_jet`, so the two build the bordered
+    /// design/penalty pair independently. A divergence between them would not
+    /// look like a failure — it would look like a line search that accepts steps
+    /// the Newton's own objective rejects, i.e. a solve that wanders. Bit
+    /// equality is the right bar: both call the same solver on the same
+    /// matrices, so anything short of it means the matrices differ.
+    #[test]
+    fn the_bracket_value_and_the_jet_value_are_the_same_criterion() {
+        let n = 200usize;
+        let centers = 6usize;
+        let seed = 0x5EED_2747_0000_0003_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, 0.6, 1.0, centers, 0.0, seed);
+        let (ell_ref, _) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, 0.7, 0.6, ell_ref, centers, 0.05, seed);
+        for &kappa in &[-1.1_f64, -0.3, 0.0, 0.4, 1.1] {
+            for mult in [0.3_f64, 1.0, 3.0] {
+                let eta = (ell_ref * mult).ln();
+                // A fresh profile per side, so neither answer can be served from
+                // the other's cache.
+                let by_value = ConstantCurvatureProfile::new(
+                    feats.view(),
+                    y.view(),
+                    spec_at(0.0, centers, 0.0),
+                )
+                .expect("profile is constructible")
+                .evaluate_value(kappa, eta)
+                .expect("the value path evaluates");
+                let by_jet = ConstantCurvatureProfile::new(
+                    feats.view(),
+                    y.view(),
+                    spec_at(0.0, centers, 0.0),
+                )
+                .expect("profile is constructible")
+                .evaluate_psi(kappa, eta)
+                .expect("the jet path evaluates")
+                .value;
+                assert_eq!(
+                    by_value,
+                    by_jet,
+                    "κ={kappa} ℓ={}: the bracket's criterion and the jet's criterion differ",
+                    eta.exp()
+                );
+            }
+        }
+    }
+
     /// An explicit `length_scale=` PINS the range, exactly as an explicit
     /// `kappa=` pins the geometry — the same mgcv-`sp=` convention on the
     /// smooth's other coordinate.
