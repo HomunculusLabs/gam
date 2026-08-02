@@ -476,6 +476,127 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
     );
 }
 
+/// DIAGNOSTIC (not a contract, #2672): the same grid, scored against several
+/// CANDIDATE reference d.f. definitions from one set of fits.
+///
+/// `ref_df` does two jobs at once — it is the χ² reference the p-value is read
+/// from, and (through `mean_w = ref_df + Δε` inside `lawley_lr_bartlett_factor`)
+/// the leading term of the statistic's own null mean. Choosing it is therefore a
+/// design question with a measurable answer, and re-fitting the grid once per
+/// candidate would be four times the work for no extra information: every
+/// candidate is a function of quantities `ref_df_provenance` already publishes,
+/// and `Δε` is recoverable exactly from the applied factor as `(c − 1)·d`.
+///
+/// The candidates, and what each one would mean if it is the calibrated one:
+///
+/// * `shipped` — `max(edf1, edf) + wps`, i.e. Wood's selection-corrected edf1
+///   PLUS the Wood–Pya–Säfken ρ̂-uncertainty inflation #1872 added on top.
+/// * `no-wps` — `max(edf1, edf)`. #1872 added the WPS term to fix an
+///   anti-conservatism measured while `wood_reference_df` was returning `None`
+///   on this very fixture, so its premise did not survive the influence-matrix
+///   repair. It is also a second correction for λ̂ sampling variation on top of
+///   the analytic one the estimated-λ Lawley lane already applies.
+/// * `edf-only` — `max(edf, 1)`, the raw conditional EDF #1766 replaced. The
+///   control arm: if this is the calibrated one, edf1 is the wrong instrument.
+///
+/// Each candidate is scored twice, uncorrected (`P(χ²_d > W)`) and Bartlett
+/// -corrected (`P(χ²_d > W/c)` with `c = (d + Δε)/d`), so the correction's
+/// contribution is separable from the reference's.
+#[test]
+fn zz_measure_size_under_candidate_reference_dfs_2672() {
+    init_parallelism();
+
+    const REPS: usize = 120;
+    let ns = [30usize, 50];
+    let ks = [6usize, 12];
+    let families = [NullFamily::PoissonLog, NullFamily::BernoulliLogit];
+
+    #[derive(Clone, Copy, Default)]
+    struct CandCounts {
+        raw_05: usize,
+        cor_05: usize,
+        cor_01: usize,
+        sum_d: f64,
+    }
+
+    const NAMES: [&str; 3] = ["shipped", "no-wps", "edf-only"];
+
+    eprintln!(
+        "[zz2672-size] {:>16} {:>4} {:>3} {:>5} {:>8} | candidate       mean_d   size@.05(raw/cor)  size@.01(cor)",
+        "family", "n", "k", "used", "mean_W"
+    );
+    for &family in &families {
+        for &k in &ks {
+            for &n in &ns {
+                let mut counts = [CandCounts::default(); 3];
+                let mut used = 0usize;
+                let mut sum_w = 0.0;
+                for rep in 0..REPS {
+                    let seed = mix_seed(family.label(), n, k, rep);
+                    let data = null_replicate(family, n, seed);
+                    let Some(r) = run_one(family, k, &data) else {
+                        continue;
+                    };
+                    if !(r.statistic_lr.is_finite() && r.ref_df.is_finite() && r.ref_df > 0.0) {
+                        continue;
+                    }
+                    let prov = r.ref_df_provenance;
+                    // `c = mean_w/d` with `mean_w = d + Δε`, so `Δε = (c − 1)·d`
+                    // exactly — no re-derivation of the Lawley assembly needed.
+                    let delta_eps = (r.bartlett_factor - 1.0) * r.ref_df;
+                    let base = prov.wood_edf1.unwrap_or(0.0).max(prov.edf);
+                    let ds = [
+                        r.ref_df,
+                        base.max(prov.null_dim as f64).max(1.0),
+                        prov.edf.max(prov.null_dim as f64).max(1.0),
+                    ];
+                    used += 1;
+                    sum_w += r.statistic_lr;
+                    for (slot, d) in ds.iter().copied().enumerate() {
+                        if !(d.is_finite() && d > 0.0) {
+                            continue;
+                        }
+                        let chi2 = statrs::distribution::ChiSquared::new(d).expect("chi2");
+                        use statrs::distribution::ContinuousCDF;
+                        let sf = |w: f64| (1.0 - chi2.cdf(w)).clamp(0.0, 1.0);
+                        let c = ((d + delta_eps) / d).max(f64::MIN_POSITIVE);
+                        counts[slot].sum_d += d;
+                        if sf(r.statistic_lr) <= 0.05 {
+                            counts[slot].raw_05 += 1;
+                        }
+                        if sf(r.statistic_lr / c) <= 0.05 {
+                            counts[slot].cor_05 += 1;
+                        }
+                        if sf(r.statistic_lr / c) <= 0.01 {
+                            counts[slot].cor_01 += 1;
+                        }
+                    }
+                }
+                let denom = used.max(1) as f64;
+                for (slot, name) in NAMES.iter().enumerate() {
+                    eprintln!(
+                        "[zz2672-size] {:>16} {n:>4} {k:>3} {used:>5} {:>8.4} | {name:<10} {:>8.4}   {:.3} / {:.3}        {:.3}",
+                        family.label(),
+                        sum_w / denom,
+                        counts[slot].sum_d / denom,
+                        counts[slot].raw_05 as f64 / denom,
+                        counts[slot].cor_05 as f64 / denom,
+                        counts[slot].cor_01 as f64 / denom,
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[zz2672-size] read: nominal 0.05 / 0.01; MC s.e. at {REPS} reps is {:.4} / {:.4}. \
+         `mean_W` against each candidate's `mean_d` is the first-order mean check — \
+         the reference d.f. IS the statistic's first-order null mean under \
+         `E[W] = d + Δε`.",
+        size_se(0.05, REPS),
+        size_se(0.01, REPS)
+    );
+}
+
 /// Deterministic per-cell, per-replicate seed so the grid is fully reproducible
 /// and the cells are independent (no shared RNG stream across cells).
 fn mix_seed(label: &str, n: usize, k: usize, rep: usize) -> u64 {
