@@ -9243,15 +9243,8 @@ pub struct SmoothLrReferenceDf {
     /// The term's joint unpenalized null-space dimension `dim(∩_k null(S_k))`,
     /// the degenerate-collapse floor.
     pub null_dim: usize,
-    /// Whether the outer smoothing-parameter optimization certified. `false`
-    /// makes every `edf`-derived component above untrustworthy.
-    pub outer_converged: bool,
-    /// The term's full basis dimension when the untrusted-collapse guard fired
-    /// (non-converged outer fit AND `edf` below the term's own unpenalized
-    /// floor — the #1762 stall fingerprint), else `0.0`.
-    pub untrusted_dim_floor: f64,
-    /// The resolved reference actually used: `max(max(wood_edf1, edf) +
-    /// rho_uncertainty, null_dim, untrusted_dim_floor, 1)`.
+    /// The resolved reference actually used:
+    /// `max(max(wood_edf1, edf) + rho_uncertainty, null_dim, 1)`.
     pub resolved: f64,
 }
 
@@ -9516,9 +9509,29 @@ pub fn smooth_term_lr_inference_forspec(
         // collapse; `edf` and `null_dim` never exceed `edf1` in a healthy fit.
         // This mirrors the summary Wald path, which floors its reference at the
         // statistic's own rank for the same reason.
+        // Read the RETAINED first-order correction, not the fit's PRIMARY one.
+        // `wps_block_uncertainty_df` guards `tr(P X'WX P · P C P) >= 0`, which
+        // holds when both factors are PSD. `X'WX` is PSD by construction, so a
+        // negative trace says `C` is not — and the primary correction may be a
+        // sigma-point CUBATURE upgrade approximating `E[H⁻¹] + Cov(β̂)`, which
+        // carries no PSD guarantee at all. `smoothing_correction_first_order()`
+        // is the exact first-order IFT term `J·Var(ρ)·Jᵀ`, a congruence transform
+        // of a covariance and therefore PSD by construction.
+        //
+        // This is a documented contract, not an inference: `result_types.rs` says
+        // of that accessor that it "is the accessor the #946 WPS corrected-EDF /
+        // AIC channel MUST read from … independent of whether the fit's PRIMARY
+        // correction escalated to sigma-point cubature for some other consumer",
+        // and `model_comparison.rs` — the other consumer of the same quantity on
+        // the same covariance scale — already complies. Only this call site was
+        // left behind, and it refused the whole LR call on
+        // `WPS corrected-EDF trace must be non-negative, got -0.008235329469858778`
+        // — one fit, seen identically from both `smooth_term_lr_size_calibration`
+        // tests (#2672). Note the refusal is not a mis-sized tolerance: `-8.2e-3`
+        // is orders of magnitude above round-off on this scale.
         let rho_uncertainty_df = match wps_block_uncertainty_df(
             full.fit.weighted_gram(),
-            full.fit.smoothing_correction(),
+            full.fit.smoothing_correction_first_order(),
             &coeff_range,
             coefficient_covariance_scale,
         )? {
@@ -9527,45 +9540,24 @@ pub fn smooth_term_lr_inference_forspec(
             Some(extra_df) => extra_df,
             None => 0.0,
         };
-        // Trust the tight `edf1` reference ONLY when the outer fit converged. The
-        // flat-valley REML stall on an unidentified term (#1762) rails the outer
-        // iterations out and returns an INCONSISTENT state: the term still carries
-        // a large, wiggly `β` — so the refit-based LR statistic `W` is large — yet
-        // `tr(F) = edf` reads ~0, a combination a genuine penalized least-squares
-        // solution cannot produce. Referencing that large `W` against
-        // `edf1 ≈ edf ≈ 0` manufactures significance: measured null FPR ~0.62 on
-        // those stalled noise fits against a well-calibrated ~0.06 on the
-        // converged ones (#1766). The summary Wald path sidesteps it — its
-        // statistic truncates to the ~0-`edf` rank and the term is skipped — but
-        // the whole-term LR statistic cannot self-truncate, so we widen its
-        // REFERENCE instead and floor `ref_df` at the term's full basis dimension,
-        // the maximally-honest reference for an untrusted term (it may occupy up
-        // to all its columns). A genuine effect still rejects (`W` ≫ its column
-        // count); a tiny-`W` collapse still gives `p ≈ 1`.
+        // #1766 also carried a NON-CONVERGED collapse floor here — floor `ref_df`
+        // at the term's full basis dimension when the outer fit had not certified
+        // AND `edf` had fallen below the term's own unpenalized floor (the #1762
+        // flat-valley stall: a large wiggly `β`, so a large `W`, alongside an
+        // influence trace reading ~0). `a6dbd67a7` removed it in a bulk landing
+        // with no measurement, which looked like a silent regression.
         //
-        // The trigger is NARROW on purpose. `outer_converged` alone is far too
-        // broad: the null-space double-penalty's shrinkage λ routinely rails to
-        // its ~1e13 ceiling on perfectly good fits (a `te` interaction, a
-        // multi-term model), flipping `outer_converged` to false while `edf` stays
-        // healthy (~3, ~9). Flooring THOSE at the full basis dimension would bury
-        // real effects. Requiring BOTH non-convergence AND `edf < max(null_dim, 1)`
-        // — the term shrunk below even its unpenalized floor, the inconsistency
-        // fingerprint — fires on the zero-`edf` stall alone.
-        //
-        // #2672: this guard was landed by #1766 with that measurement behind it
-        // and then removed, unremarked and with no measurement, by the bulk
-        // `a6dbd67a7` working-tree landing. It is restored here rather than
-        // re-derived; the underlying stall itself is still #1762.
-        let untrusted_edf_collapse = !full.fit.outer_converged && edf < (null_dim.max(1)) as f64;
-        let untrusted_dim_floor = if untrusted_edf_collapse {
-            coeff_range.len() as f64
-        } else {
-            0.0
-        };
+        // It is deliberately NOT restored, and the reason is structural rather
+        // than statistical: `UnifiedFitResult::try_from_parts` now REFUSES to
+        // assemble a fit at all when the optimizer reports non-convergence
+        // ("optimizer reported non-convergence"), so `outer_converged` is no
+        // longer even a field on the result. The state that guard defended
+        // against can no longer reach this function — it becomes an `Err` from
+        // the fit, one layer up, which is what SPEC asks for. Restoring the floor
+        // would add a branch whose condition is unreachable by construction.
         let wood_edf1 = wood_reference_df(influence, &coeff_range);
         let ref_df = (wood_edf1.unwrap_or(0.0).max(edf) + rho_uncertainty_df)
             .max(null_dim as f64)
-            .max(untrusted_dim_floor)
             .max(1.0);
         if !(ref_df.is_finite() && ref_df > 0.0) {
             continue;
@@ -9575,8 +9567,6 @@ pub fn smooth_term_lr_inference_forspec(
             edf,
             rho_uncertainty: rho_uncertainty_df,
             null_dim,
-            outer_converged: full.fit.outer_converged,
-            untrusted_dim_floor,
             resolved: ref_df,
         };
 

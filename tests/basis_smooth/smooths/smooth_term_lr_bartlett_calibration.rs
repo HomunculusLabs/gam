@@ -319,11 +319,9 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
     let mut sum_factor = 0.0;
     let mut wood_missing = 0usize;
     let mut count = 0usize;
-    let mut unconverged = 0usize;
-    let mut floor_fired = 0usize;
     eprintln!(
-        "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4} {:>4} {:>6}",
-        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd", "conv", "floor"
+        "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4}",
+        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd"
     );
     for rep in 0..REPS {
         let data = null_replicate(N, 1000 + rep as u64);
@@ -336,24 +334,16 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
         if p.wood_edf1.is_none() {
             wood_missing += 1;
         }
-        if !p.outer_converged {
-            unconverged += 1;
-        }
-        if p.untrusted_dim_floor > 0.0 {
-            floor_fired += 1;
-        }
         if rep < 12 {
             eprintln!(
-                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4} {:>4} {:>6.1}",
+                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4}",
                 r.statistic_lr,
                 r.ref_df,
                 wood,
                 p.edf,
                 p.rho_uncertainty,
                 r.bartlett_factor,
-                p.null_dim,
-                u8::from(p.outer_converged),
-                p.untrusted_dim_floor
+                p.null_dim
             );
         }
         sum_w += r.statistic_lr;
@@ -368,8 +358,7 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
     let d = count as f64;
     eprintln!(
         "[zz2672] MEAN over {count} reps: W={:.4}  ref_df={:.4}  wood_edf1={:.4}  edf={:.4}  \
-         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing}, \
-         non-converged {unconverged}, untrusted floor fired {floor_fired})",
+         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing})",
         sum_w / d,
         sum_ref / d,
         sum_wood / d,
