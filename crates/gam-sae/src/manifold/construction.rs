@@ -2252,23 +2252,24 @@ impl SaeManifoldTerm {
         } else {
             (0..self.k_atoms()).map(|_| None).collect()
         };
-        let residual_gauge = if isometry_pin_active {
-            // The pin-active path consumes the per-row Jacobian curvature
-            // directly (the certificate_model retains it under a pin), so route
-            // through the non-streamed exact entry point.
-            crate::identifiability::residual_gauge_exact(&certificate_model, &views, &ops)?
-        } else {
-            let curvature = streamed_curvature.ok_or_else(|| {
-                "fit_diagnostics_report: missing streamed residual-gauge curvature for unpinned exact path"
-                    .to_string()
-            })?;
-            crate::identifiability::residual_gauge_exact_from_curvature(
-                &certificate_model,
-                &views,
-                &ops,
-                curvature,
-            )?
-        };
+        // ONE entry point for both branches (#2757). The pin used to route
+        // through `residual_gauge_exact`, which rebuilds the curvature root from
+        // the model's retained per-row Jacobian blocks — an object a factor of
+        // `p` denser than the data it holds. Both branches now stream the same
+        // structured curvature, with the pin's rows carried alongside the
+        // output-coordinate blocks, so `jacobian_rows` has no production
+        // producer at all. The general `residual_gauge` / `residual_gauge_exact`
+        // path remains for callers that hand-build a model whose Jacobian is not
+        // frame-structured.
+        let curvature = streamed_curvature.ok_or_else(|| {
+            "fit_diagnostics_report: missing streamed residual-gauge curvature".to_string()
+        })?;
+        let residual_gauge = crate::identifiability::residual_gauge_exact_from_curvature(
+            &certificate_model,
+            &views,
+            &ops,
+            curvature,
+        )?;
 
         // #1097 / #1103: per-atom Riesz-debiased functionals and the any-n-valid
         // split-LRT smooth-structure e-value (non-constant vs constant inner

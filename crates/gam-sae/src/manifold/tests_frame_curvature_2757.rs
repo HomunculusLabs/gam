@@ -847,6 +847,74 @@ fn the_pin_active_certificate_matches_the_dense_gram_exactly() {
     assert_eq!(from_blocks.group_signature(), from_dense.group_signature());
 }
 
+/// The whole production entry point, through BOTH branches, against the dense
+/// reduction of the very same curvature.
+///
+/// The gates above exercise `residual_gauge_exact_from_curvature` directly.
+/// This one goes through `fit_diagnostics_report`, which is where a branch that
+/// was left pointing at the old entry point would show up — and did: routing
+/// the pin-active branch through `residual_gauge_exact` after
+/// `jacobian_rows` stopped being populated would have reported a zero
+/// curvature, every generator unpinned, and no error at all.
+#[test]
+fn fit_diagnostics_report_certifies_the_same_thing_on_both_branches() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms) = (24usize, 12usize, 3usize);
+    for pin in [false, true] {
+        let term = planted_term(n, p, k_atoms, true);
+        let rho = unit_rho(k_atoms);
+        let fitted = term
+            .try_fitted_target_aware(Array2::<f64>::zeros((n, p)).view(), Some(&rho))
+            .expect("fitted");
+        let report = term
+            .fit_diagnostics_report(None, pin, None, fitted.view(), None)
+            .expect("diagnostics report")
+            .residual_gauge;
+        assert!(
+            report.pinning_rank > 0,
+            "pin={pin}: the certificate must see a nonzero curvature"
+        );
+
+        // The same model, reduced from the dense Gram of the same curvature.
+        let metric = term.diagnostic_metric().expect("metric");
+        let (model, streamed) = term
+            .to_residual_gauge_model(metric, None, pin)
+            .expect("certificate model");
+        let structured = streamed.expect("both branches stream their curvature");
+        assert_eq!(
+            (model.isometry_penalty_root.nrows() > 0),
+            pin,
+            "pin={pin}: the pin must be installed exactly when requested"
+        );
+        let dense = ResidualGaugeCurvature::DenseGram {
+            gram: structured.to_dense_gram(),
+            root_rows: structured.root_rows(),
+        };
+        let views: Vec<Option<crate::identifiability::AtomParameterView>> =
+            (0..model.atoms.len()).map(|_| None).collect();
+        let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> = if pin {
+            model
+                .atoms
+                .iter()
+                .map(|_| None)
+                .collect::<Vec<Option<crate::identifiability::OrbitPenaltyOperator>>>()
+        } else {
+            (0..model.atoms.len()).map(|_| None).collect()
+        };
+        let from_dense = residual_gauge_exact_from_curvature(&model, &views, &ops, dense)
+            .expect("dense certificate");
+        assert_eq!(
+            report.pinning_rank, from_dense.pinning_rank,
+            "pin={pin}: the shipped report must agree with the dense reduction"
+        );
+        assert_eq!(
+            report.diffeomorphism_unpinned, !pin,
+            "pin={pin}: the escalation must track the installed pin"
+        );
+    }
+}
+
 /// The inertia counter itself, against a dense eigendecomposition, on a
 /// deliberately awkward operator: a structurally empty output coordinate, a
 /// rank-deficient block, and an update that reaches into the blocks' null
