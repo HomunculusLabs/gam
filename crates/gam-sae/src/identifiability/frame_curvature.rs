@@ -260,7 +260,7 @@ fn fold_row_into_triangular_factor(r: &mut ArrayViewMut2<'_, f64>, v: &mut [f64]
 /// Streaming accumulator for the output-coordinate block roots.
 ///
 /// One `D × D` upper-triangular factor per output coordinate, grown by
-/// [`fold_row_into_triangular_factor`] as observations arrive. Memory `p·D²`
+/// `fold_row_into_triangular_factor` as observations arrive. Memory `p·D²`
 /// and cost `O(rows · p · D²)` — the same as accumulating the blocks' Grams,
 /// without the squaring.
 pub struct OutputBlockRootAccumulator {
