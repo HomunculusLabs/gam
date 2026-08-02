@@ -27,7 +27,7 @@ fn constant_curvature_psi_profile_value(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
-) -> Result<f64, EstimationError> {
+) -> Result<(f64, bool), EstimationError> {
     let mut profile_spec = spec.clone();
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
@@ -54,7 +54,9 @@ fn constant_curvature_psi_profile_value(
         None,
         None,
     )?;
-    Ok(fit.reml_score)
+    let rho_at_bound = (fit.rho - gam_solve::gaussian_reml::RHO_LOWER).abs() <= 1.0e-9
+        || (fit.rho - gam_solve::gaussian_reml::RHO_UPPER).abs() <= 1.0e-9;
+    Ok((fit.reml_score, rho_at_bound))
 }
 
 /// Value, exact gradient and exact Hessian of the continuously
@@ -195,8 +197,9 @@ struct ConstantCurvatureProfile<'a> {
     /// `η` seed — the auto rule's realized `ℓ_ref`, in logs.
     eta_seed: f64,
     cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), ProfiledRemlPsiJet>>,
-    /// Value-only cache for the bracketing scan (see [`Self::evaluate_value`]).
-    value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), f64>>,
+    /// Value-only cache for the bracketing scan: `(V, ρ̂ railed)`; see
+    /// [`Self::evaluate_value`].
+    value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), (f64, bool)>>,
 }
 
 /// How the inner range solve at one κ terminated.
@@ -295,16 +298,50 @@ impl<'a> ConstantCurvatureProfile<'a> {
         }
         let key = (kappa.to_bits(), eta.to_bits());
         if let Some(cached) = self.cache.borrow().get(&key) {
-            return Ok(cached.value);
+            return Self::comparable_value(kappa, eta, cached.value, cached.rho_at_bound);
         }
         if let Some(&cached) = self.value_cache.borrow().get(&key) {
-            return Ok(cached);
+            return Self::comparable_value(kappa, eta, cached.0, cached.1);
         }
         let mut probe_spec = self.spec.clone();
         probe_spec.kappa = kappa;
         probe_spec.length_scale = eta.exp();
-        let value = constant_curvature_psi_profile_value(self.data, self.response, &probe_spec)?;
-        self.value_cache.borrow_mut().insert(key, value);
+        let sample = constant_curvature_psi_profile_value(self.data, self.response, &probe_spec)?;
+        self.value_cache.borrow_mut().insert(key, sample);
+        Self::comparable_value(kappa, eta, sample.0, sample.1)
+    }
+
+    /// A criterion value the range search is allowed to COMPARE, or a refusal
+    /// naming why not.
+    ///
+    /// `V` is a λ-profile only where `ρ̂` is interior. At a rail it is a
+    /// constrained minimum over a truncated λ range, and a constrained minimum
+    /// is not comparable to an unconstrained one — picking the smaller of the
+    /// two is picking whichever happened to be truncated harder.
+    ///
+    /// This matters here and essentially nowhere else because the range
+    /// coordinate DRIVES `ρ̂`: the realized design scales like `1/ℓ`, so λ has
+    /// to follow it and `ρ̂ ≈ const − ln ℓ` (measured: each ×100 in `ℓ` costs
+    /// 4.6 in `ρ̂`, which is `ln 100`). A range box drawn at the floating-point
+    /// wall is therefore always wide enough to walk `ρ̂` into `RHO_LOWER`, and
+    /// the values past it move spuriously by tens of nats while the true
+    /// criterion is flat — which is exactly how a κ̂ ends up 84 nats worse than
+    /// a box endpoint the CI walk then refuses to accept.
+    ///
+    /// Refusing rather than clamping is deliberate: the point is not infeasible
+    /// for the MODEL, only unusable as a comparison, and the search treats a
+    /// refusal exactly as it treats an unbuildable design — it moves on.
+    fn comparable_value(
+        kappa: f64,
+        eta: f64,
+        value: f64,
+        rho_at_bound: bool,
+    ) -> Result<f64, EstimationError> {
+        if rho_at_bound {
+            crate::bail_invalid_estim!(
+                "constant-curvature profile at ψ = ({kappa}, ln ℓ = {eta}) railed ρ̂ at its bound,                  so its value is a truncated minimum and not comparable across the range"
+            );
+        }
         Ok(value)
     }
 
@@ -364,19 +401,40 @@ impl<'a> ConstantCurvatureProfile<'a> {
         const SCAN_POINTS: usize = 13;
         let scan_lo = self.eta_bracket.0.clamp(lo, hi);
         let scan_hi = self.eta_bracket.1.clamp(lo, hi);
-        let mut candidates: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
-        let consider = |eta: f64, into: &mut Vec<(f64, f64)>| {
-            if let Ok(value) = self.evaluate_value(kappa, eta) {
-                into.push((value, eta));
+        // Two lists: points whose value the search may COMPARE (interior ρ̂),
+        // and every point that evaluated at all. The second exists only so a
+        // dataset whose ρ̂ rails everywhere still gets an answer — it is a
+        // fallback, and the outcome it produces is reported as `LocallyFixed`
+        // because a comparison across truncated minima is not a minimization.
+        let mut comparable: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
+        let mut any: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
+        let consider = |eta: f64, ok: &mut Vec<(f64, f64)>, all: &mut Vec<(f64, f64)>| {
+            match self.evaluate_value(kappa, eta) {
+                Ok(value) => {
+                    ok.push((value, eta));
+                    all.push((value, eta));
+                }
+                Err(_) => {
+                    if let Some(&(value, _)) = self
+                        .value_cache
+                        .borrow()
+                        .get(&(kappa.to_bits(), eta.to_bits()))
+                    {
+                        all.push((value, eta));
+                    }
+                }
             }
         };
         for i in 0..SCAN_POINTS {
             consider(
                 scan_lo + (scan_hi - scan_lo) * (i as f64) / ((SCAN_POINTS - 1) as f64),
-                &mut candidates,
+                &mut comparable,
+                &mut any,
             );
         }
-        consider(self.eta_seed, &mut candidates);
+        consider(self.eta_seed, &mut comparable, &mut any);
+        let fell_back = comparable.is_empty();
+        let mut candidates = if fell_back { any } else { comparable };
         candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         // The jet carries checks the value path does not (the ψ-fixed null-space
         // premise, and the chart's reproduction of the forward score), so a point
@@ -391,6 +449,12 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 "constant-curvature profile could not evaluate the range box at κ = {kappa}"
             );
         };
+        if fell_back {
+            // Every probed range railed ρ̂. There is no comparison to make, so
+            // the best raw value stands and the range is declared locally fixed
+            // rather than pretending to be a certified minimizer.
+            return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
+        }
         // Safeguarded Newton on η at fixed κ. The trust step is capped at the
         // BRACKET width rather than the (deliberately enormous) box width, so a
         // flat or non-convex stretch cannot throw the iterate fifteen orders of

@@ -533,44 +533,54 @@ pub fn constant_curvature_evaluated_scale_span(
 }
 
 /// DERIVED box `[ℓ_lo, ℓ_hi]` for the kernel range — the interval on which the
-/// realized design is EVALUABLE, which is the only thing a box on this
-/// coordinate is entitled to enforce.
+/// realized design's GRAM is still resolvable in double precision, which is the
+/// only thing a box on this coordinate is entitled to enforce.
 ///
-/// The tempting derivation — bound `ℓ` by the scales the geometry contains — was
-/// measured and is wrong (gam#2747). On the same nine planted fixtures the
-/// criterion `V(κ⋆, ℓ)` is sharply unimodal with an interior minimum that
-/// recovers the planted range, and it rises monotonically on BOTH sides across
-/// four log-units; but that minimum sits outside the center set's own
-/// `[d_min, d_max]` in a third of the cells (a truth planted at twice the median
-/// center spacing minimizes above the largest center separation). A window drawn
-/// at the geometry's scales therefore rails a coordinate the criterion itself
-/// walls in perfectly well — trading one artificial constraint for another,
-/// which is exactly the mistake `#944` and `#1464` made in the κ direction.
+/// Two derivations were tried and measured before this one.
 ///
-/// So the box is the FLOATING-POINT wall and nothing else, derived from the
-/// evaluated scale span and the format's own constants:
+/// The first bounded `ℓ` by the scales the geometry contains, `[d_min⁺, d_max]`.
+/// That is wrong because the criterion `V(κ⋆, ℓ)` is sharply unimodal with an
+/// interior minimum that recovers the planted range and rises monotonically on
+/// both sides across four log-units — it walls the range in by itself — while
+/// its minimum sits OUTSIDE the center set's own span in a third of the planted
+/// cells. A window at the geometry's scales rails a coordinate the criterion
+/// handles perfectly well, trading one artificial constraint for another, which
+/// is exactly the mistake `#944` and `#1464` made in the κ direction.
 ///
-/// * **`ℓ_lo = d_max / ln(1/MIN_POSITIVE)`** — below it `exp(−d_max/ℓ)`
-///   underflows to zero, the farthest evaluated pairs drop out of the design
-///   entirely, and the model is no longer the one being differentiated.
-/// * **`ℓ_hi = d_min⁺ / EPSILON`** — above it `1 − exp(−d_min⁺/ℓ)` is below the
-///   rounding of 1, so the closest evaluated pair is indistinguishable from a
-///   coincident one and every kernel contrast is lost to cancellation.
+/// The second put the wall at REPRESENTABILITY: `ℓ_lo = d_max/ln(1/MIN_POSITIVE)`
+/// and `ℓ_hi = d_min⁺/EPSILON`, the points at which `exp(−d_max/ℓ)` underflows
+/// and `1 − exp(−d_min⁺/ℓ)` rounds away. That is 39× too permissive at the
+/// bottom and seven orders too permissive at the top, because **the criterion
+/// does not evaluate the kernel — it evaluates a Cholesky of `H = XᵀX + λS`**,
+/// and the Gram SQUARES the design's dynamic range. At `ℓ_lo` so defined the
+/// design entries span 300 orders of magnitude, `H` is numerically singular,
+/// and the profile's derivatives come back at `10⁶`–`10⁸` — which is how a
+/// bounded outer solve ends up reporting `|Pg| = 8.2e6` against a stationarity
+/// bound of `1.1e-3` and failing its line search.
+///
+/// So the wall belongs where the linear algebra lives:
+///
+/// * **`ℓ_lo = d_max / (½·ln(1/ε))`** — with `q = d/ℓ`, the design's entries
+///   span `e^{−q_max}` and `XᵀX` spans its square, so a Cholesky resolves the
+///   Gram only while `e^{−2·q_max} ≥ ε`, i.e. `q_max ≤ ½·ln(1/ε) ≈ 18`.
+/// * **`ℓ_hi = d_min⁺ / √ε`** — the closest evaluated pair must stay
+///   distinguishable from a coincident one AFTER the same squaring:
+///   `(1 − e^{−q_min})² ≥ ε`, i.e. `q_min ≥ √ε`.
 ///
 /// Both ends are read in the κ = 0 doubled gauge, the same gauge the auto
 /// `ℓ_ref` rule uses, so the box is κ-FIXED and does not move while the
-/// optimizer walks κ. It is wide — some fifteen orders — and deliberately so:
-/// the criterion supplies the shape, this supplies only the wall. Bracketing the
-/// inner search is a separate concern and uses
+/// optimizer walks κ. It is still wide — some seven orders — and deliberately
+/// so: the criterion supplies the shape, this supplies only the wall.
+/// Bracketing the inner search is a separate concern and uses
 /// [`constant_curvature_evaluated_scale_span`] directly.
 pub fn constant_curvature_length_scale_bounds(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
 ) -> Result<(f64, f64), BasisError> {
     let (d_min, d_max) = constant_curvature_evaluated_scale_span(data, centers)?;
-    let underflow_efolds = -f64::MIN_POSITIVE.ln();
-    let lo = d_max / underflow_efolds;
-    let hi = d_min / f64::EPSILON;
+    let gram_resolvable_efolds = 0.5 * -f64::EPSILON.ln();
+    let lo = d_max / gram_resolvable_efolds;
+    let hi = d_min / f64::EPSILON.sqrt();
     if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi > lo) {
         crate::bail_invalid_basis!(
             "constant-curvature range box collapsed: [{lo}, {hi}] from an evaluated span of \
@@ -1431,56 +1441,54 @@ mod tests {
         }
     }
 
-    /// The range box is an EVALUABILITY wall, not a statistical one: it must
-    /// contain the geometry's whole scale span with room on both sides, because
-    /// the criterion's own minimum provably leaves that span (gam#2747). And it
-    /// must be exactly where the design stops being computable — one e-fold
-    /// below `ℓ_lo` the farthest evaluated pair underflows out of the design;
-    /// one above `ℓ_hi` the closest one is rounded into coincidence.
+    /// The range box is a CONDITIONING wall, not a statistical one: it must
+    /// contain the coarse end of the geometry's scale span with room above,
+    /// because the criterion's own minimum provably leaves that span
+    /// (gam#2747). And it must sit where the GRAM stops being resolvable, not
+    /// where the kernel stops being representable — the criterion evaluates a
+    /// Cholesky of `H = XᵀX + λS`, and the Gram squares the design's dynamic
+    /// range.
     #[test]
-    pub(crate) fn range_box_is_the_floating_point_wall_and_contains_the_scale_span() {
+    pub(crate) fn range_box_is_the_gram_conditioning_wall_and_contains_the_scale_span() {
         let (data, centers) = oracle_disk_design_centers();
-        let (span_lo, span_hi) = constant_curvature_evaluated_scale_span(data.view(), centers.view())
-            .expect("the fixture carries positive evaluated distances");
+        let (span_lo, span_hi) =
+            constant_curvature_evaluated_scale_span(data.view(), centers.view())
+                .expect("the fixture carries positive evaluated distances");
         let (lo, hi) = constant_curvature_length_scale_bounds(data.view(), centers.view())
             .expect("box is derivable");
         let seed = realized_constant_curvature_length_scale(centers.view(), 0.0).expect("seed");
         assert!(
-            lo < span_lo && span_hi < hi,
-            "the box [{lo}, {hi}] must strictly contain the evaluated scale span \
-             [{span_lo}, {span_hi}] — the criterion's minimum leaves that span"
+            span_hi < hi && lo < seed && seed < hi,
+            "the box [{lo}, {hi}] must contain the coarse end of the evaluated span \
+             [{span_lo}, {span_hi}] and the auto seed {seed}"
+        );
+        // AT `lo` the Gram's dynamic range is exactly one ε — the last one a
+        // double-precision Cholesky can resolve; half an ℓ below, the Gram's
+        // far entries have rounded into the diagonal.
+        let gram_range = |ell: f64| (-2.0 * span_hi / ell).exp();
+        assert!(
+            gram_range(lo) >= f64::EPSILON,
+            "at ℓ_lo the Gram must still span a full ε; got {}",
+            gram_range(lo)
         );
         assert!(
-            lo < seed && seed < hi,
-            "the auto seed {seed} must be inside the box [{lo}, {hi}]"
+            1.0 + gram_range(lo / 2.0) == 1.0,
+            "half an ℓ_lo below, the Gram's far entries must round into the diagonal"
         );
-        // AT `lo` the largest evaluated pair is still representable; a factor of
-        // e below it, it is not.
+        // AT `hi` the closest pair's contrast survives the same squaring; a
+        // factor of two above, it does not.
+        let gram_contrast = |ell: f64| {
+            let c = 1.0 - (-span_lo / ell).exp();
+            c * c
+        };
         assert!(
-            (-span_hi / lo).exp() > 0.0,
-            "exp(−d_max/ℓ_lo) must still be a normal number"
+            gram_contrast(hi) >= f64::EPSILON,
+            "at ℓ_hi the closest pair's SQUARED contrast must still be a full ε; got {}",
+            gram_contrast(hi)
         );
-        assert_eq!(
-            (-span_hi / (lo / std::f64::consts::E)).exp(),
-            0.0,
-            "one e-fold below ℓ_lo the farthest evaluated pair must underflow out of the design"
-        );
-        // AT `hi` the closest evaluated pair is still distinguishable from a
-        // coincident one, and by exactly one ULP: `ℓ_hi = d_min⁺/ε` puts
-        // `1 − exp(−d_min⁺/ℓ_hi)` at `ε`, the smallest contrast the format can
-        // express next to 1. Below half an ULP (`q < 2⁻⁵⁴`) the exponential
-        // rounds to 1 and the contrast is gone, which is a factor of four
-        // further out — so the wall sits one ULP inside the vanishing point,
-        // not at it.
         assert!(
-            1.0 - (-span_lo / hi).exp() >= f64::EPSILON,
-            "1 − exp(−d_min/ℓ_hi) must still carry a full ULP of contrast"
-        );
-        let vanishes = hi * 4.0 * (1.0 + f64::EPSILON);
-        assert_eq!(
-            1.0 - (-span_lo / vanishes).exp(),
-            0.0,
-            "past four ℓ_hi the closest evaluated pair must round into coincidence"
+            1.0 + gram_contrast(hi * 2.0) == 1.0,
+            "twice ℓ_hi above, the closest pair's squared contrast must round away"
         );
     }
 
