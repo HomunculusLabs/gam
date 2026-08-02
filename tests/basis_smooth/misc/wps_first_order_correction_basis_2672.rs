@@ -87,14 +87,9 @@ fn edf_pair(n: usize, seed: u64, x_scale: f64) -> (f64, f64) {
             .final_eta
             .to_vec(),
     );
-    let cmp = model_comparison_from_unified(
-        fit,
-        y.view(),
-        eta_hat.view(),
-        Array1::ones(n).view(),
-        None,
-    )
-    .expect("model comparison from a converged Gaussian fit");
+    let cmp =
+        model_comparison_from_unified(fit, y.view(), eta_hat.view(), Array1::ones(n).view(), None)
+            .expect("model comparison from a converged Gaussian fit");
     let rho_df = cmp
         .edf
         .rho_uncertainty_df()

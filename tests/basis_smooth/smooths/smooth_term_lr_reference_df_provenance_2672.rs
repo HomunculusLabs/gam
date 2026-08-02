@@ -41,7 +41,10 @@ use rand_distr::{Distribution, Poisson};
 /// `amplitude = 0` makes `z` a pure nuisance covariate and the smooth null-true.
 fn dataset(n: usize, seed: u64, amplitude: f64) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(seed);
-    let headers = ["y", "x", "w", "v", "z"].into_iter().map(String::from).collect();
+    let headers = ["y", "x", "w", "v", "z"]
+        .into_iter()
+        .map(String::from)
+        .collect();
     let mut rows = Vec::<StringRecord>::with_capacity(n);
     for i in 0..n {
         let x = i as f64 / (n as f64 - 1.0);
@@ -182,10 +185,7 @@ fn wood_edf1_reaches_the_reference_df_with_a_parametric_term_2672() {
     // inactive and `F` was never dropped even before the repair.
     let unconditioned = report("y ~ s(z)", &data);
 
-    for (label, r) in [
-        ("y ~ x + s(z)", &conditioned),
-        ("y ~ s(z)", &unconditioned),
-    ] {
+    for (label, r) in [("y ~ x + s(z)", &conditioned), ("y ~ s(z)", &unconditioned)] {
         let p = r.ref_df_provenance;
         let edf1 = p.wood_edf1.unwrap_or_else(|| {
             panic!(
