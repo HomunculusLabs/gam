@@ -551,6 +551,20 @@ class Model:
         family). This turns "we chose hyperbolic space" into
         ":math:`\\hat\\kappa = -1.8` (95% CI ...), flat rejected at p = ...".
 
+        Each row also carries ``length_scale_hat`` — the geodesic kernel range
+        :math:`\\hat\\ell` the criterion profiles to at :math:`\\hat\\kappa` — and
+        ``length_scale_estimated``. The range is the smooth's second outer
+        coordinate and every statistic in the row is a profile over it (#2747):
+        :math:`\\hat\\kappa` is the argmin of
+        :math:`V_p(\\kappa) = \\min_\\ell V(\\kappa, \\ell)`, the interval is a
+        profile-likelihood interval, and the flatness LR compares two
+        range-profiled values. Pinning the range with an explicit
+        ``length_scale=`` sets ``length_scale_estimated`` to ``False`` and makes
+        :math:`\\hat\\kappa` conditional on that choice — which is not
+        recommended, because :math:`\\kappa` and :math:`\\ell` enter
+        :math:`\\exp(-d_\\kappa/\\ell)` through one exponent and a
+        :math:`\\kappa` fitted against a wrong range reports the range error.
+
         ``kappa_hat`` alone is also surfaced in :meth:`summary` with no refit;
         the CI and flatness test re-profile the criterion over :math:`\\kappa`,
         which is why they require the training ``data``.

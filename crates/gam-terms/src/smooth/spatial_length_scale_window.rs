@@ -65,9 +65,16 @@ pub fn spatial_term_seed_psi(
 /// point by construction — which is what the certificate's
 /// `AT THE SAME POINT theta0` premise had been asserting in prose.
 ///
-/// Constant-curvature terms carry a signed-κ chart rather than a log-ℓ chart
-/// and are skipped; terms with no explicit `length_scale` are left alone so
-/// `reseed_from_data` keeps ownership of their seed.
+/// Constant-curvature terms are skipped. They DO carry a log-ℓ coordinate
+/// (gam#2747), but both of their outer boxes are DERIVED from the term's own
+/// geometry rather than configured: the κ interval is the half-margin to the
+/// antipodal fold over `data ∪ centers`, and the range window is the span of
+/// the center set's own pairwise chart distances. Projecting one of the two onto
+/// a caller window that the curvature-inference path cannot see would put the
+/// point estimate and its profile CI on two different boxes — the "two objective
+/// owners" failure this subsystem already carries a scar from. Terms with no
+/// explicit `length_scale` are likewise left alone so `reseed_from_data` keeps
+/// ownership of their seed.
 ///
 /// Returns `(term_idx, raw, projected)` for every term that actually moved.
 pub fn project_spatial_length_scales_in_spec(

@@ -480,57 +480,104 @@ fn center_chart_gauge_distances(centers: ArrayView2<'_, f64>) -> Result<Vec<f64>
     Ok(dists)
 }
 
-/// DERIVED search window `[ℓ_lo, ℓ_hi]` for the kernel range — the interval on
-/// which the range is identifiable at all, read off the center set's own
-/// geometry rather than chosen.
+/// The scales the kernel actually evaluates: `(d_min⁺, d_max)` over the
+/// data→center **and** center→center pairs, in the κ = 0 doubled chart gauge,
+/// excluding the exact zeros that self-pairs contribute.
 ///
-/// The geodesic-exponential kernel resolves structure only between the finest
-/// and the coarsest separation its own centers carry:
-///
-/// * **below the smallest positive center separation** every off-diagonal Gram
-///   entry is under `e^{−1}` of the diagonal, the Gram tends to the identity and
-///   the design stops being a smoother — shrinking ℓ further changes the model's
-///   content not at all and its conditioning steadily for the worse;
-/// * **above the largest separation** every entry is over `e^{−1}`, the kernel
-///   is a perturbation of the constant function, and the constant is exactly
-///   what the sum-to-zero frame annihilates.
-///
-/// So `[d_min, d_max]` over the center set's pairwise distances is the window,
-/// and it has no chosen constant in it. Both ends are read in the κ = 0 doubled
-/// gauge — the same gauge the auto `ℓ_ref` rule uses — so the window is κ-FIXED
-/// and `ℓ_ref` (the median of the same multiset) is strictly inside it whenever
-/// the centers are not all equidistant.
-///
-/// Degenerate center sets (every pair at the same distance — a simplex, or two
-/// centers) collapse `d_min = d_max`; the window is widened symmetrically to one
-/// e-fold on each side so the coordinate stays a coordinate rather than becoming
-/// a point.
-pub fn constant_curvature_length_scale_bounds(
+/// This is the same pair set the chart guard validates and the κ box takes its
+/// radius over (`data ∪ centers`, gam#2716) — one set, so a configuration that
+/// moves one of the smooth's two outer boxes moves the other consistently.
+pub fn constant_curvature_evaluated_scale_span(
+    data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
 ) -> Result<(f64, f64), BasisError> {
-    let dists = center_chart_gauge_distances(centers)?;
-    let lo = dists
-        .iter()
-        .copied()
-        .find(|d| d.is_finite() && *d > 0.0)
-        .unwrap_or(f64::NAN);
-    let hi = dists
-        .iter()
-        .copied()
-        .filter(|d| d.is_finite())
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi >= lo) {
-        crate::bail_invalid_basis!(
-            "constant-curvature range window is undefined: the centers carry no positive \
-             pairwise chart distance (d_min = {lo}, d_max = {hi})"
+    if data.ncols() != centers.ncols() {
+        crate::bail_dim_basis!(
+            "constant-curvature scale span dimension mismatch: data d={} centers d={}",
+            data.ncols(),
+            centers.ncols()
         );
     }
-    if hi > lo {
-        return Ok((lo, hi));
+    let mut lo = f64::INFINITY;
+    let mut hi = 0.0_f64;
+    let mut observe = |a: ndarray::ArrayView1<'_, f64>, b: ndarray::ArrayView1<'_, f64>| {
+        let mut sum = 0.0_f64;
+        for k in 0..a.len() {
+            let delta = a[k] - b[k];
+            sum += delta * delta;
+        }
+        let d = 2.0 * sum.sqrt();
+        if d.is_finite() && d > 0.0 {
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+    };
+    for x in data.outer_iter() {
+        for c in centers.outer_iter() {
+            observe(x, c);
+        }
     }
-    Ok((lo / std::f64::consts::E, hi * std::f64::consts::E))
+    for i in 0..centers.nrows() {
+        for j in (i + 1)..centers.nrows() {
+            observe(centers.row(i), centers.row(j));
+        }
+    }
+    if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi >= lo) {
+        crate::bail_invalid_basis!(
+            "constant-curvature range window is undefined: the evaluated pairs carry no \
+             positive chart distance (d_min = {lo}, d_max = {hi})"
+        );
+    }
+    Ok((lo, hi))
 }
 
+/// DERIVED box `[ℓ_lo, ℓ_hi]` for the kernel range — the interval on which the
+/// realized design is EVALUABLE, which is the only thing a box on this
+/// coordinate is entitled to enforce.
+///
+/// The tempting derivation — bound `ℓ` by the scales the geometry contains — was
+/// measured and is wrong (gam#2747). On the same nine planted fixtures the
+/// criterion `V(κ⋆, ℓ)` is sharply unimodal with an interior minimum that
+/// recovers the planted range, and it rises monotonically on BOTH sides across
+/// four log-units; but that minimum sits outside the center set's own
+/// `[d_min, d_max]` in a third of the cells (a truth planted at twice the median
+/// center spacing minimizes above the largest center separation). A window drawn
+/// at the geometry's scales therefore rails a coordinate the criterion itself
+/// walls in perfectly well — trading one artificial constraint for another,
+/// which is exactly the mistake `#944` and `#1464` made in the κ direction.
+///
+/// So the box is the FLOATING-POINT wall and nothing else, derived from the
+/// evaluated scale span and the format's own constants:
+///
+/// * **`ℓ_lo = d_max / ln(1/MIN_POSITIVE)`** — below it `exp(−d_max/ℓ)`
+///   underflows to zero, the farthest evaluated pairs drop out of the design
+///   entirely, and the model is no longer the one being differentiated.
+/// * **`ℓ_hi = d_min⁺ / EPSILON`** — above it `1 − exp(−d_min⁺/ℓ)` is below the
+///   rounding of 1, so the closest evaluated pair is indistinguishable from a
+///   coincident one and every kernel contrast is lost to cancellation.
+///
+/// Both ends are read in the κ = 0 doubled gauge, the same gauge the auto
+/// `ℓ_ref` rule uses, so the box is κ-FIXED and does not move while the
+/// optimizer walks κ. It is wide — some fifteen orders — and deliberately so:
+/// the criterion supplies the shape, this supplies only the wall. Bracketing the
+/// inner search is a separate concern and uses
+/// [`constant_curvature_evaluated_scale_span`] directly.
+pub fn constant_curvature_length_scale_bounds(
+    data: ArrayView2<'_, f64>,
+    centers: ArrayView2<'_, f64>,
+) -> Result<(f64, f64), BasisError> {
+    let (d_min, d_max) = constant_curvature_evaluated_scale_span(data, centers)?;
+    let underflow_efolds = -f64::MIN_POSITIVE.ln();
+    let lo = d_max / underflow_efolds;
+    let hi = d_min / f64::EPSILON;
+    if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi > lo) {
+        crate::bail_invalid_basis!(
+            "constant-curvature range box collapsed: [{lo}, {hi}] from an evaluated span of \
+             [{d_min}, {d_max}]"
+        );
+    }
+    Ok((lo, hi))
+}
 
 /// Build the constant-curvature reproducing-kernel smooth: realized design
 /// `K_κ(data, centers)·z`, RKHS penalty `zᵀ K_κ(centers, centers) z`, and the
@@ -1197,6 +1244,37 @@ mod tests {
         eprintln!();
     }
 
+    /// 8 data rows + 8 centers inside a disk of radius < 0.5 (valid in every
+    /// κ ∈ [−3, 3] chart). Data ≠ centers so the data→center scale is nontrivial.
+    pub(crate) fn oracle_disk_design_centers() -> (Array2<f64>, Array2<f64>) {
+        let centers = ndarray::array![
+            [0.10, 0.05],
+            [-0.20, 0.15],
+            [0.30, -0.10],
+            [-0.05, -0.25],
+            [0.22, 0.20],
+            [-0.30, -0.05],
+            [0.05, 0.30],
+            [-0.15, 0.10],
+        ];
+        // Deterministic pseudo-random data on a slightly wider disk.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // map to (−0.42, 0.42)
+            ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.84
+        };
+        let n = 60usize;
+        let mut data = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            data[(i, 0)] = next();
+            data[(i, 1)] = next();
+        }
+        (data, centers)
+    }
+
     /// Every entry of the `(κ, η)` kernel tower must match a central finite
     /// difference of the value (first order) and of the first derivatives
     /// (second order), on BOTH branches and across the κ = 0 series/closed-form
@@ -1327,66 +1405,53 @@ mod tests {
         }
     }
 
-    /// The range window is DERIVED from the center geometry and contains the
-    /// auto seed: `[d_min, d_max]` over the centers' own pairwise chart
-    /// distances, with the auto `ℓ_ref` their median.
+    /// The range box is an EVALUABILITY wall, not a statistical one: it must
+    /// contain the geometry's whole scale span with room on both sides, because
+    /// the criterion's own minimum provably leaves that span (gam#2747). And it
+    /// must be exactly where the design stops being computable — one e-fold
+    /// below `ℓ_lo` the farthest evaluated pair underflows out of the design;
+    /// one above `ℓ_hi` the closest one is rounded into coincidence.
     #[test]
-    pub(crate) fn range_window_brackets_the_auto_seed() {
-        let (_, centers) = oracle_disk_design_centers();
-        let (lo, hi) =
-            constant_curvature_length_scale_bounds(centers.view()).expect("window is derivable");
+    pub(crate) fn range_box_is_the_floating_point_wall_and_contains_the_scale_span() {
+        let (data, centers) = oracle_disk_design_centers();
+        let (span_lo, span_hi) = constant_curvature_evaluated_scale_span(data.view(), centers.view())
+            .expect("the fixture carries positive evaluated distances");
+        let (lo, hi) = constant_curvature_length_scale_bounds(data.view(), centers.view())
+            .expect("box is derivable");
         let seed = realized_constant_curvature_length_scale(centers.view(), 0.0).expect("seed");
         assert!(
-            lo > 0.0 && lo < seed && seed < hi,
-            "the auto seed {seed} must be strictly inside the derived window [{lo}, {hi}]"
+            lo < span_lo && span_hi < hi,
+            "the box [{lo}, {hi}] must strictly contain the evaluated scale span \
+             [{span_lo}, {span_hi}] — the criterion's minimum leaves that span"
         );
-        // A two-center set has ONE pairwise distance, so d_min = d_max; the
-        // window must stay an interval rather than collapsing to a point.
-        let pair = ndarray::array![[0.0_f64, 0.0], [0.2, 0.0]];
-        let (plo, phi) = constant_curvature_length_scale_bounds(pair.view())
-            .expect("a two-center window is still derivable");
         assert!(
-            plo < phi,
-            "a degenerate distance multiset must still yield a usable window, got [{plo}, {phi}]"
+            lo < seed && seed < hi,
+            "the auto seed {seed} must be inside the box [{lo}, {hi}]"
+        );
+        // AT `lo` the largest evaluated pair is still representable; a factor of
+        // e below it, it is not.
+        assert!(
+            (-span_hi / lo).exp() > 0.0,
+            "exp(−d_max/ℓ_lo) must still be a normal number"
+        );
+        assert_eq!(
+            (-span_hi / (lo / std::f64::consts::E)).exp(),
+            0.0,
+            "one e-fold below ℓ_lo the farthest evaluated pair must underflow out of the design"
+        );
+        // AT `hi` the closest evaluated pair is still distinguishable from a
+        // coincident one; a factor of e above it, it is not.
+        assert!(
+            1.0 - (-span_lo / hi).exp() > 0.0,
+            "1 − exp(−d_min/ℓ_hi) must still be nonzero"
+        );
+        assert_eq!(
+            1.0 - (-span_lo / (hi * std::f64::consts::E)).exp(),
+            0.0,
+            "one e-fold above ℓ_hi the closest evaluated pair must round into coincidence"
         );
     }
 
-    /// 8 data rows + 8 centers inside a disk of radius < 0.5 (valid in every
-    /// κ ∈ [−3, 3] chart). Data ≠ centers so the data→center scale is nontrivial.
-    pub(crate) fn oracle_disk_design_centers() -> (Array2<f64>, Array2<f64>) {
-        let centers = ndarray::array![
-            [0.10, 0.05],
-            [-0.20, 0.15],
-            [0.30, -0.10],
-            [-0.05, -0.25],
-            [0.22, 0.20],
-            [-0.30, -0.05],
-            [0.05, 0.30],
-            [-0.15, 0.10],
-        ];
-        // Deterministic pseudo-random data on a slightly wider disk.
-        let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            // map to (−0.42, 0.42)
-            ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.84
-        };
-        let n = 60usize;
-        let mut data = Array2::<f64>::zeros((n, 2));
-        for i in 0..n {
-            data[(i, 0)] = next();
-            data[(i, 1)] = next();
-        }
-        (data, centers)
-    }
-
-    /// #1531 regression: the constant-curvature RKHS primary penalty (the
-    /// gauge-restricted kernel Gram `zᵀKz`) is strictly PD / full-rank, so it has
-    /// NO null space. This is the fact that makes the `double_penalty` identity
-    /// ridge at the top of `build_constant_curvature_basis` a deliberate
-    /// whole-chart shrinkage coordinate rather than a null-space penalty.
     #[test]
     fn constant_curvature_gram_is_full_rank_so_identity_is_the_only_double_penalty() {
         // Centers inside every κ chart, several curvatures spanning sign.

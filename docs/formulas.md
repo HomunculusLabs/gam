@@ -296,6 +296,13 @@ path through a distinct `type=`:
   constant-curvature `M_κ` geodesic-kernel smooth, the κ-generic sibling
   of `sphere()` that interpolates `Sᵈ → ℝᵈ → Hᵈ` via `kappa=` (default
   `0`, flat). See [response-geometry.md](response-geometry.md).
+  Its kernel is `exp(−d_κ/ℓ)`, so it has **two** outer coordinates — the
+  signed curvature `κ` and the range `ℓ` — and both follow the mgcv-`sp=`
+  convention: an explicit `kappa=` / `length_scale=` pins that coordinate,
+  an omitted one estimates it. Pinning `length_scale=` is not recommended:
+  `κ` and `ℓ` enter one exponent and are strongly confounded, so a `κ`
+  fitted against a wrong range reports the range error rather than the
+  curvature.
 - `pca(...)` — PCA-subspace smooth.
 
 Each requires at least one variable and accepts radial-smooth options

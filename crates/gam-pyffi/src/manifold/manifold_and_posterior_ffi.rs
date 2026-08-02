@@ -1666,6 +1666,13 @@ struct CurvatureInferenceRow {
     /// p-value of the κ = 0 flatness test against the interior χ²₁ reference
     /// (no half-χ² boundary correction — κ = 0 is interior to S^d ← ℝ^d → H^d).
     flatness_p_value: f64,
+    /// The kernel range `ℓ̂` the criterion profiles to at `κ̂` (gam#2747). Every
+    /// statistic in this row is a PROFILE over it, so it is reported rather
+    /// than hidden.
+    length_scale_hat: f64,
+    /// `false` when the user pinned the range with an explicit `length_scale=`,
+    /// in which case `κ̂` is conditional on that choice rather than profiled.
+    length_scale_estimated: bool,
 }
 
 #[derive(Serialize)]
@@ -1810,6 +1817,8 @@ fn curvature_inference_dataset_json_impl(
             verdict: curvature_verdict_label(report.ci.verdict),
             flatness_lr_stat: report.flatness.lr_stat,
             flatness_p_value: report.flatness.p_value,
+            length_scale_hat: report.length_scale_hat,
+            length_scale_estimated: report.length_scale_estimated,
         });
     }
 

@@ -157,14 +157,14 @@ mod constant_curvature_kappa_range_identification_tests {
                     }
                 }
                 let step = 2.0 * cap / (GRID as f64);
-                let (_, eta_hat, _) = profile
+                let (eta_hat, _, outcome) = profile
                     .minimize_over_eta(best.1)
-                    .expect("the range window is searchable at the argmin");
+                    .expect("the range box is searchable at the argmin");
                 eprintln!(
                     "[#2747] κ⋆={kappa_star:+.2} range={range_mult}×ℓ_ref({ell_ref:.4}): \
-                     κ̂={:+.4} (box ±{cap:.4}, step {step:.4}), ℓ̂={:.4}",
+                     κ̂={:+.4} (box ±{cap:.4}, step {step:.4}), ℓ̂={:.4} [{outcome:?}]",
                     best.1,
-                    eta_hat.value.exp().max(0.0)
+                    eta_hat.exp()
                 );
                 assert!(
                     best.1.abs() < cap * 0.999,
@@ -218,7 +218,7 @@ mod constant_curvature_kappa_range_identification_tests {
                     .expect("profile is constructible on the fixture");
             let (eta_hat, _, _) = profile
                 .minimize_over_eta(1.0)
-                .expect("the range window is searchable at the planted κ");
+                .expect("the range box is searchable at the planted κ");
             eprintln!(
                 "[#2747 range] planted {:.4} ({range_mult}×ℓ_ref) -> ℓ̂ = {:.4}",
                 ell_ref * range_mult,

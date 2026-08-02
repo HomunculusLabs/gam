@@ -2223,16 +2223,37 @@ fn constant_curvature_psi_profile_jet(
 /// the reason the second one exists is that it is confounded with the first
 /// (#2747) — a κ optimized at a pinned ℓ measures the range error, not the
 /// curvature.
+///
+/// This type is the SINGLE owner of the criterion. The point estimate, the
+/// profile CI and the flatness LR all read [`Self::evaluate`], the
+/// range-profiled κ jet, so they cannot be extrema of different objects.
 struct ConstantCurvatureProfile<'a> {
     data: ArrayView2<'a, f64>,
     response: ArrayView1<'a, f64>,
     spec: gam_terms::basis::ConstantCurvatureBasisSpec,
-    /// Derived `[ln ℓ_lo, ln ℓ_hi]` window; `None` when the user pinned the
-    /// range, in which case η is not a coordinate at all.
+    /// Derived `[ln ℓ_lo, ln ℓ_hi]` evaluability box; `None` when the user
+    /// pinned the range, in which case η is not a coordinate at all.
     eta_bounds: Option<(f64, f64)>,
+    /// `[ln d_min⁺, ln d_max]` over the pairs the kernel evaluates — where the
+    /// inner search BRACKETS, as opposed to where it is walled.
+    eta_bracket: (f64, f64),
     /// `η` seed — the auto rule's realized `ℓ_ref`, in logs.
     eta_seed: f64,
     cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), ProfiledRemlPsiJet>>,
+}
+
+/// How the inner range solve at one κ terminated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeSolveOutcome {
+    /// `V_η = 0` and `V_ηη > 0` at an η strictly inside the box: the envelope
+    /// and Schur reductions of the profile are both valid.
+    InteriorMinimum,
+    /// The range could not be certified as an interior minimizer — it is pinned
+    /// by the user, parked at an evaluability wall, or the inner solve stopped
+    /// at a point whose η-curvature does not identify the reduction. The value
+    /// is still the best one found, but `η̂` is locally CONSTANT in κ there, so
+    /// the profile's derivatives are the plain κ slice.
+    LocallyFixed,
 }
 
 impl<'a> ConstantCurvatureProfile<'a> {
@@ -2259,20 +2280,33 @@ impl<'a> ConstantCurvatureProfile<'a> {
             );
         }
         spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::CenterSumToZero;
-        // The window and the seed are read from the realized center set, which
-        // is what the basis builder itself will use, and in the κ = 0 chart
-        // gauge — so both are κ-FIXED and the outer box does not move while the
-        // optimizer walks κ.
+        // Box, bracket and seed are all read from the REALIZED center set — the
+        // one the basis builder itself will use — and in the κ = 0 chart gauge,
+        // so all three are κ-FIXED and none of them moves while the optimizer
+        // walks κ.
+        //
+        // They are DERIVED, not configured, and deliberately do not consult
+        // `SpatialLengthScaleOptimizationOptions`: the κ box beside them is
+        // derived the same way (the half-margin to the antipodal fold), and the
+        // curvature-inference entry point has no access to those options at
+        // all. A box visible to the fit but not to the profile CI would put the
+        // point estimate and its interval on two different parameter spaces.
         let centers = gam_terms::basis::constant_curvature_realized_centers(data, &spec)
             .map_err(EstimationError::from)?;
-        let ell_seed =
-            gam_terms::basis::realized_constant_curvature_length_scale(centers.view(), spec.length_scale)
+        let ell_seed = gam_terms::basis::realized_constant_curvature_length_scale(
+            centers.view(),
+            spec.length_scale,
+        )
+        .map_err(EstimationError::from)?;
+        let (span_lo, span_hi) =
+            gam_terms::basis::constant_curvature_evaluated_scale_span(data, centers.view())
                 .map_err(EstimationError::from)?;
         let eta_bounds = if spec.length_scale_fixed {
             None
         } else {
-            let (lo, hi) = gam_terms::basis::constant_curvature_length_scale_bounds(centers.view())
-                .map_err(EstimationError::from)?;
+            let (lo, hi) =
+                gam_terms::basis::constant_curvature_length_scale_bounds(data, centers.view())
+                    .map_err(EstimationError::from)?;
             Some((lo.ln(), hi.ln()))
         };
         let eta_seed = match eta_bounds {
@@ -2284,6 +2318,7 @@ impl<'a> ConstantCurvatureProfile<'a> {
             response,
             spec,
             eta_bounds,
+            eta_bracket: (span_lo.ln(), span_hi.ln()),
             eta_seed,
             cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         })
@@ -2308,25 +2343,30 @@ impl<'a> ConstantCurvatureProfile<'a> {
         Ok(sample)
     }
 
-    /// `η̂(κ) = argmin_η V(κ, η)` on the derived window, and the jet there.
+    /// `η̂(κ) = argmin_η V(κ, η)` on the evaluability box, and the jet there.
     ///
-    /// A coarse scan across the window brackets the basin before a safeguarded
-    /// Newton refines it, because the range coordinate is the one that can carry
-    /// a second, degenerate optimum at the collapsed-kernel corner and a pure
-    /// local descent from the seed could adopt it. `at_bound` reports whether
-    /// the accepted η̂ is a window endpoint rather than an interior stationary
-    /// point — the profile's second derivative reduction is different there.
+    /// A deterministic scan across the geometry's own scale span brackets the
+    /// basin before a safeguarded Newton refines it. The scan is an
+    /// INITIALIZATION, not a constraint: the measured criterion puts its minimum
+    /// above the largest evaluated separation on a third of the planted
+    /// fixtures, and the Newton is free to walk there — only the evaluability
+    /// box stops it. Making the bracket deterministic (rather than warm-starting
+    /// from the previous κ) is what makes `V_p` a function of κ alone, which the
+    /// CI walk and the LR test both require.
     fn minimize_over_eta(
         &self,
         kappa: f64,
-    ) -> Result<(f64, ProfiledRemlPsiJet, bool), EstimationError> {
+    ) -> Result<(f64, ProfiledRemlPsiJet, RangeSolveOutcome), EstimationError> {
         let Some((lo, hi)) = self.eta_bounds else {
             let jet = self.evaluate_psi(kappa, self.eta_seed)?;
-            return Ok((self.eta_seed, jet, true));
+            return Ok((self.eta_seed, jet, RangeSolveOutcome::LocallyFixed));
         };
-        // Bracket: the window plus the seed, so a user-supplied or previously
-        // fitted range is always among the candidates.
-        const SCAN_POINTS: usize = 9;
+        // Bracket over the evaluated scale span (clamped into the box), plus the
+        // seed, so a user-supplied or previously fitted range is always among
+        // the candidates.
+        const SCAN_POINTS: usize = 13;
+        let scan_lo = self.eta_bracket.0.clamp(lo, hi);
+        let scan_hi = self.eta_bracket.1.clamp(lo, hi);
         let mut best: Option<(f64, ProfiledRemlPsiJet)> = None;
         let consider = |eta: f64, best: &mut Option<(f64, ProfiledRemlPsiJet)>| {
             if let Ok(jet) = self.evaluate_psi(kappa, eta)
@@ -2337,30 +2377,33 @@ impl<'a> ConstantCurvatureProfile<'a> {
         };
         for i in 0..SCAN_POINTS {
             consider(
-                lo + (hi - lo) * (i as f64) / ((SCAN_POINTS - 1) as f64),
+                scan_lo + (scan_hi - scan_lo) * (i as f64) / ((SCAN_POINTS - 1) as f64),
                 &mut best,
             );
         }
         consider(self.eta_seed, &mut best);
         let Some((mut eta, mut jet)) = best else {
             crate::bail_invalid_estim!(
-                "constant-curvature profile could not evaluate the range window at κ = {kappa}"
+                "constant-curvature profile could not evaluate the range box at κ = {kappa}"
             );
         };
-        // Safeguarded Newton on the η coordinate at fixed κ. The step is capped
-        // at one window width and backtracked on non-descent, so a non-convex
-        // stretch cannot throw the iterate across the window.
-        const MAX_NEWTON: usize = 40;
-        let width = hi - lo;
+        // Safeguarded Newton on η at fixed κ. The trust step is capped at the
+        // BRACKET width rather than the (deliberately enormous) box width, so a
+        // flat or non-convex stretch cannot throw the iterate fifteen orders of
+        // magnitude away from the geometry.
+        const MAX_NEWTON: usize = 60;
+        let width = (scan_hi - scan_lo).max(1.0);
+        let mut converged = false;
         for _ in 0..MAX_NEWTON {
             let g = jet.gradient[1];
             let h = jet.hessian[1][1];
-            let at_lo = (eta - lo).abs() <= 1.0e-12 * (1.0 + width);
-            let at_hi = (hi - eta).abs() <= 1.0e-12 * (1.0 + width);
+            let at_lo = eta <= lo + 1.0e-12 * (1.0 + lo.abs());
+            let at_hi = eta >= hi - 1.0e-12 * (1.0 + hi.abs());
             if (at_lo && g >= 0.0) || (at_hi && g <= 0.0) {
-                return Ok((eta, jet, true));
+                return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
             }
             if g.abs() <= 1.0e-9 * (1.0 + jet.value.abs()) {
+                converged = true;
                 break;
             }
             let raw = if h.is_finite() && h > 0.0 {
@@ -2370,7 +2413,7 @@ impl<'a> ConstantCurvatureProfile<'a> {
             };
             let mut step = raw.clamp(-width, width);
             let mut accepted = None;
-            for _ in 0..25 {
+            for _ in 0..30 {
                 let trial = (eta + step).clamp(lo, hi);
                 if (trial - eta).abs() <= 1.0e-14 * (1.0 + eta.abs()) {
                     break;
@@ -2389,30 +2432,44 @@ impl<'a> ConstantCurvatureProfile<'a> {
                     eta = next_eta;
                     jet = next_jet;
                     if moved <= 1.0e-12 * (1.0 + eta.abs()) {
+                        converged = jet.gradient[1].abs() <= 1.0e-7 * (1.0 + jet.value.abs());
                         break;
                     }
                 }
                 None => break,
             }
         }
-        let at_bound = (eta - lo).abs() <= 1.0e-9 * (1.0 + width)
-            || (hi - eta).abs() <= 1.0e-9 * (1.0 + width);
-        Ok((eta, jet, at_bound))
+        let interior = converged
+            && jet.hessian[1][1].is_finite()
+            && jet.hessian[1][1] > 0.0
+            && eta > lo + 1.0e-9 * (1.0 + lo.abs())
+            && eta < hi - 1.0e-9 * (1.0 + hi.abs());
+        Ok((
+            eta,
+            jet,
+            if interior {
+                RangeSolveOutcome::InteriorMinimum
+            } else {
+                RangeSolveOutcome::LocallyFixed
+            },
+        ))
     }
 
     /// `(V_p(κ), V_p′(κ), V_p″(κ))` with the range PROFILED out — the
-    /// one-dimensional likelihood the CI and the flatness test consume.
+    /// one-dimensional likelihood the point estimate, the CI and the flatness
+    /// test all consume.
     ///
-    /// At an interior η̂ the envelope theorem gives `V_p′ = V_κ` and the Schur
-    /// complement gives `V_p″ = V_κκ − V_κη²/V_ηη`. At a railed η̂ (or a pinned
-    /// range) the selection is locally constant, `dη̂/dκ = 0`, and the reduction
-    /// is absent — exactly the premise this file already applies to a railed ρ̂.
+    /// At a certified interior η̂ the envelope theorem gives `V_p′ = V_κ` and the
+    /// Schur complement gives `V_p″ = V_κκ − V_κη²/V_ηη`. Otherwise η̂ is
+    /// locally constant in κ, the reduction is absent, and the derivatives are
+    /// the plain κ slice at the η actually used — exactly the premise this file
+    /// already applies to a railed ρ̂. The VALUE is the best one found either
+    /// way, so the criterion the CI compares is the same object in both cases.
     fn evaluate(&self, kappa: f64) -> Result<(f64, f64, f64), EstimationError> {
-        let (_, jet, at_bound) = self.minimize_over_eta(kappa)?;
-        if at_bound {
-            Ok(jet.kappa_slice())
-        } else {
-            jet.eta_profiled_kappa_jet()
+        let (_, jet, outcome) = self.minimize_over_eta(kappa)?;
+        match outcome {
+            RangeSolveOutcome::InteriorMinimum => jet.eta_profiled_kappa_jet(),
+            RangeSolveOutcome::LocallyFixed => Ok(jet.kappa_slice()),
         }
     }
 }
@@ -2445,24 +2502,41 @@ fn validate_constant_curvature_profile_inputs(
 struct ConstantCurvatureOptimum {
     /// Signed sectional curvature κ̂.
     kappa: f64,
-    /// Kernel range ℓ̂ = exp(η̂). Equals the pinned value when the user set
+    /// Kernel range ℓ̂ = exp(η̂(κ̂)) — the range the criterion profiles to at the
+    /// fitted curvature. Equals the pinned value when the user set
     /// `length_scale=`.
     length_scale: f64,
 }
 
-/// Minimize the continuously smoothing-profiled Gaussian REML evidence over the
-/// smooth's OWN coordinates — the signed curvature on its chart-valid interval
-/// and the log kernel range on its derived window — with the shared bounded
-/// analytic outer solver, so every accepted result has passed the solver's final
-/// box-KKT projected-gradient certificate. No sampled point is ever returned as
-/// the estimate: samples are only line-search probes for the continuous solve.
+/// Minimize the RANGE-PROFILED, continuously smoothing-profiled Gaussian REML
+/// evidence `V_p(κ) = min_{η,ρ} V(κ, η, ρ)` on the chart-valid κ interval, with
+/// the shared bounded analytic outer solver — so every accepted result has
+/// passed the solver's final box-KKT projected-gradient certificate. No sampled
+/// point is ever returned as the estimate: samples are only line-search probes
+/// for the continuous solve.
 ///
-/// The range joins the search because it is confounded with the curvature
-/// (#2747): the two enter `exp(−d_κ/ℓ)` through one exponent, so a κ optimized
-/// against a pinned ℓ reports the range error rather than the curvature — it
-/// rails, inverts the sign, or invents curvature from flat data. A user who
-/// pins `length_scale=` gets a one-dimensional κ search at that range, exactly
-/// as a user who pins `kappa=` gets fixed geometry.
+/// # Why the range is profiled rather than searched jointly
+///
+/// The range has to be estimated at all because it is confounded with the
+/// curvature (#2747): the two enter `exp(−d_κ/ℓ)` through one exponent, so a κ
+/// optimized against a pinned ℓ reports the range error rather than the
+/// curvature — measured, it rails, inverts the sign, or invents curvature from
+/// flat data.
+///
+/// But it must be profiled, not co-searched, because **the point estimate and
+/// the interval have to be extrema of the SAME object**. A joint search over
+/// `(κ, η)` returns a local stationary point of `V(κ, η)`, while the profile CI
+/// and the flatness LR compare values of `V_p(κ) = min_η V(κ, η)`; where the
+/// two disagree the reported κ̂ is not the argmin of its own interval's
+/// criterion. This file already carries the scar from the last time one
+/// coordinate had two objective owners — see the `spatial_terms` filter, which
+/// exists because that "made the scalar and joint routes disagree at the
+/// identical seed on flat data". So there is one owner: `ConstantCurvatureProfile`,
+/// whose inner range solve is deterministic and globally bracketed, and whose
+/// κ jet is the exact envelope/Schur reduction of it.
+///
+/// A user who pins `length_scale=` gets the same one-dimensional κ search at
+/// that range, exactly as a user who pins `kappa=` gets fixed geometry.
 fn constant_curvature_kappa_profile_optimum(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -2492,33 +2566,17 @@ fn constant_curvature_kappa_profile_optimum(
     };
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
     let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
-    let initial_kappa = profile.spec.kappa.clamp(kappa_min, kappa_max);
-    let eta_window = profile.eta_bounds;
-    let initial_eta = profile.eta_seed;
-
-    // The ψ vector: κ always, η only when the user left the range free. A pinned
-    // range must not become a degenerate axis with `lower == upper` — that
-    // manufactures a coordinate the criterion cannot move and spends the
-    // solver's certificate on it.
-    let (lower, upper, theta0) = match eta_window {
-        Some((eta_lo, eta_hi)) => (
-            vec![kappa_min, eta_lo],
-            vec![kappa_max, eta_hi],
-            vec![initial_kappa, initial_eta],
-        ),
-        None => (vec![kappa_min], vec![kappa_max], vec![initial_kappa]),
-    };
-    let dim = theta0.len();
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.bounds = (kappa_min, kappa_max);
     seed_config.max_seeds = 1;
     seed_config.seed_budget = 1;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
-    seed_config.num_auxiliary_trailing = dim;
+    seed_config.num_auxiliary_trailing = 1;
     seed_config.over_smoothing_probe_rho = None;
-    let problem = gam_solve::rho_optimizer::OuterProblem::new(dim)
+    let initial_kappa = profile.spec.kappa.clamp(kappa_min, kappa_max);
+    let problem = gam_solve::rho_optimizer::OuterProblem::new(1)
         .with_gradient(gam_problem::Derivative::Analytic)
-        // #2458: the ψ profile supplies an EXACT Hessian, so this route runs
+        // #2458: the κ profile supplies an EXACT d²V_p/dκ², so this route runs
         // the same curvature-denominated stationarity certificate every other
         // route runs. It previously declared `Unavailable` — not because the
         // curvature was unavailable, but because this call site never asked the
@@ -2528,53 +2586,36 @@ fn constant_curvature_kappa_profile_optimum(
         // is the terminal certification, not the trajectory. Declaring the
         // Hessian while preferring gradient-only routes the planner through the
         // `(Analytic, Analytic) if prefer_gradient_only` arm to the same BFGS it
-        // used before, so ψ-hat is selected by the same solve -- but the
+        // used before, so kappa-hat is selected by the same solve -- but the
         // terminal mint can now MEASURE curvature and run the derived criterion
         // instead of the un-derived gradient band.
         .with_prefer_gradient_only(true)
         .with_disable_fixed_point(true)
         .with_fallback_policy(gam_solve::rho_optimizer::FallbackPolicy::Disabled)
-        .with_psi_dim(dim)
+        .with_psi_dim(1)
         .with_tolerance(options.tol.max(f64::EPSILON.sqrt()))
         .with_max_iter(options.max_iter.max(1))
         .with_bounds(
-            Array1::from_vec(lower.clone()),
-            Array1::from_vec(upper.clone()),
+            Array1::from_vec(vec![kappa_min]),
+            Array1::from_vec(vec![kappa_max]),
         )
-        .with_initial_rho(Array1::from_vec(theta0.clone()))
+        .with_initial_rho(Array1::from_vec(vec![initial_kappa]))
         .with_seed_config(seed_config);
-    let eta_at = move |theta: &Array1<f64>| -> f64 {
-        if theta.len() > 1 { theta[1] } else { initial_eta }
-    };
     let mut objective = problem.build_objective(
         profile,
-        {
-            let eta_at = eta_at;
-            move |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-                profile
-                    .evaluate_psi(theta[0], eta_at(theta))
-                    .map(|jet| jet.value)
-            }
+        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
+            profile.evaluate(theta[0]).map(|(value, _, _)| value)
         },
-        {
-            let eta_at = eta_at;
-            move |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
-                let jet = profile.evaluate_psi(theta[0], eta_at(theta))?;
-                let dim = theta.len();
-                let gradient = Array1::from_vec(jet.gradient[..dim].to_vec());
-                let mut hessian = Array2::<f64>::zeros((dim, dim));
-                for i in 0..dim {
-                    for j in 0..dim {
-                        hessian[(i, j)] = jet.hessian[i][j];
-                    }
-                }
-                Ok(gam_problem::OuterEval {
-                    cost: jet.value,
-                    gradient,
-                    hessian: gam_problem::HessianValue::Dense(hessian),
-                    inner_beta_hint: None,
-                })
-            }
+        |profile: &mut ConstantCurvatureProfile<'_>, theta: &Array1<f64>| {
+            let (cost, derivative, curvature) = profile.evaluate(theta[0])?;
+            Ok(gam_problem::OuterEval {
+                cost,
+                gradient: Array1::from_vec(vec![derivative]),
+                hessian: gam_problem::HessianValue::Dense(
+                    Array2::from_shape_vec((1, 1), vec![curvature]).expect("1x1 from one element"),
+                ),
+                inner_beta_hint: None,
+            })
         },
         None::<fn(&mut ConstantCurvatureProfile<'_>)>,
         None::<
@@ -2590,7 +2631,7 @@ fn constant_curvature_kappa_profile_optimum(
     )?;
     if !result.converged() {
         crate::bail_invalid_estim!(
-            "constant-curvature likelihood-profile ψ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
+            "constant-curvature likelihood-profile κ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
             term_idx,
             result.iterations,
             result.final_value,
@@ -2598,11 +2639,11 @@ fn constant_curvature_kappa_profile_optimum(
         );
     }
     let kappa_hat = result.rho[0];
-    let length_scale_hat = if result.rho.len() > 1 {
-        result.rho[1].exp()
-    } else {
-        initial_eta.exp()
-    };
+    // Read ℓ̂ off the SAME profile object the solve just used, so the reported
+    // range is the one the accepted κ̂ was profiled against (and replays from its
+    // cache rather than re-solving).
+    let (eta_hat, _, _) = objective.state.minimize_over_eta(kappa_hat)?;
+    let length_scale_hat = eta_hat.exp();
     log::info!(
         "[spatial-kappa] continuous likelihood-profile optimum kappa_hat={:.6} \
          length_scale_hat={:.6} (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
@@ -8624,6 +8665,18 @@ pub struct CurvatureInference {
     /// half-χ² boundary correction — κ = 0 is an interior point of the
     /// `S^d ← ℝ^d → H^d` family).
     pub flatness: gam_geometry::curvature_estimand::FlatnessTest,
+    /// The kernel range `ℓ̂` the criterion profiles to AT `κ̂` — the smooth's
+    /// second outer coordinate (gam#2747).
+    ///
+    /// It is reported rather than hidden because every statistic above is a
+    /// PROFILE over it: `κ̂` is the argmin of `V_p(κ) = min_η V(κ, η)`, the CI
+    /// is a profile-likelihood interval, and the flatness LR compares two
+    /// range-profiled values. A reader who cannot see `ℓ̂` cannot tell an
+    /// estimate anchored at a sensible resolution from one anchored at a
+    /// degenerate corner of the range window.
+    pub length_scale_hat: f64,
+    /// Was `ℓ̂` estimated, or pinned by an explicit `length_scale=`?
+    pub length_scale_estimated: bool,
 }
 
 /// Compute the #944 curvature inference for the constant-curvature smooth at
@@ -8915,11 +8968,14 @@ pub fn curvature_inference_forspec(
     )
     .map_err(EstimationError::RemlOptimizationFailed)?;
 
+    let (eta_hat, _, _) = profile.minimize_over_eta(kappa_hat)?;
     Ok(CurvatureInference {
         term_idx,
         kappa_hat,
         ci,
         flatness,
+        length_scale_hat: eta_hat.exp(),
+        length_scale_estimated: profile.eta_bounds.is_some(),
     })
 }
 
