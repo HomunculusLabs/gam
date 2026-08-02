@@ -106,16 +106,6 @@ mod constant_curvature_kappa_range_identification_tests {
         (ell, 0.5 / max_r2)
     }
 
-    /// THE GATE. Three planted curvatures × three planted ranges. The
-    /// range-profiled criterion must put its argmin near κ⋆ in every cell —
-    /// interior, correct sign on the curved arms, and not curved at all on the
-    /// flat one.
-    ///
-    /// Measured before #2747 on exactly this grid: the criterion was right in
-    /// the `1×` column and nowhere else — railed at a box endpoint, sign
-    /// inverted, or reporting a confident interior `κ̂ = ∓0.94` on genuinely
-    /// FLAT data. Every one of those failures is a range error wearing a
-    /// curvature's clothes.
     /// The bias bar, and where it comes from.
     ///
     /// `κ̂` at this fixture size is an estimate from `n = 240` rows at SNR 33
@@ -134,6 +124,16 @@ mod constant_curvature_kappa_range_identification_tests {
     /// all.
     const KAPPA_BIAS_BAR: f64 = 0.45;
 
+    /// THE GATE. Three planted curvatures × three planted ranges. The
+    /// range-profiled criterion must put its argmin near κ⋆ in every cell —
+    /// interior, correct sign on the curved arms, and not curved at all on the
+    /// flat one.
+    ///
+    /// Measured before #2747 on exactly this grid: the criterion was right in
+    /// the `1×` column and nowhere else — railed at a box endpoint, sign
+    /// inverted, or reporting a confident interior `κ̂ = ∓0.94` on genuinely
+    /// FLAT data. Every one of those failures is a range error wearing a
+    /// curvature's clothes.
     #[test]
     fn range_profiled_criterion_identifies_kappa_star_at_every_planted_range() {
         // Powered rather than cheap: `κ̂` at n = 120 / noise 0.10 has a sampling
