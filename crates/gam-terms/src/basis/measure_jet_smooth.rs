@@ -590,6 +590,20 @@ fn constructive_pullback_center_form(
     ConstructiveQuadratic::from_energy_factor(factor.dot(evaluation), context)
 }
 
+/// Congruence of a jet onto a frame: `F (Fᵀ J F) Fᵀ`.
+///
+/// This is the exact derivative of `R(ψ) = N M(ψ) Nᵀ`, `M = Nᵀ S(ψ) N`, for a
+/// ψ-FIXED frame `N` — which is what a declared structural null frame is. An
+/// empty frame gives an exact zero, matching a rebuild that declined.
+fn restrict_jet_to_frame(jet: &Array2<f64>, frame: &Array2<f64>) -> Array2<f64> {
+    if frame.ncols() == 0 {
+        return Array2::<f64>::zeros(jet.dim());
+    }
+    let inner = frame.t().dot(jet).dot(frame);
+    let restricted = frame.dot(&inner).dot(&frame.t());
+    (&restricted + &restricted.t()) * 0.5
+}
+
 /// Frobenius scale of a constructive quadratic, with the same degenerate
 /// convention `normalize_penalty` uses: a scale at or below `1e-12` reports
 /// `1e-12` so the division can never blow up.
@@ -2411,6 +2425,10 @@ pub fn build_measure_jet_basis_psi_derivatives(
     // in single-scale mode. Candidate order exactly mirrors the value builder:
     // scale candidates or Primary first, then the optional null-component
     // candidate. Active filtering aligns through `ActivePenaltyInfo::original_index`.
+    // The single-scale Primary, when there is one. `None` in per-level mode,
+    // which emits scale candidates instead and therefore never rebuilds the
+    // null component.
+    let mut single_scale_primary: Option<ConstructiveQuadratic> = None;
     let mut raw: Vec<RawPenaltyJets> = if geom.per_level {
         let l_count = band.eps.len();
         // Six forms per scale: value, ∂α, ∂α², and zero τ slots — same
@@ -2494,6 +2512,23 @@ pub fn build_measure_jet_basis_psi_derivatives(
             first[0] = ell_first;
             second_diag[0] = ell_second;
         }
+        // Keep the Primary the builder would emit: the null component's shipped
+        // matrix is a REBUILD off it, so the producer needs the same object to
+        // differentiate the same thing (see below).
+        single_scale_primary = Some(constructive_pullback_center_form(
+            &geom.kz,
+            &q_form,
+            "measure-jet primary penalty",
+        )?);
+        if let (Some(primary), Some(frame)) = (
+            single_scale_primary.as_mut(),
+            measure_jet_primary_structural_null_frame(&geom.z, m, geom.head_lift.ncols())?,
+        ) {
+            *primary = primary.clone().with_structural_null_frame(
+                frame,
+                "measure-jet primary structural null declaration",
+            )?;
+        }
         vec![RawPenaltyJets {
             value: sandwich(&q_form),
             first,
@@ -2503,9 +2538,9 @@ pub fn build_measure_jet_basis_psi_derivatives(
     };
 
     if spec.double_penalty {
-        let null_form =
+        let null_center =
             affine_function_nullspace_center_quadratic(geom.centers.view(), geom.masses.view())?;
-        let null_form = null_form.dense();
+        let null_form = null_center.dense();
         let mut first: Vec<Array2<f64>> = (0..n_coords).map(|_| zero_p()).collect();
         let mut second_diag: Vec<Array2<f64>> = (0..n_coords).map(|_| zero_p()).collect();
         if coord_offset == 1 {
@@ -2513,8 +2548,61 @@ pub fn build_measure_jet_basis_psi_derivatives(
             first[0] = ell_first;
             second_diag[0] = ell_second;
         }
+        let mut value = sandwich(null_form);
+        // The builder does NOT ship this raw pullback when a Primary exists: it
+        // ships `rebuild_metric_consistent_ridge`'s output, `R = N M Nᵀ` with
+        // `M = Nᵀ (EᵀH₀E) N` and `N` the Primary's declared structural null
+        // frame. Differentiating the raw pullback instead is an
+        // objective↔gradient desync on the `ln ℓ` coordinate, and #2761
+        // measured it as the WHOLE of that coordinate's gradient error:
+        //
+        //   arm                       analytic     Ridders FD     rel
+        //   double_penalty = true    -1.124278e1  -1.149171e1   2.2e-2
+        //   double_penalty = false   -1.1255398e1 -1.1255398e1   9e-10
+        //
+        // with the total's per-atom breakdown putting it in `logdet_S`
+        // (−0.2369) and `fixed_beta` (+0.4858). λ_null being tiny does not
+        // shrink it: on the directions the Primary annihilates, `S_λ` IS
+        // `λ_null·S_null`, so `λ_null` cancels out of
+        // `tr(S_λ⁺ ∂S_λ/∂ψ)` and a wrong `∂S_null/∂ψ` lands at full size.
+        //
+        // The exact jets of the rebuilt object are `N (Nᵀ ∂S_raw N) Nᵀ`, since
+        // `N` is ψ-fixed by construction (it is a declaration, not a rank
+        // test). They are numerically ZERO here — `N`'s columns carry no
+        // representer coefficients, so `E·N` is ℓ-invariant and `M` cannot
+        // move — but computing them rather than asserting them keeps the
+        // producer correct if a future frame does move.
+        if let Some(primary) = single_scale_primary.as_ref() {
+            let ridge_physical = ConstructiveQuadratic::from_energy_factor(
+                null_center.factor().dot(&geom.kz),
+                "measure-jet affine/null coefficient penalty",
+            )?;
+            match super::rebuild_metric_consistent_ridge(primary, &ridge_physical)? {
+                Some(rebuilt) => {
+                    let frame = primary
+                        .structural_null_frame()
+                        .cloned()
+                        .unwrap_or_else(|| Array2::<f64>::zeros((p, 0)));
+                    for coord in 0..n_coords {
+                        first[coord] = restrict_jet_to_frame(&first[coord], &frame);
+                        second_diag[coord] = restrict_jet_to_frame(&second_diag[coord], &frame);
+                    }
+                    value = rebuilt.dense().clone();
+                }
+                None => {
+                    // The rebuild declined, so the builder ships an exact zero
+                    // and the candidate is dropped. A dropped candidate has no
+                    // derivative.
+                    for coord in 0..n_coords {
+                        first[coord] = zero_p();
+                        second_diag[coord] = zero_p();
+                    }
+                    value = zero_p();
+                }
+            }
+        }
         raw.push(RawPenaltyJets {
-            value: sandwich(null_form),
+            value,
             first,
             second_diag,
             // H₀ is independent of α and τ; its only moving object is E(ℓ),
@@ -3501,6 +3589,24 @@ mod tests {
                 - &(&at.active_penalties[candidate].matrix * 2.0)
                 + &minus.active_penalties[candidate].matrix)
                 / (h * h);
+            // A central difference cannot resolve a derivative below its own
+            // cancellation noise: differencing entries of size `E` at step `h`
+            // leaves `~ε·E/h` in the first difference and `~ε·E/h²` in the
+            // second, whatever the true derivative is. The null component's
+            // shipped matrix (the rebuilt metric-consistent ridge) is EXACTLY
+            // ℓ-invariant, so its analytic jets are exactly zero and its FD is
+            // pure noise — measured at 3.5e-13 against a `1e-12` scale floor
+            // that predates the exact answer. Grading that against a relative
+            // tolerance alone asserts the ORACLE is exact, which it is not.
+            // The factor 8 covers the handful of roundings between the two
+            // rebuilds; it is not a fudge on the gradient, which is still
+            // graded relatively wherever the FD resolves anything.
+            let entry_scale = [&plus, &minus, &at]
+                .iter()
+                .flat_map(|built| built.active_penalties[candidate].matrix.iter())
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            let first_floor = 8.0 * f64::EPSILON * entry_scale / h;
+            let second_floor = 8.0 * f64::EPSILON * entry_scale / (h * h);
             let first_scale = fd_penalty_first
                 .iter()
                 .fold(1e-12_f64, |acc, value| acc.max(value.abs()));
@@ -3512,8 +3618,10 @@ mod tests {
                 .zip(fd_penalty_first.iter())
             {
                 assert!(
-                    (analytic - finite_difference).abs() <= 1e-4 * first_scale,
-                    "candidate {candidate} ∂S~/∂lnℓ: analytic {analytic:.6e} vs FD {finite_difference:.6e}"
+                    (analytic - finite_difference).abs() <= 1e-4 * first_scale + first_floor,
+                    "candidate {candidate} ∂S~/∂lnℓ: analytic {analytic:.6e} vs FD \
+                     {finite_difference:.6e} (rel budget {:.3e}, oracle floor {first_floor:.3e})",
+                    1e-4 * first_scale
                 );
             }
             for (analytic, finite_difference) in derivs.penalties_second_diag[0][candidate]
@@ -3521,8 +3629,10 @@ mod tests {
                 .zip(fd_penalty_second.iter())
             {
                 assert!(
-                    (analytic - finite_difference).abs() <= 5e-3 * second_scale,
-                    "candidate {candidate} ∂²S~/∂lnℓ²: analytic {analytic:.6e} vs FD {finite_difference:.6e}"
+                    (analytic - finite_difference).abs() <= 5e-3 * second_scale + second_floor,
+                    "candidate {candidate} ∂²S~/∂lnℓ²: analytic {analytic:.6e} vs FD \
+                     {finite_difference:.6e} (rel budget {:.3e}, oracle floor {second_floor:.3e})",
+                    5e-3 * second_scale
                 );
             }
         }
