@@ -520,6 +520,89 @@ fn pullback_center_form(evaluation: &Array2<f64>, form: &Array2<f64>) -> Array2<
     (&pulled + &pulled.t()) * 0.5
 }
 
+/// Energy factor `F` of a symmetric PSD center-value form: `FᵀF = H` on `H`'s
+/// positive part, rows `√λ_k · u_kᵀ`.
+///
+/// Every eigenvalue that is positive is kept — no rank tolerance enters, so
+/// this is an exact factorization of `H⁺` rather than a truncation. `H` here is
+/// always the output of [`measure_jet_energy_form`] or the affine projector,
+/// both of which are PSD by construction, so the dropped part is roundoff.
+fn psd_energy_factor(form: &Array2<f64>, context: &str) -> Result<Array2<f64>, BasisError> {
+    let m = form.nrows();
+    if m == 0 {
+        return Ok(Array2::<f64>::zeros((0, 0)));
+    }
+    let sym = (form + &form.t()) * 0.5;
+    let (evals, evecs) = sym.eigh(Side::Lower).map_err(|e| {
+        BasisError::InvalidInput(format!(
+            "measure-jet energy factorization `{context}` eigendecomposition failed: {e}"
+        ))
+    })?;
+    let kept: Vec<usize> = evals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &value)| (value > 0.0).then_some(index))
+        .collect();
+    let mut factor = Array2::<f64>::zeros((kept.len(), m));
+    for (row, index) in kept.into_iter().enumerate() {
+        let scale = evals[index].sqrt();
+        for column in 0..m {
+            factor[[row, column]] = scale * evecs[[column, index]];
+        }
+    }
+    Ok(factor)
+}
+
+/// Pull a PSD center-value form back through an evaluation map CONSTRUCTIVELY:
+/// `EᵀHE = (F E)ᵀ (F E)` for `FᵀF = H`.
+///
+/// The dense route (`pullback_center_form` + `try_from_dense_psd`) is a false
+/// refusal waiting to happen and #2761 measured it firing: the Gaussian
+/// representers go collinear as the range ℓ grows, `E`'s condition number blows
+/// up, and the triple product loses exactly the digits that keep the smallest
+/// eigenvalue non-negative. On `measure_jet_perf_parity` the whole design then
+/// refuses to build for every `ℓ ≳ 2.8` —
+///
+/// ```text
+///   ell   2.15059  builds        reml -1279.00091366   (still descending)
+///   ell   2.79577  REFUSED  min eigenvalue -9.266e-9
+///   ell   7.98500  REFUSED  min eigenvalue -2.864e-5
+/// ```
+///
+/// — while the criterion is still descending at the last `ℓ` that builds, which
+/// is what the outer search reports as `StepSizeTooSmall after 50 attempt(s)`:
+/// its descent direction points into a region where the objective cannot be
+/// EVALUATED. `-4e-5` relative on a Frobenius-normalized matrix is cancellation,
+/// not negative curvature, and the refusal's own guidance says so ("supply the
+/// native energy factor for a PSD function penalty").
+///
+/// Going through the factor makes PSD-ness structural instead of a numerical
+/// accident, and never squares `E`'s condition number in the middle product.
+/// The module's null-component penalty already worked this way
+/// ([`affine_function_nullspace_quadratic`]); the energy Primary was the
+/// sibling that did not.
+fn constructive_pullback_center_form(
+    evaluation: &Array2<f64>,
+    form: &Array2<f64>,
+    context: &str,
+) -> Result<ConstructiveQuadratic, BasisError> {
+    let factor = psd_energy_factor(form, context)?;
+    ConstructiveQuadratic::from_energy_factor(factor.dot(evaluation), context)
+}
+
+/// Frobenius scale of a constructive quadratic, with the same degenerate
+/// convention `normalize_penalty` uses: a scale at or below `1e-12` reports
+/// `1e-12` so the division can never blow up.
+fn constructive_frobenius_scale(quadratic: &ConstructiveQuadratic) -> f64 {
+    quadratic
+        .dense()
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt()
+        .max(1e-12)
+}
+
 /// First and diagonal-second `u = ln ℓ` derivatives of `E(u)ᵀ H E(u)` for a
 /// `u`-invariant center-value form `H`.
 fn pullback_center_form_log_length_jets(
@@ -2033,18 +2116,18 @@ pub fn build_measure_jet_basis(
             spec.tau0,
         )?;
         for (level, q_l) in forms.into_iter().enumerate() {
-            let s_l = kz.t().dot(&q_l).dot(&kz);
-            let (s_norm, c_l) = normalize_penalty(&((&s_l + &s_l.t()) * 0.5));
+            // Constructive pullback, not a dense triple product: the per-scale
+            // form is PSD by construction and so is its pullback, and only the
+            // arithmetic can lose that (#2761).
+            let s_l = constructive_pullback_center_form(&kz, &q_l, "measure-jet scale penalty")?;
+            let c_l = constructive_frobenius_scale(&s_l);
             let intrinsic_dim = centers.ncols() as f64;
             let eta = 2.0 * order_s + intrinsic_dim * (2.0 - 2.0 * spec.alpha);
             let scale_weight = log_step * eps_band[level].powf(-eta);
             penalty_normalization_scales.push(c_l);
             raw_penalty_normalization_scales.push(c_l / scale_weight);
             candidates.push(PenaltyCandidate {
-                matrix: ConstructiveQuadratic::try_from_dense_psd(
-                    s_norm,
-                    "measure-jet scale penalty",
-                )?,
+                matrix: s_l.scaled(1.0 / c_l, "normalized measure-jet scale penalty")?,
                 source: PenaltySource::Other(format!("measure_jet_scale_{level}")),
                 normalization_scale: c_l,
                 kronecker_factors: None,
@@ -2064,18 +2147,15 @@ pub fn build_measure_jet_basis(
         // the center evaluation map. It is independent of `double_penalty`:
         // statistical selection is a distinct REML component below, never a
         // fixed coefficient toll fused into this estimand.
-        let penalty = pullback_center_form(&kz, &q_form);
-        let (penalty_norm, c_primary) = normalize_penalty(&penalty);
+        let penalty = constructive_pullback_center_form(&kz, &q_form, "measure-jet primary penalty")?;
+        let c_primary = constructive_frobenius_scale(&penalty);
         fused_penalty_normalization_scale = Some(c_primary);
         // Declare the energy's structural null frame on the shipped Primary
         // (#2761, the #2445 mechanism): the affine head is null by theorem, and
         // the pullback's NUMERICAL rank falls as the representer range grows, so
         // a rank test on the shipped matrix would let a design-moving ℓ decide
         // the double-penalty topology between outer trials.
-        let mut primary = ConstructiveQuadratic::try_from_dense_psd(
-            penalty_norm,
-            "measure-jet primary penalty",
-        )?;
+        let mut primary = penalty.scaled(1.0 / c_primary, "normalized measure-jet primary penalty")?;
         if let Some(frame) = measure_jet_primary_structural_null_frame(&z, m, head_width)? {
             primary = primary.with_structural_null_frame(
                 frame,
