@@ -102,6 +102,18 @@
   but no step improved the objective" line-search refusals than anything in
   this issue; it is #2761's, not this one's.
 
+  One more measured consequence, recorded because it is a real cost of this
+  change and not a wash: in `tests/regressions/misc/`, the same revert-in-place
+  comparison shows the two `mjs` `ln ℓ` fixtures **swapping**, not improving —
+  `measure_jet_formula_fit_succeeds_like_the_cli` was red before and is green
+  after; `measure_jet_5d_converges_when_aniso_loses_to_isotropic` was green
+  before and is red after, refusing with `hessian_psd=NO` at a point the solver
+  itself calls stationary (`|Pg| = 2.156e-1` under `bound = 2.778e-1`). Adding
+  one column to the design moves the ψ landscape, and both fixtures sit on the
+  same knife edge — which is the state #2761's `ln ℓ` search is actually in.
+  That instability is the next thing to fix, not a reason to leave the null
+  space one dimension short.
+
 - **The matrix-free from-probes selected-inverse channels price per-row
   deflation instead of refusing it — and there was never anything to derive
   (#2712).** Three channels of the #2080 wide-`p` analytic-gradient cluster —
