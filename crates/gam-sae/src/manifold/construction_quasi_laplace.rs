@@ -2903,10 +2903,14 @@ impl SaeManifoldTerm {
     /// complete weighted shifted-solve derivative and the exact
     /// `ArrowSchurSystem` used to produce it. Optional shift-zero inverse probes
     /// are requested separately and are scoped to EFS proposals. Per-row
-    /// spectral deflation is rejected explicitly: the border-only derivative
-    /// representation does not contain the Daleckii--Krein correction, and a
-    /// dense retry would violate both the declared memory route and the single-
-    /// functional derivative contract.
+    /// spectral deflation is rejected explicitly, and a dense retry would violate
+    /// both the declared memory route and the single-functional derivative
+    /// contract. #2712 corrected the REASON on that rejection: the border-only
+    /// derivative representation does reconstruct the deflated block and does
+    /// carry the Daleckii--Krein correction now; what is unfixed is the
+    /// deflation-INDEPENDENT #2515 beta-Schur desync in the complete matrix-free
+    /// gradient. See the gate itself for the measurement and for what would lift
+    /// it.
     pub(crate) fn penalized_quasi_laplace_streaming_outer_evaluation(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -2961,6 +2965,26 @@ impl SaeManifoldTerm {
                     .to_string(),
             )
         })?;
+        // #2712 CORRECTED RATIONALE — this gate stays, but not for the reason it
+        // was written with. The three from-probes selected-inverse channels this
+        // lane's bundle feeds now PRICE per-row deflation: `A_i` is the
+        // conditioned row Cholesky, so the reconstructed block is the deflated
+        // `(H⁻¹)_tt`, and each channel applies the same Daleckii–Krein correction
+        // its dense sibling applies (measured route-identical on a deflated
+        // cache — `tests_deflated_from_probes_2712`).
+        //
+        // What still stands in front of a deflated fit going matrix-free end to
+        // end is a DIFFERENT deflation. `complete_outer_gradient_deflation_-
+        // contribution_is_route_independent_2712` measures the complete outer
+        // ρ-gradient both ways on this fixture class and finds a `8.45` route gap
+        // against `‖g‖∞ = 5.00` that is BIT-IDENTICAL with and without per-row
+        // deflation — #2499/#2515's β-Schur smoothness-EDF desync, where the dense
+        // route contracts the β-Schur deflated spectral pseudo-inverse and the
+        // from-probes route contracts the plain `S⁻¹` its bundle carries.
+        //
+        // TO LIFT THIS GATE: #2515 first, then a measured parity gate on a
+        // streaming-lane evaluation whose cache actually deflates. Argument alone
+        // is what put the wrong reason on it in the first place.
         if let Some((row, directions)) = cache
             .deflated_row_directions
             .iter()
@@ -2968,9 +2992,11 @@ impl SaeManifoldTerm {
             .find(|(_, directions)| !directions.is_empty())
         {
             return Err(SaeCriterionError::Numerical(format!(
-                "streaming outer derivative is undefined for row {row} with {} spectral \
-                 deflation direction(s): the selected-inverse bundle does not carry the \
-                 Daleckii--Krein correction",
+                "streaming outer derivative is not admitted for row {row} with {} spectral \
+                 deflation direction(s): the from-probes selected-inverse channels do carry \
+                 the Daleckii--Krein correction (#2712), but the complete matrix-free outer \
+                 gradient still desyncs from the dense one through the #2515 beta-Schur \
+                 smoothness channel, whose gap is deflation-independent and unfixed",
                 directions.len()
             )));
         }
