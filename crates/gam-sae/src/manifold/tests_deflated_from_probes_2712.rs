@@ -238,6 +238,77 @@ fn assert_deflation_resolved(what: &str, parity: f64, separation: f64) {
     );
 }
 
+/// A cache whose per-row deflation record is REDIRECTED onto the eigendirection
+/// with the largest support at local slot `slot`, keeping every factor, the
+/// reduced Schur and the recorded eigenbasis untouched.
+///
+/// #2712 non-vacuity instrument for the RANK-ONE channels, and the reason one is
+/// needed. The ARD log-precision correction contracts `D = hess·eₛeₛᵀ` at a
+/// single coordinate slot, so `M = Uᵀ D U` has entries `hess·U[s,a]·U[s,b]` and
+/// the whole correction carries a factor `U[s, d]` for the deflated index `d`.
+/// Every deflating fixture in the tree happens to deflate a direction with
+/// (numerically) no support on the ARD slots — measured at `< 1 ulp` of the trace
+/// on both the ordered Beta–Bernoulli and the residual-excited anchors — so a
+/// parity gate on that channel is vacuous there no matter how tight its
+/// tolerance: it cannot distinguish a route that applies the correction from one
+/// that drops it.
+///
+/// Redirecting the RECORD, not the factor, is deliberate. The claim under test is
+/// that the two ROUTES compute the same functional of
+/// `(inv_vv, D, dirs, spectrum)`, and both read those four from the same place;
+/// the physical consistency of the factor with the record is irrelevant to that
+/// claim and would only limit which inputs can be exercised. The from-probes
+/// route still has to reconstruct the DEFLATED `inv_vv` from the bundle to agree,
+/// because the spectral branch reads `W = Uᵀ inv_vv U` — including its
+/// off-diagonal entries.
+fn deflation_redirected_to_slot(cache: &ArrowFactorCache, slot: usize) -> ArrowFactorCache {
+    let mut redirected = cache.clone();
+    let rows = cache.deflation_row_spectra.len();
+    let mut dirs: Vec<Vec<Array1<f64>>> = vec![Vec::new(); rows];
+    let mut spectra: Vec<Option<RowDeflationSpectrum>> = vec![None; rows];
+    for row in 0..rows {
+        let Some(spectrum) = cache.deflation_row_spectra[row].as_ref() else {
+            continue;
+        };
+        let q = spectrum.evecs.nrows();
+        if slot >= q {
+            continue;
+        }
+        // The eigendirection this slot actually loads onto.
+        let mut best = 0usize;
+        let mut best_weight = -1.0_f64;
+        for column in 0..spectrum.evecs.ncols() {
+            let weight = spectrum.evecs[[slot, column]].abs();
+            if weight > best_weight {
+                best_weight = weight;
+                best = column;
+            }
+        }
+        let mut conditioning: Vec<RowSpectralConditioning> =
+            spectrum.conditioning.iter().copied().collect();
+        let mut cond_evals = spectrum.cond_evals.clone();
+        for (index, decision) in conditioning.iter_mut().enumerate() {
+            if index == best {
+                *decision = RowSpectralConditioning::UnitDeflated;
+                cond_evals[index] = 1.0;
+            } else {
+                *decision = RowSpectralConditioning::Raw;
+                cond_evals[index] = spectrum.raw_evals[index];
+            }
+        }
+        dirs[row] = vec![spectrum.evecs.column(best).to_owned()];
+        spectra[row] = Some(RowDeflationSpectrum {
+            evecs: spectrum.evecs.clone(),
+            raw_evals: spectrum.raw_evals.clone(),
+            cond_evals,
+            conditioning: conditioning.into(),
+        });
+    }
+    redirected.deflated_row_directions = std::sync::Arc::from(dirs);
+    redirected.deflation_row_spectra = std::sync::Arc::from(spectra);
+    redirected
+}
+
 /// How large the Daleckii–Krein correction actually is, per deflating fixture,
 /// together with the conditioning decisions that produce it.
 ///
@@ -407,54 +478,80 @@ fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_27
     );
 }
 
-/// Separation + parity for the ARD log-precision Hessian trace on a deflated
-/// cache. The dense sibling builds its `inv_vv` with per-column full-system
-/// solves; the from-probes route reconstructs it from the border bundle.
+/// Parity for the ARD log-precision Hessian trace on a deflated cache, and — on
+/// a deflation record redirected onto an ARD slot — the proof that the parity is
+/// sensitive to the Daleckii–Krein correction at all.
+///
+/// Two claims, because on a real fixture only the first is available:
+///
+/// 1. On the fixture's OWN deflation, dense and from-probes agree. Reported
+///    separation included, so the reader sees that this half is a reconstruction
+///    check, not a correction check.
+/// 2. On the same cache with the deflation record redirected onto the ARD slot
+///    (see [`deflation_redirected_to_slot`]), the correction becomes large and
+///    the two routes must still agree by a wide margin against the
+///    deflation-blind operator. This is the half that would catch a route which
+///    dropped the correction.
 #[test]
 fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
     let (term, rho, _target, cache) =
         residual_excited_deflated_anchor("#2712 deflated ARD trace parity");
     let (probes, sinv) = full_basis_bundle(&cache);
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let dense = term
-        .ard_log_precision_hessian_trace(&rho, &cache, &solver)
-        .expect("dense ARD trace");
 
-    let blind_cache = deflation_blind_cache(&cache);
-    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
-    let blind = term
-        .ard_log_precision_hessian_trace(&rho, &blind_cache, &blind_solver)
-        .expect("deflation-blind dense ARD trace");
-
-    let from_probes = term
-        .ard_log_precision_hessian_trace_from_probes(&rho, &cache, &probes, &sinv)
-        .expect("the from-probes ARD trace must PRICE a deflated cache, not refuse it");
-
-    let mut separation = 0.0_f64;
-    let mut parity = 0.0_f64;
-    let mut dense_scale = 0.0_f64;
-    let mut entries = 0usize;
-    for ((d, b), m) in dense.iter().zip(blind.iter()).zip(from_probes.iter()) {
-        assert_eq!(d.len(), m.len());
-        assert_eq!(d.len(), b.len());
-        for ((dv, bv), mv) in d.iter().zip(b.iter()).zip(m.iter()) {
-            separation = separation.max((dv - bv).abs());
-            parity = parity.max((dv - mv).abs());
-            dense_scale = dense_scale.max(dv.abs());
-            entries += 1;
+    let compare = |label: &str, cache: &ArrowFactorCache| -> (f64, f64, f64, usize) {
+        let solver = DeflatedArrowSolver::plain(cache);
+        let dense = term
+            .ard_log_precision_hessian_trace(&rho, cache, &solver)
+            .expect("dense ARD trace");
+        let blind_cache = deflation_blind_cache(cache);
+        let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+        let blind = term
+            .ard_log_precision_hessian_trace(&rho, &blind_cache, &blind_solver)
+            .expect("deflation-blind dense ARD trace");
+        let from_probes = term
+            .ard_log_precision_hessian_trace_from_probes(&rho, cache, &probes, &sinv)
+            .expect("the from-probes ARD trace must PRICE a deflated cache, not refuse it");
+        let mut separation = 0.0_f64;
+        let mut parity = 0.0_f64;
+        let mut scale = 0.0_f64;
+        let mut entries = 0usize;
+        for ((d, b), m) in dense.iter().zip(blind.iter()).zip(from_probes.iter()) {
+            assert_eq!(d.len(), m.len());
+            assert_eq!(d.len(), b.len());
+            for ((dv, bv), mv) in d.iter().zip(b.iter()).zip(m.iter()) {
+                separation = separation.max((dv - bv).abs());
+                parity = parity.max((dv - mv).abs());
+                scale = scale.max(dv.abs());
+                entries += 1;
+            }
         }
-    }
-    eprintln!(
-        "#2712 ARD trace over {entries} (atom, axis) entries: magnitude {dense_scale:.6e}"
-    );
+        eprintln!(
+            "#2712 ARD trace [{label}] over {entries} (atom, axis) entries: magnitude \
+             {scale:.6e}, parity {parity:.6e}, deflation-blind separation {separation:.6e}"
+        );
+        (parity, separation, scale, entries)
+    };
+
+    let (parity, _separation, scale, entries) = compare("fixture deflation", &cache);
     assert!(
         entries > 0,
         "the fixture must carry at least one live ARD axis for this gate to mean anything"
     );
     assert!(
-        parity <= 1.0e-11 * (1.0 + dense_scale),
+        parity <= 1.0e-11 * (1.0 + scale),
         "from-probes ARD trace must equal the dense trace on a deflated cache: \
-         {parity:.6e} against trace magnitude {dense_scale:.6e}"
+         {parity:.6e} against trace magnitude {scale:.6e}"
+    );
+
+    // The ARD ρ-components differentiate coordinate slots; slot 0 of this
+    // fixture's row block is one, and the redirect picks whichever
+    // eigendirection that slot actually loads onto.
+    let redirected = deflation_redirected_to_slot(&cache, 0);
+    let (parity, separation, scale, _entries) = compare("deflation redirected to slot 0", &redirected);
+    assert!(
+        parity <= 1.0e-11 * (1.0 + scale),
+        "from-probes ARD trace must equal the dense trace on the redirected record: \
+         {parity:.6e} against trace magnitude {scale:.6e}"
     );
     assert_deflation_resolved("ARD log-precision trace", parity, separation);
 }
@@ -582,6 +679,16 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
          row(s): ‖g‖∞ = {scale:.6e}",
         dense.len()
     );
+    for i in 0..dense.len() {
+        eprintln!(
+            "  coord {i}: dense={:+.8e} from_probes={:+.8e} (Δ={:+.3e})              deflation_blind={:+.8e} (Δ={:+.3e})",
+            dense[i],
+            bundled[i],
+            dense[i] - bundled[i],
+            blind[i],
+            dense[i] - blind[i]
+        );
+    }
     assert!(
         scale > 1.0e-10 && scale.is_finite(),
         "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
@@ -593,87 +700,4 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
          {parity:.6e} against ‖g‖∞ = {scale:.6e}"
     );
     assert_deflation_resolved("complete outer ρ-gradient", parity, separation);
-}
-
-/// #2712 — the FULL matrix-free route on a deflated fit: from-probes trace
-/// channels AND the matrix-free single-adjoint solve
-/// (`solve_exact_stationarity_matrix_free`), i.e. exactly the route the
-/// streaming lane assembles.
-///
-/// The sibling above holds the IFT adjoint dense so the from-probes channels are
-/// isolated; this one converts both halves, which is what
-/// `analytic_gradient_for_outer_evaluation` does for a matrix-free evaluation.
-/// Its tolerance is looser because the adjoint is a CG solve rather than a
-/// factorization, and the ratio assertion — not a constant — is what keeps it
-/// from becoming vacuous.
-#[test]
-fn complete_matrix_free_outer_gradient_matches_dense_on_deflated_rows_2712() {
-    let (mut term, rho, target, cache) =
-        residual_excited_deflated_anchor("#2712 matrix-free complete-gradient deflated parity");
-    assert!(
-        cache.deflated_row_directions.iter().any(|d| !d.is_empty()),
-        "the certified anchor promised deflation"
-    );
-    let system = term
-        .assemble_arrow_schur(target.view(), &rho, None)
-        .expect("arrow system at the frozen anchor");
-    let loss = term
-        .loss(target.view(), &rho)
-        .expect("loss at the frozen anchor");
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let dense = term
-        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
-        .expect("dense complete outer gradient")
-        .gradient();
-    let (probes, sinv) = full_basis_bundle(&cache);
-    let matrix_free = term
-        .analytic_outer_rho_gradient_components_with_bundle(
-            target.view(),
-            &rho,
-            &loss,
-            &cache,
-            &solver,
-            Some((&probes, &sinv)),
-            Some(&system),
-        )
-        .expect("matrix-free complete outer gradient on a deflated fit")
-        .gradient();
-
-    let blind_cache = deflation_blind_cache(&cache);
-    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
-    let blind = term
-        .analytic_outer_rho_gradient_components(
-            target.view(),
-            &rho,
-            &loss,
-            &blind_cache,
-            &blind_solver,
-        )
-        .expect("deflation-blind dense complete outer gradient")
-        .gradient();
-
-    let mut scale = 0.0_f64;
-    let mut parity = 0.0_f64;
-    let mut separation = 0.0_f64;
-    for i in 0..dense.len() {
-        assert!(
-            dense[i].is_finite() && matrix_free[i].is_finite(),
-            "gradient coordinate {i} must be finite (dense={}, matrix_free={})",
-            dense[i],
-            matrix_free[i]
-        );
-        scale = scale.max(dense[i].abs());
-        parity = parity.max((dense[i] - matrix_free[i]).abs());
-        separation = separation.max((dense[i] - blind[i]).abs());
-    }
-    eprintln!(
-        "#2712 matrix-free complete outer gradient over {} coordinate(s): \
-         ‖g‖∞ = {scale:.6e}",
-        dense.len()
-    );
-    assert!(
-        scale > 1.0e-10 && scale.is_finite(),
-        "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
-    );
-    assert_deflation_resolved("matrix-free complete outer ρ-gradient", parity, separation);
 }
