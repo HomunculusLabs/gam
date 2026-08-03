@@ -1,5 +1,62 @@
 ## Unreleased
 
+- **The matrix-free from-probes selected-inverse channels price per-row
+  deflation instead of refusing it — and there was never anything to derive
+  (#2712).** Three channels of the #2080 wide-`p` analytic-gradient cluster —
+  `logdet_theta_adjoint_from_probes`, `ard_log_precision_hessian_trace_from_probes`
+  and `assignment_log_strength_hessian_trace_from_probes` — hard-refused any
+  cache carrying `deflated_row_directions`, on the stated grounds that "the
+  plain-`S⁻¹` bundle carries the UNdeflated block" and so could not rebuild the
+  Daleckii–Krein correction `tr(inv_vv·(D − DΦ[D]))`. They convert as one
+  all-or-nothing cluster, so one deflated row routed the whole fit to a dense
+  channel the lane cannot afford at massive `K`.
+
+  **The premise was a misreading of `undamped_factor`.** That accessor returns
+  the Cholesky of the spectrally CONDITIONED `Φ(H_tt^(i))` — the block that
+  pinned `λ̃ = 1` on each deflated direction — not of the raw `H_tt^(i)`, and the
+  reduced Schur behind the bundle is that same conditioned arrow's. So
+  `A_i⁻¹ + G_i S⁻¹ G_iᵀ`, which is literally what BOTH routes build, already IS
+  the deflated `(H⁻¹)_tt`. Measured on the deflating fixture, rebuilding
+  `A_i = L Lᵀ` from the cached factor:
+
+  ```
+  ||A v - v||               = 1.97e-16      (the unit-stiffness pin itself)
+  ||A - U diag(cond) U^T||  = 4.97e-16
+  ||A - U diag(raw)  U^T||  = 9.999999e-1   <- 10^15 larger
+  ```
+
+  and the from-probes reconstruction matches `selected_inverse_row_blocks` to
+  `~2e-16` RELATIVE on every deflated row. What the probe routes actually lacked
+  was the correction TERM, whose remaining operands — `deflated_row_directions`,
+  `deflation_row_spectra`, and the raw per-slot `D` each channel already
+  assembles from its own row jets — never involved `S⁻¹` at all. Each channel now
+  applies the same `deflation_block_correction` its dense sibling applies, on the
+  t-slot channels, the border channels, and the ordered Beta–Bernoulli
+  shared-mass diagonal (that last one was a second, latent gap: the from-probes
+  site tuple carried no `diag_deflation_weight` field at all).
+
+  The three private copies of the row-block reconstruction collapse into one
+  `arrow_solver::row_selected_inverse_from_probes`, the matrix-free sibling of
+  `DeflatedArrowSolver::selected_inverse_row_blocks`, which documents the
+  conditioned-block fact once at the place it is used.
+
+  **A test-methodology finding came out of the acceptance requirement, and it is
+  worth stating on its own.** The deflated and deflation-blind operators agree
+  wherever the deflation is inactive, so machine-precision parity is also what a
+  port that ignored deflation would produce. The instrument for that is
+  `deflation_blind_cache`: a clone of the cache with ONLY the deflation metadata
+  emptied, against which the PRODUCTION dense adjoint yields exactly the
+  deflation-blind operator — no test-only flag, no second code path. Measured on
+  the ordered Beta–Bernoulli anchor, the correction moves `Γ` by `8.47e-8`
+  against `‖Γ‖∞ = 98.9`, because that fixture's unit-deflated direction is a
+  near-null the raw derivative barely touches. That is **below** the historical
+  per-entry parity tolerance `1e-8·(1+|Γ|) = 1e-6`, so on a deflated cache those
+  element-wise assertions alone would have passed a port that dropped the
+  correction entirely. The gates now tighten to `1e-10·(1+|Γ|)` on a deflated
+  cache, state non-vacuity as a ratio (`parity·1e3 ≤ separation`), and assert the
+  thing that actually decides whether a gate can see the defect it exists to
+  catch: the per-entry tolerance must itself be finer than the separation.
+
 - **SAE post-fit certification no longer costs `dim³`: the residual-gauge
   curvature is `p` blocks of `D × D`, not one `(p·D)²` Gram (#2757).**
   `fit_diagnostics_report` was materializing the curvature `H = RᵀR` as a dense
