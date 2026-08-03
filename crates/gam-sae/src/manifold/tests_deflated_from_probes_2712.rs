@@ -52,6 +52,86 @@ fn obb_deflated_anchor(label: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<
     (anchor.term, anchor.rho, target, anchor.cache)
 }
 
+/// The #2330 residual-excited two-atom circle at a certified deflating anchor.
+///
+/// This is the SOFTMAX deflating fixture, and it is not interchangeable with the
+/// ordered Beta–Bernoulli one: there the deflated direction lives in the LOGIT
+/// subspace (the assignment penalty is what drives it), here it lives in the
+/// over-parametrized CHART — the coordinate slots. Which subspace it occupies
+/// decides which channel's deflation correction is non-zero at all, measured:
+/// the ARD log-precision correction contracts `D = hess·eₛeₛᵀ` at a COORDINATE
+/// slot `s`, so on the ordered Beta–Bernoulli anchor it evaluates to exactly
+/// zero (the deflated direction is orthogonal to every ARD slot) and no parity
+/// gate stated there can be non-vacuous.
+///
+/// The ρ ladder is the one `sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330`
+/// declares: #2398 measured that the historical single lift now lands on an
+/// exact-`A` saddle where the deflated-PD state does not exist, so the ladder
+/// walks the lift down until a deflated maximum certifies.
+fn residual_excited_deflated_anchor(
+    label: &str,
+) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>, ArrowFactorCache) {
+    let (mut term, mut target, mut rho) = gamma_fd_tiny_fixture();
+    let (n, p) = (target.nrows(), target.ncols());
+    for row in 0..n {
+        for col in 0..p {
+            let phase = (row as f64 + 0.35) / n as f64;
+            let theta = std::f64::consts::TAU * phase;
+            target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
+        }
+    }
+    rho.log_lambda_sparse = -0.5;
+    for value in rho.log_lambda_smooth.iter_mut() {
+        *value = -1.0;
+    }
+    for axis in rho.log_ard.iter_mut() {
+        for value in axis.iter_mut() {
+            *value = -0.5;
+        }
+    }
+    term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        40,
+        0.4,
+        1.0e-6,
+        1.0e-6,
+    )
+    .expect("off-manifold fixture converges with both atoms alive");
+
+    let eval_rho_ladder: Vec<(String, SaeManifoldRho)> = [
+        (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
+        (0.5, -1.5, -1.2, -1.0),
+        (0.2, -2.0, -1.2, -1.0),
+        (0.2, -1.5, -1.0, -0.8),
+        (0.0, -1.5, -1.0, -0.8),
+        (-0.2, -1.2, -0.8, -0.6),
+        (-0.5, -1.0, -0.5, -0.5),
+    ]
+    .iter()
+    .map(|&(sparse, smooth, ard0, ard1)| {
+        let mut candidate = rho.clone();
+        candidate.log_lambda_sparse = sparse;
+        for value in candidate.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        candidate.log_ard = vec![ndarray::array![ard0], ndarray::array![ard1]];
+        (
+            format!("eval rho (sparse={sparse:.1}, smooth={smooth:.1}, ard=[{ard0:.1}, {ard1:.1}])"),
+            candidate,
+        )
+    })
+    .collect();
+    let anchor = certified_fd_anchor(
+        label,
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, eval_rho_ladder, 0),
+    );
+    (anchor.term, anchor.rho, target, anchor.cache)
+}
+
 /// The cold, genuinely indefinite two-atom softmax state, where
 /// `factor_spectral_deflated_criterion_row` (#1117) records a real
 /// `RowDeflationSpectrum`.
@@ -227,6 +307,15 @@ fn zz_measure_deflation_correction_size_2712() {
 
     let (term, rho, cache) = spectrally_deflated_cold_state();
     report("two-atom softmax cold seed (spectral)", &term, &rho, &cache);
+
+    let (term, rho, _target, cache) =
+        residual_excited_deflated_anchor("#2712 correction size: residual-excited softmax");
+    report(
+        "residual-excited two-atom softmax (certified deflated anchor)",
+        &term,
+        &rho,
+        &cache,
+    );
 }
 
 /// The reconstruction identity on a SPECTRALLY deflated row, including the
@@ -323,7 +412,8 @@ fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_27
 /// solves; the from-probes route reconstructs it from the border bundle.
 #[test]
 fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
-    let (term, rho, _target, cache) = obb_deflated_anchor("#2712 deflated ARD trace parity");
+    let (term, rho, _target, cache) =
+        residual_excited_deflated_anchor("#2712 deflated ARD trace parity");
     let (probes, sinv) = full_basis_bundle(&cache);
     let solver = DeflatedArrowSolver::plain(&cache);
     let dense = term
@@ -422,7 +512,8 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
 /// channels — the object under test — rather than the CG adjoint.
 #[test]
 fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
-    let (term, rho, target, cache) = obb_deflated_anchor("#2712 complete-gradient deflated parity");
+    let (term, rho, target, cache) =
+        residual_excited_deflated_anchor("#2712 complete-gradient deflated parity");
     let deflated_rows = cache
         .deflated_row_directions
         .iter()
@@ -518,7 +609,7 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
 #[test]
 fn complete_matrix_free_outer_gradient_matches_dense_on_deflated_rows_2712() {
     let (mut term, rho, target, cache) =
-        obb_deflated_anchor("#2712 matrix-free complete-gradient deflated parity");
+        residual_excited_deflated_anchor("#2712 matrix-free complete-gradient deflated parity");
     assert!(
         cache.deflated_row_directions.iter().any(|d| !d.is_empty()),
         "the certified anchor promised deflation"
