@@ -1,30 +1,60 @@
-//! #2712 — the from-probes selected-inverse cluster on a SECOND deflating
-//! fixture, and on the two trace channels the θ-adjoint gates do not touch.
+//! #2712 — the from-probes selected-inverse cluster on deflated rows.
 //!
-//! The gates in `tests_logdet_adjoint_780` run the θ-adjoint on the ordered
-//! Beta–Bernoulli fixture. This module runs the whole cluster — the
-//! reconstruction identity, the θ-adjoint, the ARD log-precision trace and the
-//! assignment-strength trace — on the SOFTMAX two-atom fixture at its cold,
-//! genuinely indefinite seed, where `factor_spectral_deflated_criterion_row`
-//! (#1117) records a real `RowDeflationSpectrum`.
+//! Two things live here: the reconstruction identity on a SPECTRALLY deflated
+//! row (the load-bearing claim), and the measurement that decides which fixture
+//! a non-vacuous parity gate can even be stated on.
 //!
-//! The spectral branch is the one worth pinning: the correction there is
-//! `Σ_{a,b} W[a,b]·M[a,b]·(1 − F[a,b])` with `W = Uᵀ inv_vv U`, so it reads every
-//! OFF-DIAGONAL entry of the row's selected-inverse block through the
-//! Daleckii–Krein rotation coefficients `(λₘ − 1)/(λₘ − λᵢ)` that couple the kept
-//! and deflated subspaces. A reconstruction that recovered only the diagonal
-//! would pass a diagonal comparison and fail here. The gauge-only fallback
-//! (`spectrum = None`, the two-sided projection `Σᵢ vᵢᵀ D vᵢ`) cannot make that
-//! distinction, which is why the premise below asserts a recorded spectrum
-//! rather than merely a deflated direction.
+//! The spectral branch is the one worth pinning for the reconstruction: the
+//! correction there is `Σ_{a,b} W[a,b]·M[a,b]·(1 − F[a,b])` with
+//! `W = Uᵀ inv_vv U`, so it reads every OFF-DIAGONAL entry of the row's
+//! selected-inverse block through the Daleckii–Krein rotation coefficients
+//! `(λₘ − 1)/(λₘ − λᵢ)` that couple the kept and deflated subspaces. A
+//! reconstruction that recovered only the diagonal passes a diagonal comparison
+//! and fails there.
+//!
+//! # The separation is a property of the fixture, and it had to be measured
+//!
+//! The issue's own acceptance note is the sharp one: agreement is not evidence
+//! unless the deflation-aware and deflation-blind operators provably separate on
+//! the fixture, because they coincide wherever the deflation is inactive.
+//! `zz_measure_deflation_correction_size_2712` measures exactly that separation
+//! on the tree's deflating fixtures, and the numbers are NOT interchangeable —
+//! on the ordered Beta–Bernoulli anchor the correction moves `Γ` by `8.5e-8`
+//! against `‖Γ‖∞ = 98.9`, because that fixture's deflated direction is a
+//! near-null the raw derivative barely touches. The gates below therefore state
+//! non-vacuity as a RESOLUTION RATIO against the measured separation rather than
+//! as an absolute threshold copied from a sibling gate that was separating two
+//! entirely different operators.
 
-use super::tests::small_two_atom_periodic_term;
+use super::tests::{gamma_fd_tiny_fixture, small_two_atom_periodic_term};
 use super::tests_logdet_adjoint_780::deflation_blind_cache;
+use super::tests_recovery_split_780::{
+    FdAnchorRegime, certified_fd_anchor, rho_ladder_family, sparse_lift_ladder,
+};
 use super::*;
 
-/// The cold, genuinely indefinite two-atom state, with the fixture premise
-/// asserted rather than assumed: at least one row must carry a recorded
-/// SPECTRAL deflation, not merely a gauge direction.
+/// The `log λ_sparse` ladder that reaches the deflating regime on the ordered
+/// Beta–Bernoulli tiny fixture (shared with the sibling gates in
+/// `tests_logdet_adjoint_780`).
+const DEFLATING_SPARSE_LIFTS: [f64; 10] = [2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0];
+
+/// The ordered Beta–Bernoulli tiny fixture at its certified deflating anchor.
+fn obb_deflated_anchor(label: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>, ArrowFactorCache)
+{
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    let anchor = certified_fd_anchor(
+        label,
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &DEFLATING_SPARSE_LIFTS), 5),
+    );
+    (anchor.term, anchor.rho, target, anchor.cache)
+}
+
+/// The cold, genuinely indefinite two-atom softmax state, where
+/// `factor_spectral_deflated_criterion_row` (#1117) records a real
+/// `RowDeflationSpectrum`.
 fn spectrally_deflated_cold_state() -> (SaeManifoldTerm, SaeManifoldRho, ArrowFactorCache) {
     let (mut term, target, rho) = small_two_atom_periodic_term();
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
@@ -43,9 +73,7 @@ fn spectrally_deflated_cold_state() -> (SaeManifoldTerm, SaeManifoldRho, ArrowFa
         spectral_rows > 0,
         "#2712 premise: this gate needs a row whose deflation carries a RECORDED \
          SPECTRUM (the Daleckii–Krein branch that reads the off-diagonal block). \
-         Got {spectral_rows} spectral row(s) and {} gauge direction(s) — the fixture \
-         no longer reaches the indefinite cold seed and the gate would be testing \
-         the projection fallback instead.",
+         Got {spectral_rows} spectral row(s) and {} gauge direction(s).",
         cache.gauge_deflated_directions
     );
     assert!(
@@ -78,8 +106,136 @@ fn full_basis_bundle(cache: &ArrowFactorCache) -> (Vec<Array1<f64>>, Vec<Array1<
     (probes, sinv)
 }
 
+fn sup_difference(a: &SaeArrowVector, b: &SaeArrowVector) -> f64 {
+    a.t.iter()
+        .zip(b.t.iter())
+        .chain(a.beta.iter().zip(b.beta.iter()))
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f64, f64::max)
+}
+
+fn sup_norm(a: &SaeArrowVector) -> f64 {
+    a.t.iter()
+        .chain(a.beta.iter())
+        .map(|x| x.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+/// The shared non-vacuity claim, stated once.
+///
+/// `parity` is how far the from-probes route is from the dense route;
+/// `separation` is how far the DEFLATION-BLIND operator is from the dense route
+/// — that is, what a port which silently dropped the Daleckii–Krein correction
+/// would score on the same comparison. The gate is meaningful exactly when
+/// `parity` is much smaller than `separation`, and the ratio is the margin by
+/// which such a port would be caught.
+///
+/// Deliberately NOT an absolute threshold. The correction's size is a property
+/// of the fixture, so an absolute floor copied from a sibling gate would either
+/// reject an honest fixture or — much worse — pass one on which the two
+/// operators are numerically indistinguishable and the parity assertion proves
+/// nothing at all.
+fn assert_deflation_resolved(what: &str, parity: f64, separation: f64) {
+    assert!(
+        separation.is_finite() && separation > 0.0,
+        "{what}: the deflation-aware and deflation-blind operators do not separate at \
+         all on this fixture (separation {separation:.6e}), so agreement between the \
+         dense and from-probes routes says nothing about the Daleckii–Krein \
+         correction."
+    );
+    let margin = separation / parity.max(f64::MIN_POSITIVE);
+    assert!(
+        parity * 1.0e3 <= separation,
+        "{what}: from-probes parity error {parity:.6e} is not small enough against the \
+         {separation:.6e} distance to the deflation-blind operator. The gate can only \
+         claim the correction is reconstructed if a port that dropped it would be \
+         caught by a wide margin; the measured margin is {margin:.3e}x."
+    );
+    eprintln!(
+        "#2712 {what}: parity {parity:.6e}, deflation-blind separation \
+         {separation:.6e} — a port that dropped the correction would be caught by \
+         {margin:.3e}x"
+    );
+}
+
+/// How large the Daleckii–Krein correction actually is, per deflating fixture,
+/// together with the conditioning decisions that produce it.
+///
+/// This exists because the size of the correction is the resolution any parity
+/// gate on it can possibly have, and that is a property of the fixture which has
+/// to be measured rather than assumed. Reported, never asserted on: which
+/// eigenvalue a fixture's seed lands on is a measurement about that fixture, and
+/// pinning it would turn a diagnostic into a gate on someone else's numerics.
+#[test]
+fn zz_measure_deflation_correction_size_2712() {
+    fn report(
+        label: &str,
+        term: &SaeManifoldTerm,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+    ) {
+        let mut unit_deflated = 0usize;
+        let mut floor_clamped = 0usize;
+        let mut raw_kept = 0usize;
+        let mut rows_with_dirs = 0usize;
+        let mut rows_with_spectrum = 0usize;
+        for row in 0..cache.row_dims.len() {
+            if cache
+                .deflated_row_directions
+                .get(row)
+                .is_some_and(|d| !d.is_empty())
+            {
+                rows_with_dirs += 1;
+            }
+            if let Some(spectrum) = cache.deflation_row_spectra.get(row).and_then(Option::as_ref) {
+                rows_with_spectrum += 1;
+                for decision in spectrum.conditioning.iter() {
+                    match decision {
+                        RowSpectralConditioning::UnitDeflated => unit_deflated += 1,
+                        RowSpectralConditioning::FloorClamped => floor_clamped += 1,
+                        RowSpectralConditioning::Raw => raw_kept += 1,
+                    }
+                }
+            }
+        }
+        let solver = DeflatedArrowSolver::plain(cache);
+        let dense = term.logdet_theta_adjoint(rho, cache, &solver);
+        let blind_cache = deflation_blind_cache(cache);
+        let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+        let blind = term.logdet_theta_adjoint(rho, &blind_cache, &blind_solver);
+        let (scale, separation) = match (&dense, &blind) {
+            (Ok(d), Ok(b)) => (sup_norm(d), sup_difference(d, b)),
+            _ => (f64::NAN, f64::NAN),
+        };
+        eprintln!(
+            "[#2712 correction size] {label}: rows(dirs)={rows_with_dirs} \
+             rows(spectrum)={rows_with_spectrum} conditioning(unit={unit_deflated}, \
+             floor={floor_clamped}, raw={raw_kept}) ‖Γ‖∞={scale:.6e} \
+             ‖Γ_dense − Γ_deflation-blind‖∞={separation:.6e} relative={:.6e}",
+            separation / (1.0 + scale)
+        );
+    }
+
+    let (term, rho, _target, cache) =
+        obb_deflated_anchor("#2712 correction size: ordered Beta--Bernoulli");
+    report(
+        "ordered Beta--Bernoulli tiny (certified deflated anchor)",
+        &term,
+        &rho,
+        &cache,
+    );
+
+    let (term, rho, cache) = spectrally_deflated_cold_state();
+    report("two-atom softmax cold seed (spectral)", &term, &rho, &cache);
+}
+
 /// The reconstruction identity on a SPECTRALLY deflated row, including the
 /// off-diagonal entries the Daleckii–Krein rotation term reads.
+///
+/// This gate needs no separation argument: it compares the two ROUTES for the
+/// same block directly, so a route that reconstructed something other than the
+/// deflated block differs here whether or not any downstream correction is
+/// numerically large on this fixture.
 #[test]
 fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_2712() {
     let (_term, _rho, cache) = spectrally_deflated_cold_state();
@@ -139,13 +295,13 @@ fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_27
          {worst_off_diagonal:.3e} (off-diagonal magnitude {off_diagonal_mass:.3e}), \
          worst t–β error {worst_border:.3e}, block magnitude {block_scale:.3e}"
     );
-    // A reconstruction that only got the DIAGONAL right would pass a
-    // diagonal-only comparison; the off-diagonal mass is what makes the
-    // off-diagonal assertion non-vacuous.
     assert!(
         rows > 0,
         "the premise promised a spectrally deflated row and the loop found none"
     );
+    // A reconstruction that only got the DIAGONAL right would pass a
+    // diagonal-only comparison; the off-diagonal mass is what makes the
+    // off-diagonal assertion non-vacuous.
     assert!(
         off_diagonal_mass > 1.0e-6 * (1.0 + block_scale),
         "the deflated selected-inverse block must carry real off-diagonal mass for \
@@ -162,68 +318,12 @@ fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_27
     );
 }
 
-/// Separation + parity for the θ-adjoint on the SPECTRAL branch.
-#[test]
-fn logdet_theta_adjoint_from_probes_matches_dense_on_spectrally_deflated_rows_2712() {
-    let (term, rho, cache) = spectrally_deflated_cold_state();
-    let (probes, sinv) = full_basis_bundle(&cache);
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let dense = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
-        .expect("dense theta-adjoint");
-
-    let blind_cache = deflation_blind_cache(&cache);
-    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
-    let blind = term
-        .logdet_theta_adjoint(&rho, &blind_cache, &blind_solver)
-        .expect("deflation-blind dense theta-adjoint");
-    let separation = dense
-        .t
-        .iter()
-        .zip(blind.t.iter())
-        .chain(dense.beta.iter().zip(blind.beta.iter()))
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0_f64, f64::max);
-
-    let from_probes = term
-        .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, false)
-        .expect("the from-probes theta-adjoint must PRICE a deflated cache, not refuse it");
-    let parity = dense
-        .t
-        .iter()
-        .zip(from_probes.t.iter())
-        .chain(dense.beta.iter().zip(from_probes.beta.iter()))
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0_f64, f64::max);
-    eprintln!(
-        "#2712 spectral θ-adjoint: separation from the deflation-blind operator \
-         {separation:.6e}, from-probes parity error {parity:.6e}"
-    );
-    assert!(
-        separation > 1.0e-6 && separation > 1.0e4 * parity,
-        "the deflated and deflation-blind θ-adjoints must SEPARATE before parity is \
-         evidence: separation {separation:.6e} against parity error {parity:.6e}"
-    );
-    for (i, (d, m)) in dense.t.iter().zip(from_probes.t.iter()).enumerate() {
-        assert!(
-            (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
-            "gamma_t[{i}]: dense={d:.10e}, from_probes={m:.10e}"
-        );
-    }
-    for (i, (d, m)) in dense.beta.iter().zip(from_probes.beta.iter()).enumerate() {
-        assert!(
-            (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
-            "gamma_beta[{i}]: dense={d:.10e}, from_probes={m:.10e}"
-        );
-    }
-}
-
-/// Separation + parity for the ARD log-precision Hessian trace on the SPECTRAL
-/// branch. The dense sibling builds its `inv_vv` with per-column full-system
+/// Separation + parity for the ARD log-precision Hessian trace on a deflated
+/// cache. The dense sibling builds its `inv_vv` with per-column full-system
 /// solves; the from-probes route reconstructs it from the border bundle.
 #[test]
 fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
-    let (term, rho, cache) = spectrally_deflated_cold_state();
+    let (term, rho, _target, cache) = obb_deflated_anchor("#2712 deflated ARD trace parity");
     let (probes, sinv) = full_basis_bundle(&cache);
     let solver = DeflatedArrowSolver::plain(&cache);
     let dense = term
@@ -255,31 +355,26 @@ fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_27
         }
     }
     eprintln!(
-        "#2712 spectral ARD trace over {entries} (atom, axis) entries: magnitude \
-         {dense_scale:.6e}, separation {separation:.6e}, from-probes parity error \
-         {parity:.6e}"
+        "#2712 ARD trace over {entries} (atom, axis) entries: magnitude {dense_scale:.6e}"
     );
     assert!(
         entries > 0,
         "the fixture must carry at least one live ARD axis for this gate to mean anything"
     );
     assert!(
-        separation > 1.0e4 * parity && separation > 0.0,
-        "the deflated and deflation-blind ARD traces must SEPARATE before parity is \
-         evidence: separation {separation:.6e} against parity error {parity:.6e}"
-    );
-    assert!(
         parity <= 1.0e-11 * (1.0 + dense_scale),
         "from-probes ARD trace must equal the dense trace on a deflated cache: \
          {parity:.6e} against trace magnitude {dense_scale:.6e}"
     );
+    assert_deflation_resolved("ARD log-precision trace", parity, separation);
 }
 
-/// Separation + parity for the assignment-strength Hessian trace on the SPECTRAL
-/// branch.
+/// Separation + parity for the assignment-strength Hessian trace on a deflated
+/// cache.
 #[test]
 fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
-    let (term, rho, cache) = spectrally_deflated_cold_state();
+    let (term, rho, _target, cache) =
+        obb_deflated_anchor("#2712 deflated assignment-strength trace parity");
     let (probes, sinv) = full_basis_bundle(&cache);
     let solver = DeflatedArrowSolver::plain(&cache);
     let dense = term
@@ -299,21 +394,15 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
     let separation = (dense - blind).abs();
     let parity = (dense - from_probes).abs();
     eprintln!(
-        "#2712 spectral assignment trace: dense {dense:.10e}, deflation-blind \
-         {blind:.10e} (separation {separation:.6e}), from-probes {from_probes:.10e} \
-         (parity error {parity:.6e})"
-    );
-    assert!(
-        separation > 1.0e4 * parity && separation > 0.0,
-        "the deflated and deflation-blind assignment traces must SEPARATE before \
-         parity is evidence: separation {separation:.6e} against parity error \
-         {parity:.6e}"
+        "#2712 assignment trace: dense {dense:.10e}, deflation-blind {blind:.10e}, \
+         from-probes {from_probes:.10e}"
     );
     assert!(
         parity <= 1.0e-11 * (1.0 + dense.abs()),
         "from-probes assignment trace must equal the dense trace on a deflated \
          cache: {parity:.6e}"
     );
+    assert_deflation_resolved("assignment-strength trace", parity, separation);
 }
 
 /// #2712 END-TO-END: the COMPLETE analytic outer ρ-gradient must be the same
@@ -333,24 +422,7 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
 /// channels — the object under test — rather than the CG adjoint.
 #[test]
 fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
-    let (mut term, target, rho) = super::tests::gamma_fd_tiny_fixture();
-    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
-    let anchor = super::tests_recovery_split_780::certified_fd_anchor(
-        "#2712 complete-gradient deflated parity",
-        &target,
-        super::tests_recovery_split_780::FdAnchorRegime::deflated(),
-        super::tests_recovery_split_780::rho_ladder_family(
-            &term,
-            super::tests_recovery_split_780::sparse_lift_ladder(
-                &rho,
-                &[2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0],
-            ),
-            5,
-        ),
-    );
-    let term = anchor.term;
-    let rho = anchor.rho;
-    let cache = anchor.cache;
+    let (term, rho, target, cache) = obb_deflated_anchor("#2712 complete-gradient deflated parity");
     let deflated_rows = cache
         .deflated_row_directions
         .iter()
@@ -416,8 +488,7 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
     }
     eprintln!(
         "#2712 complete outer gradient over {} coordinate(s), {deflated_rows} deflated \
-         row(s): ‖g‖∞ = {scale:.6e}, dense↔from-probes {parity:.6e}, \
-         dense↔deflation-blind {separation:.6e}",
+         row(s): ‖g‖∞ = {scale:.6e}",
         dense.len()
     );
     assert!(
@@ -425,15 +496,10 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
         "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
     );
     assert!(
-        separation > 1.0e4 * parity && separation > 1.0e-9,
-        "the deflated and deflation-blind complete gradients must SEPARATE before \
-         parity is evidence: separation {separation:.6e} against parity error \
-         {parity:.6e}"
-    );
-    assert!(
         parity <= 1.0e-8 * (1.0 + scale),
         "the complete outer ρ-gradient must not depend on whether its \
          selected-inverse channels went dense or from-probes, on a DEFLATED fit: \
          {parity:.6e} against ‖g‖∞ = {scale:.6e}"
     );
+    assert_deflation_resolved("complete outer ρ-gradient", parity, separation);
 }

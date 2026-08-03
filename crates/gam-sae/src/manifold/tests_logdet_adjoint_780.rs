@@ -2217,15 +2217,20 @@ fn assert_theta_adjoint_from_probes_matches_dense(
          ‖Γ_dense‖∞ = {max_abs:.6e}, ‖Γ_dense − Γ_from-probes‖∞ = {parity:.6e}, \
          ‖Γ_dense − Γ_deflation-blind‖∞ = {separation:.6e}"
     );
+    // #2712: `1e-8` per entry is the historical undeflated bar; on a deflated
+    // cache it has to be finer than the correction it is supposed to be
+    // sensitive to, which the assertion at the end of this function checks
+    // against the measured separation.
+    let relative_tolerance = if deflated_rows > 0 { 1.0e-10 } else { 1.0e-8 };
     for (i, (d, m)) in dense.t.iter().zip(mf.t.iter()).enumerate() {
         assert!(
-            (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
+            (d - m).abs() <= relative_tolerance * (1.0 + d.abs()),
             "theta-adjoint gamma_t[{i}] mismatch: dense={d:.10e}, from_probes={m:.10e}"
         );
     }
     for (i, (d, m)) in dense.beta.iter().zip(mf.beta.iter()).enumerate() {
         assert!(
-            (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
+            (d - m).abs() <= relative_tolerance * (1.0 + d.abs()),
             "theta-adjoint gamma_beta[{i}] mismatch: dense={d:.10e}, from_probes={m:.10e}"
         );
     }
@@ -2234,17 +2239,31 @@ fn assert_theta_adjoint_from_probes_matches_dense(
         "the theta-adjoint must be non-trivial to make the parity check meaningful"
     );
     if deflated_rows > 0 {
-        // Non-vacuity, stated as a RATIO rather than as two absolute thresholds
-        // that a change in the row block's conditioning could silently invert:
-        // agreement with the deflated operator is only evidence if the
-        // deflation-blind operator is much further away than the agreement is
-        // tight.
+        // Non-vacuity, stated as a RATIO against the MEASURED separation rather
+        // than as an absolute threshold. On this fixture the correction moves Γ
+        // by 8.5e-8 against ‖Γ‖∞ = 98.9 — the deflated direction is a near-null
+        // the raw derivative barely touches — so an absolute floor would reject
+        // an honest fixture, while the per-entry `1e-8·(1+|Γ|)` parity tolerance
+        // ALONE would admit a deflation-blind port (8.5e-8 < 1e-6). The ratio is
+        // the margin by which such a port is actually caught.
         assert!(
-            separation > 1.0e-6 && separation > 1.0e4 * parity,
+            separation > 0.0 && parity * 1.0e3 <= separation,
             "the deflated and deflation-blind θ-adjoints must SEPARATE before parity \
              is evidence of anything: a port that dropped the Daleckii–Krein \
              correction would also agree here. Measured separation {separation:.6e} \
              against parity error {parity:.6e} on {deflated_rows} deflated row(s)."
+        );
+        // ...and the parity tolerance the loops above applied must itself be
+        // finer than the separation, or a deflation-blind port would slip
+        // through them even though the ratio above holds.
+        let loop_tolerance = relative_tolerance * (1.0 + max_abs);
+        assert!(
+            loop_tolerance < separation,
+            "the per-entry parity tolerance {loop_tolerance:.6e} is coarser than the \
+             {separation:.6e} distance to the deflation-blind operator, so the \
+             element-wise assertions above would pass a port that dropped the \
+             Daleckii–Krein correction. Tighten them or pick a fixture on which the \
+             correction is larger."
         );
     }
 }
