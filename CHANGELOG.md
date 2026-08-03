@@ -91,6 +91,14 @@
   now deflates) — a premise that only existed because the route used to refuse
   deflated rows.
 
+  All seven #2712 gates pass at `ff1ee8a24`. The five remaining failures under
+  that filter are the identical baseline set — `#2330` Patch-D coordinate gap
+  `1.774e-3`, `#1625`'s unresolved invariant-subspace block, two `#2500` gates,
+  and the dense ARD FD deflation trace — every one of them a dense-route or
+  fixture-stratum failure, and no dense computation path is touched here: the
+  production diff is confined to the three from-probes functions, the new
+  `arrow_solver` helper, and comments.
+
 - **SAE post-fit certification no longer costs `dim³`: the residual-gauge
   curvature is `p` blocks of `D × D`, not one `(p·D)²` Gram (#2757).**
   `fit_diagnostics_report` was materializing the curvature `H = RᵀR` as a dense
