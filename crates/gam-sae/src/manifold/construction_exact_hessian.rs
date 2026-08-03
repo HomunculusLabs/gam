@@ -2845,9 +2845,11 @@ impl SaeManifoldTerm {
     /// contraction is the derivative of the SAME shifted rational value, not a
     /// separately sampled `S^-1`. They convert
     /// together as ONE all-or-nothing cluster on the single `Some` (invariant #1):
-    /// never a partial mix within a single eval. Each from-probes channel hard-refuses
-    /// deflated rows (the plain-S⁻¹ bundle cannot reconstruct the Daleckii–Krein
-    /// correction), routing those fits to the dense channel.
+    /// never a partial mix within a single eval. Each from-probes channel PRICES
+    /// deflated rows (#2712): `A_i⁻¹ + G_i S⁻¹ G_iᵀ` built on the conditioned row
+    /// Cholesky IS the deflated block, so each applies the same Daleckii–Krein
+    /// correction its dense sibling applies, and no fit is routed to the dense
+    /// channel for carrying deflation.
     ///
     /// The complete all-coordinate assembler is single-adjoint (#2080-A): the IFT
     /// correction `−½·⟨Γ, A⁺ g_ρ_l⟩` over every outer coordinate collapses to ONE
@@ -3141,13 +3143,13 @@ impl SaeManifoldTerm {
 
         // #2080: the envelope Γ off the SAME shared low-rank logdet derivative
         // representation (the all-or-nothing cluster's third channel) when
-        // present; the dense
-        // selected inverse otherwise. The border-only bundle reconstructs the NO-SELF
-        // base derivative on the undeflated row chart, so
-        // `logdet_theta_adjoint_from_probes` hard-refuses
-        // (routes to dense) a cache carrying a T-space gauge/rotation deflation
-        // that the border probes cannot span. Ordered Beta--Bernoulli uses its
-        // row-local PSD majorizer and shared-mass derivative directly.
+        // present; the dense selected inverse otherwise. #2712: the border-only
+        // bundle reconstructs the row block on the DEFLATED chart too — `A_i` is
+        // the conditioned row Cholesky, so `A_i⁻¹ + G_i S⁻¹ G_iᵀ` is the deflated
+        // `(H⁻¹)_tt` — and `logdet_theta_adjoint_from_probes` subtracts the same
+        // Daleckii–Krein correction the dense route subtracts instead of routing
+        // the fit away. Ordered Beta--Bernoulli uses its row-local PSD majorizer
+        // and shared-mass derivative directly.
         // This completes the matrix-free selected-inverse cluster (smoothness EDF + ARD
         // Hessian trace + θ-adjoint); assignment log-strength traces remain
         // solver-bound

@@ -315,3 +315,125 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
          cache: {parity:.6e}"
     );
 }
+
+/// #2712 END-TO-END: the COMPLETE analytic outer ρ-gradient must be the same
+/// vector whether its selected-inverse channels go through the dense solver or
+/// through the probe bundle — on a DEFLATED fit.
+///
+/// This is the statement the routing actually needs, and the reason fixing only
+/// the θ-adjoint would not have been enough.
+/// `analytic_outer_rho_gradient_components_with_bundle` converts the smoothness
+/// EDF, the ARD Hessian trace and the θ-adjoint together as ONE all-or-nothing
+/// cluster (invariant #1); before this change every one of them refused a
+/// deflated cache, so the whole wide-`p` lane routed any deflated fit to a dense
+/// channel it cannot afford at massive `K`.
+///
+/// `matrix_free_system = None` keeps the single-adjoint IFT solve dense on BOTH
+/// sides, so the only difference between the two gradients is the from-probes
+/// channels — the object under test — rather than the CG adjoint.
+#[test]
+fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
+    let (mut term, target, rho) = super::tests::gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    let anchor = super::tests_recovery_split_780::certified_fd_anchor(
+        "#2712 complete-gradient deflated parity",
+        &target,
+        super::tests_recovery_split_780::FdAnchorRegime::deflated(),
+        super::tests_recovery_split_780::rho_ladder_family(
+            &term,
+            super::tests_recovery_split_780::sparse_lift_ladder(
+                &rho,
+                &[2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0],
+            ),
+            5,
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+    let deflated_rows = cache
+        .deflated_row_directions
+        .iter()
+        .filter(|d| !d.is_empty())
+        .count();
+    assert!(deflated_rows > 0, "the certified anchor promised deflation");
+
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("loss at the frozen anchor");
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let dense = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
+        .expect("dense complete outer gradient")
+        .gradient();
+
+    let (probes, sinv) = full_basis_bundle(&cache);
+    let bundled = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            &solver,
+            Some((&probes, &sinv)),
+            None,
+        )
+        .expect(
+            "the from-probes cluster must PRICE a deflated fit; before #2712 every \
+             channel in it refused here",
+        )
+        .gradient();
+
+    let blind_cache = deflation_blind_cache(&cache);
+    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+    let blind = term
+        .analytic_outer_rho_gradient_components(
+            target.view(),
+            &rho,
+            &loss,
+            &blind_cache,
+            &blind_solver,
+        )
+        .expect("deflation-blind dense complete outer gradient")
+        .gradient();
+
+    assert_eq!(dense.len(), bundled.len());
+    assert_eq!(dense.len(), blind.len());
+    let mut scale = 0.0_f64;
+    let mut parity = 0.0_f64;
+    let mut separation = 0.0_f64;
+    for i in 0..dense.len() {
+        assert!(
+            dense[i].is_finite() && bundled[i].is_finite() && blind[i].is_finite(),
+            "gradient coordinate {i} must be finite (dense={}, bundled={}, blind={})",
+            dense[i],
+            bundled[i],
+            blind[i]
+        );
+        scale = scale.max(dense[i].abs());
+        parity = parity.max((dense[i] - bundled[i]).abs());
+        separation = separation.max((dense[i] - blind[i]).abs());
+    }
+    eprintln!(
+        "#2712 complete outer gradient over {} coordinate(s), {deflated_rows} deflated \
+         row(s): ‖g‖∞ = {scale:.6e}, dense↔from-probes {parity:.6e}, \
+         dense↔deflation-blind {separation:.6e}",
+        dense.len()
+    );
+    assert!(
+        scale > 1.0e-10 && scale.is_finite(),
+        "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
+    );
+    assert!(
+        separation > 1.0e4 * parity && separation > 1.0e-9,
+        "the deflated and deflation-blind complete gradients must SEPARATE before \
+         parity is evidence: separation {separation:.6e} against parity error \
+         {parity:.6e}"
+    );
+    assert!(
+        parity <= 1.0e-8 * (1.0 + scale),
+        "the complete outer ρ-gradient must not depend on whether its \
+         selected-inverse channels went dense or from-probes, on a DEFLATED fit: \
+         {parity:.6e} against ‖g‖∞ = {scale:.6e}"
+    );
+}

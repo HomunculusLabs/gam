@@ -2267,11 +2267,10 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
     assert_theta_adjoint_from_probes_matches_dense(&anchor.term, &anchor.rho, &anchor.cache);
 }
 
-/// The declared `log λ_sparse` ladder for the from-probes parity gates. The
-/// bundle they compare against carries no Daleckii–Krein correction, so the
-/// gate is only defined where no row deflates; a stronger assignment penalty
-/// conditions the over-parametrized chart out of the deflating regime, so the
-/// ladder climbs.
+/// The declared `log λ_sparse` ladder for the PD-regime from-probes parity
+/// gates. Those gates pin the undeflated branch on its own — the deflated branch
+/// has its own gates (#2712) — and a stronger assignment penalty conditions the
+/// over-parametrized chart out of the deflating regime, so the ladder climbs.
 const UNDEFLATED_SPARSE_LIFTS: [f64; 9] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
 
 /// The declared `log λ_sparse` ladder for gates that need any state the

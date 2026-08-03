@@ -1909,10 +1909,13 @@ pub(crate) fn certified_branch_stable_central_difference(
 /// Row-deflation regime a finite-difference anchor must PROVE.
 ///
 /// The deflation state is not a detail of the fixture: it decides which
-/// analytic object even exists at the point. The plain-`S⁻¹` probe bundle
-/// cannot reconstruct the Daleckii–Krein correction, so a from-probes parity
-/// gate is only defined on an undeflated cache; conversely a test whose whole
-/// subject is the deflated correction is vacuous on an undeflated one.
+/// analytic object even exists at the point. A test whose whole subject is the
+/// deflated Daleckii–Krein correction is vacuous on an undeflated cache, and a
+/// gate meant to isolate the PD regime is not testing that regime if a row
+/// deflates under it. (#2712: the probe bundle DOES reconstruct the deflated
+/// block — `undamped_factor` is the conditioned row Cholesky — so
+/// `NoRowDeflates` is no longer a precondition of the from-probes routes, only
+/// a statement about which regime a given gate means to pin.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FdAnchorDeflation {
     /// No row may deflate.
@@ -1951,8 +1954,9 @@ impl FdAnchorRegime {
         }
     }
 
-    /// The regime the from-probes parity gate needs: an undeflated cache, since
-    /// the plain-`S⁻¹` bundle carries no Daleckii–Krein correction to compare.
+    /// The PD regime: no row may deflate, so what the gate pins is the
+    /// undeflated branch on its own. The deflated branch has its own gates
+    /// (#2712) rather than being excluded here for want of a correction.
     pub(crate) fn undeflated() -> Self {
         Self {
             deflation: FdAnchorDeflation::NoRowDeflates,
