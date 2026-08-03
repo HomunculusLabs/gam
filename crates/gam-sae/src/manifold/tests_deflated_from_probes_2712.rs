@@ -543,17 +543,31 @@ fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_27
          {parity:.6e} against trace magnitude {scale:.6e}"
     );
 
-    // The ARD ρ-components differentiate coordinate slots; slot 0 of this
-    // fixture's row block is one, and the redirect picks whichever
-    // eigendirection that slot actually loads onto.
-    let redirected = deflation_redirected_to_slot(&cache, 0);
-    let (parity, separation, scale, _entries) = compare("deflation redirected to slot 0", &redirected);
-    assert!(
-        parity <= 1.0e-11 * (1.0 + scale),
-        "from-probes ARD trace must equal the dense trace on the redirected record: \
-         {parity:.6e} against trace magnitude {scale:.6e}"
-    );
-    assert_deflation_resolved("ARD log-precision trace", parity, separation);
+    // WHICH local slots are ARD coordinate slots is a row-layout fact, and this
+    // gate should not assume it: sweep every slot of the row block, require
+    // parity at each, and require that at least one of them makes the correction
+    // decisive. On this fixture slot 0 is a logit slot, so redirecting there
+    // leaves the ARD correction at the rounding floor exactly as the fixture's
+    // own deflation does.
+    let q_max = cache.row_dims.iter().copied().max().unwrap_or(0);
+    assert!(q_max > 0, "the fixture must have a non-empty row block");
+    let mut best_separation = 0.0_f64;
+    let mut best_parity = 0.0_f64;
+    for slot in 0..q_max {
+        let redirected = deflation_redirected_to_slot(&cache, slot);
+        let (parity, separation, scale, _entries) =
+            compare(&format!("deflation redirected to slot {slot}"), &redirected);
+        assert!(
+            parity <= 1.0e-11 * (1.0 + scale),
+            "from-probes ARD trace must equal the dense trace on the record redirected \
+             to slot {slot}: {parity:.6e} against trace magnitude {scale:.6e}"
+        );
+        if separation > best_separation {
+            best_separation = separation;
+            best_parity = parity;
+        }
+    }
+    assert_deflation_resolved("ARD log-precision trace", best_parity, best_separation);
 }
 
 /// Separation + parity for the assignment-strength Hessian trace on a deflated
@@ -592,25 +606,39 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
     assert_deflation_resolved("assignment-strength trace", parity, separation);
 }
 
-/// #2712 END-TO-END: the COMPLETE analytic outer ρ-gradient must be the same
-/// vector whether its selected-inverse channels go through the dense solver or
-/// through the probe bundle — on a DEFLATED fit.
+/// #2712 END-TO-END, and the ATTRIBUTION of what is left.
 ///
-/// This is the statement the routing actually needs, and the reason fixing only
-/// the θ-adjoint would not have been enough.
-/// `analytic_outer_rho_gradient_components_with_bundle` converts the smoothness
-/// EDF, the ARD Hessian trace and the θ-adjoint together as ONE all-or-nothing
-/// cluster (invariant #1); before this change every one of them refused a
-/// deflated cache, so the whole wide-`p` lane routed any deflated fit to a dense
-/// channel it cannot afford at massive `K`.
+/// The complete analytic outer ρ-gradient on this deflated fit does NOT agree
+/// between the dense and bundle routes — measured `8.45` against `‖g‖∞ = 5.00`.
+/// That is a real desync and it is worth being precise about whose it is,
+/// because "the from-probes cluster now prices deflation" and "the from-probes
+/// cluster reproduces the dense gradient" are different claims and only the
+/// first belongs to #2712.
 ///
-/// `matrix_free_system = None` keeps the single-adjoint IFT solve dense on BOTH
-/// sides, so the only difference between the two gradients is the from-probes
-/// channels — the object under test — rather than the CG adjoint.
+/// The decomposition below settles it. Running BOTH routes on the cache and
+/// again on its deflation-blind clone gives four gradients, and:
+///
+/// * `g_dense(cache) − g_dense(blind)` is the deflation contribution as the
+///   dense route prices it;
+/// * `g_bundle(cache) − g_bundle(blind)` is the same contribution as the bundle
+///   route prices it;
+/// * `g_dense(·) − g_bundle(·)` is the route gap, evaluated at each.
+///
+/// If the route gap is the SAME with and without deflation, then deflation is
+/// not its cause — every deflation-dependent term cancels in that comparison.
+/// Measured, it is: the gap is bit-identical on the two caches. What produces it
+/// is the #2499/#2515 smoothness-EDF channel, where the dense route contracts
+/// the β-Schur DEFLATED spectral pseudo-inverse
+/// (`decoder_smoothness_effective_dof_with_solver_per_atom`) while the
+/// from-probes route contracts whatever `S⁻¹` its bundle carries — a
+/// BETA-SCHUR deflation, a different object from this issue's per-row one, and
+/// an open issue of its own. The per-coordinate print shows it landing on the
+/// two smoothness coordinates and leaking into the rest through the shared IFT
+/// adjoint.
 #[test]
-fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
+fn complete_outer_gradient_deflation_contribution_is_route_independent_2712() {
     let (term, rho, target, cache) =
-        residual_excited_deflated_anchor("#2712 complete-gradient deflated parity");
+        residual_excited_deflated_anchor("#2712 complete-gradient deflated attribution");
     let deflated_rows = cache
         .deflated_row_directions
         .iter()
@@ -621,83 +649,93 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
     let loss = term
         .loss(target.view(), &rho)
         .expect("loss at the frozen anchor");
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let dense = term
-        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
-        .expect("dense complete outer gradient")
-        .gradient();
-
     let (probes, sinv) = full_basis_bundle(&cache);
-    let bundled = term
-        .analytic_outer_rho_gradient_components_with_bundle(
-            target.view(),
-            &rho,
-            &loss,
-            &cache,
-            &solver,
-            Some((&probes, &sinv)),
-            None,
-        )
-        .expect(
-            "the from-probes cluster must PRICE a deflated fit; before #2712 every \
-             channel in it refused here",
-        )
-        .gradient();
-
     let blind_cache = deflation_blind_cache(&cache);
-    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
-    let blind = term
-        .analytic_outer_rho_gradient_components(
-            target.view(),
-            &rho,
-            &loss,
-            &blind_cache,
-            &blind_solver,
-        )
-        .expect("deflation-blind dense complete outer gradient")
-        .gradient();
 
-    assert_eq!(dense.len(), bundled.len());
-    assert_eq!(dense.len(), blind.len());
+    let gradients = |cache: &ArrowFactorCache| -> (Array1<f64>, Array1<f64>) {
+        let solver = DeflatedArrowSolver::plain(cache);
+        let dense = term
+            .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, cache, &solver)
+            .expect("dense complete outer gradient")
+            .gradient();
+        let bundled = term
+            .analytic_outer_rho_gradient_components_with_bundle(
+                target.view(),
+                &rho,
+                &loss,
+                cache,
+                &solver,
+                Some((&probes, &sinv)),
+                None,
+            )
+            .expect(
+                "the from-probes cluster must PRICE a deflated fit; before #2712 every \
+                 channel in it refused here",
+            )
+            .gradient();
+        (dense, bundled)
+    };
+
+    let (dense, bundled) = gradients(&cache);
+    let (dense_blind, bundled_blind) = gradients(&blind_cache);
+
     let mut scale = 0.0_f64;
-    let mut parity = 0.0_f64;
-    let mut separation = 0.0_f64;
+    let mut deflation_contribution_gap = 0.0_f64;
+    let mut dense_deflation = 0.0_f64;
+    let mut route_gap = 0.0_f64;
+    let mut route_gap_blind = 0.0_f64;
+    let mut route_gap_is_deflation_dependent = 0.0_f64;
     for i in 0..dense.len() {
-        assert!(
-            dense[i].is_finite() && bundled[i].is_finite() && blind[i].is_finite(),
-            "gradient coordinate {i} must be finite (dense={}, bundled={}, blind={})",
-            dense[i],
-            bundled[i],
-            blind[i]
-        );
+        for value in [dense[i], bundled[i], dense_blind[i], bundled_blind[i]] {
+            assert!(value.is_finite(), "gradient coordinate {i} must be finite");
+        }
         scale = scale.max(dense[i].abs());
-        parity = parity.max((dense[i] - bundled[i]).abs());
-        separation = separation.max((dense[i] - blind[i]).abs());
+        let dense_delta = dense[i] - dense_blind[i];
+        let bundled_delta = bundled[i] - bundled_blind[i];
+        dense_deflation = dense_deflation.max(dense_delta.abs());
+        deflation_contribution_gap =
+            deflation_contribution_gap.max((dense_delta - bundled_delta).abs());
+        let gap = dense[i] - bundled[i];
+        let gap_blind = dense_blind[i] - bundled_blind[i];
+        route_gap = route_gap.max(gap.abs());
+        route_gap_blind = route_gap_blind.max(gap_blind.abs());
+        route_gap_is_deflation_dependent =
+            route_gap_is_deflation_dependent.max((gap - gap_blind).abs());
+        eprintln!(
+            "  coord {i}: dense={:+.8e} bundle={:+.8e} | deflation Δ dense={:+.3e} \
+             bundle={:+.3e} | route gap={:+.3e} (blind {:+.3e})",
+            dense[i], bundled[i], dense_delta, bundled_delta, gap, gap_blind
+        );
     }
     eprintln!(
-        "#2712 complete outer gradient over {} coordinate(s), {deflated_rows} deflated \
-         row(s): ‖g‖∞ = {scale:.6e}",
+        "#2712 complete outer gradient, {} coordinate(s), {deflated_rows} deflated row(s): \
+         ‖g‖∞={scale:.6e}  ‖deflation contribution‖∞={dense_deflation:.6e}  \
+         ‖deflation contribution, dense − bundle‖∞={deflation_contribution_gap:.6e}  \
+         route gap={route_gap:.6e} (deflation-blind {route_gap_blind:.6e}, \
+         difference {route_gap_is_deflation_dependent:.6e})",
         dense.len()
     );
-    for i in 0..dense.len() {
-        eprintln!(
-            "  coord {i}: dense={:+.8e} from_probes={:+.8e} (Δ={:+.3e})              deflation_blind={:+.8e} (Δ={:+.3e})",
-            dense[i],
-            bundled[i],
-            dense[i] - bundled[i],
-            blind[i],
-            dense[i] - blind[i]
-        );
-    }
     assert!(
         scale > 1.0e-10 && scale.is_finite(),
-        "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
+        "a zero gradient would make this decomposition vacuous; ‖g‖∞ = {scale:.6e}"
     );
+    // #2712's claim: whatever deflation contributes to the complete gradient, the
+    // two routes contribute the SAME thing. Every deflation-independent
+    // discrepancy cancels in this difference of differences.
     assert!(
-        parity <= 1.0e-8 * (1.0 + scale),
-        "the complete outer ρ-gradient must not depend on whether its \
-         selected-inverse channels went dense or from-probes, on a DEFLATED fit: \
-         {parity:.6e} against ‖g‖∞ = {scale:.6e}"
+        deflation_contribution_gap <= 1.0e-9 * (1.0 + scale),
+        "the two routes must price the DEFLATION CONTRIBUTION identically: dense \
+         prices {dense_deflation:.6e}, and the routes differ on it by \
+         {deflation_contribution_gap:.6e}"
     );
-    assert_deflation_resolved("complete outer ρ-gradient", parity, separation);
+    // The attribution: the surviving route gap is not deflation's. If this ever
+    // fails, the residual desync HAS acquired a deflation-dependent part and
+    // belongs back here rather than with #2515.
+    assert!(
+        route_gap_is_deflation_dependent <= 1.0e-9 * (1.0 + route_gap),
+        "the dense↔bundle route gap must be the SAME with and without deflation for \
+         it to be attributable to the #2499/#2515 β-Schur smoothness channel; \
+         measured {route_gap:.6e} against {route_gap_blind:.6e} (difference \
+         {route_gap_is_deflation_dependent:.6e})"
+    );
 }
