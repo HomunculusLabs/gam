@@ -1,5 +1,88 @@
 ## Unreleased
 
+- **The measure-jet head spans the energy's WHOLE affine null space, so the
+  term collection's centering can no longer delete a linear direction
+  (#2751).** The `mjs` design's extrapolation head carried only the LINEAR part
+  `{x_1..x_d}` of the jet energy's affine null space. The term-collection
+  chokepoint then applies its parametric orthogonalization `Z = null(1ᵀX)`,
+  which removes exactly one coefficient direction, and the constrained null
+  space is `{γ : Zγ ∈ null(S)}` — so with no constant in `null(S)` for that
+  removal to be charged to, **it came out of the null space itself**, leaving
+  `d − 1` free ambient-linear directions where the theorem says `d`.
+
+  The consequence only appears once REML selects a large energy `λ`, which it
+  does for any near-affine truth: the fit is then confined to what the energy
+  leaves free, and what it left free was one accidental direction — the single
+  linear combination whose data-mean happens to vanish. Measured with the ridge
+  limit against the shipped design's own Primary (no fit, no family, no
+  smoothing search: least squares of the noiseless plane `0.2 + 0.9·x₁` with
+  `λ·S_primary` added):
+
+  ```
+  lambda    d/dx1   rms[x1]  rms[x2]   pearson
+  1e2       0.8994  0.29980  -0.00640  0.9993
+  1e6       0.4838  0.16126  -0.13235  0.7729
+  1e10      0.4342  0.14472  -0.14644  0.7029    <- one linear direction left
+  ```
+
+  At `λ → ∞` the surviving direction is `(0.695, −0.716)`; projecting the
+  planted `(0.9, 0)` onto it gives `|cos 45°| = 0.707`, which is exactly the
+  `0.7051` Pearson the `mjs`-backed BMS fixture reported end to end. Duchon,
+  whose null space `{1, x₁, x₂}` *does* contain the constant, survives the
+  identical chokepoint with the plane intact (`0.9000` at `λ = 1e10`).
+
+  Two upstream hypotheses were killed before the collection was implicated, and
+  both are now gates rather than beliefs: the energy form annihilates the affine
+  span to `1e-17` relative on a regular grid, on scattered centers, on a
+  10×-anisotropic layout and at a single scale; and the emitted basis-level
+  Primary had nullity 2 with both directions exactly affine. Nothing upstream of
+  the collection was wrong — a 2-dimensional null space is simply one dimension
+  too small to survive a 1-dimensional constraint.
+
+  `measure_jet_affine_head_lift` now returns the `(d+1) × (1 + head_rank)` lift
+  acting on `[1 | x]`, `measure_jet_affine_head_block` realizes it, and
+  `measure_jet_affine_value_basis` — which is both the gauge's `A` and the
+  null-component penalty's projector — is literally the same object evaluated at
+  the centers, so "the head spans exactly the energy's null space" is a property
+  of the code instead of a comment two call sites have to keep agreeing on.
+
+  ```
+                          before -> after
+  raw design width          15 -> 16
+  Primary nullity            2 ->  3     (all three exactly affine)
+  declared null frame        2 ->  3
+  null-component rank        2 ->  3
+  FIT chart width           14 -> 15     = m - 1, matching Duchon's k - 1
+  ```
+
+  End to end on the fixture that reported the defect, all four surface bases on
+  byte-identical rows (the comparators are unchanged to every printed digit, so
+  the change is confined to `mjs`):
+
+  ```
+  basis                            pearson   d/dx1   rms[x1]  rms[x2]  rms[nl]
+  mjs(x1,x2,centers=16,scales=3)    0.9936   0.993   0.3311   0.0233   0.0298
+  matern(x1,x2,k=16)                0.9416   0.701   0.2337   0.0336   0.0765
+  duchon(x1,x2,k=16)                0.9975   0.961   0.3204   0.0202   0.0102
+  s(x1,k=8) + s(x2,k=8)             0.9837   1.052   0.3506   0.0095   0.0634
+  truth  0.2 + 0.9*x1               1.0000   0.900   0.3000   0.0000   0.0000
+  ```
+
+  The predict-side ambient gradient takes the affine lift (row 0 is the constant
+  and contributes nothing to `∇f̂`; its FD gate now carries a nonzero constant
+  column, so a mis-indexed row fails it), and the errors-in-variables
+  reconstruction in `model.rs` rebuilds the same lift. A model frozen before
+  this change carries an `m + head_rank` row transform and is refused by the
+  frozen-width check with that exact message rather than silently replaying a
+  different basis.
+
+  Also corrected: `measure_jet_bms_backend`'s penalty-count assertion demanded
+  ONE penalty per surface, describing a "nullspace ridge folded into the
+  Primary" the builder deliberately does not do — it emits the Primary
+  independently of `double_penalty`, so the realized count is two. The wrong
+  number survived because that assertion had never executed: the truth-recovery
+  assertion above it failed first.
+
 - **The matrix-free from-probes selected-inverse channels price per-row
   deflation instead of refusing it — and there was never anything to derive
   (#2712).** Three channels of the #2080 wide-`p` analytic-gradient cluster —
