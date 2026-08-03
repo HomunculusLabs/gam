@@ -4239,17 +4239,19 @@ impl SaeManifoldTerm {
 
     /// Matrix-free sibling of [`Self::assignment_log_strength_hessian_trace`]
     /// for assignment families whose majorized prior curvature is row-local.
-    /// Reconstructs each undeflated row's selected-
-    /// inverse diagonal from the exact row-local inverse plus the shared
-    /// `(z_j, S^-1 z_j)` reduced-Schur bundle:
+    /// Reconstructs each row's selected-inverse block from the exact row-local
+    /// inverse plus the shared `(z_j, S^-1 z_j)` reduced-Schur bundle
+    /// ([`row_selected_inverse_from_probes`]):
     ///
-    /// `diag(H^-1_tt) = diag(A_i^-1) + (1/m) sum_j
-    ///   (A_i^-1 H_tbeta z_j) * (A_i^-1 H_tbeta S^-1 z_j)`.
+    /// `H^-1_tt = A_i^-1 + G_i S^-1 G_i^T`,
+    /// `diag` = `diag(A_i^-1) + (1/m) sum_j (G_i z_j) * (G_i S^-1 z_j)`.
     ///
     /// This is the missing assignment-strength trace in the matrix-free analytic
-    /// rho-gradient cluster. It deliberately refuses per-row spectral/gauge
-    /// deflation because the border-only bundle cannot reconstruct that
-    /// correction.
+    /// rho-gradient cluster. Per-row deflation is PRICED, not refused (#2712):
+    /// the reconstructed block is the DEFLATED one (`A_i` is the conditioned row
+    /// block), so each branch applies the same deflation treatment as its dense
+    /// counterpart — the within-row kept-subspace diagonal on the softmax branch,
+    /// the full Daleckii–Krein `tr(inv_vv·(D − DΦ[D]))` elsewhere.
     pub(crate) fn assignment_log_strength_hessian_trace_from_probes(
         &self,
         rho: &SaeManifoldRho,
@@ -4340,52 +4342,29 @@ impl SaeManifoldTerm {
         }
         let assignment_dim = self.assignment.assignment_coord_dim();
         let row_loss_weights = self.row_loss_weights.as_deref();
-        let inv_m = 1.0 / m as f64;
         let mut trace = 0.0_f64;
         for row in 0..self.n_obs() {
-            if cache
+            let q = cache.row_dims[row];
+            // The DEFLATED row-block selected inverse from the shared bundle
+            // (#2712). The `t–β` block is not contracted here, so it is not built.
+            let (inv_vv, _) = row_selected_inverse_from_probes(
+                cache,
+                row,
+                probes,
+                sinv_probes,
+                false,
+                "assignment_log_strength_hessian_trace_from_probes",
+            )?;
+            let inverse_diagonal = inv_vv.diag().to_owned();
+            let dirs = cache
                 .deflated_row_directions
                 .get(row)
-                .is_some_and(|directions| !directions.is_empty())
-            {
-                return Err(format!(
-                    "assignment_log_strength_hessian_trace_from_probes: row {row} carries \
-                     deflation directions; the plain-S^-1 bundle cannot reconstruct the \
-                     Daleckii-Krein correction"
-                ));
-            }
-            let q = cache.row_dims[row];
-            let factor = cache.undamped_factor(row);
-            let mut inverse_diagonal = Array1::<f64>::zeros(q);
-            let mut unit = Array1::<f64>::zeros(q);
-            for slot in 0..q {
-                unit.fill(0.0);
-                unit[slot] = 1.0;
-                inverse_diagonal[slot] = cholesky_solve_vector(factor, unit.view())[slot];
-            }
-
-            let mut cross = Array1::<f64>::zeros(q);
-            for j in 0..m {
-                cross.fill(0.0);
-                if !cache.apply_htbeta_row(row, probes[j].view(), &mut cross) {
-                    return Err(format!(
-                        "assignment_log_strength_hessian_trace_from_probes: H_tbeta^({row}) \
-                         probe apply failed"
-                    ));
-                }
-                let probe_row = cholesky_solve_vector(factor, cross.view());
-                cross.fill(0.0);
-                if !cache.apply_htbeta_row(row, sinv_probes[j].view(), &mut cross) {
-                    return Err(format!(
-                        "assignment_log_strength_hessian_trace_from_probes: H_tbeta^({row}) \
-                         solve apply failed"
-                    ));
-                }
-                let solve_row = cholesky_solve_vector(factor, cross.view());
-                for slot in 0..q {
-                    inverse_diagonal[slot] += inv_m * probe_row[slot] * solve_row[slot];
-                }
-            }
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref);
 
             if let Some((_temperature, scale, penalty)) = softmax.as_ref() {
                 let row_weight = row_loss_weights.map_or(1.0, |weights| weights[row]);
@@ -4398,23 +4377,52 @@ impl SaeManifoldTerm {
                         let curvature = penalty.psd_majorizer_abs_row_sums(&row_logits, *scale);
                         let logit_dim = assignment_dim.min(inverse_diagonal.len());
                         for atom in 0..logit_dim {
-                            trace += inverse_diagonal[atom] * row_weight * curvature[atom];
+                            // Kept-subspace diagonal, matching the dense softmax
+                            // branch's `latent_inverse_diagonal_kept`: the deflated
+                            // inverse assigns `1/λ̃ = 1` to each `vᵢ`, and a
+                            // ρ-independent direction must contribute 0.
+                            let kept = inverse_diagonal[atom]
+                                - dirs
+                                    .iter()
+                                    .map(|v| v.get(atom).copied().unwrap_or(0.0).powi(2))
+                                    .sum::<f64>();
+                            trace += kept * row_weight * curvature[atom];
                         }
                     }
                 }
             } else {
                 let assignment_base = row * k_atoms;
+                // Per-row diagonal `(∂H/∂ρ)_tt` for the deflation correction: the
+                // assignment prior curves only the logit/assignment slots.
+                let mut d_diag = Array1::<f64>::zeros(q);
                 match self.last_row_layout {
                     Some(ref layout) => {
                         for (slot, &atom) in layout.active_atoms[row].iter().enumerate() {
-                            trace += inverse_diagonal[slot] * hdiag[assignment_base + atom];
+                            let d_slot = hdiag[assignment_base + atom];
+                            trace += inverse_diagonal[slot] * d_slot;
+                            if slot < q {
+                                d_diag[slot] = d_slot;
+                            }
                         }
                     }
                     None => {
                         for slot in 0..assignment_dim.min(inverse_diagonal.len()) {
-                            trace += inverse_diagonal[slot] * hdiag[assignment_base + slot];
+                            let d_slot = hdiag[assignment_base + slot];
+                            trace += inverse_diagonal[slot] * d_slot;
+                            if slot < q {
+                                d_diag[slot] = d_slot;
+                            }
                         }
                     }
+                }
+                if !dirs.is_empty() {
+                    // Same Daleckii–Krein correction the dense sibling subtracts,
+                    // against the same deflated `inv_vv` (#2712).
+                    let mut d_mat = Array2::<f64>::zeros((q, q));
+                    for slot in 0..q {
+                        d_mat[[slot, slot]] = d_diag[slot];
+                    }
+                    trace -= Self::deflation_block_correction(&inv_vv, &d_mat, dirs, spectrum);
                 }
             }
         }

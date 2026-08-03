@@ -2107,30 +2107,76 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
     }
 }
 
-/// #2080 shared assertion: the matrix-free θ-adjoint
+/// The same cache with its PER-ROW deflation metadata stripped.
+///
+/// #2712 non-vacuity instrument. The per-row Cholesky factors and the reduced
+/// Schur are untouched — only `deflated_row_directions` / `deflation_row_spectra`
+/// are emptied — so running the production dense θ-adjoint against this cache
+/// yields exactly the operator a port that silently dropped the Daleckii–Krein
+/// correction would return: same selected inverse, same raw `∂H/∂θ`, no
+/// `tr(inv_vv·(D − DΦ[D]))`. It is a REFERENCE, never a route.
+pub(crate) fn deflation_blind_cache(cache: &ArrowFactorCache) -> ArrowFactorCache {
+    let mut blind = cache.clone();
+    let rows = cache.deflated_row_directions.len();
+    blind.deflated_row_directions = std::sync::Arc::from(vec![Vec::new(); rows]);
+    blind.deflation_row_spectra = std::sync::Arc::from(vec![None; rows]);
+    blind
+}
+
+/// #2080/#2712 shared assertion: the matrix-free θ-adjoint
 /// ([`SaeManifoldTerm::logdet_theta_adjoint_from_probes`]) reconstructed from the
 /// FULL-BASIS probe bundle (`z_j = √k·e_j`, exact dense `S⁻¹` via
 /// `cache.schur_inverse_apply`) must reproduce the dense selected-inverse
-/// θ-adjoint ([`SaeManifoldTerm::logdet_theta_adjoint`]) on an UNDEFLATED cache —
-/// where the plain-`S⁻¹` outer-product estimators are algebraically exact and the
-/// Daleckii–Krein correction is identically zero. This isolates the from-probes
-/// reconstruction (the dense adjoint is already FD-validated against `log|H|`).
+/// θ-adjoint ([`SaeManifoldTerm::logdet_theta_adjoint`]). This isolates the
+/// from-probes reconstruction (the dense adjoint is already FD-validated against
+/// `log|H|`).
+///
+/// On a DEFLATED cache the two operators additionally have to be told apart from
+/// the deflation-blind one before agreement means anything: the deflated and
+/// undeflated θ-adjoints coincide wherever the deflation is inactive, so
+/// machine-precision agreement is ALSO what a port that ignored deflation would
+/// produce. The gate therefore measures the separation
+/// `‖Γ_dense − Γ_deflation-blind‖∞` first and refuses to claim parity unless the
+/// two provably separate.
 fn assert_theta_adjoint_from_probes_matches_dense(
     term: &SaeManifoldTerm,
     rho: &SaeManifoldRho,
     cache: &ArrowFactorCache,
 ) {
-    let deflated = cache.deflated_row_directions.iter().any(|d| !d.is_empty());
-    assert!(
-        !deflated,
-        "the from-probes parity gate requires an UNDEFLATED cache (the plain-S⁻¹ \
-         bundle cannot reconstruct the Daleckii–Krein correction); re-pick ρ so no \
-         row deflates"
-    );
     let solver = DeflatedArrowSolver::plain(cache);
     let dense = term
         .logdet_theta_adjoint(rho, cache, &solver)
         .expect("dense theta-adjoint");
+
+    if cache.deflated_row_directions.iter().any(|d| !d.is_empty()) {
+        let blind = deflation_blind_cache(cache);
+        let blind_solver = DeflatedArrowSolver::plain(&blind);
+        let blind_gamma = term
+            .logdet_theta_adjoint(rho, &blind, &blind_solver)
+            .expect("deflation-blind dense theta-adjoint");
+        let separation = dense
+            .t
+            .iter()
+            .zip(blind_gamma.t.iter())
+            .chain(dense.beta.iter().zip(blind_gamma.beta.iter()))
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        eprintln!(
+            "#2712 deflated parity gate: ‖Γ_dense − Γ_deflation-blind‖∞ = {separation:.6e}"
+        );
+        assert!(
+            separation > 1.0e-6,
+            "the deflated and deflation-blind θ-adjoints must SEPARATE before parity \
+             is evidence of anything: a port that dropped the Daleckii–Krein correction \
+             would also agree to machine precision here. Measured {separation:.6e} on a \
+             cache with {} deflated row(s).",
+            cache
+                .deflated_row_directions
+                .iter()
+                .filter(|d| !d.is_empty())
+                .count()
+        );
+    }
 
     let k = cache.k;
     assert!(
@@ -2232,12 +2278,21 @@ fn sae_logdet_theta_adjoint_from_probes_matches_ordered_beta_bernoulli() {
     assert_theta_adjoint_from_probes_matches_dense(&anchor.term, &anchor.rho, &anchor.cache);
 }
 
-/// #2080 θ-adjoint from-probes — DEFLATION hard-refuse. On the known-deflating
-/// PD-region learnable-ordered Beta--Bernoulli fixture (per-row gauge deflation surfaced into the cache),
-/// the from-probes θ-adjoint must REFUSE (route to the dense channel) rather than
-/// silently drop the Daleckii–Krein correction the plain-S⁻¹ bundle cannot rebuild.
+/// #2712 θ-adjoint from-probes — DEFLATED PARITY. On the known-deflating
+/// PD-region learnable-ordered Beta--Bernoulli fixture (per-row deflation
+/// surfaced into the cache), the from-probes θ-adjoint must PRICE the deflated
+/// rows and reproduce the dense adjoint, not refuse them.
+///
+/// The bundle carries the plain reduced-Schur `S⁻¹`, but the block the
+/// Daleckii–Krein correction is contracted against is
+/// `A_i⁻¹ + G_i S⁻¹ G_iᵀ` with `A_i = cache.undamped_factor(i)` — the Cholesky of
+/// the spectrally CONDITIONED row block — so the reconstruction IS the deflated
+/// inverse and every remaining operand of the correction
+/// (`deflated_row_directions`, `deflation_row_spectra`, the raw per-slot `D`) is
+/// row-local. `assert_theta_adjoint_from_probes_matches_dense` proves the two
+/// operators separate from the deflation-blind one before it accepts agreement.
 #[test]
-fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
+fn sae_logdet_theta_adjoint_from_probes_matches_dense_on_deflated_rows_2712() {
     let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
     // The hard-refuse only has teeth on a state that genuinely deflates, so the
@@ -2245,7 +2300,7 @@ fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
     // certifying the accepted member replaces the "re-pick ρ if not" note the
     // old inline assertion could only ever print.
     let anchor = certified_fd_anchor(
-        "#2080 from-probes deflation hard-refuse",
+        "#2712 from-probes deflated parity",
         &target,
         FdAnchorRegime::deflated(),
         rho_ladder_family(
@@ -2263,10 +2318,40 @@ fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
             5,
         ),
     );
-    let term = anchor.term;
-    let rho = anchor.rho;
+    assert_theta_adjoint_from_probes_matches_dense(&anchor.term, &anchor.rho, &anchor.cache);
+}
+
+/// #2712 — the identity the whole fix rests on, asserted directly rather than
+/// inferred from a downstream trace: at FULL-BASIS probes the from-probes
+/// reconstruction of a row's selected-inverse blocks equals the dense
+/// [`DeflatedArrowSolver::selected_inverse_row_blocks`] ON A DEFLATED ROW.
+///
+/// If `cache.undamped_factor(i)` factorized the RAW `H_tt^(i)` — the reading the
+/// issue's refusal was written from — this would fail on exactly the deflated
+/// rows, because `A_i⁻¹` would then be the undeflated block. It does not, because
+/// the factor carries the CONDITIONED spectrum: the gate also checks
+/// `A_i v = v` on each deflated direction, which is the unit-stiffness pin
+/// itself.
+#[test]
+fn sae_row_selected_inverse_from_probes_is_the_deflated_block_2712() {
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    let anchor = certified_fd_anchor(
+        "#2712 deflated selected-inverse reconstruction",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(
+                &rho,
+                &[2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0],
+            ),
+            5,
+        ),
+    );
     let cache = anchor.cache;
     let k = cache.k;
+    assert!(k > 0, "the fixture must have a border for S⁻¹ to matter");
     let sqrt_k = (k as f64).sqrt();
     let probes: Vec<ndarray::Array1<f64>> = (0..k)
         .map(|j| {
@@ -2283,10 +2368,81 @@ fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
                 .expect("schur_inverse_apply")
         })
         .collect();
-    let result = term.logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, false);
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let beta_inv = solver.beta_inv().expect("beta_inv");
+
+    let mut deflated_rows = 0usize;
+    let mut max_block_error = 0.0_f64;
+    let mut max_unit_pin_error = 0.0_f64;
+    for row in 0..cache.row_dims.len() {
+        let dirs = cache
+            .deflated_row_directions
+            .get(row)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if dirs.is_empty() {
+            continue;
+        }
+        deflated_rows += 1;
+
+        // The unit-stiffness pin, read straight off the cached factor: rebuild
+        // `A_i = L Lᵀ` and check `A_i vᵢ = vᵢ`.
+        let q = cache.row_dims[row];
+        let l = cache.undamped_factor(row);
+        let mut a_block = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            for j in 0..q {
+                let mut acc = 0.0_f64;
+                for t in 0..=i.min(j) {
+                    acc += l[[i, t]] * l[[j, t]];
+                }
+                a_block[[i, j]] = acc;
+            }
+        }
+        for v in dirs {
+            let av = a_block.dot(v);
+            for slot in 0..q {
+                max_unit_pin_error = max_unit_pin_error.max((av[slot] - v[slot]).abs());
+            }
+        }
+
+        let (dense_vv, dense_vbeta) = solver
+            .selected_inverse_row_blocks(row, &beta_inv)
+            .expect("dense selected inverse row blocks");
+        let (probe_vv, probe_vbeta) = row_selected_inverse_from_probes(
+            &cache,
+            row,
+            &probes,
+            &sinv,
+            true,
+            "#2712 reconstruction gate",
+        )
+        .expect("from-probes selected inverse row blocks");
+        for (d, p) in dense_vv.iter().zip(probe_vv.iter()) {
+            max_block_error = max_block_error.max((d - p).abs());
+        }
+        for (d, p) in dense_vbeta.iter().zip(probe_vbeta.iter()) {
+            max_block_error = max_block_error.max((d - p).abs());
+        }
+    }
     assert!(
-        result.is_err(),
-        "the from-probes theta-adjoint must refuse a deflated-row cache; got Ok"
+        deflated_rows > 0,
+        "the certified anchor promised a deflated row and delivered none"
+    );
+    eprintln!(
+        "#2712 reconstruction gate: {deflated_rows} deflated row(s), \
+         max|A_i v - v| = {max_unit_pin_error:.6e}, \
+         max|selected-inverse block difference| = {max_block_error:.6e}"
+    );
+    assert!(
+        max_unit_pin_error <= 1.0e-9,
+        "`undamped_factor` must carry the CONDITIONED spectrum (A_i v = v on a \
+         deflated direction); got max|A_i v - v| = {max_unit_pin_error:.6e}"
+    );
+    assert!(
+        max_block_error <= 1.0e-9,
+        "the from-probes reconstruction must equal the dense selected inverse on a \
+         DEFLATED row at full-basis probes; got {max_block_error:.6e}"
     );
 }
 

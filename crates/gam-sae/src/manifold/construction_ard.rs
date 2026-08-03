@@ -1137,25 +1137,20 @@ impl SaeManifoldTerm {
     /// `solver.latent_inverse_diagonal()` on the PLAIN (undeflated) selected inverse
     /// to solve precision.
     ///
-    /// # Deflation is out of scope for this lane
+    /// # Deflation is priced, not refused (#2712)
     ///
     /// The dense path's Daleckii–Krein correction `−½ tr(inv_vv·(D − DΦ[D]))`
-    /// reconstructs the per-row gauge/rotation deflation the DEFLATED `solve`
-    /// removes; it needs the DEFLATED per-row inverse block. The surrogate bundle
-    /// carries the PLAIN reduced-Schur `S⁻¹`, so `A_i⁻¹ + G_i S⁻¹ G_iᵀ` is the
-    /// UNdeflated block — correct only where no row carries deflation directions
-    /// (`deflated_row_directions` empty), which is precisely the matrix-free
-    /// surrogate regime (per-row gauge deflation is a dense-solver feature). A row
-    /// that DOES carry deflation is hard-refused here (the caller must keep the
-    /// dense channel for it) rather than silently double-adding the correction on an
-    /// undeflated block. On the plain regime the correction term is identically
-    /// zero, so the two paths agree exactly — the FD gate's acceptance.
-    ///
-    /// BOUNDARY (#2080): for the surrogate to OWN a deflated-row dense fit, the
-    /// lane would have to emit a DEFLATED reduced-Schur `S⁻¹` bundle (so the
-    /// reformulated block is the deflated inverse the correction expects) — a
-    /// separate design step, taken only if we ever route the deflated regime
-    /// matrix-free. Until then, deflated rows stay on the dense channel.
+    /// needs the DEFLATED per-row inverse block, and this lane has it: `A_i` is
+    /// `cache.undamped_factor(i)`, the Cholesky of the spectrally CONDITIONED
+    /// `Φ(H_tt^(i))`, and the reduced Schur behind the bundle is that same
+    /// conditioned arrow's — so `A_i⁻¹ + G_i S⁻¹ G_iᵀ` IS the deflated block
+    /// ([`row_selected_inverse_from_probes`]). This lane used to hard-refuse
+    /// deflated rows on the stated grounds that the reconstruction was the
+    /// UNdeflated block; that was a misreading of `undamped_factor`, and the
+    /// correction's remaining operands (`deflated_row_directions`,
+    /// `deflation_row_spectra`, and the per-slot diagonal `D` built below) never
+    /// involved `S⁻¹` at all. Deflated and undeflated rows now take the same
+    /// route, and the correction is identically zero on a PD row.
     // #2080 analytic-gradient cluster channel: wired into
     // `analytic_outer_rho_gradient_components_with_bundle`'s `Some`-bundle branch
     // (the all-or-nothing selected-inverse cluster, alongside the from-probes
@@ -1221,70 +1216,40 @@ impl SaeManifoldTerm {
                 }
             })
             .collect();
-        let inv_m = 1.0 / (m as f64);
         for row in 0..n {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let q = cache.row_dims[row];
-            // Per-row gauge/rotation deflation is unsupported on the plain-`S⁻¹`
-            // surrogate bundle (see the docstring); the dense channel owns those rows.
-            if cache
+            // The DEFLATED row-block selected inverse from the shared bundle
+            // (#2712). The `t–β` block is not contracted here, so it is not built.
+            let (inv_vv, _) = row_selected_inverse_from_probes(
+                cache,
+                row,
+                probes,
+                sinv_probes,
+                false,
+                "ard_log_precision_hessian_trace_from_probes",
+            )
+            .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?;
+            let inv_diag_local = inv_vv.diag().to_owned();
+            let dirs = cache
                 .deflated_row_directions
                 .get(row)
-                .is_some_and(|d| !d.is_empty())
-            {
-                return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: format!(
-                        "ard_log_precision_hessian_trace_from_probes: row {row} carries \
-                         deflation directions; the plain-S⁻¹ bundle cannot reconstruct the \
-                         Daleckii–Krein correction — route this fit through the dense channel"
-                    ),
-                });
-            }
-            let factor = cache.undamped_factor(row);
-            // Row-local (A_i⁻¹)[s,s].
-            let mut a_inv_diag = Array1::<f64>::zeros(q);
-            let mut e_s = Array1::<f64>::zeros(q);
-            for s in 0..q {
-                e_s.fill(0.0);
-                e_s[s] = 1.0;
-                let col = cholesky_solve_vector(factor, e_s.view());
-                a_inv_diag[s] = col[s];
-            }
-            // Border vectors w_ij = A_i⁻¹ H_tβ^i z_j, s_ij = A_i⁻¹ H_tβ^i (S⁻¹ z_j).
-            let mut w_probes: Vec<Array1<f64>> = Vec::with_capacity(m);
-            let mut s_probes: Vec<Array1<f64>> = Vec::with_capacity(m);
-            let mut b_tmp = Array1::<f64>::zeros(q);
-            for j in 0..m {
-                b_tmp.fill(0.0);
-                if !cache.apply_htbeta_row(row, probes[j].view(), &mut b_tmp) {
-                    return Err(ArrowSchurError::SchurFactorFailed {
-                        reason: format!(
-                            "ard_log_precision_hessian_trace_from_probes: H_tβ^({row}) probe apply \
-                             failed"
-                        ),
-                    });
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref);
+            // Correction for one local coordinate slot `s` with curvature `hess`,
+            // identical to the dense sibling's `slot_correction`.
+            let slot_correction = |s: usize, hess: f64| -> f64 {
+                if dirs.is_empty() || s >= q || hess == 0.0 {
+                    return 0.0;
                 }
-                w_probes.push(cholesky_solve_vector(factor, b_tmp.view()));
-                b_tmp.fill(0.0);
-                if !cache.apply_htbeta_row(row, sinv_probes[j].view(), &mut b_tmp) {
-                    return Err(ArrowSchurError::SchurFactorFailed {
-                        reason: format!(
-                            "ard_log_precision_hessian_trace_from_probes: H_tβ^({row}) solve apply \
-                             failed"
-                        ),
-                    });
-                }
-                s_probes.push(cholesky_solve_vector(factor, b_tmp.view()));
-            }
-            // Full per-row selected-inverse diagonal (undeflated).
-            let mut inv_diag_local = Array1::<f64>::zeros(q);
-            for s in 0..q {
-                let mut border = 0.0_f64;
-                for j in 0..m {
-                    border += w_probes[j][s] * s_probes[j][s];
-                }
-                inv_diag_local[s] = a_inv_diag[s] + inv_m * border;
-            }
+                let mut d = Array2::<f64>::zeros((q, q));
+                d[[s, s]] = hess;
+                Self::deflation_block_correction(&inv_vv, &d, dirs, spectrum)
+            };
             let accumulate = |k: usize, block_start: usize, traces: &mut Vec<Array1<f64>>| {
                 if rho.log_ard[k].is_empty() {
                     return;
@@ -1298,6 +1263,7 @@ impl SaeManifoldTerm {
                     let hess = w_row * prior.psd_majorizer_hess();
                     let s = block_start + axis;
                     traces[k][axis] += 0.5 * inv_diag_local[s] * hess;
+                    traces[k][axis] -= 0.5 * slot_correction(s, hess);
                 }
             };
             match self.last_row_layout {
