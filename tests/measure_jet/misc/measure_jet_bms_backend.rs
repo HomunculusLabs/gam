@@ -241,28 +241,36 @@ fn bms_marginal_slope_accepts_measure_jet_backbone() {
     );
 
     // (c) Measure-jet diagnostic: with `centers=16` and no `multiscale` opt-in
-    // (#1116) the mjs term resolves to single-scale mode — exactly ONE fused
-    // penalty per surface (the jet-energy with the affine-preserving nullspace
-    // ridge folded in at a fixed identifiability fraction, not a 2nd λ), the
-    // one-λ Duchon/Matérn footprint (#1039). The per-scale spectral split is
-    // reserved for the explicit multiscale opt-in where the spectrum is
-    // identifiable; opting it in here would only inflate the marginal-slope
-    // family's O(n) per-evaluation cost for no benefit. The band is still
-    // realized (frozen quadrature non-empty), it just feeds one fused penalty.
+    // (#1116) the mjs term resolves to single-scale mode — ONE fused jet-energy
+    // Primary instead of the per-scale spectral split, the one-λ Duchon/Matérn
+    // footprint (#1039). The band is still realized (frozen quadrature
+    // non-empty), it just feeds one fused penalty. Alongside it the default
+    // `double_penalty` emits the independent function-space null-component
+    // candidate with its own λ (the standard Marra & Wood decomposition), so
+    // the realized count per surface is TWO.
+    //
+    // This assertion previously demanded ONE, describing a "ridge folded into
+    // the Primary" design the builder does not have: the Primary is emitted
+    // independently of `double_penalty` on purpose (`measure_jet_smooth.rs`,
+    // "statistical selection is a distinct REML component, never a fixed
+    // coefficient toll fused into this estimand"). It had never executed —
+    // assertion (b) fails first — so the stale number survived (#2751).
     assert!(
         mjs_band_len(&out.marginalspec_resolved, "marginal") >= 1,
         "marginal mjs surface must still realize a scale band"
     );
     assert_eq!(
         out.marginal_design.penalties.len(),
-        1,
-        "small-centers mjs surface must be single-scale: one fused penalty (ridge folded), got {}",
+        2,
+        "single-scale mjs surface must carry the fused jet-energy Primary plus the \
+         double-penalty null component, got {}",
         out.marginal_design.penalties.len()
     );
     assert_eq!(
         out.logslope_design.penalties.len(),
-        1,
-        "small-centers logslope mjs surface must be single-scale: one fused penalty (ridge folded), got {}",
+        2,
+        "single-scale logslope mjs surface must carry the fused jet-energy Primary plus the \
+         double-penalty null component, got {}",
         out.logslope_design.penalties.len()
     );
 }

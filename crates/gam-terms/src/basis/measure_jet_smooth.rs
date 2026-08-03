@@ -1609,7 +1609,7 @@ pub fn measure_jet_affine_head_block(
         return Array2::<f64>::zeros((n, 0));
     }
     let d = points.ncols();
-    debug_assert_eq!(
+    assert_eq!(
         lift.nrows(),
         d + 1,
         "affine head lift must have d+1 rows for d ambient coordinates"
@@ -2999,8 +2999,12 @@ mod tests {
 
     /// The single-scale affine head is a gauge-fixed decomposition, not a
     /// coefficient ridge: RBF center values are exactly mass-orthogonal to the
-    /// supported affine space and replacing those directions with the head keeps
-    /// the total reduced width at `m - 1`.
+    /// supported affine space, and replacing those directions with the head
+    /// keeps the RAW chart exactly `m` wide. The collection's parametric
+    /// orthogonalization then removes the head's constant, landing the FIT
+    /// chart at `m - 1` — the width this test asserted directly before #2751,
+    /// when the head omitted the constant and the centering took a linear
+    /// direction instead.
     #[test]
     pub(crate) fn single_scale_affine_head_gauge_annihilates_center_cross() {
         let n = 90usize;
