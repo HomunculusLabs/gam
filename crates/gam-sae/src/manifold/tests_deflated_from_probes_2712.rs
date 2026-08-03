@@ -503,3 +503,86 @@ fn complete_outer_gradient_from_probes_matches_dense_on_deflated_rows_2712() {
     );
     assert_deflation_resolved("complete outer ρ-gradient", parity, separation);
 }
+
+/// #2712 — the FULL matrix-free route on a deflated fit: from-probes trace
+/// channels AND the matrix-free single-adjoint solve
+/// (`solve_exact_stationarity_matrix_free`), i.e. exactly the route the
+/// streaming lane assembles.
+///
+/// The sibling above holds the IFT adjoint dense so the from-probes channels are
+/// isolated; this one converts both halves, which is what
+/// `analytic_gradient_for_outer_evaluation` does for a matrix-free evaluation.
+/// Its tolerance is looser because the adjoint is a CG solve rather than a
+/// factorization, and the ratio assertion — not a constant — is what keeps it
+/// from becoming vacuous.
+#[test]
+fn complete_matrix_free_outer_gradient_matches_dense_on_deflated_rows_2712() {
+    let (mut term, rho, target, cache) =
+        obb_deflated_anchor("#2712 matrix-free complete-gradient deflated parity");
+    assert!(
+        cache.deflated_row_directions.iter().any(|d| !d.is_empty()),
+        "the certified anchor promised deflation"
+    );
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("arrow system at the frozen anchor");
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("loss at the frozen anchor");
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let dense = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
+        .expect("dense complete outer gradient")
+        .gradient();
+    let (probes, sinv) = full_basis_bundle(&cache);
+    let matrix_free = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            &solver,
+            Some((&probes, &sinv)),
+            Some(&system),
+        )
+        .expect("matrix-free complete outer gradient on a deflated fit")
+        .gradient();
+
+    let blind_cache = deflation_blind_cache(&cache);
+    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+    let blind = term
+        .analytic_outer_rho_gradient_components(
+            target.view(),
+            &rho,
+            &loss,
+            &blind_cache,
+            &blind_solver,
+        )
+        .expect("deflation-blind dense complete outer gradient")
+        .gradient();
+
+    let mut scale = 0.0_f64;
+    let mut parity = 0.0_f64;
+    let mut separation = 0.0_f64;
+    for i in 0..dense.len() {
+        assert!(
+            dense[i].is_finite() && matrix_free[i].is_finite(),
+            "gradient coordinate {i} must be finite (dense={}, matrix_free={})",
+            dense[i],
+            matrix_free[i]
+        );
+        scale = scale.max(dense[i].abs());
+        parity = parity.max((dense[i] - matrix_free[i]).abs());
+        separation = separation.max((dense[i] - blind[i]).abs());
+    }
+    eprintln!(
+        "#2712 matrix-free complete outer gradient over {} coordinate(s): \
+         ‖g‖∞ = {scale:.6e}",
+        dense.len()
+    );
+    assert!(
+        scale > 1.0e-10 && scale.is_finite(),
+        "a zero gradient would make the parity check vacuous; ‖g‖∞ = {scale:.6e}"
+    );
+    assert_deflation_resolved("matrix-free complete outer ρ-gradient", parity, separation);
+}
