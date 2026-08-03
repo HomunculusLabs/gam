@@ -446,3 +446,7 @@ path = "examples/probe_2623_sampled_marginal_channel_fd.rs"
 [[example]]
 name = "probe_2751_bms_logslope_decomposition"
 path = "examples/probe_2751_bms_logslope_decomposition.rs"
+
+[[example]]
+name = "probe_2761_ell_profile"
+path = "examples/probe_2761_ell_profile.rs"
