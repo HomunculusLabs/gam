@@ -57,6 +57,40 @@
   thing that actually decides whether a gate can see the defect it exists to
   catch: the per-entry tolerance must itself be finer than the separation.
 
+  **Which SUBSPACE deflates decides which channel can be gated at all**, and that
+  also had to be measured. The ARD correction contracts `D = hess·eₛeₛᵀ` at ONE
+  coordinate slot, so `M = UᵀDU` carries a factor `U[s,d]` and the whole
+  correction vanishes when the deflated direction misses that slot — separation
+  exactly `0.0` on both real deflating fixtures, while the θ-adjoint separates by
+  `8.47e-8` on the same cache because its `D` is a full `q×q` block. The ARD gate
+  therefore sweeps every local slot with the deflation RECORD redirected onto
+  whichever eigendirection that slot loads (factors, Schur and eigenbasis
+  untouched; both routes read the same four operands, which is the whole claim).
+  Slot 0 is a logit slot there and still gives `0.0`; slot 1 gives separation
+  `2.606` against parity `0.0`.
+
+  **What this does NOT do is flip the wide-`p` routing, and the reason is
+  measured.** The complete outer ρ-gradient still disagrees between the dense and
+  bundle routes on a deflated fit — `8.45` against `‖g‖∞ = 5.00` — but that gap is
+  BIT-IDENTICAL on the cache and on its deflation-blind clone, so deflation
+  cannot be its cause. It is #2499/#2515's β-Schur smoothness-EDF desync, landing
+  on the two smoothness coordinates and leaking into the ARD ones through the
+  shared single-adjoint IFT contraction. The end-to-end gate asserts exactly
+  that decomposition — the two routes price the *deflation contribution*
+  identically, and the surviving gap is deflation-independent — so it doubles as
+  a tripwire: if the residual desync ever acquires a deflation-dependent part it
+  comes back here rather than staying with #2515. The fourth refusal on the same
+  false premise (the streaming outer evaluation) is therefore corrected in place
+  rather than lifted, with the measurement that would lift it written on it.
+
+  Measured, same filter and host, `76770446e` with this work's files reverted vs
+  after: **31 passed / 6 failed → 38 passed / 5 failed.** The six baseline
+  failures are the identical set; the one that left is
+  `sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080`, which was red
+  on its own premise (it declares `NoRowDeflates`, and every member of its ladder
+  now deflates) — a premise that only existed because the route used to refuse
+  deflated rows.
+
 - **SAE post-fit certification no longer costs `dim³`: the residual-gauge
   curvature is `p` blocks of `D × D`, not one `(p·D)²` Gram (#2757).**
   `fit_diagnostics_report` was materializing the curvature `H = RᵀR` as a dense
