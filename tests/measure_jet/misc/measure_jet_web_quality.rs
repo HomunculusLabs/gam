@@ -731,12 +731,21 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
         .to_owned();
     let z_full = transform.dot(&beta_term);
     let m = centers.nrows();
-    let head_rank = transform.nrows() - m;
+    // The head block spans the energy's whole AFFINE null space, constant
+    // included (#2751), so the reconstruction has to rebuild the same object
+    // the design was built from: the affine lift, acting on `[1 | x]`.
+    let head_width = transform.nrows() - m;
     let rep = z_full.slice(ndarray::s![..m]).to_owned();
     let head_coeffs = z_full.slice(ndarray::s![m..]).to_owned();
-    let head_t = (head_rank > 0).then(|| {
-        gam::basis::measure_jet_affine_head_transform(centers.view(), frozen.masses.view())
-    });
+    let head_t = (head_width > 0)
+        .then(|| gam::basis::measure_jet_affine_head_lift(centers.view(), frozen.masses.view()));
+    if let Some(t) = head_t.as_ref() {
+        assert_eq!(
+            t.ncols(),
+            head_width,
+            "the rebuilt affine head lift must have the frozen head block's width"
+        );
+    }
 
     // Central-FD of the fit's own η along a single RAW ambient axis, via the
     // frozen design replay (the same path `predict_with_fit` uses).

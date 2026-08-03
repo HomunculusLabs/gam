@@ -541,7 +541,7 @@ fn span_arm(n: usize, bodies: &[&str]) {
                         continue;
                     }
                 };
-                let head = gam::terms::basis::measure_jet_affine_head_transform(
+                let head = gam::terms::basis::measure_jet_affine_head_lift(
                     centers.view(),
                     masses.view(),
                 );
