@@ -83,6 +83,25 @@
   number survived because that assertion had never executed: the truth-recovery
   assertion above it failed first.
 
+  Verification: the `measure_jet` integration target is 11 passed / 5 failed and
+  `gam-terms` is 919 passed / 1 failed. Both failure sets are pre-existing and
+  both belong to #2761's `ln ℓ` dial, established by reverting
+  `crates/gam-terms/src` + `crates/gam-models/src` in place and re-running:
+  identical five, and `psi_producer_matches_fd_length_scale` red at both
+  sources (`analytic −6.988657e-5 vs FD 0` before, `analytic 1.574896e-4 vs
+  FD 0` after). A printing replica of that comparison attaches the magnitudes —
+  `|analytic|max` `3.78e-3` (pre) / `3.50e-3` (post) against `|FD|max` `8.3e-13`
+  / `4.2e-13`, i.e. the shipped null-component candidate does not move with `ℓ`
+  at all while the producer reports a jet three orders above its central
+  difference, in both arms, while the Primary agrees with its own FD to `3.7e-9`
+  in both. The builder ships the rebuilt metric-consistent ridge `R = N M Nᵀ`
+  (whose frame `N` has zero representer coefficients, so `E·N` is `ℓ`-invariant
+  by construction) while the ψ producer differentiates the raw pullback
+  `E(ℓ)ᵀH₀E(ℓ)`, which is not. That is an objective↔gradient desync on the `ℓ`
+  coordinate and a far better candidate for the five "the direction descended
+  but no step improved the objective" line-search refusals than anything in
+  this issue; it is #2761's, not this one's.
+
 - **The matrix-free from-probes selected-inverse channels price per-row
   deflation instead of refusing it — and there was never anything to derive
   (#2712).** Three channels of the #2080 wide-`p` analytic-gradient cluster —
