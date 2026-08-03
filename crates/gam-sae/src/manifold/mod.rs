@@ -404,6 +404,9 @@ mod tests_deflation_traces_780;
 mod tests_logdet_adjoint_780;
 
 #[cfg(test)]
+mod tests_probe_2712;
+
+#[cfg(test)]
 mod tests_pen_fd_780;
 
 #[cfg(test)]

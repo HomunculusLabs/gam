@@ -299,6 +299,113 @@ impl<'a> DeflatedArrowSolver<'a> {
     }
 }
 
+/// #2712 — the matrix-free sibling of
+/// [`DeflatedArrowSolver::selected_inverse_row_blocks`]: row `i`'s own
+/// `(H⁻¹)_tt` (`q×q`) and `(H⁻¹)_tβ` (`q×K`) blocks of the bordered arrow,
+/// reconstructed from a shared reduced-Schur probe bundle `(z_l, S⁻¹ z_l)`
+/// instead of a materialized `K×K` `S⁻¹`. Single source of truth for the three
+/// from-probes selected-inverse channels
+/// (`logdet_theta_adjoint_from_probes`, `ard_log_precision_hessian_trace_from_probes`,
+/// `assignment_log_strength_hessian_trace_from_probes`), which previously each
+/// carried their own copy of this reconstruction.
+///
+/// With `A_i = cache.undamped_factor(i)`, `B_i = H_tβ^(i)`, `G_i = A_i⁻¹ B_i`,
+/// and the Rademacher probe identity `E[z zᵀ] = I` (EXACT at the full-basis
+/// probe set `z_j = √k·e_j`):
+///
+/// ```text
+///   (H⁻¹)_tt[i] = A_i⁻¹ + G_i S⁻¹ G_iᵀ ,  (G_i S⁻¹ G_iᵀ)[a,b] ≈ (1/m)Σ_l w_l[a] s_l[b]
+///   (H⁻¹)_tβ[i] = −G_i S⁻¹             ,  (G_i S⁻¹)[a,c]      ≈ (1/m)Σ_l w_l[a] (S⁻¹z_l)[c]
+/// ```
+///
+/// with `w_l = A_i⁻¹ B_i z_l` and `s_l = A_i⁻¹ B_i (S⁻¹ z_l)`. The `t–t` outer
+/// product is symmetrized, which is a no-op at full-basis probes and removes the
+/// asymmetry a finite Rademacher set would otherwise introduce into a block the
+/// callers contract as symmetric. Its DIAGONAL is unchanged by the
+/// symmetrization (`½(w[a]s[a] + s[a]w[a]) = w[a]s[a]`), so diagonal-only
+/// consumers get bit-identical values.
+///
+/// # These blocks are the DEFLATED selected inverse (#2712)
+///
+/// `cache.undamped_factor(i)` is the Cholesky of the SPECTRALLY CONDITIONED
+/// `Φ(H_tt^(i))` — the block that pinned `λ̃ = 1` on every direction recorded in
+/// `cache.deflated_row_directions[i]` — not of the raw `H_tt^(i)`, and the
+/// reduced Schur `S` behind the bundle is that same conditioned arrow's Schur
+/// complement. So `A_i⁻¹ + G_i S⁻¹ G_iᵀ` is the DEFLATED per-row inverse block,
+/// exactly the object [`DeflatedArrowSolver::selected_inverse_row_blocks`]
+/// returns from the dense route and exactly the object the Daleckii–Krein
+/// deflation correction `tr(inv_vv·(D − DΦ[D]))` must be contracted against.
+///
+/// The from-probes channels used to hard-refuse deflated rows on the stated
+/// grounds that "the plain-`S⁻¹` bundle cannot reconstruct the DEFLATED block".
+/// That was a misreading of which operand was missing: the block is
+/// reconstructed here, and what the probe routes actually lacked was the
+/// correction TERM, whose remaining operands (`cache.deflated_row_directions`,
+/// `cache.deflation_row_spectra`, and the raw per-row derivative `D` each
+/// channel already assembles locally) never involved `S⁻¹` at all.
+///
+/// `want_tbeta = false` skips the `q×K` `t–β` block — the only part of the
+/// reconstruction that costs `O(q·K)` per row — for the trace channels that
+/// contract the `t–t` block alone.
+pub(crate) fn row_selected_inverse_from_probes(
+    cache: &ArrowFactorCache,
+    row: usize,
+    probes: &[Array1<f64>],
+    sinv_probes: &[Array1<f64>],
+    want_tbeta: bool,
+    context: &str,
+) -> Result<(Array2<f64>, Array2<f64>), String> {
+    let q = cache.row_dims[row];
+    let k = cache.k;
+    let factor = cache.undamped_factor(row);
+
+    // A_i⁻¹ (q×q) via the row-local undamped Cholesky.
+    let mut inv_vv = Array2::<f64>::zeros((q, q));
+    let mut unit = Array1::<f64>::zeros(q);
+    for j in 0..q {
+        unit.fill(0.0);
+        unit[j] = 1.0;
+        let col = cholesky_solve_vector(factor, unit.view());
+        for r in 0..q {
+            inv_vv[[r, j]] = col[r];
+        }
+    }
+
+    let border_cols = if want_tbeta { k } else { 0 };
+    let mut inv_vbeta = Array2::<f64>::zeros((q, border_cols));
+    let m = probes.len();
+    // A borderless arrow (`k == 0`) is block diagonal: the row block inverse IS
+    // `A_i⁻¹` and there is no bundle to fold.
+    if k == 0 || m == 0 {
+        return Ok((inv_vv, inv_vbeta));
+    }
+    let inv_m = 1.0 / m as f64;
+    let mut b_tmp = Array1::<f64>::zeros(q);
+    for l in 0..m {
+        b_tmp.fill(0.0);
+        if !cache.apply_htbeta_row(row, probes[l].view(), &mut b_tmp) {
+            return Err(format!("{context}: H_tβ^({row}) probe apply failed"));
+        }
+        let w = cholesky_solve_vector(factor, b_tmp.view());
+        b_tmp.fill(0.0);
+        if !cache.apply_htbeta_row(row, sinv_probes[l].view(), &mut b_tmp) {
+            return Err(format!("{context}: H_tβ^({row}) solve apply failed"));
+        }
+        let s = cholesky_solve_vector(factor, b_tmp.view());
+        for a in 0..q {
+            for b in 0..q {
+                inv_vv[[a, b]] += 0.5 * inv_m * (w[a] * s[b] + s[a] * w[b]);
+            }
+        }
+        if want_tbeta {
+            for a in 0..q {
+                inv_vbeta.row_mut(a).scaled_add(-inv_m * w[a], &sinv_probes[l]);
+            }
+        }
+    }
+    Ok((inv_vv, inv_vbeta))
+}
+
 #[cfg(test)]
 mod selected_inverse_row_blocks_oracle_tests {
     //! #932 FRONT C oracle: the row-local Takahashi selected-inverse blocks

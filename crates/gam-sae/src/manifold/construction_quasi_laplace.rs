@@ -5821,17 +5821,19 @@ impl SaeManifoldTerm {
     /// `P_l=Σ_j z_l[c_j] b_j`, `R_l=Σ_i (S⁻¹z_l)[c_i] b_i`, `Q_l=Σ_j z_l[c_j] bd_j`,
     /// `Rd_l=Σ_i (S⁻¹z_l)[c_i] bd_i` (`b`=`beta` jet, `bd`=`beta_deriv` jet).
     ///
-    /// # Scope
+    /// # Per-row deflation (#2712)
     ///
-    /// The bundle spans ONLY the reduced-Schur border (`cache.k`), so the outer
-    /// products reconstruct the row-block arrow inverse. One regime is
-    /// hard-refused and routed to the dense channel:
-    ///
-    /// * **Per-row deflation** (`deflated_row_directions`): the Daleckii–Krein
-    ///   correction `−tr(inv_vv·(D − DΦ[D]))` needs the DEFLATED block the plain-S⁻¹
-    ///   bundle does not carry.
-    /// On accepted regimes the from-probes and dense
-    /// θ-adjoints agree exactly at full-basis probes — the FD gate's acceptance.
+    /// Deflated rows are priced here, not refused. `cache.undamped_factor(i)`
+    /// factorizes the spectrally CONDITIONED `Φ(H_tt^(i))` and the reduced Schur
+    /// behind the bundle is that same conditioned arrow's, so the reconstructed
+    /// `A_i⁻¹ + G_i S⁻¹ G_iᵀ` IS the deflated `(H⁻¹)_tt` the dense route contracts
+    /// (see [`row_selected_inverse_from_probes`]). The Daleckii–Krein correction
+    /// `−tr(inv_vv·(D − DΦ[D]))` is then applied through the same
+    /// [`Self::deflation_block_correction`] helper the dense route uses, on the
+    /// t-slot channels, the border channels, and the ordered Beta–Bernoulli
+    /// shared-mass diagonal alike — none of whose operands involves `S⁻¹`. The
+    /// from-probes and dense θ-adjoints therefore agree exactly at full-basis
+    /// probes on the deflated regime too — the FD gate's acceptance.
     /// `exact_a` (#2515 B-full) selects WHICH operator's θ-adjoint this returns.
     ///
     /// `false` — the historical `½log|B|` adjoint `Γ = tr(B⁻¹ ∂B/∂θ)`.
@@ -5909,23 +5911,6 @@ impl SaeManifoldTerm {
         let mut gamma_t = Array1::<f64>::zeros(total_t);
         let mut gamma_beta = Array1::<f64>::zeros(k_border);
 
-        // Deflation hard-refuse (see the docstring): the plain-S⁻¹ bundle cannot
-        // reconstruct the Daleckii–Krein correction, so any deflated row routes the
-        // whole fit to the dense channel.
-        for row in 0..n {
-            if cache
-                .deflated_row_directions
-                .get(row)
-                .is_some_and(|d| !d.is_empty())
-            {
-                return Err(format!(
-                    "logdet_theta_adjoint_from_probes: row {row} carries deflation directions; \
-                     the plain-S⁻¹ bundle cannot reconstruct the Daleckii–Krein correction — \
-                     route this fit through the dense channel"
-                ));
-            }
-        }
-
         let ordered_beta_bernoulli_channels =
             ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
                 &self.assignment,
@@ -5978,77 +5963,63 @@ impl SaeManifoldTerm {
                 self.apply_whiten_to_logdet_row_jets(row, &mut jets)?;
             }
 
-            // A_i⁻¹ (q×q) via the row-local undamped Cholesky.
-            let factor = cache.undamped_factor(row);
-            let mut a_inv = Array2::<f64>::zeros((q, q));
-            let mut e_j = Array1::<f64>::zeros(q);
-            for j in 0..q {
-                e_j.fill(0.0);
-                e_j[j] = 1.0;
-                let col = cholesky_solve_vector(factor, e_j.view());
-                for r in 0..q {
-                    a_inv[[r, j]] = col[r];
-                }
-            }
+            // The DEFLATED row-block selected inverse `(H⁻¹)_tt = A_i⁻¹ + G_i S⁻¹ G_iᵀ`
+            // and border block `(H⁻¹)_tβ = −G_i S⁻¹`, from the shared bundle. `A_i` is
+            // the SPECTRALLY CONDITIONED row block, so these are the same objects the
+            // dense `selected_inverse_row_blocks` returns — including on a deflated row
+            // (#2712; see `row_selected_inverse_from_probes`).
+            let (inv_vv, inv_vbeta) = row_selected_inverse_from_probes(
+                cache,
+                row,
+                probes,
+                sinv_probes,
+                true,
+                "logdet_theta_adjoint_from_probes",
+            )?;
 
-            // Row probe images w_l = G_i z_l, s_l = G_i (S⁻¹ z_l) — the bundle carriers
-            // for the selected-inverse blocks (identical to the ARD from-probes path).
-            let mut w_probes: Vec<Array1<f64>> = Vec::with_capacity(m);
-            let mut s_probes: Vec<Array1<f64>> = Vec::with_capacity(m);
-            if k_border > 0 {
-                let mut b_tmp = Array1::<f64>::zeros(q);
-                for l in 0..m {
-                    b_tmp.fill(0.0);
-                    if !cache.apply_htbeta_row(row, probes[l].view(), &mut b_tmp) {
-                        return Err(format!(
-                            "logdet_theta_adjoint_from_probes: H_tβ^({row}) probe apply failed"
-                        ));
-                    }
-                    w_probes.push(cholesky_solve_vector(factor, b_tmp.view()));
-                    b_tmp.fill(0.0);
-                    if !cache.apply_htbeta_row(row, sinv_probes[l].view(), &mut b_tmp) {
-                        return Err(format!(
-                            "logdet_theta_adjoint_from_probes: H_tβ^({row}) solve apply failed"
-                        ));
-                    }
-                    s_probes.push(cholesky_solve_vector(factor, b_tmp.view()));
-                }
-            }
+            // Per-row UNIT-stiffness deflated directions. `inv_vv` above is the
+            // DEFLATED inverse (it assigns `1/λ̃ = 1` to each `vᵢ`), so every
+            // `inv_vv`-weighted t–t contraction of the RAW `∂H/∂θ_w` below over-claims
+            // curvature exactly where the re-deflating criterion uses the deflation-map
+            // derivative `DΦ`. The kept-subspace Γ subtracts `tr(inv_vv·(D − DΦ[D]))`
+            // through the SAME Daleckii–Krein helper the dense route uses — every
+            // operand of which (`inv_vv`, `dirs`, `spectrum`, and the locally
+            // assembled raw `D`) is in hand here.
+            let defl_dirs = cache
+                .deflated_row_directions
+                .get(row)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let defl_spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref);
 
-            // (H⁻¹)_tt block: A_i⁻¹ + (1/m)Σ_l sym(w_l ⊗ s_l) (symmetrized outer product;
-            // exact & symmetric at full-basis probes).
-            // `w_probes`/`s_probes` are populated only when a border exists
-            // (`k_border > 0`); their length is `m` there and `0` otherwise, so the
-            // border-term loops below vanish cleanly on the borderless arrow.
-            let mut inv_vv = a_inv.clone();
-            for l in 0..w_probes.len() {
-                for a in 0..q {
-                    for b in 0..q {
-                        inv_vv[[a, b]] += 0.5
-                            * inv_m
-                            * (w_probes[l][a] * s_probes[l][b] + s_probes[l][a] * w_probes[l][b]);
-                    }
-                }
-            }
             if ordered_beta_bernoulli_channels.is_some() {
                 for (position, variable) in jets.vars.iter().enumerate() {
                     if let SaeLocalRowVar::Logit { atom } = *variable {
+                        // Same per-slot Daleckii–Krein weight for a unit diagonal
+                        // derivative the dense route records, so the shared-mass column
+                        // pass below differentiates the same conditioned majorizer.
+                        let diag_deflation_weight = if defl_dirs.is_empty() {
+                            0.0
+                        } else {
+                            let mut unit_diag = Array2::<f64>::zeros((q, q));
+                            unit_diag[[position, position]] = 1.0;
+                            Self::deflation_block_correction(
+                                &inv_vv,
+                                &unit_diag,
+                                defl_dirs,
+                                defl_spectrum,
+                            )
+                        };
                         ordered_beta_bernoulli_logit_sites.push((
                             row,
                             atom,
                             base + position,
-                            inv_vv[[position, position]],
+                            inv_vv[[position, position]] - diag_deflation_weight,
                         ));
                     }
-                }
-            }
-            // (H⁻¹)_tβ block (q×K): −(1/m)Σ_l w_l ⊗ (S⁻¹ z_l).
-            let mut inv_vbeta = Array2::<f64>::zeros((q, k_border));
-            for l in 0..w_probes.len() {
-                for a in 0..q {
-                    inv_vbeta
-                        .row_mut(a)
-                        .scaled_add(-inv_m * w_probes[l][a], &sinv_probes[l]);
                 }
             }
 
@@ -6107,7 +6078,15 @@ impl SaeManifoldTerm {
                         }
                         _ => None,
                     };
-                // t–t block: reuse the dense contraction (undeflated: no DΦ correction).
+                // t–t block: reuse the dense contraction. On a deflated row the raw
+                // per-slot derivative is retained as a matrix so the Daleckii–Krein
+                // correction can be applied to it after the loop; on a PD row the
+                // matrix stays `0×0` and nothing is allocated.
+                let mut deflated_base_dh_mat = if defl_dirs.is_empty() {
+                    Array2::<f64>::zeros((0, 0))
+                } else {
+                    Array2::<f64>::zeros((q, q))
+                };
                 for a in 0..q {
                     for b in 0..q {
                         let mut dh = match (softmax_d_dw, jets.vars[a], jets.vars[b]) {
@@ -6187,8 +6166,25 @@ impl SaeManifoldTerm {
                                 _ => 0.0,
                             };
                         }
+                        if !defl_dirs.is_empty() {
+                            deflated_base_dh_mat[[a, b]] = dh;
+                        }
                         gamma += inv_vv[[b, a]] * dh;
                     }
+                }
+                if !defl_dirs.is_empty() {
+                    // The row factor / log-det operator is the spectrally conditioned
+                    // `Φ(H_tt)`, while the channels above assemble the RAW row
+                    // derivative `D`. Subtract `tr(inv_vv·(D − DΦ[D]))` so the
+                    // from-probes θ-adjoint differentiates the same operator as
+                    // `arrow_log_det`, `apply_cached_arrow_hessian`, the selected
+                    // inverse, and the dense θ-adjoint (#2712).
+                    gamma -= Self::deflation_block_correction(
+                        &inv_vv,
+                        &deflated_base_dh_mat,
+                        defl_dirs,
+                        defl_spectrum,
+                    );
                 }
                 // t–β block: reuse the dense contraction with the reconstructed inv_vβ.
                 for a in 0..q {
@@ -6227,12 +6223,30 @@ impl SaeManifoldTerm {
 
             for (w_beta_pos, w_channel) in border.iter().enumerate() {
                 let mut gamma = 0.0_f64;
+                let mut dh_mat = if defl_dirs.is_empty() {
+                    Array2::<f64>::zeros((0, 0))
+                } else {
+                    Array2::<f64>::zeros((q, q))
+                };
                 for a in 0..q {
                     for b in 0..q {
                         let dh = sae_dot(jets.beta_l_deriv(a, w_beta_pos), jets.first(b))
                             + sae_dot(jets.first(a), jets.beta_l_deriv(b, w_beta_pos));
+                        if !defl_dirs.is_empty() {
+                            dh_mat[[a, b]] = dh;
+                        }
                         gamma += inv_vv[[b, a]] * dh;
                     }
+                }
+                if !defl_dirs.is_empty() {
+                    // The border channels differentiate the same conditioned t–t block,
+                    // so they carry the same Daleckii–Krein correction (#2712).
+                    gamma -= Self::deflation_block_correction(
+                        &inv_vv,
+                        &dh_mat,
+                        defl_dirs,
+                        defl_spectrum,
+                    );
                 }
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
