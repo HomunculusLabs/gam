@@ -347,6 +347,27 @@ impl<'a> DeflatedArrowSolver<'a> {
 /// `want_tbeta = false` skips the `q×K` `t–β` block — the only part of the
 /// reconstruction that costs `O(q·K)` per row — for the trace channels that
 /// contract the `t–t` block alone.
+///
+/// # Edge cases the deflated regime raises, and why they are handled
+///
+/// * **Stochastic probes (`m < k`).** The reconstruction is then a Hutchinson
+///   ESTIMATE, but the Daleckii–Krein correction
+///   `Σ_{a,b} W[a,b]·M[a,b]·(1 − F[a,b])`, `W = Uᵀ inv_vv U`, is LINEAR in
+///   `inv_vv` — exactly like the `Σ inv_vv[b,a]·dh` contraction it corrects. An
+///   unbiased block gives an unbiased correction, so deflation introduces no new
+///   approximation class beyond the one the route already accepts.
+/// * **Extreme magnitudes.** A KEPT near-null eigendirection makes `inv_vv`
+///   legitimately enormous (measured `1.7e7` against a `6e-8` kept eigenvalue on
+///   the #2712 fixture). Those entries do NOT amplify the correction: `1 − F` is
+///   identically zero on kept×kept pairs, so the huge `W[a,a]` terms drop out and
+///   only pairs touching a deflated index survive, each weighted by the
+///   deflated direction's own unit stiffness.
+/// * **Degenerate / near-degenerate raw eigenvalues.** Handled once, upstream, in
+///   `row_deflation_frechet_coefficients`' `eigen_gap_threshold` branch, which
+///   both routes call — this reconstruction never re-derives the branch.
+/// * **Non-deflating solver paths.** `deflated_row_directions` is empty on the
+///   streaming / cross-row-CG / device paths by construction, so the correction
+///   is skipped there exactly as before.
 pub(crate) fn row_selected_inverse_from_probes(
     cache: &ArrowFactorCache,
     row: usize,
