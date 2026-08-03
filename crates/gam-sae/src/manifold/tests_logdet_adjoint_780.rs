@@ -2270,13 +2270,25 @@ fn assert_theta_adjoint_from_probes_matches_dense(
 
 /// #2080 θ-adjoint from-probes — SOFTMAX fixture. Exercises the softmax entropy
 /// dense off-diagonal channel + the core t–t / t–β / β–β selected-inverse folds.
+///
+/// #2712 — the regime is `Unconstrained`, and that is a repair, not a
+/// loosening. This gate declared `NoRowDeflates` because the from-probes route
+/// used to refuse a deflated cache; the softmax fixture has since drifted so that
+/// EVERY member of the declared ladder deflates (4–5 rows at each of the nine
+/// lifts), leaving the gate red on its own premise with no fix available short of
+/// a fixture decision. The route now prices deflation, so the premise is gone and
+/// the gate runs wherever its ladder lands — with
+/// `assert_theta_adjoint_from_probes_matches_dense` switching to the tighter
+/// tolerance and the non-vacuity assertions when the anchor turns out to deflate.
+/// The PD branch is still pinned on its own, by the ordered Beta–Bernoulli
+/// sibling below, whose ladder does still reach an undeflated member.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
     let (term, target, rho) = gamma_fd_tiny_fixture();
     let anchor = certified_fd_anchor(
         "#2080 from-probes softmax parity",
         &target,
-        FdAnchorRegime::undeflated(),
+        FdAnchorRegime::any_maximum(),
         rho_ladder_family(
             &term,
             sparse_lift_ladder(&rho, &UNDEFLATED_SPARSE_LIFTS),
