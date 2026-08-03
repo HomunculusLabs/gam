@@ -2148,35 +2148,31 @@ fn assert_theta_adjoint_from_probes_matches_dense(
         .logdet_theta_adjoint(rho, cache, &solver)
         .expect("dense theta-adjoint");
 
-    if cache.deflated_row_directions.iter().any(|d| !d.is_empty()) {
+    let deflated_rows = cache
+        .deflated_row_directions
+        .iter()
+        .filter(|d| !d.is_empty())
+        .count();
+    // The deflation-blind operator: the production dense adjoint against the
+    // same cache with only the deflation metadata stripped. That is exactly what
+    // a from-probes port which silently dropped the Daleckii–Krein correction
+    // would return, so the distance to it is the resolution this gate has.
+    let separation = if deflated_rows == 0 {
+        0.0
+    } else {
         let blind = deflation_blind_cache(cache);
         let blind_solver = DeflatedArrowSolver::plain(&blind);
         let blind_gamma = term
             .logdet_theta_adjoint(rho, &blind, &blind_solver)
             .expect("deflation-blind dense theta-adjoint");
-        let separation = dense
+        dense
             .t
             .iter()
             .zip(blind_gamma.t.iter())
             .chain(dense.beta.iter().zip(blind_gamma.beta.iter()))
             .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f64, f64::max);
-        eprintln!(
-            "#2712 deflated parity gate: ‖Γ_dense − Γ_deflation-blind‖∞ = {separation:.6e}"
-        );
-        assert!(
-            separation > 1.0e-6,
-            "the deflated and deflation-blind θ-adjoints must SEPARATE before parity \
-             is evidence of anything: a port that dropped the Daleckii–Krein correction \
-             would also agree to machine precision here. Measured {separation:.6e} on a \
-             cache with {} deflated row(s).",
-            cache
-                .deflated_row_directions
-                .iter()
-                .filter(|d| !d.is_empty())
-                .count()
-        );
-    }
+            .fold(0.0_f64, f64::max)
+    };
 
     let k = cache.k;
     assert!(
@@ -2206,24 +2202,51 @@ fn assert_theta_adjoint_from_probes_matches_dense(
     assert_eq!(dense.t.len(), mf.t.len());
     assert_eq!(dense.beta.len(), mf.beta.len());
     let mut max_abs = 0.0_f64;
+    let mut parity = 0.0_f64;
+    for (d, m) in dense
+        .t
+        .iter()
+        .zip(mf.t.iter())
+        .chain(dense.beta.iter().zip(mf.beta.iter()))
+    {
+        parity = parity.max((d - m).abs());
+        max_abs = max_abs.max(d.abs());
+    }
+    eprintln!(
+        "#2080/#2712 from-probes θ-adjoint gate: {deflated_rows} deflated row(s), \
+         ‖Γ_dense‖∞ = {max_abs:.6e}, ‖Γ_dense − Γ_from-probes‖∞ = {parity:.6e}, \
+         ‖Γ_dense − Γ_deflation-blind‖∞ = {separation:.6e}"
+    );
     for (i, (d, m)) in dense.t.iter().zip(mf.t.iter()).enumerate() {
         assert!(
             (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
             "theta-adjoint gamma_t[{i}] mismatch: dense={d:.10e}, from_probes={m:.10e}"
         );
-        max_abs = max_abs.max(d.abs());
     }
     for (i, (d, m)) in dense.beta.iter().zip(mf.beta.iter()).enumerate() {
         assert!(
             (d - m).abs() <= 1.0e-8 * (1.0 + d.abs()),
             "theta-adjoint gamma_beta[{i}] mismatch: dense={d:.10e}, from_probes={m:.10e}"
         );
-        max_abs = max_abs.max(d.abs());
     }
     assert!(
         max_abs > 0.0 && max_abs.is_finite(),
         "the theta-adjoint must be non-trivial to make the parity check meaningful"
     );
+    if deflated_rows > 0 {
+        // Non-vacuity, stated as a RATIO rather than as two absolute thresholds
+        // that a change in the row block's conditioning could silently invert:
+        // agreement with the deflated operator is only evidence if the
+        // deflation-blind operator is much further away than the agreement is
+        // tight.
+        assert!(
+            separation > 1.0e-6 && separation > 1.0e4 * parity,
+            "the deflated and deflation-blind θ-adjoints must SEPARATE before parity \
+             is evidence of anything: a port that dropped the Daleckii–Krein \
+             correction would also agree here. Measured separation {separation:.6e} \
+             against parity error {parity:.6e} on {deflated_rows} deflated row(s)."
+        );
+    }
 }
 
 /// #2080 θ-adjoint from-probes — SOFTMAX fixture. Exercises the softmax entropy
@@ -2373,6 +2396,7 @@ fn sae_row_selected_inverse_from_probes_is_the_deflated_block_2712() {
 
     let mut deflated_rows = 0usize;
     let mut max_block_error = 0.0_f64;
+    let mut block_scale = 0.0_f64;
     let mut max_unit_pin_error = 0.0_f64;
     for row in 0..cache.row_dims.len() {
         let dirs = cache
@@ -2420,9 +2444,11 @@ fn sae_row_selected_inverse_from_probes_is_the_deflated_block_2712() {
         .expect("from-probes selected inverse row blocks");
         for (d, p) in dense_vv.iter().zip(probe_vv.iter()) {
             max_block_error = max_block_error.max((d - p).abs());
+            block_scale = block_scale.max(d.abs());
         }
         for (d, p) in dense_vbeta.iter().zip(probe_vbeta.iter()) {
             max_block_error = max_block_error.max((d - p).abs());
+            block_scale = block_scale.max(d.abs());
         }
     }
     assert!(
@@ -2432,17 +2458,23 @@ fn sae_row_selected_inverse_from_probes_is_the_deflated_block_2712() {
     eprintln!(
         "#2712 reconstruction gate: {deflated_rows} deflated row(s), \
          max|A_i v - v| = {max_unit_pin_error:.6e}, \
-         max|selected-inverse block difference| = {max_block_error:.6e}"
+         max|selected-inverse block difference| = {max_block_error:.6e} \
+         against block magnitude {block_scale:.6e}"
     );
     assert!(
         max_unit_pin_error <= 1.0e-9,
         "`undamped_factor` must carry the CONDITIONED spectrum (A_i v = v on a \
          deflated direction); got max|A_i v - v| = {max_unit_pin_error:.6e}"
     );
+    // RELATIVE, deliberately: a kept near-null eigendirection makes `inv_vv`
+    // legitimately huge (measured `1.7e7` on this fixture), so an absolute bar
+    // here would be a statement about the conditioning, not about the
+    // reconstruction.
     assert!(
-        max_block_error <= 1.0e-9,
+        max_block_error <= 1.0e-11 * (1.0 + block_scale),
         "the from-probes reconstruction must equal the dense selected inverse on a \
-         DEFLATED row at full-basis probes; got {max_block_error:.6e}"
+         DEFLATED row at full-basis probes; got {max_block_error:.6e} against block \
+         magnitude {block_scale:.6e}"
     );
 }
 
