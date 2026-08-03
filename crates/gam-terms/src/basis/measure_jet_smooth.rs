@@ -474,16 +474,12 @@ fn measure_jet_affine_value_basis(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
 ) -> Array2<f64> {
-    let m = centers.nrows();
-    let head_transform = measure_jet_affine_head_transform(centers, masses);
-    let head_rank = head_transform.ncols();
-    let mut affine = Array2::<f64>::ones((m, head_rank + 1));
-    if head_rank > 0 {
-        affine
-            .slice_mut(ndarray::s![.., 1..])
-            .assign(&centers.dot(&head_transform));
-    }
-    affine
+    // The SAME object the design's head block is built from, evaluated at the
+    // centers. Sharing one construction is what makes "the head spans exactly
+    // the energy's null space" a property of the code rather than a comment
+    // two call sites have to keep agreeing on (#2751).
+    let lift = measure_jet_affine_head_lift(centers, masses);
+    measure_jet_affine_head_block(centers, lift.view())
 }
 
 /// Mass-metric quadratic form selecting the affine/null component of center
@@ -1487,13 +1483,19 @@ fn measure_jet_design_log_length_jets(
 /// each direction rather than its offset; the relative floor
 /// `MEASURE_JET_PSEUDOINVERSE_RTOL` is the module's own numerical rank
 /// tolerance (the same one the local Gram pseudo-inverses use). The returned
-/// `T` satisfies `head(points) = points · T` (the mean-centering only informs
-/// the keep/drop decision; the constant component of `points · T` is removed
-/// downstream by the global parametric orthogonalization). `T` is a
-/// deterministic function of the frozen centers + masses, so the frozen replay
-/// path reconstructs the identical head with no persisted state. Public so the
-/// predict-side errors-in-variables gradient (#2225) can reconstruct the head
-/// lift `T` from the frozen centers + masses to differentiate the head block.
+/// `T` satisfies `linear_head(points) = points · T` (the mean-centering only
+/// informs the keep/drop decision). `T` is a deterministic function of the
+/// frozen centers + masses, so the frozen replay path reconstructs the
+/// identical head with no persisted state.
+///
+/// This is the LINEAR half of the null space. The realized head block is the
+/// whole affine null space `[1 | points·T]`; build it through
+/// [`measure_jet_affine_head_lift`] + [`measure_jet_affine_head_block`], which
+/// is what the design, the gauge and the null-component penalty all use. A
+/// linear-only head is a defect, not an economy: the global parametric
+/// orthogonalization removes ONE design direction, and if the term's null space
+/// has no constant to give up, the direction it takes comes out of the null
+/// space itself, leaving `d − 1` free linear directions instead of `d` (#2751).
 pub fn measure_jet_affine_head_transform(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
@@ -1559,6 +1561,64 @@ pub fn measure_jet_affine_head_transform(
     t_mat
 }
 
+/// Affine head lift `T_aff` (`(d+1) × (1 + head_rank)`) acting on the augmented
+/// point rows `[1 | x]`: column 0 is the constant, the rest are the supported
+/// ambient-linear directions of [`measure_jet_affine_head_transform`].
+///
+/// This — not the linear lift alone — is the energy's null space. The energy
+/// annihilates every AFFINE function of the centers exactly, constant included
+/// (`affine_function_nullspace_form` projects onto exactly this span), so the
+/// design block that carries the null space has to span the same thing.
+///
+/// The constant column looks redundant against the model intercept and is not.
+/// The term-collection chokepoint residualizes every measure-jet design against
+/// the parametric block and reparameterizes to `Z = null(1ᵀX)`, which removes
+/// exactly one coefficient direction. The null space of the constrained penalty
+/// is `{γ : Zγ ∈ null(S)}`, so that removal is charged to the null space unless
+/// the null space contains the constraint's own direction. With a linear-only
+/// head the term's null space is `span{x·T}`, the constant is nowhere in it,
+/// and the centering deletes a LINEAR direction: on a 2-D fixture the surviving
+/// direction is the accidental one with zero data-mean, and every REML fit that
+/// selects a large energy λ collapses onto it (#2751, measured at Pearson
+/// 0.705 = |cos 45°| against a planted `x1` plane). With the constant present
+/// the centering consumes the constant — which the intercept re-supplies —
+/// and all `head_rank` linear directions stay free. That is exactly how the
+/// thin-plate/Duchon null space `{1, x_1..x_d}` behaves at the same chokepoint.
+pub fn measure_jet_affine_head_lift(
+    centers: ArrayView2<'_, f64>,
+    masses: ArrayView1<'_, f64>,
+) -> Array2<f64> {
+    let linear = measure_jet_affine_head_transform(centers, masses);
+    let d = centers.ncols();
+    let mut lift = Array2::<f64>::zeros((d + 1, linear.ncols() + 1));
+    lift[(0, 0)] = 1.0;
+    lift.slice_mut(ndarray::s![1.., 1..]).assign(&linear);
+    lift
+}
+
+/// Realize the affine head block `[1 | points] · T_aff` for the lift returned
+/// by [`measure_jet_affine_head_lift`]. A zero-column lift (multiscale mode,
+/// which carries no head) yields a zero-column block.
+pub fn measure_jet_affine_head_block(
+    points: ArrayView2<'_, f64>,
+    lift: ArrayView2<'_, f64>,
+) -> Array2<f64> {
+    let n = points.nrows();
+    let width = lift.ncols();
+    if width == 0 {
+        return Array2::<f64>::zeros((n, 0));
+    }
+    let d = points.ncols();
+    debug_assert_eq!(
+        lift.nrows(),
+        d + 1,
+        "affine head lift must have d+1 rows for d ambient coordinates"
+    );
+    let mut augmented = Array2::<f64>::ones((n, d + 1));
+    augmented.slice_mut(ndarray::s![.., 1..]).assign(&points);
+    augmented.dot(&lift)
+}
+
 /// Resolve the realized representer range ℓ. An explicit positive
 /// `spec_length_scale` is used verbatim; the `0.0` sentinel auto-initializes
 /// from the median nearest-center spacing (one spacing width: neighbors
@@ -1599,12 +1659,13 @@ pub(crate) struct RealizedMeasureJetGeometry {
     pub(crate) z: Array2<f64>,
     pub(crate) coefficient_gauge: gam_problem::Gauge,
     pub(crate) kz: Array2<f64>,
-    /// Ambient-linear head lift `T` (d × head_rank): the extrapolation
-    /// null-space basis appended to the representer design (#1845). The head
-    /// columns evaluate as `points · T`; empty (`d × 0`) when the geometry
-    /// resolves no supported linear direction. Deterministic in the frozen
-    /// centers + masses, so predict-time replay rebuilds it verbatim.
-    pub(crate) head_transform: Array2<f64>,
+    /// Affine head lift `T_aff` ((d+1) × head_width): the energy's null space
+    /// appended to the representer design (#1845), constant included (#2751).
+    /// The head columns evaluate as `[1 | points] · T_aff`; empty
+    /// (`(d+1) × 0`) in multiscale mode, which carries no head. Deterministic
+    /// in the frozen centers + masses, so predict-time replay rebuilds it
+    /// verbatim.
+    pub(crate) head_lift: Array2<f64>,
 }
 
 pub(crate) fn realize_measure_jet_geometry(
@@ -1662,25 +1723,27 @@ pub(crate) fn realize_measure_jet_geometry(
         }
     };
     let length_scale = realized_measure_jet_length_scale(centers.view(), spec.length_scale)?;
-    // Ambient-linear extrapolation head (#1845): the raw center space becomes
-    // `[ m Gaussian representers | head_rank ambient-linear columns ]`. The head
-    // carries the penalty's affine null space explicitly so the fit no longer
-    // reverts to the parametric backbone (the training mean) across an
-    // unsupported gap.
+    // Affine extrapolation head (#1845): the raw center space becomes
+    // `[ m Gaussian representers | head_width affine columns ]`. The head
+    // carries the penalty's affine null space explicitly — constant included
+    // (#2751) — so the fit no longer reverts to the parametric backbone (the
+    // training mean) across an unsupported gap, and so the collection's
+    // parametric orthogonalization has the constant to consume instead of a
+    // linear direction.
     // The extrapolation head is the single-scale (fused) gap-bridge path. In
     // multiscale mode the per-scale spectral penalties carry their own
     // structure and the design stays the pure representer basis (the per-level
     // replay + width contracts pin `m − 1` columns), so the head is added only
     // when the term is single-scale.
-    let head_transform = if spec.multiscale {
-        Array2::<f64>::zeros((centers.ncols(), 0))
+    let head_lift = if spec.multiscale {
+        Array2::<f64>::zeros((centers.ncols() + 1, 0))
     } else {
-        measure_jet_affine_head_transform(centers.view(), masses.view())
+        measure_jet_affine_head_lift(centers.view(), masses.view())
     };
-    let head_rank = head_transform.ncols();
-    let m_aug = m + head_rank;
+    let head_width = head_lift.ncols();
+    let m_aug = m + head_width;
     let k_cc = measure_jet_design_matrix(centers.view(), centers.view(), length_scale)?;
-    let head_cc = centers.dot(&head_transform);
+    let head_cc = measure_jet_affine_head_block(centers.view(), head_lift.view());
     // Realized-design constraint transform. In single-scale mode the explicit
     // affine head and Gaussian representers can otherwise carry the same affine
     // CENTER values in two different ways. That is a genuine gauge redundancy,
@@ -1701,7 +1764,7 @@ pub(crate) fn realize_measure_jet_geometry(
                 crate::bail_dim_basis!(
                     "frozen measure-jet identifiability transform mismatch: {} representers + {} head columns but transform has {} rows",
                     m,
-                    head_rank,
+                    head_width,
                     transform.nrows()
                 );
             }
@@ -1711,9 +1774,12 @@ pub(crate) fn realize_measure_jet_geometry(
             )
         }
         MeasureJetIdentifiability::CenterSumToZero => {
-            let z_rbf = if head_rank > 0 {
-                let affine = measure_jet_affine_value_basis(centers.view(), masses.view());
-                let mut weighted_affine = affine.clone();
+            let z_rbf = if head_width > 0 {
+                // `head_cc` IS the affine value basis A at the centers, by
+                // construction (both come from `measure_jet_affine_head_lift`),
+                // so the gauge constrains the representers against exactly the
+                // span the head carries.
+                let mut weighted_affine = head_cc.clone();
                 for (i, mut row) in weighted_affine.outer_iter_mut().enumerate() {
                     row.mapv_inplace(|v| v * masses[i]);
                 }
@@ -1729,11 +1795,11 @@ pub(crate) fn realize_measure_jet_geometry(
                 householder_sum_to_zero_z(&u)
             };
             let rbf_rank = z_rbf.ncols();
-            let mut z_block = Array2::<f64>::zeros((m_aug, rbf_rank + head_rank));
+            let mut z_block = Array2::<f64>::zeros((m_aug, rbf_rank + head_width));
             z_block
                 .slice_mut(ndarray::s![..m, ..rbf_rank])
                 .assign(&z_rbf);
-            for r in 0..head_rank {
+            for r in 0..head_width {
                 z_block[(m + r, rbf_rank + r)] = 1.0;
             }
             (
@@ -1742,13 +1808,13 @@ pub(crate) fn realize_measure_jet_geometry(
             )
         }
     };
-    // Augmented raw center matrix `[K(centers, centers) | centers · T]`, so the
+    // Augmented raw center matrix `[K(centers, centers) | A]`, so the
     // restricted `kz` maps constrained coefficients to center nodal values for
     // BOTH the representers and the head; the energy annihilates the head block
     // (affine) to machine precision, so it stays the unpenalized null space.
     let mut k_aug = Array2::<f64>::zeros((m, m_aug));
     k_aug.slice_mut(ndarray::s![.., ..m]).assign(&k_cc);
-    if head_rank > 0 {
+    if head_width > 0 {
         k_aug.slice_mut(ndarray::s![.., m..]).assign(&head_cc);
     }
     let kz = coefficient_gauge.restrict_design(&k_aug);
@@ -1767,7 +1833,7 @@ pub(crate) fn realize_measure_jet_geometry(
         z,
         coefficient_gauge,
         kz,
-        head_transform,
+        head_lift,
     })
 }
 
@@ -1912,26 +1978,26 @@ pub fn build_measure_jet_basis(
         z,
         coefficient_gauge,
         kz,
-        head_transform,
+        head_lift,
     } = realize_measure_jet_geometry(data, spec)?;
     let band = MeasureJetBand {
         eps: eps_band.clone(),
         log_step,
     };
     let m = centers.nrows();
-    let head_rank = head_transform.ncols();
-    let m_aug = m + head_rank;
-    // Augmented raw design `[K(data, centers) | data · T]` (#1845): the head
-    // columns are the ambient-linear extrapolation basis. The gauge restricts
-    // BOTH blocks together, so the frozen composed transform replays the head
-    // verbatim at predict time.
+    let head_width = head_lift.ncols();
+    let m_aug = m + head_width;
+    // Augmented raw design `[K(data, centers) | [1 | data]·T_aff]` (#1845): the
+    // head columns are the AFFINE extrapolation basis, which is the energy's
+    // whole null space (#2751). The gauge restricts BOTH blocks together, so
+    // the frozen composed transform replays the head verbatim at predict time.
     let kernel_design = measure_jet_design_matrix(data, centers.view(), length_scale)?;
     let mut raw_design = Array2::<f64>::zeros((data.nrows(), m_aug));
     raw_design
         .slice_mut(ndarray::s![.., ..m])
         .assign(&kernel_design);
-    if head_rank > 0 {
-        let head_design = data.dot(&head_transform);
+    if head_width > 0 {
+        let head_design = measure_jet_affine_head_block(data, head_lift.view());
         raw_design
             .slice_mut(ndarray::s![.., m..])
             .assign(&head_design);
@@ -2010,7 +2076,7 @@ pub fn build_measure_jet_basis(
             penalty_norm,
             "measure-jet primary penalty",
         )?;
-        if let Some(frame) = measure_jet_primary_structural_null_frame(&z, m, head_rank)? {
+        if let Some(frame) = measure_jet_primary_structural_null_frame(&z, m, head_width)? {
             primary = primary.with_structural_null_frame(
                 frame,
                 "measure-jet primary structural null declaration",
@@ -2178,7 +2244,7 @@ pub fn build_measure_jet_basis_psi_derivatives(
     let n = data.nrows();
     let p = geom.kz.ncols();
     let m = geom.centers.nrows();
-    let m_aug = m + geom.head_transform.ncols();
+    let m_aug = m + geom.head_lift.ncols();
 
     struct LengthScaleJets {
         evaluation_first: Array2<f64>,
@@ -2954,20 +3020,23 @@ mod tests {
         };
         let geom = realize_measure_jet_geometry(data.view(), &spec).expect("realized geometry");
         let m = geom.centers.nrows();
-        let head_rank = geom.head_transform.ncols();
-        assert!(head_rank > 0, "fixture must realize an affine head");
+        let head_width = geom.head_lift.ncols();
+        assert!(head_width > 0, "fixture must realize an affine head");
         assert_eq!(
             geom.z.ncols(),
-            m - 1,
-            "affine gauge replaces duplicated RBF directions without widening the smooth"
+            m,
+            "the affine head replaces the RBF block's affine directions one for one: the RAW \
+             chart is exactly m wide (m - head_width representers + head_width head columns). \
+             The collection's parametric orthogonalization then removes the constant, landing \
+             the FIT chart at m - 1 (#2751)"
         );
-        let rbf_rank = m - (head_rank + 1);
+        let rbf_rank = m - head_width;
         let z_rbf = geom.z.slice(ndarray::s![..m, ..rbf_rank]).to_owned();
         let k_cc =
             measure_jet_design_matrix(geom.centers.view(), geom.centers.view(), geom.length_scale)
                 .expect("center kernel");
         let affine = measure_jet_affine_value_basis(geom.centers.view(), geom.masses.view());
-        assert_eq!(affine.ncols(), head_rank + 1);
+        assert_eq!(affine.ncols(), head_width);
         let mut weighted_affine = affine.clone();
         for (i, mut row) in weighted_affine.outer_iter_mut().enumerate() {
             row.mapv_inplace(|v| v * geom.masses[i]);

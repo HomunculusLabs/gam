@@ -313,6 +313,105 @@ fn least_squares(x: &Array2<f64>, y: &[f64]) -> (Vec<f64>, f64) {
     (coef, (sse / n as f64).sqrt())
 }
 
+/// Symmetric positive-definite solve by Cholesky with a relative jitter
+/// fallback — `p` is ~17, so a textbook factorization is exact enough and
+/// keeps the probe dependency-free.
+fn spd_solve(a: &Array2<f64>, b: &[f64]) -> Vec<f64> {
+    let p = b.len();
+    let scale = (0..p).map(|i| a[[i, i]].abs()).fold(0.0, f64::max).max(1.0);
+    let mut jitter = 0.0;
+    loop {
+        let mut l = vec![vec![0.0f64; p]; p];
+        let mut ok = true;
+        for i in 0..p {
+            for j in 0..=i {
+                let mut s = a[[i, j]] + if i == j { jitter * scale } else { 0.0 };
+                for k in 0..j {
+                    s -= l[i][k] * l[j][k];
+                }
+                if i == j {
+                    if s <= 0.0 {
+                        ok = false;
+                        break;
+                    }
+                    l[i][i] = s.sqrt();
+                } else {
+                    l[i][j] = s / l[j][j];
+                }
+            }
+            if !ok {
+                break;
+            }
+        }
+        if !ok {
+            jitter = if jitter == 0.0 { 1e-14 } else { jitter * 100.0 };
+            assert!(jitter < 1.0, "penalized normal equations are not solvable");
+            continue;
+        }
+        let mut y = vec![0.0f64; p];
+        for i in 0..p {
+            let mut s = b[i];
+            for k in 0..i {
+                s -= l[i][k] * y[k];
+            }
+            y[i] = s / l[i][i];
+        }
+        let mut x = vec![0.0f64; p];
+        for i in (0..p).rev() {
+            let mut s = y[i];
+            for k in (i + 1)..p {
+                s -= l[k][i] * x[k];
+            }
+            x[i] = s / l[i][i];
+        }
+        return x;
+    }
+}
+
+/// Ridge-limit least squares against ONE of the design's own penalties: as
+/// `lambda -> inf` the solution is the least-squares fit restricted to that
+/// penalty's null space. Applied to the measure-jet Primary this reads out
+/// exactly the subspace the energy leaves free — the object the end-to-end fit
+/// collapses onto when REML puts the energy at `lambda = 85`.
+fn penalized_fit(
+    x: &Array2<f64>,
+    y: &[f64],
+    penalty: Option<(&Array2<f64>, std::ops::Range<usize>)>,
+    lambda: f64,
+) -> Vec<f64> {
+    let (n, p) = x.dim();
+    let mut xtx = Array2::<f64>::zeros((p, p));
+    for i in 0..n {
+        for j in 0..p {
+            let xij = x[[i, j]];
+            if xij == 0.0 {
+                continue;
+            }
+            for k in j..p {
+                xtx[[j, k]] += xij * x[[i, k]];
+            }
+        }
+    }
+    for j in 0..p {
+        for k in 0..j {
+            xtx[[j, k]] = xtx[[k, j]];
+        }
+    }
+    if let Some((s, range)) = penalty {
+        // `x` carries an appended intercept in column 0, so the design column
+        // `c` of the penalty's range sits at `c + 1`.
+        for (a, ca) in range.clone().enumerate() {
+            for (b, cb) in range.clone().enumerate() {
+                xtx[[ca + 1, cb + 1]] += lambda * s[[a, b]];
+            }
+        }
+    }
+    let xty: Vec<f64> = (0..p)
+        .map(|j| (0..n).map(|i| x[[i, j]] * y[i]).sum())
+        .collect();
+    spd_solve(&xtx, &xty)
+}
+
 /// Span floor of a surface basis against the planted affine truth, with no fit
 /// and no penalty in it: least-squares projection of the NOISELESS
 /// `beta_true(x1)` onto the fit-time design's column span (intercept
@@ -401,6 +500,60 @@ fn span_arm(n: usize, bodies: &[&str]) {
                 .map(|l| (l * 1e6).round() / 1e6)
                 .collect::<Vec<_>>()
         );
+        // The ridge limit against each of the design's own penalties: at
+        // lambda -> inf this is the least-squares fit restricted to that
+        // penalty's null space, with no estimator and no smoothing search in
+        // it. For the measure-jet Primary (the jet energy) that null space is
+        // the affine head, which is where the end-to-end fit lands when REML
+        // puts the energy at lambda = 85.
+        for (pi, pen) in fitted.design.penalties.iter().enumerate() {
+            for lambda in [1.0e2_f64, 1.0e6, 1.0e10] {
+                let b = penalized_fit(
+                    &x,
+                    &truth_rows,
+                    Some((&pen.local, pen.col_range.clone())),
+                    lambda,
+                );
+                let g: Vec<f64> = (0..grid.len())
+                    .map(|i| b[0] + (0..cols).map(|j| gdense[[i, j]] * b[j + 1]).sum::<f64>())
+                    .collect();
+                let (rb1, re1, re2, renl) = decompose(&g, &grid);
+                println!(
+                    "[2751 span {body}] ridge-limit penalty#{pi} range={:?} lambda={lambda:.0e} \
+                     d/dx1={rb1:.4} rms[x1]={re1:.5} rms[x2]={re2:.5} rms[nl]={renl:.5} \
+                     pearson={:.4}",
+                    pen.col_range,
+                    pearson(&g, &truth_grid)
+                );
+            }
+        }
+        for term in &fitted.resolvedspec.smooth_terms {
+            if let SmoothBasisSpec::MeasureJet { spec: mj, .. } = &term.basis {
+                let masses = mj
+                    .frozen_quadrature
+                    .as_ref()
+                    .map(|q| q.masses.clone())
+                    .expect("frozen quadrature");
+                let centers = match &mj.center_strategy {
+                    gam::terms::basis::CenterStrategy::UserProvided(c) => c.clone(),
+                    other => {
+                        println!("[2751 span {body}] centers not frozen: {other:?}");
+                        continue;
+                    }
+                };
+                let head = gam::terms::basis::measure_jet_affine_head_transform(
+                    centers.view(),
+                    masses.view(),
+                );
+                println!(
+                    "[2751 span {body}] centers={:?} head_rank={} head_T={:?} ell={:?}",
+                    centers.dim(),
+                    head.ncols(),
+                    head,
+                    mj.length_scale
+                );
+            }
+        }
     }
 }
 

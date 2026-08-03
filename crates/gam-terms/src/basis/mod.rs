@@ -93,6 +93,7 @@ pub use measure_jet_predict::{
 pub use measure_jet_smooth::{
     MeasureJetBand, MeasureJetBasisSpec, MeasureJetEnergyJets, MeasureJetFrozenQuadrature,
     MeasureJetIdentifiability, build_measure_jet_basis, build_measure_jet_basis_psi_derivatives,
+    measure_jet_affine_head_block, measure_jet_affine_head_lift,
     measure_jet_affine_head_transform, measure_jet_band, measure_jet_center_masses,
     measure_jet_design_matrix, measure_jet_energy_form, measure_jet_energy_form_with_jets,
     measure_jet_energy_forms_per_scale, measure_jet_input_noise_scale, measure_jet_multiscale_mode,

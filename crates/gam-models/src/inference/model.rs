@@ -4375,11 +4375,15 @@ impl FittedModel {
                     let beta_term = fit.beta.slice(ndarray::s![g0..g0 + term_cols]).to_owned();
                     // Lift to raw representer+head coefficients z_full = Z·β̂_term.
                     let z_full = transform.dot(&beta_term);
-                    let head_rank = m_aug - m;
+                    let head_width = m_aug - m;
                     let rep = z_full.slice(ndarray::s![..m]).to_owned();
                     let head_coeffs = z_full.slice(ndarray::s![m..]).to_owned();
-                    let head_t = if head_rank > 0 {
-                        Some(gam_terms::basis::measure_jet_affine_head_transform(
+                    // The AFFINE head lift (#2751): the head block spans the
+                    // energy's whole null space, constant included, so the
+                    // reconstruction has to rebuild the same object the design
+                    // was built from.
+                    let head_t = if head_width > 0 {
+                        Some(gam_terms::basis::measure_jet_affine_head_lift(
                             centers.view(),
                             frozen.masses.view(),
                         ))
@@ -4387,10 +4391,10 @@ impl FittedModel {
                         None
                     };
                     if let Some(t) = head_t.as_ref() {
-                        if t.ncols() != head_rank {
+                        if t.ncols() != head_width {
                             log::warn!(
-                                "measure-jet term '{}': reconstructed head lift rank {} disagrees \
-                                 with the frozen head block {head_rank}; skipping its \
+                                "measure-jet term '{}': reconstructed head lift width {} disagrees \
+                                 with the frozen head block {head_width}; skipping its \
                                  input-measurement-error variance",
                                 term.name,
                                 t.ncols()

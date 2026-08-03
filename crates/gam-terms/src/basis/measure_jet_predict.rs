@@ -81,10 +81,11 @@ use super::BasisError;
 /// coordinates the frozen geometry lives in.
 ///
 /// The term's fitted contribution is the augmented representer expansion
-/// `f̂(x) = Σ_i z_i · K(x, c_i)  +  Σ_h h_h · (xᵀ T)_h`, where
+/// `f̂(x) = Σ_i z_i · K(x, c_i)  +  Σ_h h_h · ([1 | x]ᵀ T_aff)_h`, where
 /// `K(x, c_i) = exp(−‖x − c_i‖² / (2 ℓ²))` is the Gaussian representer, `z`
-/// the raw-space representer coefficients (`z_full[..m]`), `T` the
-/// ambient-linear head lift (`d × head_rank`) and `h` the raw-space head
+/// the raw-space representer coefficients (`z_full[..m]`), `T_aff` the AFFINE
+/// head lift (`(d+1) × head_width`, row 0 the constant — see
+/// [`crate::basis::measure_jet_affine_head_lift`]) and `h` the raw-space head
 /// coefficients (`z_full[m..]`). Both coefficient blocks are the raw (pre-gauge)
 /// coefficients — lift the fitted reduced coefficients through the frozen
 /// identifiability transform first (`β_raw = Z · β̂`).
@@ -92,14 +93,15 @@ use super::BasisError;
 /// Differentiating in `x` (exact, hand-derived — no FD, no autodiff):
 ///
 /// ```text
-///   ∂K(x, c_i)/∂x_a = K(x, c_i) · (c_{i,a} − x_a) / ℓ² ,
-///   ∂(xᵀ T)_h/∂x_a  = T_{a,h} ,
+///   ∂K(x, c_i)/∂x_a       = K(x, c_i) · (c_{i,a} − x_a) / ℓ² ,
+///   ∂([1|x]ᵀ T_aff)_h/∂x_a = T_aff_{a+1,h} ,
 /// ```
 ///
-/// so the ambient gradient is
+/// (the constant row contributes nothing to the gradient), so the ambient
+/// gradient is
 ///
 /// ```text
-///   ∇f̂(x)_a = Σ_i z_i · K(x, c_i) · (c_{i,a} − x_a) / ℓ²  +  Σ_h h_h · T_{a,h} .
+///   ∇f̂(x)_a = Σ_i z_i · K(x, c_i) · (c_{i,a} − x_a) / ℓ²  +  Σ_h h_h · T_aff_{a+1,h} .
 /// ```
 ///
 /// This is the first-order (jet) term of the measure-jet expansion the frame
@@ -152,24 +154,27 @@ pub fn measure_jet_ambient_gradient(
         }
     }
     if let Some(t) = head_transform {
-        let head_rank = t.ncols();
-        if head_coeffs.len() != head_rank {
+        let head_width = t.ncols();
+        if head_coeffs.len() != head_width {
             crate::bail_dim_basis!(
                 "measure-jet ambient gradient: {} head coefficients for a head lift with \
-                 {head_rank} columns",
+                 {head_width} columns",
                 head_coeffs.len()
             );
         }
-        if t.nrows() != d {
+        if t.nrows() != d + 1 {
             crate::bail_dim_basis!(
-                "measure-jet ambient gradient: head lift has {} rows but ambient dimension is {d}",
+                "measure-jet ambient gradient: affine head lift has {} rows but ambient \
+                 dimension is {d} (expected d+1)",
                 t.nrows()
             );
         }
         for a in 0..d {
             let mut acc = 0.0_f64;
-            for h in 0..head_rank {
-                acc += head_coeffs[h] * t[(a, h)];
+            for h in 0..head_width {
+                // Row 0 of the affine lift is the constant; the gradient in
+                // coordinate `a` reads row `a + 1`.
+                acc += head_coeffs[h] * t[(a + 1, h)];
             }
             grad[a] += acc;
         }
@@ -628,9 +633,11 @@ mod tests {
         }
         if let Some(t) = head {
             for h in 0..t.ncols() {
-                let mut proj = 0.0_f64;
+                // Affine lift: row 0 multiplies the constant 1, row a+1 the
+                // coordinate a.
+                let mut proj = t[(0, h)];
                 for a in 0..query.len() {
-                    proj += query[a] * t[(a, h)];
+                    proj += query[a] * t[(a + 1, h)];
                 }
                 val += head_coeffs[h] * proj;
             }
@@ -647,9 +654,12 @@ mod tests {
         let centers = arr2(&[[0.0, 0.0], [1.0, 0.5], [-0.7, 0.9], [0.4, -1.1]]);
         let z = arr1(&[0.8, -1.3, 0.5, 2.0]);
         let length_scale = 0.6;
-        // A rank-2 ambient-linear head lift T (d=2, head_rank=2).
-        let t = arr2(&[[1.0, 0.2], [-0.3, 0.9]]);
-        let head_coeffs = arr1(&[0.7, -0.4]);
+        // A rank-2 AFFINE head lift T_aff (d=2, head_width=3): row 0 is the
+        // constant, rows 1..=2 the two ambient-linear directions. The constant
+        // column must contribute nothing to the gradient, which is exactly what
+        // the FD comparison below pins.
+        let t = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.2], [0.0, -0.3, 0.9]]);
+        let head_coeffs = arr1(&[1.9, 0.7, -0.4]);
         let query = arr1(&[0.15, -0.2]);
 
         let grad = measure_jet_ambient_gradient(
