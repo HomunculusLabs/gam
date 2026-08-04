@@ -7610,7 +7610,7 @@ fn try_exact_joint_latent_coord_optimization(
     };
 
     let result = {
-        let mut obj = problem.build_objective_with_eval_order(
+        let obj = problem.build_objective_with_eval_order(
             &mut ctx,
             |ctx: &mut &mut LatentJointContext<'_>, theta: &Array1<f64>| Ok(ctx.eval_cost(theta)),
             |ctx: &mut &mut LatentJointContext<'_>, theta: &Array1<f64>| {
