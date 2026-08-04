@@ -285,15 +285,24 @@ pub trait OuterObjective {
     /// is built on a [`gam_terms::construction::CanonicalPenalty`] bundle that
     /// `PenaltyMapInvariance` reads directly.
     ///
-    /// NOT installed by the custom-family route, which is the other production
-    /// site that sets `require_measured_psd`. Its penalties live as
-    /// `ParameterBlockSpec::penalties` (plus, for the one family that has them,
-    /// a `JointPenaltyBundle`), so publishing an invariance there means first
-    /// mapping that layout onto the outer rho vector — and a WRONG map deflates
-    /// a direction the criterion is not flat along, which is strictly worse than
-    /// deflating nothing. Left at the default until someone can derive that map
-    /// and gate it: `None` is exactly the pre-#2676 behaviour, so nothing there
-    /// regresses, and no fixture on this issue routes through it.
+    /// NOT installed on two routes that also set `require_measured_psd`,
+    /// because on both of them the map from the penalty layout onto the outer
+    /// rho vector is not derivable from where the objective is built — and a
+    /// WRONG map deflates a direction the criterion is not flat along, which is
+    /// strictly worse than deflating nothing:
+    ///
+    /// * the **custom-family** route, whose penalties live as
+    ///   `ParameterBlockSpec::penalties` plus (for the one family that has them)
+    ///   a `JointPenaltyBundle`;
+    /// * the **n-block exact-joint spatial** route, whose criterion is a
+    ///   caller-supplied evaluator (`exact_fn`) rather than a `RemlState`, so
+    ///   the block-major concatenation of per-block penalties into rho is the
+    ///   caller's contract and not visible here.
+    ///
+    /// Both keep the default, which is exactly the pre-#2676 behaviour, so
+    /// nothing on them regresses. Neither carries a #2676 fixture: the
+    /// `geo_disease_*_matern` cells route through `standard REML` and
+    /// `iso-kappa joint REML`, both of which do install it.
     fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
         log::trace!(
             "[#2676] this objective declares no criterion invariance (theta_dim={})",

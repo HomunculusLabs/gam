@@ -7624,6 +7624,15 @@ fn try_exact_joint_latent_coord_optimization(
             }),
             Some(|ctx: &mut &mut LatentJointContext<'_>, theta: &Array1<f64>| ctx.eval_efs(theta)),
         );
+        // #2676: same invariance hook as the iso-kappa arm — this route also
+        // runs through `exact_joint_multistart_outer_problem`, which sets
+        // `require_measured_psd`, so its certificate reaches the same curvature
+        // verdict on the same kind of penalty map.
+        let mut obj = obj.with_criterion_invariance(
+            |ctx: &mut &mut LatentJointContext<'_>, rho: &Array1<f64>| {
+                ctx.evaluator.criterion_invariant_directions(rho)
+            },
+        );
 
         problem
             .run(&mut obj, "latent-coordinate joint REML")
