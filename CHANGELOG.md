@@ -38,11 +38,22 @@
   boundary is the eigensolver's own Weyl backward error, the instrument already
   used for this Gram.
 
-  **What this does not change.** An objective declaring no invariance — every
-  objective except the two REML arms and the spatial joint arm, and those only
-  on a redundant penalty map — reaches a bit-identical verdict; the deflated
-  path is not taken. A genuine saddle is untouched: #2665's
-  `lambda_min = -1.6e3` is not in the deflated subspace and still refuses.
+  **What this does not change, as a theorem rather than an anecdote.** An
+  objective declaring no invariance — every objective except the two REML arms
+  and the spatial joint arm, and those only on a redundant penalty map —
+  reaches a bit-identical verdict; the deflated path is not taken. And what
+  deflation can hide is bounded by Cauchy interlacing: `Z' H Z` is a compression
+  onto a subspace of codimension `d`, so `lambda_1(Z'HZ) <= lambda_{d+1}(H)`.
+  Deflating `d` directions can lose at most the `d` SMALLEST eigenvalues and
+  never one beyond them — with the one-dimensional invariance here, a matrix
+  carrying two negative directions still refuses, and #2665's
+  `lambda_min = -1.6e3` saddle is not in the deflated subspace at all.
+
+  Only the part of the invariance that lies INSIDE the judged face is deflated.
+  The identity is a statement about the FULL direction, so an invariance
+  direction with a material component on a railed coordinate is deliberately
+  left in the judged block rather than restricted and deflated — restricting it
+  would break the identity and, in the extreme, hide real curvature.
 
   **Related corrections.** The saddle-escape search now looks in the same
   subspace the certificate judged, so it can no longer step along the invariance
