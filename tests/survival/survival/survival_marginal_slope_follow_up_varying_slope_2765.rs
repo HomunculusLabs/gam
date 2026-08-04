@@ -27,7 +27,7 @@ use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
 
-const N: usize = 1_600;
+const N: usize = 2_400;
 /// Slope at `t = 1` (`log t = 0`).
 const SLOPE_LEVEL: f64 = 0.85;
 /// Slope drift per unit `log t`. Negative = the score's effect attenuates.
@@ -187,8 +187,16 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
         z_column: Some("z".to_string()),
         logslope_formula: Some("1".to_string()),
         // The slope's own follow-up margin — the whole point of #2765/#2767.
+        // A quadratic margin with four columns spans the planted linear-in-log-t
+        // slope with room to spare while staying well clear of the baseline
+        // time surface, which is also a smooth function of `log t`: the two are
+        // separated by the `z` interaction, not by their time shapes, so a very
+        // rich margin buys nothing and costs conditioning.
         logslope_time_k: Some(4),
-        logslope_time_degree: 3,
+        logslope_time_degree: 2,
+        // Keep the baseline time surface only as flexible as the planted
+        // `q(t) = a₀ + a₁·log t` needs.
+        time_num_internal_knots: 3,
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     };

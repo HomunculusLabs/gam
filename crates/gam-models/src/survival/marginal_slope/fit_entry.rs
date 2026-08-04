@@ -131,8 +131,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // time margin, and the layout carries the other two follow-up channels. The
     // `Static` template returns the design untouched, so every model built
     // before this existed takes exactly the same path it did.
-    let (logslope_design, logslope_follow_up) =
-        tensorize_logslope_design_over_time(logslope_design, &spec.logslope_template)?;
+    // The COVARIATE factor stays available under its own name: `build_blocks`
+    // and `make_family` apply the time margin themselves (the outer spatial
+    // search hands them a freshly rebuilt covariate design on every probe), so
+    // handing them the already-tensored design would tensor it twice.
+    let logslope_cov_design = logslope_design;
+    let (logslope_design, logslope_follow_up) = tensorize_logslope_design_over_time(
+        logslope_cov_design.clone(),
+        &spec.logslope_template,
+    )?;
     if logslope_follow_up.is_some() {
         // The spatial-psi hyperparameter path, the learned-frailty scale jet and
         // the flex/time-wiggle surfaces all evaluate the row program through the
@@ -1149,12 +1156,12 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         let rigid_blocks = build_blocks(
             &rigid_rho,
             &marginal_design,
-            &logslope_design,
+            &logslope_cov_design,
             FlexActivation::OffForRigidPilot,
         )?;
         let rigid_family = make_family(
             &marginal_design,
-            &logslope_design,
+            &logslope_cov_design,
             &initial_hyper_theta,
             FlexActivation::OffForRigidPilot,
         )?;
@@ -1277,7 +1284,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let initial_blocks = build_blocks(
         &initial_rho,
         &marginal_design,
-        &logslope_design,
+        &logslope_cov_design,
         FlexActivation::On,
     )?;
     // Validate the assembled block specs at the construction boundary so any
@@ -1293,7 +1300,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     })?;
     let initial_family = make_family(
         &marginal_design,
-        &logslope_design,
+        &logslope_cov_design,
         &initial_hyper_theta,
         FlexActivation::On,
     )?;
