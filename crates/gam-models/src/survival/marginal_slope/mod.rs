@@ -147,7 +147,7 @@ mod psi_terms;
 mod pullback;
 pub(crate) mod row_kernel;
 mod row_math;
-mod slope_geometry;
+pub(crate) mod slope_geometry;
 mod spec;
 mod timepoint_exact;
 mod timewiggle_geometry;

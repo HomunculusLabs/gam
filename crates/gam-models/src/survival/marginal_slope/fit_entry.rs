@@ -1724,6 +1724,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         logslopespec_resolved: resolved_specs.remove(0),
         marginal_design: designs[0].clone(),
         logslope_design: designs[1].clone(),
+        logslope_time_basis: spec
+            .logslope_template
+            .resolved_time_basis()
+            .cloned(),
         gaussian_frailty_sd: final_sigma,
         baseline_config: final_baseline_config,
         baseline_slope,

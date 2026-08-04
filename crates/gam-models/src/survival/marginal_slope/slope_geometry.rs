@@ -601,7 +601,7 @@ mod tests {
             let h = 10.0_f64.powi(-step_exponent);
             let finite = (eta(t + h) - eta(t - h)) / (2.0 * h);
 
-            let features = dynamic_slope_feature_frame(
+            let features = [
                 0.0,
                 q(t),
                 q_rate(t),
@@ -611,7 +611,7 @@ mod tests {
                 0.0,
                 g(t) * g(t) * covariance_ones,
                 2.0 * g(t) * g_rate(t) * covariance_ones,
-            );
+            ];
             let (_, _, _, [_, _, adjusted_derivative]) =
                 rigid_feature_frame_order2(&features, row.wi, row.di, probit_scale);
 
@@ -677,12 +677,16 @@ mod tests {
             .expect("per-score topology")
             .materialize_identity(DesignMatrix::from(raw.clone()), &array![0.0, 0.0])
             .expect("per-score layout");
-        let error = layout
-            .with_follow_up(
-                DesignMatrix::from(raw.clone()),
-                DesignMatrix::from(raw),
-            )
-            .expect_err("per-score plus a time margin must be refused");
+        let Err(error) = layout.with_follow_up(
+            DesignMatrix::from(raw.clone()),
+            DesignMatrix::from(raw),
+        ) else {
+            panic!(
+                // SAFETY (test): the refusal is the property under test; if the
+                // call succeeds there is nothing left to assert on.
+                "per-score plus a time margin must be refused"
+            );
+        };
         assert!(error.contains("per-score"), "{error}");
     }
 }

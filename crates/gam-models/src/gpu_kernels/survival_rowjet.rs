@@ -430,6 +430,9 @@ mod tests {
         probit_scale: f64,
     ) -> SurvivalRowVghChannels {
         use crate::survival::marginal_slope::row_kernel::rigid_row_order2;
+        use crate::survival::marginal_slope::slope_geometry::{
+            STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry,
+        };
 
         let n = rows.len();
         let mut value = vec![0.0_f64; n];
@@ -438,7 +441,11 @@ mod tests {
         for (row, input) in rows.iter().enumerate() {
             let in_row = rigid_cpu_row_inputs(row, input, probit_scale);
             let p = input.primaries;
-            if let Ok((row_value, row_gradient, row_hessian)) = rigid_row_order2(&p, &in_row) {
+            if let Ok((row_value, row_gradient, row_hessian)) = rigid_row_order2::<
+                STATIC_SLOPE_PRIMARIES,
+                StaticSlopeGeometry,
+            >(&p, &in_row)
+            {
                 value[row] = row_value;
                 grad[row * 4..row * 4 + 4].copy_from_slice(&row_gradient);
                 for a in 0..4 {
@@ -502,6 +509,9 @@ mod tests {
     #[test]
     fn cpu_vgh_matches_canonical_dense_order2() {
         use crate::survival::marginal_slope::row_kernel::rigid_row_nll;
+        use crate::survival::marginal_slope::slope_geometry::{
+            STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry,
+        };
         use gam_math::jet_scalar::{JetScalar, Order2};
 
         let rows = fixture(64);
@@ -510,7 +520,11 @@ mod tests {
             let row_inputs = rigid_cpu_row_inputs(row, input, 0.7);
             let variables: [Order2<4>; 4] =
                 std::array::from_fn(|axis| Order2::variable(input.primaries[axis], axis));
-            let expected = rigid_row_nll(&variables, &row_inputs).expect("dense order-2 row");
+            let expected = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+                &variables,
+                &row_inputs,
+            )
+            .expect("dense order-2 row");
             assert!((expected.value() - out.value[row]).abs() <= 1e-12);
             for a in 0..4 {
                 assert!((expected.g()[a] - out.grad[row * 4 + a]).abs() <= 1e-12);

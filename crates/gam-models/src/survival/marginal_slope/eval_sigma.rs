@@ -671,7 +671,7 @@ mod sigma_parameter_jet_release_tests {
             primaries[2],
             primaries[3].mul(scale),
         ];
-        rigid_row_nll(&observed, inputs)
+        rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&observed, inputs)
     }
 
     // Naive dense alternative to `first_parameter_order2_terms`: the SAME row

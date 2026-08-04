@@ -158,7 +158,7 @@ impl LogslopeTopology {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum LogslopeChannels {
     Shared {
         offset: Arc<Array1<f64>>,
@@ -181,7 +181,7 @@ pub(crate) enum LogslopeChannels {
 ///
 /// `None` on a layout is the time-constant slope: `g₀ = g₁` and `ġ₁ = 0`
 /// identically, which is what every model built before this existed asks for.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct LogslopeFollowUpDesigns {
     pub(crate) entry: DesignMatrix,
     pub(crate) derivative_exit: DesignMatrix,
@@ -211,7 +211,7 @@ pub(crate) struct SlopeRowChannels {
     pub(crate) rate: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct LogslopeLayout {
     coefficient_design: DesignMatrix,
     follow_up: Option<LogslopeFollowUpDesigns>,

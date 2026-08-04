@@ -133,6 +133,18 @@ pub struct SurvivalMarginalSlopeFitResult {
     /// baselines have no family-owned coordinates and therefore return `None`.
     pub baseline_config: crate::survival::construction::SurvivalBaselineConfig,
     pub logslope_design: TermCollectionDesign,
+    /// The resolved follow-up time margin of the log-slope block, when the fit
+    /// asked for a slope that varies along follow-up (gam#2765, gam#2767).
+    ///
+    /// This is fit state a predictor would have to replay: with a margin
+    /// present, `logslope_design` is the tensor product `X_cov ⊗ᵣ B(log t)` and
+    /// `logslopespec_resolved` still describes only the covariate factor, so a
+    /// predictor that rebuilt the design from the spec alone would produce
+    /// `p_cov` columns against a `p_cov·p_time` coefficient vector. The knots
+    /// are carried here for exactly the reason the threshold and sigma margins
+    /// carry theirs — a prediction sample must never be allowed to move the
+    /// basis by re-estimating quantile knots.
+    pub logslope_time_basis: Option<crate::survival::location_scale::SurvivalCovariateTimeBasis>,
     pub baseline_slope: f64,
     pub baseline_offset_residuals: OffsetChannelResiduals,
     pub baseline_offset_curvatures: OffsetChannelCurvatures,

@@ -609,6 +609,7 @@ fn validate_spec_rejects_coordinate_cone_without_guard_offset() {
         marginalspec: empty_termspec(),
         marginal_offset: Array1::zeros(2),
         frailty: FrailtySpec::None,
+        logslope_template: SurvivalCovariateTermBlockTemplate::Static,
         derivative_guard: 1e-4,
         baseline_hyper: SurvivalMarginalSlopeBaselineHyperSpec::Linear {
             config: crate::survival::construction::SurvivalBaselineConfig {
@@ -653,6 +654,7 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
     // clear it, so the two cannot drift apart again.
     const LEARNED_SHIFT_GUARD: f64 = 1e-4;
     let spec = SurvivalMarginalSlopeTermSpec {
+        logslope_template: SurvivalCovariateTermBlockTemplate::Static,
         age_entry: array![0.0, 0.0],
         age_exit: array![1.0, 1.0],
         event_target: array![0.0, 1.0],
@@ -1233,7 +1235,9 @@ fn rigid_row_kernel_propagates_invalid_nonfinite_signed_margin_errors() {
     );
 
     let err =
-        <SurvivalMarginalSlopeRowKernel as crate::row_kernel::RowKernel<4>>::row_kernel(&kernel, 0)
+        <SurvivalMarginalSlopeRowKernel<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry> as crate::row_kernel::RowKernel<STATIC_SLOPE_PRIMARIES>>::row_kernel(
+            &kernel, 0,
+        )
             .expect_err("row kernel should propagate exact probit boundary failures");
     assert!(err.contains("non-finite signed margin"));
 }
@@ -1265,7 +1269,9 @@ fn rigid_row_kernel_propagates_nan_signed_margin_errors() {
     );
 
     let err =
-        <SurvivalMarginalSlopeRowKernel as crate::row_kernel::RowKernel<4>>::row_kernel(&kernel, 0)
+        <SurvivalMarginalSlopeRowKernel<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry> as crate::row_kernel::RowKernel<STATIC_SLOPE_PRIMARIES>>::row_kernel(
+            &kernel, 0,
+        )
             .expect_err("row kernel should propagate NaN probit boundary failures");
     assert!(err.contains("non-finite signed margin"));
 }
@@ -1467,16 +1473,27 @@ fn rigid_family_direction_terms_match_fd_witness_932() {
 
         for row in 0..n {
             let (terms_first, terms_second) = family
-                .rigid_family_direction_terms(row, &block_states, first, second)
+                .rigid_family_direction_terms::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                    row,
+                    &block_states,
+                    first,
+                    second,
+                )
                 .expect("family-direction terms");
 
-            let p = rigid_row_kernel_primaries(&family, &block_states, row).expect("primaries");
+            let p = rigid_row_kernel_primaries::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                &family,
+                &block_states,
+                row,
+            )
+            .expect("primaries");
             let inputs = rigid_row_inputs(&family, &block_states, row, "family-direction oracle")
                 .expect("row inputs");
             let at = |t: f64| -> (f64, [f64; 4], [[f64; 4]; 4]) {
                 let shifted: [f64; 4] =
                     std::array::from_fn(|a| p[a] + t * first[a] + 0.5 * t * t * second[a]);
-                rigid_row_order2(&shifted, &inputs).expect("shifted symbolic row")
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(&shifted, &inputs)
+                    .expect("shifted symbolic row")
             };
 
             // First channel: d/dt at 0 (central, h=1e-6).
@@ -1553,7 +1570,10 @@ fn rigid_family_direction_terms_match_fd_witness_932() {
             ];
             for (label, block, beta_dir) in probes {
                 let drift = family
-                    .rigid_family_direction_beta_drift(row, &block_states, first, beta_dir)
+                    .rigid_family_direction_beta_drift::<
+                        STATIC_SLOPE_PRIMARIES,
+                        StaticSlopeGeometry,
+                    >(row, &block_states, first, beta_dir)
                     .expect("family-direction beta drift");
                 let hs = 1.0e-5;
                 let shifted_terms = |s: f64| {
@@ -1564,7 +1584,10 @@ fn rigid_family_direction_terms_match_fd_witness_932() {
                         states[block].eta[row] += s;
                     }
                     family
-                        .rigid_family_direction_terms(row, &states, first, [0.0; 4])
+                        .rigid_family_direction_terms::<
+                            STATIC_SLOPE_PRIMARIES,
+                            StaticSlopeGeometry,
+                        >(row, &states, first, [0.0; STATIC_SLOPE_PRIMARIES])
                         .expect("shifted family-direction terms")
                         .0
                 };
@@ -1650,7 +1673,7 @@ fn rigid_row_kernel_agrees_with_jet_tower_program_all_channels() {
             },
         ];
 
-        let kernel = SurvivalMarginalSlopeRowKernel::new(family.clone(), block_states.clone());
+        let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(family.clone(), block_states.clone());
 
         // Build the tower program's primaries exactly as `row_kernel` reads
         // them (designs · beta_time + offsets + shared marginal/logslope eta).
@@ -1755,9 +1778,14 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
         };
 
         let dense_vars: [Order2<4>; 4] = std::array::from_fn(|a| Order2::variable(p[a], a));
-        let dense = rigid_row_nll(&dense_vars, &inputs).expect("generic scalar feature map");
+        let dense = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+            &dense_vars,
+            &inputs,
+        )
+        .expect("generic scalar feature map");
         let (value, gradient, hessian) =
-            rigid_row_order2(&p, &inputs).expect("scalar feature pullback");
+            rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(&p, &inputs)
+                .expect("scalar feature pullback");
         let observed_g = inputs.probit_scale * p[3];
         let (_, _, _, semantic_witnesses) = rigid_feature_frame_order2(
             &static_slope_feature_frame(
@@ -1772,7 +1800,10 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
             inputs.di,
             inputs.probit_scale,
         );
-        let sliced_witnesses = rigid_row_admission_witnesses(&p, &inputs);
+        let sliced_witnesses =
+            rigid_row_admission_witnesses::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                &p, &inputs,
+            );
 
         let mut check = |a: f64, b: f64| {
             let rel = (a - b).abs() / (1.0 + a.abs().max(b.abs()));
@@ -7492,7 +7523,7 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
             },
         ];
 
-        let kernel = SurvivalMarginalSlopeRowKernel::new(family, block_states);
+        let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(family, block_states);
         let p = RowKernel::n_coefficients(&kernel);
         assert_eq!(
             p,
@@ -8001,14 +8032,20 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         let dense = program_full_tower(&program, 0).expect("dense tower");
         let third_vars: [OneSeed<4>; 4] =
             std::array::from_fn(|a| OneSeed::seed_direction([q0, q1, qd1, g][a], a, dir_u[a]));
-        let third = rigid_row_nll(&third_vars, &inputs)
-            .expect("specialized third")
-            .contracted_third();
+        let third = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+            &third_vars,
+            &inputs,
+        )
+        .expect("specialized third")
+        .contracted_third();
         let fourth_vars: [TwoSeed<4>; 4] =
             std::array::from_fn(|a| TwoSeed::seed([q0, q1, qd1, g][a], a, dir_u[a], dir_v[a]));
-        let fourth = rigid_row_nll(&fourth_vars, &inputs)
-            .expect("specialized fourth")
-            .contracted_fourth();
+        let fourth = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+            &fourth_vars,
+            &inputs,
+        )
+        .expect("specialized fourth")
+        .contracted_fourth();
         let dense_third = dense.third_contracted(&dir_u);
         let dense_fourth = dense.fourth_contracted(&dir_u, &dir_v);
         for a in 0..4 {
@@ -8034,7 +8071,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
             let vars: [OneSeed<4>; 4] = std::array::from_fn(|a| {
                 OneSeed::seed_direction([q0, q1, qd1, perturbed_g][a], a, dir_u[a])
             });
-            let t = rigid_row_nll(&vars, &inputs)
+            let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
                 .expect("specialized third")
                 .contracted_third();
             t[0][0] + t[3][3]
@@ -8056,7 +8093,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
             let vars: [TwoSeed<4>; 4] = std::array::from_fn(|a| {
                 TwoSeed::seed([q0, q1, qd1, perturbed_g][a], a, dir_u[a], dir_v[a])
             });
-            let t = rigid_row_nll(&vars, &inputs)
+            let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
                 .expect("specialized fourth")
                 .contracted_fourth();
             t[0][0] + t[3][3]
@@ -8077,7 +8114,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
 }
 
 /// gam#979 isolation gate: does `SurvivalMarginalSlopeRowKernel`'s
-/// static-sparsity `SparseTower4<RIGID_LINEAR_MASK>` build the SAME full
+/// static-sparsity `SparseTower4<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>` build the SAME full
 /// `t4` (all 256 entries, not just the 3 `fourth_contracted(u,v)` direction
 /// pairs `rigid_row_kernel_agrees_with_jet_tower_program_all_channels`
 /// checks) as the dense `Tower4<4>` oracle, on the EXACT fixture/row the
@@ -8095,9 +8132,9 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
 #[test]
 fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
     use super::row_kernel::{
-        RIGID_LINEAR_MASK, SparseTower4, rigid_row_inputs, rigid_row_kernel_primaries,
-        rigid_row_nll,
+        SparseTower4, rigid_row_inputs, rigid_row_kernel_primaries, rigid_row_nll,
     };
+    use super::slope_geometry::{RIGID_LINEAR_MASK, STATIC_SLOPE_PRIMARIES};
     use gam_math::jet_scalar::JetScalar;
     use gam_math::jet_tower::program_full_tower;
 
@@ -8168,7 +8205,12 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
     for row in 0..n {
         let dense = program_full_tower(&program, row).expect("dense tower4 oracle");
 
-        let p = rigid_row_kernel_primaries(&family, &block_states, row).expect("primaries");
+        let p = rigid_row_kernel_primaries::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+            &family,
+            &block_states,
+            row,
+        )
+        .expect("primaries");
         let inputs = rigid_row_inputs(
             &family,
             &block_states,
@@ -8176,9 +8218,12 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
             "sparse-vs-dense t4 isolation test",
         )
         .expect("rigid row inputs");
-        let vars: [SparseTower4<RIGID_LINEAR_MASK>; 4] =
+        let vars: [SparseTower4<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>; STATIC_SLOPE_PRIMARIES] =
             std::array::from_fn(|a| SparseTower4::variable(p[a], a));
-        let sparse = rigid_row_nll(&vars, &inputs).expect("sparse tower4");
+        let sparse = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+            &vars, &inputs,
+        )
+        .expect("sparse tower4");
 
         for a in 0..4 {
             for b in 0..4 {
@@ -8813,16 +8858,25 @@ fn rigid_row_primary_mixed_in_z_matches_finite_difference() {
                         };
                         let primaries = [q0, q1, qd1, g];
                         let analytic =
-                            rigid_row_primary_mixed_in_z(&primaries, &inputs_at(z))
-                                .expect("analytic mixed derivative");
+                            rigid_row_primary_mixed_in_z::<
+                                STATIC_SLOPE_PRIMARIES,
+                                StaticSlopeGeometry,
+                            >(&primaries, &inputs_at(z))
+                            .expect("analytic mixed derivative");
                         // Central difference of the primary gradient in z. The
                         // step is scaled to |z| so the relative truncation error
                         // stays ~h² across the grid.
                         let h = 1e-5 * (1.0 + z.abs());
-                        let (_, grad_plus, _) =
-                            rigid_row_order2(&primaries, &inputs_at(z + h)).expect("gradient +h");
-                        let (_, grad_minus, _) =
-                            rigid_row_order2(&primaries, &inputs_at(z - h)).expect("gradient -h");
+                        let (_, grad_plus, _) = rigid_row_order2::<
+                            STATIC_SLOPE_PRIMARIES,
+                            StaticSlopeGeometry,
+                        >(&primaries, &inputs_at(z + h))
+                        .expect("gradient +h");
+                        let (_, grad_minus, _) = rigid_row_order2::<
+                            STATIC_SLOPE_PRIMARIES,
+                            StaticSlopeGeometry,
+                        >(&primaries, &inputs_at(z - h))
+                        .expect("gradient -h");
                         for axis in 0..4 {
                             let fd = (grad_plus[axis] - grad_minus[axis]) / (2.0 * h);
                             let scale = analytic[axis].abs().max(fd.abs()).max(1.0);
