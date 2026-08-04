@@ -751,7 +751,14 @@ fn rigid_row_feature_jets<S: JetScalar<4>>(
     let observed_g = vars[3].scale(inputs.probit_scale);
     let linear = observed_g.scale(inputs.z_sum);
     let variance = vars[3].mul(&vars[3]).scale(inputs.covariance_ones);
-    [vars[0], vars[1], vars[2], linear, variance]
+    static_slope_feature_frame(
+        vars[0],
+        vars[1],
+        vars[2],
+        linear,
+        variance,
+        S::constant(0.0),
+    )
 }
 
 #[inline(always)]
@@ -761,13 +768,14 @@ fn rigid_row_feature_values(
 ) -> [f64; RIGID_FEATURE_DIMENSION] {
     let [q0, q1, qd1, g] = *primaries;
     let observed_g = inputs.probit_scale * g;
-    [
+    static_slope_feature_frame(
         q0,
         q1,
         qd1,
         observed_g * inputs.z_sum,
         (g * g) * inputs.covariance_ones,
-    ]
+        0.0,
+    )
 }
 
 /// Admission witnesses for the scalar/shared four-primary geometry, obtained by
@@ -779,8 +787,8 @@ pub(crate) fn rigid_row_admission_witnesses(
     primaries: &[f64; 4],
     inputs: &RigidRowInputs,
 ) -> [f64; 3] {
-    let [q0, q1, qd1, linear, variance] = rigid_row_feature_values(primaries, inputs);
-    rigid_feature_program_witnesses(q0, q1, qd1, linear, variance, inputs.probit_scale)
+    let features = rigid_row_feature_values(primaries, inputs);
+    rigid_feature_frame_witnesses(&features, inputs.probit_scale)
 }
 
 /// The rigid survival marginal-slope row negative log-likelihood, evaluated
@@ -804,16 +812,8 @@ pub(crate) fn rigid_row_nll<S: JetScalar<4>>(
     inputs: &RigidRowInputs,
 ) -> Result<S, String> {
     let features = rigid_row_feature_jets(vars, inputs);
-    let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) = rigid_feature_program::<4, S>(
-        &features[FEATURE_Q0],
-        &features[FEATURE_Q1],
-        &features[FEATURE_QD1],
-        &features[FEATURE_LINEAR],
-        &features[FEATURE_VARIANCE],
-        inputs.wi,
-        inputs.di,
-        inputs.probit_scale,
-    );
+    let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) =
+        rigid_feature_frame_program::<4, S>(&features, inputs.wi, inputs.di, inputs.probit_scale);
 
     validate_rigid_row_admission(
         vars[2].value(),
@@ -859,18 +859,9 @@ pub(crate) fn rigid_row_primary_mixed_in_z(
     primaries: &[f64; 4],
     inputs: &RigidRowInputs,
 ) -> Result<[f64; 4], String> {
-    let [q0, q1, qd1, linear, variance] = rigid_row_feature_values(primaries, inputs);
+    let features = rigid_row_feature_values(primaries, inputs);
     let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_program_order2(
-            q0,
-            q1,
-            qd1,
-            linear,
-            variance,
-            inputs.wi,
-            inputs.di,
-            inputs.probit_scale,
-        );
+        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
     validate_rigid_row_admission(
         primaries[FEATURE_QD1],
         inputs,
@@ -879,44 +870,53 @@ pub(crate) fn rigid_row_primary_mixed_in_z(
         adjusted_derivative,
     )?;
     // `∂η/∂z_sum`: the observed slope. Same quantity `rigid_observed_logslope`
-    // names, read here off the feature map so the two cannot drift.
+    // names, read here off the feature map so the two cannot drift. A static
+    // slope reaches `z_sum` through BOTH location channels (`L0` at entry and
+    // `L1` at exit are the same functional), so every `∂/∂z_sum` below sums the
+    // pair — that pair is exactly what the single `linear` feature used to be
+    // before the slope was given its own follow-up axis (gam#2765).
     let observed_slope = inputs.probit_scale * primaries[3];
     // The same feature-map Jacobian columns `rigid_row_order2` builds for the
     // log-slope primary.
     let d_linear_d_g = inputs.probit_scale * inputs.z_sum;
     let d_variance_d_g = 2.0 * primaries[3] * inputs.covariance_ones;
+    let jacobian_to_g = |feature: usize| -> f64 {
+        if feature == FEATURE_LINEAR0 || feature == FEATURE_LINEAR1 {
+            d_linear_d_g
+        } else {
+            d_variance_d_g
+        }
+    };
+    let mixed_in_z = |feature: usize| -> f64 {
+        feature_hessian[feature][FEATURE_LINEAR0] + feature_hessian[feature][FEATURE_LINEAR1]
+    };
+    let slope_channel = STATIC_SLOPE_ACTIVE_FEATURES
+        .iter()
+        .map(|&feature| mixed_in_z(feature) * jacobian_to_g(feature))
+        .sum::<f64>();
     Ok([
-        observed_slope * feature_hessian[FEATURE_Q0][FEATURE_LINEAR],
-        observed_slope * feature_hessian[FEATURE_Q1][FEATURE_LINEAR],
-        observed_slope * feature_hessian[FEATURE_QD1][FEATURE_LINEAR],
-        observed_slope
-            * (feature_hessian[FEATURE_LINEAR][FEATURE_LINEAR] * d_linear_d_g
-                + feature_hessian[FEATURE_VARIANCE][FEATURE_LINEAR] * d_variance_d_g)
-            + feature_gradient[FEATURE_LINEAR] * inputs.probit_scale,
+        observed_slope * mixed_in_z(FEATURE_Q0),
+        observed_slope * mixed_in_z(FEATURE_Q1),
+        observed_slope * mixed_in_z(FEATURE_QD1),
+        observed_slope * slope_channel
+            + (feature_gradient[FEATURE_LINEAR0] + feature_gradient[FEATURE_LINEAR1])
+                * inputs.probit_scale,
     ])
 }
 
-/// Direct value/gradient/Hessian lowering of the canonical five-feature row
+/// Direct value/gradient/Hessian lowering of the canonical nine-feature row
 /// program followed by the universal second-order pullback into the scalar/shared
 /// four-primary geometry. The fixed stack buffers and active-feature map expose
-/// only the three identity rows plus the two `g -> (L,V)` channels.
+/// only the three identity rows plus the four `g -> (L0,L1,V0,V1)` channels a
+/// time-constant slope reaches.
 #[inline(always)]
 pub(crate) fn rigid_row_order2(
     primaries: &[f64; 4],
     inputs: &RigidRowInputs,
 ) -> Result<(f64, [f64; 4], [[f64; 4]; 4]), String> {
-    let [q0, q1, qd1, linear, variance] = rigid_row_feature_values(primaries, inputs);
+    let features = rigid_row_feature_values(primaries, inputs);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_program_order2(
-            q0,
-            q1,
-            qd1,
-            linear,
-            variance,
-            inputs.wi,
-            inputs.di,
-            inputs.probit_scale,
-        );
+        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
     validate_rigid_row_admission(
         primaries[FEATURE_QD1],
         inputs,
@@ -930,8 +930,12 @@ pub(crate) fn rigid_row_order2(
     jacobian[FEATURE_Q0 * DIMENSION + FEATURE_Q0] = 1.0;
     jacobian[FEATURE_Q1 * DIMENSION + FEATURE_Q1] = 1.0;
     jacobian[FEATURE_QD1 * DIMENSION + FEATURE_QD1] = 1.0;
-    jacobian[FEATURE_LINEAR * DIMENSION + 3] = inputs.probit_scale * inputs.z_sum;
-    jacobian[FEATURE_VARIANCE * DIMENSION + 3] = 2.0 * primaries[3] * inputs.covariance_ones;
+    let d_linear_d_g = inputs.probit_scale * inputs.z_sum;
+    let d_variance_d_g = 2.0 * primaries[3] * inputs.covariance_ones;
+    jacobian[FEATURE_LINEAR0 * DIMENSION + 3] = d_linear_d_g;
+    jacobian[FEATURE_LINEAR1 * DIMENSION + 3] = d_linear_d_g;
+    jacobian[FEATURE_VARIANCE0 * DIMENSION + 3] = d_variance_d_g;
+    jacobian[FEATURE_VARIANCE1 * DIMENSION + 3] = d_variance_d_g;
 
     let mut gradient = [0.0; DIMENSION];
     let mut flat_hessian = [0.0; DIMENSION * DIMENSION];
@@ -939,19 +943,30 @@ pub(crate) fn rigid_row_order2(
         &feature_gradient,
         &feature_hessian,
         &jacobian,
-        |axis| if axis < 3 { 1 } else { 2 },
+        |axis| {
+            if axis < 3 {
+                1
+            } else {
+                STATIC_SLOPE_ACTIVE_FEATURES.len()
+            }
+        },
         |axis, slot| {
             if axis < 3 {
                 axis
             } else {
-                FEATURE_LINEAR + slot
+                STATIC_SLOPE_ACTIVE_FEATURES[slot]
             }
         },
         DIMENSION,
         &mut gradient,
         &mut flat_hessian,
         |gradient, hessian| {
-            hessian[3 * DIMENSION + 3] += gradient[FEATURE_VARIANCE] * 2.0 * inputs.covariance_ones;
+            // `∂²V_k/∂g² = 2·covariance_ones` on both variance channels; the
+            // location channels are linear in `g` and contribute nothing here.
+            hessian[3 * DIMENSION + 3] += (gradient[FEATURE_VARIANCE0]
+                + gradient[FEATURE_VARIANCE1])
+                * 2.0
+                * inputs.covariance_ones;
         },
     );
     let hessian = [

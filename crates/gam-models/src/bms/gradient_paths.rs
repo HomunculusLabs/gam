@@ -2170,6 +2170,37 @@ pub(crate) fn unary_derivatives_sqrt(x: f64) -> [f64; 5] {
         -15.0 / (16.0 * x3 * s),
     ]
 }
+/// Derivatives of `x^(-1/2)` through 4th order.
+///
+/// The marginalization-preserving correction `c = √(1 + s²·V)` and its
+/// reciprocal both appear in the survival marginal-slope row program: `c`
+/// rescales the location index so the *marginal* survival curve is invariant to
+/// the slope, and `1/c` appears in `dc/dt = s²·(dV/dt)/(2c)` once the slope is
+/// allowed to move along the follow-up axis (gam#2765, gam#2767). Declaring it
+/// as its own leaf keeps the row program division-free, which is what the
+/// `row_program!` SSA vocabulary supports.
+///
+/// The `max(1e-300)` floor mirrors [`unary_derivatives_sqrt`]: the argument is
+/// `1 + s²·V ≥ 1` on every reachable path (`V = gᵀΣg ≥ 0` by the covariance
+/// admission check), so the floor is unreachable in production and exists only
+/// so a corrupted argument yields a finite value rather than an ∞/NaN cascade
+/// with no provenance.
+pub(crate) fn unary_derivatives_inverse_sqrt(x: f64) -> [f64; 5] {
+    let x1 = x.max(1e-300);
+    let s = x1.sqrt();
+    let r = 1.0 / s;
+    let x2 = x1 * x1;
+    let x3 = x2 * x1;
+    let x4 = x3 * x1;
+    [
+        r,
+        -0.5 * r / x1,
+        0.75 * r / x2,
+        -1.875 * r / x3,
+        6.5625 * r / x4,
+    ]
+}
+
 pub(crate) fn unary_derivatives_neglog_phi(x: f64, weight: f64) -> [f64; 5] {
     // Single source of truth for the signed-probit value+derivative stack:
     // one Mills-ratio transcendental feeds both logΦ and k1..k4 (the prior

@@ -1759,12 +1759,15 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
         let (value, gradient, hessian) =
             rigid_row_order2(&p, &inputs).expect("scalar feature pullback");
         let observed_g = inputs.probit_scale * p[3];
-        let (_, _, _, semantic_witnesses) = rigid_feature_program_order2(
-            p[0],
-            p[1],
-            p[2],
-            observed_g * inputs.z_sum,
-            (p[3] * p[3]) * inputs.covariance_ones,
+        let (_, _, _, semantic_witnesses) = rigid_feature_frame_order2(
+            &static_slope_feature_frame(
+                p[0],
+                p[1],
+                p[2],
+                observed_g * inputs.z_sum,
+                (p[3] * p[3]) * inputs.covariance_ones,
+                0.0,
+            ),
             inputs.wi,
             inputs.di,
             inputs.probit_scale,

@@ -4,7 +4,7 @@
 
 use super::*;
 
-use gam_math::jet_scalar::{RuntimeJetScalar, RuntimeValue};
+use gam_math::jet_scalar::{JetScalar, RuntimeJetScalar, RuntimeValue};
 use gam_row_macros::row_program;
 
 // ── Closed-form row kernel ─────────────────────────────────────────────
@@ -554,7 +554,7 @@ pub fn survival_marginal_slope_vector_neglog(
     }
     let linear = probit_scale * linear_dot;
     let variance = validated_vector_variance(workspace.quadratic_value(slopes), probit_scale)?;
-    let features = [q0, q1, qd1, linear, variance]
+    let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0)
         .map(|value| RuntimeValue::constant(value, RIGID_FEATURE_DIMENSION, &()));
     Ok(rigid_feature_runtime_nll(&features, &inputs, RIGID_FEATURE_DIMENSION, &())?.value())
 }
@@ -906,42 +906,144 @@ mod vector_hand_oracle_tests {
     }
 }
 
-pub(crate) const RIGID_FEATURE_DIMENSION: usize = 5;
+pub(crate) const RIGID_FEATURE_DIMENSION: usize = 9;
 pub(crate) const FEATURE_Q0: usize = 0;
 pub(crate) const FEATURE_Q1: usize = 1;
 pub(crate) const FEATURE_QD1: usize = 2;
-pub(crate) const FEATURE_LINEAR: usize = 3;
-pub(crate) const FEATURE_VARIANCE: usize = 4;
+pub(crate) const FEATURE_LINEAR0: usize = 3;
+pub(crate) const FEATURE_LINEAR1: usize = 4;
+pub(crate) const FEATURE_DLINEAR1: usize = 5;
+pub(crate) const FEATURE_VARIANCE0: usize = 6;
+pub(crate) const FEATURE_VARIANCE1: usize = 7;
+pub(crate) const FEATURE_DVARIANCE1: usize = 8;
+
+/// The features a **time-constant** slope index actually reaches, in the order
+/// the sparse order-two pullbacks visit them. The three rate features are
+/// identically zero under [`static_slope_feature_frame`] and carry no
+/// derivative, so a static geometry never has to touch them.
+pub(crate) const STATIC_SLOPE_ACTIVE_FEATURES: [usize; 4] = [
+    FEATURE_LINEAR0,
+    FEATURE_LINEAR1,
+    FEATURE_VARIANCE0,
+    FEATURE_VARIANCE1,
+];
+
+/// Embed a **time-constant** slope index into the nine-feature frame the sole
+/// row program consumes.
+///
+/// The three "rate" features are exactly zero and the entry/exit pairs coincide
+/// when `b` does not move along follow-up, so this is the structural statement
+/// that the rigid model is the `db/dt = 0` face of the general one — written
+/// once, here, rather than re-spelled at each of the call sites that still only
+/// know how to build a static slope (gam#2765).
+/// The array literals below are positional, so pin the layout they assume.
+/// A reordering of the feature constants that is not mirrored in the frames is
+/// a compile error rather than a silently transposed derivative.
+const _: () = {
+    assert!(FEATURE_Q0 == 0 && FEATURE_Q1 == 1 && FEATURE_QD1 == 2);
+    assert!(FEATURE_LINEAR0 == 3 && FEATURE_LINEAR1 == 4 && FEATURE_DLINEAR1 == 5);
+    assert!(FEATURE_VARIANCE0 == 6 && FEATURE_VARIANCE1 == 7 && FEATURE_DVARIANCE1 == 8);
+    assert!(RIGID_FEATURE_DIMENSION == 9);
+};
+
+#[inline(always)]
+pub(crate) fn static_slope_feature_frame<T: Clone>(
+    q0: T,
+    q1: T,
+    qd1: T,
+    linear: T,
+    variance: T,
+    zero: T,
+) -> [T; RIGID_FEATURE_DIMENSION] {
+    [
+        q0,
+        q1,
+        qd1,
+        linear.clone(),
+        linear,
+        zero.clone(),
+        variance.clone(),
+        variance,
+        zero,
+    ]
+}
 
 // The only rigid-row likelihood declaration. Every scalar/shared and vector
-// consumer is emitted from this parsed SSA in the five semantic features
-// `(q0, q1, qd1, L, V)`: generic jets carry any compile-time derivative width,
-// runtime jets carry the vector oracle's dynamic width, direct order two feeds
-// the universal feature pullback, the sliced witness surface owns admission,
-// and CUDA feeds the mechanical 5->4 device pullback. No family likelihood
-// expression exists outside this declaration.
+// consumer is emitted from this parsed SSA in the nine semantic features
+// `(q0, q1, qd1, L0, L1, dL1, V0, V1, dV1)`: generic jets carry any
+// compile-time derivative width, runtime jets carry the vector oracle's
+// dynamic width, direct order two feeds the universal feature pullback, the
+// sliced witness surface owns admission, and CUDA feeds the mechanical
+// device pullback. No family likelihood expression exists outside this
+// declaration.
+//
+// # Why the slope index carries three time channels (gam#2765, gam#2767)
+//
+// The family is a *transformation* model: `S(t | x, z) = Φ(−η(t))` with
+//
+//     η(t) = q(t)·c(t) + b(t)·z,     c(t) = √(1 + b(t)ᵀ Σ b(t)),
+//
+// and `b = s_f·g` the observed slope at frailty scale `s_f`. The factor `c` is
+// not decoration: it is exactly the rescaling that makes the *marginal* law
+// invariant to the slope, because for `z ~ N(0, Σ)`
+//
+//     E_z Φ(−(q·c + bᵀz)) = Φ(−q·c / √(1 + bᵀΣb)) = Φ(−q),
+//
+// so `q(t)` remains the population survival index whatever `b` is. That
+// identity is *pointwise in t*, which is precisely why a time-varying slope
+// generalizes without breaking the family's defining property — but it also
+// means `c` inherits the time dependence of `b`, so
+//
+//     η′(t) = q′(t)·c(t)  +  q(t)·c′(t)  +  b′(t)ᵀz,
+//
+// and the last two terms are the ones the rigid program was missing. They are
+// zero exactly when the slope is constant along follow-up, which is how the
+// static fit is recovered as a strict special case (the feature map feeds
+// `L0 = L1`, `V0 = V1`, `dL1 = dV1 = 0`).
+//
+// Episode splitting — the usual Cox `tt()` workaround — is *not* a substitute
+// here. Each row contributes `log S(t₁) − log S(t₀)`, and with a
+// piecewise-constant `b` those contributions do not telescope into any survival
+// function; the slope has to move inside the row program.
 row_program! {
     pub(crate) fn rigid_feature_program(
-        q0, q1, qd1, linear, variance;
+        q0, q1, qd1, linear0, linear1, dlinear1, variance0, variance1, dvariance1;
         wi, di, probit_scale
     )
     emit [generic, runtime, order2, third, fourth, witnesses, cuda];
     leaves {
         sqrt => unary_derivatives_sqrt => d_sqrt,
+        inverse_sqrt => unary_derivatives_inverse_sqrt => d_inverse_sqrt,
         neglog_phi => unary_derivatives_neglog_phi => neglog_phi_stack,
         log_normal_pdf => unary_derivatives_log_normal_pdf => d_lognormpdf,
         log => unary_derivatives_log => d_log,
     }
     witnesses [neg_eta0, neg_eta1, adjusted_derivative];
     {
-        let correction_argument = add_constant(
-            scale(variance, probit_scale * probit_scale),
+        let correction_argument0 = add_constant(
+            scale(variance0, probit_scale * probit_scale),
             1.0
         );
-        let correction = compose(sqrt, correction_argument);
-        let eta0 = add(mul(q0, correction), linear);
-        let eta1 = add(mul(q1, correction), linear);
-        let adjusted_derivative = mul(qd1, correction);
+        let correction0 = compose(sqrt, correction_argument0);
+        let correction_argument1 = add_constant(
+            scale(variance1, probit_scale * probit_scale),
+            1.0
+        );
+        let correction1 = compose(sqrt, correction_argument1);
+        // c′ = s²·V′ / (2c). Declared through the reciprocal-square-root leaf
+        // rather than a division because the `row_program!` SSA vocabulary is
+        // division-free; `1/c` is bounded in (0, 1] since `c ≥ 1`.
+        let inverse_correction1 = compose(inverse_sqrt, correction_argument1);
+        let correction_rate1 = scale(
+            mul(dvariance1, inverse_correction1),
+            0.5 * probit_scale * probit_scale
+        );
+        let eta0 = add(mul(q0, correction0), linear0);
+        let eta1 = add(mul(q1, correction1), linear1);
+        let adjusted_derivative = add(
+            add(mul(qd1, correction1), mul(q1, correction_rate1)),
+            dlinear1
+        );
 
         let neg_eta0 = neg(eta0);
         let entry = scale(compose(neglog_phi, neg_eta0, wi), -1.0);
@@ -965,6 +1067,139 @@ row_program! {
             add(event_density, time_derivative)
         );
     }
+}
+
+// ── Feature-frame adapters ──────────────────────────────────────────────
+//
+// The macro emits one positional parameter per semantic feature. Every
+// consumer, however, holds the feature frame as a single `[_; 9]` value
+// produced by a *feature map* — that is the whole point of the split between
+// "which primaries does this geometry carry" and "what is the likelihood".
+// These adapters are the only place the frame is unpacked, so adding or
+// reordering a feature is a change in one array literal (the map) plus one
+// adapter, never a shotgun edit across the evaluation surfaces.
+
+#[inline(always)]
+pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
+    features: &[S; RIGID_FEATURE_DIMENSION],
+    wi: f64,
+    di: f64,
+    probit_scale: f64,
+) -> (S, [f64; 3]) {
+    rigid_feature_program::<K, S>(
+        &features[0],
+        &features[1],
+        &features[2],
+        &features[3],
+        &features[4],
+        &features[5],
+        &features[6],
+        &features[7],
+        &features[8],
+        wi,
+        di,
+        probit_scale,
+    )
+}
+
+#[inline(always)]
+pub(crate) fn rigid_feature_frame_order2(
+    features: &[f64; RIGID_FEATURE_DIMENSION],
+    wi: f64,
+    di: f64,
+    probit_scale: f64,
+) -> (
+    f64,
+    [f64; RIGID_FEATURE_DIMENSION],
+    [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+    [f64; 3],
+) {
+    rigid_feature_program_order2(
+        features[0],
+        features[1],
+        features[2],
+        features[3],
+        features[4],
+        features[5],
+        features[6],
+        features[7],
+        features[8],
+        wi,
+        di,
+        probit_scale,
+    )
+}
+
+#[inline(always)]
+pub(crate) fn rigid_feature_frame_third_contracted(
+    features: &[f64; RIGID_FEATURE_DIMENSION],
+    wi: f64,
+    di: f64,
+    probit_scale: f64,
+    direction: &[f64; RIGID_FEATURE_DIMENSION],
+) -> [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION] {
+    rigid_feature_program_third_contracted(
+        features[0],
+        features[1],
+        features[2],
+        features[3],
+        features[4],
+        features[5],
+        features[6],
+        features[7],
+        features[8],
+        wi,
+        di,
+        probit_scale,
+        direction,
+    )
+}
+
+#[inline(always)]
+pub(crate) fn rigid_feature_frame_fourth_contracted(
+    features: &[f64; RIGID_FEATURE_DIMENSION],
+    wi: f64,
+    di: f64,
+    probit_scale: f64,
+    first: &[f64; RIGID_FEATURE_DIMENSION],
+    second: &[f64; RIGID_FEATURE_DIMENSION],
+) -> [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION] {
+    rigid_feature_program_fourth_contracted(
+        features[0],
+        features[1],
+        features[2],
+        features[3],
+        features[4],
+        features[5],
+        features[6],
+        features[7],
+        features[8],
+        wi,
+        di,
+        probit_scale,
+        first,
+        second,
+    )
+}
+
+#[inline(always)]
+#[cfg(target_os = "linux")]
+pub(crate) fn rigid_feature_frame_witnesses(
+    features: &[f64; RIGID_FEATURE_DIMENSION],
+    probit_scale: f64,
+) -> [f64; 3] {
+    rigid_feature_program_witnesses(
+        features[0],
+        features[1],
+        features[2],
+        features[3],
+        features[4],
+        features[5],
+        features[6],
+        features[7],
+        features[8],
+        probit_scale,
+    )
 }
 
 #[inline]
@@ -1008,11 +1243,15 @@ where
 {
     validate_vector_probit_scale(inputs)?;
     let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) = rigid_feature_program_runtime(
-        &features[FEATURE_Q0],
-        &features[FEATURE_Q1],
-        &features[FEATURE_QD1],
-        &features[FEATURE_LINEAR],
-        &features[FEATURE_VARIANCE],
+        &features[0],
+        &features[1],
+        &features[2],
+        &features[3],
+        &features[4],
+        &features[5],
+        &features[6],
+        &features[7],
+        &features[8],
         inputs.wi,
         inputs.di,
         inputs.probit_scale,
@@ -1258,9 +1497,75 @@ pub(crate) fn order2_feature_pullback_into<const FEATURES: usize>(
     add_weighted_feature_hessians(feature_gradient, hessian);
 }
 
+/// The nine-feature derivative surface as a **time-constant slope** sees it.
+///
+/// Under [`static_slope_feature_frame`] the entry and exit location features are
+/// the same functional of the slope and so are the two variance features, so
+/// every slope-direction contraction only ever needs the *pair sums*
+/// `∂/∂L0 + ∂/∂L1` and `∂/∂V0 + ∂/∂V1`. Collapsing once, here, is what keeps the
+/// static geometry's per-row cost at its pre-#2765 level: the pullbacks below
+/// still do one `(L, V)` contraction per score coordinate, not four.
+#[derive(Clone, Copy)]
+pub(crate) struct StaticSlopeFeatureContraction {
+    pub(crate) gradient_linear: f64,
+    pub(crate) gradient_variance: f64,
+    pub(crate) linear_linear: f64,
+    pub(crate) linear_variance: f64,
+    pub(crate) variance_variance: f64,
+    pub(crate) identity_linear: [f64; 3],
+    pub(crate) identity_variance: [f64; 3],
+}
+
+impl StaticSlopeFeatureContraction {
+    #[inline(always)]
+    pub(crate) fn new(
+        feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
+        feature_hessian: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+    ) -> Self {
+        let pair = |left: usize, right: usize, other_left: usize, other_right: usize| -> f64 {
+            feature_hessian[left][right]
+                + feature_hessian[left][other_right]
+                + feature_hessian[other_left][right]
+                + feature_hessian[other_left][other_right]
+        };
+        Self {
+            gradient_linear: feature_gradient[FEATURE_LINEAR0]
+                + feature_gradient[FEATURE_LINEAR1],
+            gradient_variance: feature_gradient[FEATURE_VARIANCE0]
+                + feature_gradient[FEATURE_VARIANCE1],
+            linear_linear: pair(
+                FEATURE_LINEAR0,
+                FEATURE_LINEAR0,
+                FEATURE_LINEAR1,
+                FEATURE_LINEAR1,
+            ),
+            linear_variance: pair(
+                FEATURE_LINEAR0,
+                FEATURE_VARIANCE0,
+                FEATURE_LINEAR1,
+                FEATURE_VARIANCE1,
+            ),
+            variance_variance: pair(
+                FEATURE_VARIANCE0,
+                FEATURE_VARIANCE0,
+                FEATURE_VARIANCE1,
+                FEATURE_VARIANCE1,
+            ),
+            identity_linear: std::array::from_fn(|identity| {
+                feature_hessian[identity][FEATURE_LINEAR0]
+                    + feature_hessian[identity][FEATURE_LINEAR1]
+            }),
+            identity_variance: std::array::from_fn(|identity| {
+                feature_hessian[identity][FEATURE_VARIANCE0]
+                    + feature_hessian[identity][FEATURE_VARIANCE1]
+            }),
+        }
+    }
+}
+
 #[inline(always)]
 fn write_rigid_vector_score_hessian_block(
-    feature_hessian: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+    contraction: &StaticSlopeFeatureContraction,
     linear_direction: &[f64],
     variance_direction: &[f64],
     variance_curvature_scale: f64,
@@ -1272,10 +1577,10 @@ fn write_rigid_vector_score_hessian_block(
     for left_score in 0..linear_direction.len() {
         let left_linear = linear_direction[left_score];
         let left_variance = variance_direction[left_score];
-        let to_linear = feature_hessian[FEATURE_LINEAR][FEATURE_LINEAR] * left_linear
-            + feature_hessian[FEATURE_VARIANCE][FEATURE_LINEAR] * left_variance;
-        let to_variance = feature_hessian[FEATURE_LINEAR][FEATURE_VARIANCE] * left_linear
-            + feature_hessian[FEATURE_VARIANCE][FEATURE_VARIANCE] * left_variance;
+        let to_linear = contraction.linear_linear * left_linear
+            + contraction.linear_variance * left_variance;
+        let to_variance = contraction.linear_variance * left_linear
+            + contraction.variance_variance * left_variance;
         let left_primary = 3 + left_score;
         for right_score in left_score..linear_direction.len() {
             let right_linear = linear_direction[right_score];
@@ -1312,6 +1617,7 @@ fn rigid_vector_feature_pullback_into(
     gradient: &mut [f64],
     hessian: &mut [f64],
 ) {
+    let contraction = StaticSlopeFeatureContraction::new(feature_gradient, feature_hessian);
     for identity in 0..3 {
         gradient[identity] = feature_gradient[identity];
         for other_identity in 0..3 {
@@ -1324,21 +1630,21 @@ fn rigid_vector_feature_pullback_into(
         let primary = 3 + score;
         let linear = linear_direction[score];
         let variance = variance_direction[score];
-        gradient[primary] = feature_gradient[FEATURE_LINEAR] * linear
-            + feature_gradient[FEATURE_VARIANCE] * variance;
+        gradient[primary] =
+            contraction.gradient_linear * linear + contraction.gradient_variance * variance;
         for identity in 0..3 {
-            let channel = feature_hessian[identity][FEATURE_LINEAR] * linear
-                + feature_hessian[identity][FEATURE_VARIANCE] * variance;
+            let channel = contraction.identity_linear[identity] * linear
+                + contraction.identity_variance[identity] * variance;
             hessian[identity * dimension + primary] = channel;
             hessian[primary * dimension + identity] = channel;
         }
     }
 
-    let variance_curvature_scale = 2.0 * feature_gradient[FEATURE_VARIANCE];
+    let variance_curvature_scale = 2.0 * contraction.gradient_variance;
     match covariance.representation() {
         MarginalSlopeCovarianceRef::Diagonal(diagonal) => {
             write_rigid_vector_score_hessian_block(
-                feature_hessian,
+                &contraction,
                 linear_direction,
                 variance_direction,
                 variance_curvature_scale,
@@ -1351,7 +1657,7 @@ fn rigid_vector_feature_pullback_into(
         }
         MarginalSlopeCovarianceRef::Full(matrix) => {
             write_rigid_vector_score_hessian_block(
-                feature_hessian,
+                &contraction,
                 linear_direction,
                 variance_direction,
                 variance_curvature_scale,
@@ -1362,7 +1668,7 @@ fn rigid_vector_feature_pullback_into(
         }
         MarginalSlopeCovarianceRef::LowRank(_) => {
             write_rigid_vector_score_hessian_block(
-                feature_hessian,
+                &contraction,
                 linear_direction,
                 variance_direction,
                 variance_curvature_scale,
@@ -1455,8 +1761,9 @@ pub(crate) fn row_primary_closed_form_vector_into(
         probit_scale,
         qd1_lower: derivative_guard,
     };
+    let features = static_slope_feature_frame(q0, q1, qd1, linear, raw_variance, 0.0);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_program_order2(q0, q1, qd1, linear, raw_variance, w, d, probit_scale);
+        rigid_feature_frame_order2(&features, w, d, probit_scale);
     validate_rigid_row_admission(qd1, &inputs, neg_eta0, neg_eta1, adjusted_derivative)?;
 
     let (gradient, hessian) = derivative_cells.split_at_mut(dimension);
@@ -1768,14 +2075,16 @@ mod tests {
         if validated_variance != variance.value() {
             variance = variance.add_constant(validated_variance - variance.value());
         }
+        let zero = S::constant(0.0, dimension, workspace);
         rigid_feature_runtime_nll(
-            &[
+            &static_slope_feature_frame(
                 vars[0].clone(),
                 vars[1].clone(),
                 vars[2].clone(),
                 linear,
                 variance,
-            ],
+                zero,
+            ),
             inputs,
             dimension,
             workspace,

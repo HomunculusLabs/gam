@@ -43,8 +43,8 @@ pub(crate) use crate::bms::{
     build_score_warp_deviation_block_from_seed, install_compiled_flex_block_into_runtime,
     project_monotone_feasible_beta, push_deviation_aux_blockspecs,
     signed_probit_neglog_derivatives_up_to_fourth, standardize_latent_z_with_policy,
-    unary_derivatives_log, unary_derivatives_log_normal_pdf, unary_derivatives_neglog_phi,
-    unary_derivatives_sqrt,
+    unary_derivatives_inverse_sqrt, unary_derivatives_log, unary_derivatives_log_normal_pdf,
+    unary_derivatives_neglog_phi, unary_derivatives_sqrt,
 };
 
 pub(crate) use crate::cubic_cell_kernel as exact_kernel;

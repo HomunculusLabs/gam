@@ -31,34 +31,46 @@ fn compiled_sigma_primary_terms(
     let b = scale.s * g;
     let linear = inputs.z_sum * b;
     let variance = inputs.covariance_ones * b * b;
+    // The frailty scale is folded into `b`, so the row program is asked for the
+    // unit-scale surface (`probit_scale = 1.0`) and every derivative below is
+    // taken with respect to `b` directly.
+    let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0);
     let (_, feature_gradient, feature_hessian, witnesses) =
-        rigid_feature_program_order2(q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0);
+        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, 1.0);
     validate_rigid_row_admission(qd1, inputs, witnesses[0], witnesses[1], witnesses[2])?;
 
-    let tangent = [
+    // `∂features/∂b` and `∂²features/∂b²` of the static-slope frame. Both
+    // location channels move with `z`, both variance channels with `2·cov·b`,
+    // and the three rate channels are identically zero because this geometry's
+    // slope does not move along follow-up.
+    let tangent = static_slope_feature_frame(
         0.0,
         0.0,
         0.0,
         inputs.z_sum,
         2.0 * inputs.covariance_ones * b,
-    ];
-    let curvature = [0.0, 0.0, 0.0, 0.0, 2.0 * inputs.covariance_ones];
-    let third_tangent = rigid_feature_program_third_contracted(
-        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &tangent,
+        0.0,
     );
+    let curvature =
+        static_slope_feature_frame(0.0, 0.0, 0.0, 0.0, 2.0 * inputs.covariance_ones, 0.0);
+    let third_tangent =
+        rigid_feature_frame_third_contracted(&features, inputs.wi, inputs.di, 1.0, &tangent);
 
-    let dot = |left: &[f64; 5], right: &[f64; 5]| {
-        left[0] * right[0]
-            + left[1] * right[1]
-            + left[2] * right[2]
-            + left[3] * right[3]
-            + left[4] * right[4]
+    let dot = |left: &[f64; RIGID_FEATURE_DIMENSION], right: &[f64; RIGID_FEATURE_DIMENSION]| {
+        let mut total = 0.0;
+        for axis in 0..RIGID_FEATURE_DIMENSION {
+            total += left[axis] * right[axis];
+        }
+        total
     };
-    let matrix_direction =
-        |matrix: &[[f64; 5]; 5], row: usize, direction: &[f64; 5]| dot(&matrix[row], direction);
+    let matrix_direction = |matrix: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+                            row: usize,
+                            direction: &[f64; RIGID_FEATURE_DIMENSION]| {
+        dot(&matrix[row], direction)
+    };
 
     let f_b = dot(&feature_gradient, &tangent);
-    let h_times_tangent: [f64; 5] =
+    let h_times_tangent: [f64; RIGID_FEATURE_DIMENSION] =
         std::array::from_fn(|axis| matrix_direction(&feature_hessian, axis, &tangent));
     let f_bb = dot(&h_times_tangent, &tangent) + dot(&feature_gradient, &curvature);
     let f_qb: [f64; 3] = std::array::from_fn(|axis| h_times_tangent[axis]);
@@ -100,11 +112,10 @@ fn compiled_sigma_primary_terms(
         });
     }
 
-    let third_curvature = rigid_feature_program_third_contracted(
-        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &curvature,
-    );
-    let fourth_tangent = rigid_feature_program_fourth_contracted(
-        q0, q1, qd1, linear, variance, inputs.wi, inputs.di, 1.0, &tangent, &tangent,
+    let third_curvature =
+        rigid_feature_frame_third_contracted(&features, inputs.wi, inputs.di, 1.0, &curvature);
+    let fourth_tangent = rigid_feature_frame_fourth_contracted(
+        &features, inputs.wi, inputs.di, 1.0, &tangent, &tangent,
     );
     let f_qqbb: [[f64; 3]; 3] = std::array::from_fn(|axis| {
         std::array::from_fn(|other| fourth_tangent[axis][other] + third_curvature[axis][other])

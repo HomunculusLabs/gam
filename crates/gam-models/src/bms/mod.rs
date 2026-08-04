@@ -2936,8 +2936,8 @@ pub(crate) use gradient_paths::signed_probit_neglog_unary_stack;
 pub(crate) use gradient_paths::standardize_latent_z_with_policy;
 pub(crate) use gradient_paths::{
     empirical_intercept_from_marginal, signed_probit_neglog_derivatives_up_to_fourth,
-    unary_derivatives_log, unary_derivatives_log_normal_pdf, unary_derivatives_neglog_phi,
-    unary_derivatives_sqrt,
+    unary_derivatives_inverse_sqrt, unary_derivatives_log, unary_derivatives_log_normal_pdf,
+    unary_derivatives_neglog_phi, unary_derivatives_sqrt,
 };
 pub(crate) use install_flex::{
     install_compiled_flex_block_into_runtime, project_monotone_feasible_beta,

@@ -104,6 +104,17 @@ __device__ __forceinline__ void d_sqrt(double x, double out[3]) {
     out[2] = -0.25 / (admitted * root);
 }
 
+__device__ __forceinline__ void d_inverse_sqrt(double x, double out[3]) {
+    double admitted = fmax(x, 1e-300);
+    // `1.0 / sqrt(x)` and NOT the `rsqrt` intrinsic: the host leaf
+    // (`unary_derivatives_inverse_sqrt`) is an IEEE divide of an IEEE square
+    // root, and the device/host parity test compares these bit for bit.
+    double reciprocal_root = 1.0 / sqrt(admitted);
+    out[0] = reciprocal_root;
+    out[1] = -0.5 * reciprocal_root / admitted;
+    out[2] = 0.75 * reciprocal_root / (admitted * admitted);
+}
+
 __device__ __forceinline__ void d_log(double x, double out[3]) {
     out[0] = log(x);
     out[1] = 1.0 / x;

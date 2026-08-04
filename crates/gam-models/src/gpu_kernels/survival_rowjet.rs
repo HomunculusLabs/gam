@@ -99,14 +99,22 @@ __device__ __forceinline__ void rigid_feature_program_pullback4(
     const double observed_g = in.probit_scale * g;
     const double linear = observed_g * in.z_sum;
     const double variance = (g * g) * in.covariance_ones;
-    double feature_gradient[5];
-    double feature_hessian[25];
+    double feature_gradient[9];
+    double feature_hessian[81];
+    // The static-slope feature frame: a time-constant slope reaches the entry
+    // and exit location channels through the SAME functional of `g`, likewise
+    // the two variance channels, and the three follow-up-rate channels are
+    // identically zero. Mirror of `static_slope_feature_frame` on the host.
     rigid_feature_program(
         q0,
         q1,
         qd1,
         linear,
+        linear,
+        0.0,
         variance,
+        variance,
+        0.0,
         in,
         row_value,
         feature_gradient,
@@ -114,39 +122,46 @@ __device__ __forceinline__ void rigid_feature_program_pullback4(
 
     const double d_linear = in.probit_scale * in.z_sum;
     const double d_variance = 2.0 * g * in.covariance_ones;
-    const double d2_variance = 2.0 * in.covariance_ones;
+    // Slot order and summation order match `STATIC_SLOPE_ACTIVE_FEATURES` and
+    // `order2_feature_pullback_into` on the host exactly, so the device and CPU
+    // lowerings of the same declaration agree bit for bit.
+    const int active[4] = {3, 4, 6, 7};
+    const double active_jacobian[4] = {d_linear, d_linear, d_variance, d_variance};
+
     row_gradient[0] = feature_gradient[0];
     row_gradient[1] = feature_gradient[1];
     row_gradient[2] = feature_gradient[2];
-    row_gradient[3] = feature_gradient[3] * d_linear
-        + feature_gradient[4] * d_variance;
+    double slope_gradient = 0.0;
+    for (int slot = 0; slot < 4; ++slot) {
+        slope_gradient += feature_gradient[active[slot]] * active_jacobian[slot];
+    }
+    row_gradient[3] = slope_gradient;
 
-    row_hessian[0] = feature_hessian[0];
-    row_hessian[1] = feature_hessian[1];
-    row_hessian[4] = feature_hessian[5];
-    row_hessian[2] = feature_hessian[2];
-    row_hessian[8] = feature_hessian[10];
-    row_hessian[5] = feature_hessian[6];
-    row_hessian[6] = feature_hessian[7];
-    row_hessian[9] = feature_hessian[11];
-    row_hessian[10] = feature_hessian[12];
+    for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+            row_hessian[a * 4 + b] = feature_hessian[a * 9 + b];
+        }
+        double channel = 0.0;
+        for (int slot = 0; slot < 4; ++slot) {
+            channel += feature_hessian[a * 9 + active[slot]] * active_jacobian[slot];
+        }
+        row_hessian[a * 4 + 3] = channel;
+        row_hessian[3 * 4 + a] = channel;
+    }
 
-    const double h0g = feature_hessian[3] * d_linear
-        + feature_hessian[4] * d_variance;
-    const double h1g = feature_hessian[8] * d_linear
-        + feature_hessian[9] * d_variance;
-    const double h2g = feature_hessian[13] * d_linear
-        + feature_hessian[14] * d_variance;
-    row_hessian[3] = h0g;
-    row_hessian[12] = h0g;
-    row_hessian[7] = h1g;
-    row_hessian[13] = h1g;
-    row_hessian[11] = h2g;
-    row_hessian[14] = h2g;
-    row_hessian[15] = feature_hessian[18] * d_linear * d_linear
-        + 2.0 * feature_hessian[19] * d_linear * d_variance
-        + feature_hessian[24] * d_variance * d_variance
-        + feature_gradient[4] * d2_variance;
+    double slope_curvature = 0.0;
+    for (int left = 0; left < 4; ++left) {
+        const double left_jacobian = active_jacobian[left];
+        for (int right = 0; right < 4; ++right) {
+            slope_curvature += left_jacobian
+                * feature_hessian[active[left] * 9 + active[right]]
+                * active_jacobian[right];
+        }
+    }
+    // The feature map's own curvature: `d2 V_k / d g2 = 2 * covariance_ones` on
+    // both variance channels; the location channels are linear in `g`.
+    slope_curvature += (feature_gradient[6] + feature_gradient[7]) * 2.0 * in.covariance_ones;
+    row_hessian[15] = slope_curvature;
 }
 "#;
 
