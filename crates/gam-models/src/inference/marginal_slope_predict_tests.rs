@@ -441,3 +441,112 @@ fn saved_anchored_deviation_runtime_basis_cubic_matches_basis_column() {
         assert_eq!(selected.right, expected_cubic.right);
     }
 }
+
+/// The predictor must rebuild the conditional calibration's conditioning span
+/// `a(C)` from the block the FIT conditioned on, not from whatever the primary
+/// design happens to be (gam#2768).
+///
+/// The two marginal-slope hosts package the primary design differently: the
+/// Bernoulli predictor's IS the marginal design, while the survival predictor's
+/// is the q-design `[time | timewiggle | marginal]`, because `q` is a function
+/// of follow-up time as well as of the covariates. Conditioning on the time
+/// columns would be a different map — i.e. a different model from the one the
+/// coefficients were fitted under — so the span is named explicitly and this
+/// gate is what holds the two hosts to their own choice.
+#[test]
+fn conditional_latent_calibration_conditions_on_the_named_design_block() {
+    use crate::bms::LatentZConditionalCalibration;
+    use ndarray::{Array2, array};
+
+    // `m(C) = 0.25 + 0.5·x`, `v(C) ≡ 0.64` (mean-only correction, so `√v = 0.8`).
+    let calibration = LatentZConditionalCalibration {
+        mean_coeffs: vec![0.25, 0.5],
+        var_coeffs: Vec::new(),
+        basis_ncols: 1,
+        var_floor: 1e-8,
+        homoskedastic_var: 0.64,
+        post_mean: 0.0,
+        post_sd: 1.0,
+        theta1_cov: Array2::<f64>::zeros((2, 2)),
+    };
+    let x = array![-1.0, 0.0, 2.0];
+    let z = array![0.75, 0.25, 1.25];
+    // Expected: ζ = (z − (0.25 + 0.5x)) / 0.8.
+    let expected = array![
+        (0.75 - (0.25 - 0.5)) / 0.8,
+        (0.25 - 0.25) / 0.8,
+        (1.25 - (0.25 + 1.0)) / 0.8,
+    ];
+
+    let predictor_with = |span: LatentConditioningSpan| BernoulliMarginalSlopePredictor {
+        beta_marginal: array![0.0],
+        beta_logslope: array![0.0],
+        beta_score_warp: None,
+        beta_link_dev: None,
+        base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
+        z_column: "z".to_string(),
+        latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
+        latent_measure: LatentMeasureKind::StandardNormal,
+        baseline_marginal: 0.0,
+        baseline_logslope: 0.0,
+        covariance: None,
+        score_warp_runtime: None,
+        link_deviation_runtime: None,
+        gaussian_frailty_sd: None,
+        latent_z_calibration: None,
+        latent_conditioning_span: span,
+        latent_z_conditional_calibration: Some(calibration.clone()),
+    };
+    let input_from = |design: Array2<f64>| PredictInput {
+        design: DesignMatrix::from(design),
+        offset: Array1::<f64>::zeros(3),
+        design_noise: None,
+        offset_noise: None,
+        auxiliary_scalar: None,
+        auxiliary_matrix: None,
+    };
+
+    // Bernoulli host: the primary design IS `a(C)`.
+    let mut marginal_only = Array2::<f64>::zeros((3, 1));
+    marginal_only.column_mut(0).assign(&x);
+    let bernoulli = predictor_with(LatentConditioningSpan::PrimaryDesign)
+        .apply_latent_z_conditional_calibration(&z, &input_from(marginal_only.clone()))
+        .expect("bernoulli conditioning span");
+
+    // Survival host: the same `a(C)`, behind two leading time columns whose
+    // values are deliberately large — conditioning on them instead would move
+    // every ζ far from the expected value rather than subtly.
+    let mut q_design = Array2::<f64>::zeros((3, 3));
+    q_design.column_mut(0).assign(&array![7.0, -4.0, 11.0]);
+    q_design.column_mut(1).assign(&array![-9.0, 6.0, 3.0]);
+    q_design.column_mut(2).assign(&x);
+    let survival = predictor_with(LatentConditioningSpan::PrimaryDesignTail { ncols: 1 })
+        .apply_latent_z_conditional_calibration(&z, &input_from(q_design.clone()))
+        .expect("survival conditioning span");
+
+    for row in 0..3 {
+        assert!(
+            (bernoulli[row] - expected[row]).abs() < 1e-12,
+            "bernoulli host row {row}: got {}, expected {}",
+            bernoulli[row],
+            expected[row]
+        );
+        assert!(
+            (survival[row] - expected[row]).abs() < 1e-12,
+            "survival host row {row}: got {}, expected {} — the tail block is the fitted \
+             conditioning span, the leading time columns are not",
+            survival[row],
+            expected[row]
+        );
+    }
+
+    // Naming the wrong block is refused, not silently mis-conditioned: the
+    // calibration's own `basis_ncols` is the cross-check.
+    let wrong = predictor_with(LatentConditioningSpan::PrimaryDesign)
+        .apply_latent_z_conditional_calibration(&z, &input_from(q_design))
+        .expect_err("a 3-column span against a 1-column calibration must be refused");
+    assert!(
+        wrong.to_string().contains("basis columns"),
+        "the refusal must name the width mismatch; got {wrong}"
+    );
+}

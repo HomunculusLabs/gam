@@ -1,5 +1,74 @@
 ## Unreleased
 
+- **The survival marginal-slope runs the automatic latent-measure gate, and the
+  conditional calibration it escalates to now actually delivers a unit-variance
+  score (#2768).** Three things, in the order they were found.
+
+  **The gap.** The Bernoulli marginal-slope has run an automatic gate on its
+  latent score since #905: a Rao score test on `E[z|C]` and `Var(z|C)` over the
+  marginal-index span, escalating to `ζ = (z − m(C))/√v(C)` when it fires. The
+  survival marginal-slope ran none of it. It called
+  `standardize_latent_z_with_policy` and nothing else, and under the default
+  policy — `Frozen { mean: 0, sd: 1 }` — that transform is the identity: it
+  checked, it warned, and it passed `z` through unchanged.
+
+  That is not cosmetic. The survival row index is `η = q·c(g) + s(g)·z`, so a
+  conditional shift `E[z|C] = m(C) ≠ 0` puts `s(g(C))·m(C)` into the *influence*
+  channel `q` — in a model whose entire point is that `q` is the marginal index.
+  The pooled marginal gate cannot see it (the marginal law of `z` can be exactly
+  N(0,1) while every conditional law is shifted) and rank-INT provably cannot fix
+  it. On a fixture that is exactly N(0,1) marginally with `Corr(z, x) = 0.5`,
+  slope `b = 0.6`, and a true marginal coefficient `β_x = 0.5`, the uncalibrated
+  axis returns
+
+  ```
+  fitted marginal x-coefficient    0.195   against a truth of   0.500
+  ```
+
+  a 61% attenuation, derived in closed form in the fixture and reproduced by the
+  fit. The two arms of that fixture — the shifted score, and the conditionally
+  standardised score the outcome was generated on — now agree.
+
+  **The defect underneath it.** `ζ = (z − m(C))/√v(C)` was dividing by the
+  **marginal** variance of `z` whenever the Breusch-Pagan stage did not fire. The
+  right constant is the **residual** variance of the conditional-mean regression,
+  and the two are never equal on a fired gate: with `z` standardised,
+  `1 = Var(m(C)) + E[Var(z|C)]`, so the residual variance is `1 − R²` and sits
+  strictly below the marginal variance *whenever there is any conditional
+  structure at all*. The error was therefore present on every firing and grew
+  with exactly the structure the correction exists to remove.
+
+  ```
+  sd(ζ) at R² = 0.25       0.8586  ->  1.0000
+  ```
+
+  against the `post_sd ≈ 1` the struct's own field doc claims. The marginal-index
+  identity `E_ζ[Φ(q√(1+b²) + bζ)] = Φ(q)` holds only at `Var(ζ|C) = 1`; at `v` it
+  becomes `Φ(q√(1+b²)/√(1+b²v))`, so every marginal coefficient carried a ~4%
+  multiplicative distortion. Worse, the calibrated residual then failed the
+  standard-normal adequacy re-check **on the SD clause alone** (`|sd−1| = 0.134`
+  against a `0.045` tolerance at n = 4000), which sent BMS to the empirical
+  measure and, per #2718, withheld the covariance. The field is renamed
+  `homoskedastic_var` and keeps its on-disk name `global_var`, so a model saved
+  before the fix keeps applying the map it was *fitted* with.
+
+  **The seams.** The gate is one object with the family's kernel capability as an
+  argument (`EmpiricalLatentMeasureSupport::{Available, StandardNormalOnly}`),
+  not two copies: the survival row program is the closed-form standard-normal
+  probit lowering and owns no empirical-grid branch, so a `StandardNormalOnly`
+  caller keeps the best available pre-transform and gets the failing adequacy
+  ledger back rather than a measure it cannot evaluate. On the predict side the
+  conditioning span is now named explicitly — the survival predictor's primary
+  design is the q-design `[time | timewiggle | marginal]`, so reusing it as
+  `a(C)` (which is what the shared code did) would have conditioned on time
+  columns and applied a different map than the fit. And the naive covariance,
+  which treats the generated regressor `ζ` as known, is corrected: the per-row
+  channel `∂(score_β)/∂ζ` is derived mechanically from the sole
+  `rigid_feature_program` declaration and gated against a central difference of
+  that program's own gradient over 360 cells. Shapes the rigid channel does not
+  cover (score-warp / link-deviation, `K > 1`) withhold the covariance with a
+  typed reason instead of publishing one that is too narrow.
+
 - **The measure-jet head spans the energy's WHOLE affine null space, so the
   term collection's centering can no longer delete a linear direction
   (#2751).** The `mjs` design's extrapolation head carried only the LINEAR part

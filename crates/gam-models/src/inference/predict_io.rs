@@ -572,7 +572,7 @@ impl BernoulliMarginalSlopePredictor {
     /// fit regressed z on. `None` ⇒ no conditional calibration was applied at
     /// fit time, so z passes through unchanged (mutually exclusive with the
     /// rank-INT calibration above).
-    fn apply_latent_z_conditional_calibration(
+    pub(crate) fn apply_latent_z_conditional_calibration(
         &self,
         z: &Array1<f64>,
         input: &PredictInput,
