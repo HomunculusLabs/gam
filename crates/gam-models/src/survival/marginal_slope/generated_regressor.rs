@@ -89,15 +89,19 @@ impl SurvivalMarginalSlopeFamily {
                     row,
                     "survival marginal-slope generated-regressor sensitivity",
                 )?;
-                let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
-                let mixed = rigid_row_primary_mixed_in_z(&primaries, &inputs)?;
+                let mixed = in_slope_frame!(self, P, Frame, {
+                    let primaries =
+                        rigid_row_kernel_primaries::<P, Frame>(self, block_states, row)?;
+                    rigid_row_primary_mixed_in_z::<P, Frame>(&primaries, &inputs)
+                        .map(|mixed| Array1::from_vec(mixed.to_vec()))
+                })?;
                 let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
                 // The production gradient accumulator, fed the mixed vector
                 // instead of the primary gradient. It applies the same `-=` the
                 // score does, so the result is `∂(score)/∂ζ` and not
                 // `∂(∇NLL)/∂ζ` — the sign the correction's congruence expects,
                 // and in any case one it is quadratic in.
-                let mixed_view = ndarray::ArrayView1::from(&mixed);
+                let mixed_view = mixed.view();
                 self.accumulate_dynamic_q_core_gradient(
                     row,
                     &slices,

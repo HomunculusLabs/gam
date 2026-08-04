@@ -66,15 +66,13 @@ fn combine_flex_family_coefficient_terms(
     }
 }
 
-fn rigid_family_primary_terms(channel: Order2<N_PRIMARY>) -> RigidFamilyPrimaryTerms {
+fn rigid_family_primary_terms<const P: usize>(channel: Order2<P>) -> RigidFamilyPrimaryTerms {
     let gradient = channel.g();
     let hessian = channel.h();
     RigidFamilyPrimaryTerms {
         objective: channel.value(),
         gradient: Array1::from_vec(gradient.to_vec()),
-        hessian: Array2::from_shape_fn((N_PRIMARY, N_PRIMARY), |(row, column)| {
-            hessian[row][column]
-        }),
+        hessian: Array2::from_shape_fn((P, P), |(row, column)| hessian[row][column]),
     }
 }
 
@@ -88,43 +86,45 @@ impl SurvivalMarginalSlopeFamily {
         })
     }
 
-    fn rigid_baseline_primary_first(
+    /// The baseline chart moves the OFFSET channels of the location index only.
+    /// It cannot move the slope, so every slope primary of the frame is exactly
+    /// zero here whichever frame is in play.
+    fn rigid_baseline_primary_first<const P: usize>(
         geometry: &crate::survival::construction::SurvivalMarginalSlopeOffsetGeometry,
         row: usize,
         axis: usize,
-    ) -> Result<[f64; N_PRIMARY], String> {
+    ) -> Result<[f64; P], String> {
         if axis >= geometry.theta.len() {
             return Err(format!(
                 "survival marginal-slope baseline axis {axis} is out of range for {} coordinates",
                 geometry.theta.len(),
             ));
         }
-        Ok([
-            geometry.offset_entry_theta_first[[row, axis]],
-            geometry.offset_exit_theta_first[[row, axis]],
-            geometry.derivative_offset_exit_theta_first[[row, axis]],
-            0.0,
-        ])
+        let mut direction = [0.0; P];
+        direction[PRIMARY_Q0] = geometry.offset_entry_theta_first[[row, axis]];
+        direction[PRIMARY_Q1] = geometry.offset_exit_theta_first[[row, axis]];
+        direction[PRIMARY_QD1] = geometry.derivative_offset_exit_theta_first[[row, axis]];
+        Ok(direction)
     }
 
-    fn rigid_baseline_primary_second(
+    fn rigid_baseline_primary_second<const P: usize>(
         geometry: &crate::survival::construction::SurvivalMarginalSlopeOffsetGeometry,
         row: usize,
         axis: usize,
         other_axis: usize,
-    ) -> Result<[f64; N_PRIMARY], String> {
+    ) -> Result<[f64; P], String> {
         if axis >= geometry.theta.len() || other_axis >= geometry.theta.len() {
             return Err(format!(
                 "survival marginal-slope baseline pair ({axis}, {other_axis}) is out of range for {} coordinates",
                 geometry.theta.len(),
             ));
         }
-        Ok([
-            geometry.offset_entry_theta_second[[row, axis, other_axis]],
-            geometry.offset_exit_theta_second[[row, axis, other_axis]],
-            geometry.derivative_offset_exit_theta_second[[row, axis, other_axis]],
-            0.0,
-        ])
+        let mut direction = [0.0; P];
+        direction[PRIMARY_Q0] = geometry.offset_entry_theta_second[[row, axis, other_axis]];
+        direction[PRIMARY_Q1] = geometry.offset_exit_theta_second[[row, axis, other_axis]];
+        direction[PRIMARY_QD1] =
+            geometry.derivative_offset_exit_theta_second[[row, axis, other_axis]];
+        Ok(direction)
     }
 
     fn flex_baseline_first(
@@ -328,12 +328,12 @@ impl SurvivalMarginalSlopeFamily {
     /// non-time-wiggle stratum whose coefficient map is affine.  FLEX,
     /// time-wiggle, and per-score rows use the runtime-width nested-dual row
     /// program rather than pretending this four-primary map still applies.
-    pub(crate) fn rigid_family_direction_terms(
+    pub(crate) fn rigid_family_direction_terms<const P: usize, G: SlopeRowGeometry<P>>(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-        primary_first: [f64; N_PRIMARY],
-        primary_second: [f64; N_PRIMARY],
+        primary_first: [f64; P],
+        primary_second: [f64; P],
     ) -> Result<(RigidFamilyPrimaryTerms, RigidFamilyPrimaryTerms), String> {
         if self.flex_active() || self.flex_timewiggle_active() || self.per_z_logslope_active() {
             return Err(
@@ -341,19 +341,19 @@ impl SurvivalMarginalSlopeFamily {
                     .to_string(),
             );
         }
-        let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
+        let primaries = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
         let inputs = rigid_row_inputs(
             self,
             block_states,
             row,
             "survival marginal-slope rigid family-direction row program",
         )?;
-        let variables: [Dual2<Order2<N_PRIMARY>>; N_PRIMARY] = std::array::from_fn(|axis| Dual2 {
+        let variables: [Dual2<Order2<P>>; P] = std::array::from_fn(|axis| Dual2 {
             v: Order2::variable(primaries[axis], axis),
             g: Order2::constant(primary_first[axis]),
             h: Order2::constant(primary_second[axis]),
         });
-        let output = rigid_row_nll(&variables, &inputs)?;
+        let output = rigid_row_nll::<P, G, _>(&variables, &inputs)?;
         Ok((
             rigid_family_primary_terms(output.g),
             rigid_family_primary_terms(output.h),
@@ -367,12 +367,12 @@ impl SurvivalMarginalSlopeFamily {
     /// `output.g.eps` carries the exact directional derivative of the family
     /// objective, score, and Hessian without materialising a fourth-order
     /// tensor or differencing neighbouring fits.
-    pub(crate) fn rigid_family_direction_beta_drift(
+    pub(crate) fn rigid_family_direction_beta_drift<const P: usize, G: SlopeRowGeometry<P>>(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-        primary_first: [f64; N_PRIMARY],
-        primary_beta_direction: [f64; N_PRIMARY],
+        primary_first: [f64; P],
+        primary_beta_direction: [f64; P],
     ) -> Result<RigidFamilyPrimaryTerms, String> {
         if self.flex_active() || self.flex_timewiggle_active() || self.per_z_logslope_active() {
             return Err(
@@ -380,19 +380,19 @@ impl SurvivalMarginalSlopeFamily {
                     .to_string(),
             );
         }
-        let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
+        let primaries = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
         let inputs = rigid_row_inputs(
             self,
             block_states,
             row,
             "survival marginal-slope rigid family-direction drift row program",
         )?;
-        let variables: [Dual2<OneSeed<N_PRIMARY>>; N_PRIMARY] = std::array::from_fn(|axis| Dual2 {
+        let variables: [Dual2<OneSeed<P>>; P] = std::array::from_fn(|axis| Dual2 {
             v: OneSeed::seed_direction(primaries[axis], axis, primary_beta_direction[axis]),
             g: OneSeed::constant(primary_first[axis]),
             h: OneSeed::constant(0.0),
         });
-        let output = rigid_row_nll(&variables, &inputs)?;
+        let output = rigid_row_nll::<P, G, _>(&variables, &inputs)?;
         Ok(rigid_family_primary_terms(output.g.eps))
     }
 
@@ -423,10 +423,17 @@ impl SurvivalMarginalSlopeFamily {
                 .map(|terms| terms.first)
             })?
         } else {
-            self.reduce_rigid_family_primary_terms(block_states, options, |row| {
-                let first = Self::rigid_baseline_primary_first(geometry, row, axis)?;
-                self.rigid_family_direction_terms(row, block_states, first, [0.0; N_PRIMARY])
+            in_slope_frame!(self, P, Frame, {
+                self.reduce_rigid_family_primary_terms(block_states, options, |row| {
+                    let first = Self::rigid_baseline_primary_first::<P>(geometry, row, axis)?;
+                    self.rigid_family_direction_terms::<P, Frame>(
+                        row,
+                        block_states,
+                        first,
+                        [0.0; P],
+                    )
                     .map(|terms| terms.0)
+                })
             })?
         };
         Ok(Some(ExactNewtonJointPsiTerms {
@@ -512,35 +519,61 @@ impl SurvivalMarginalSlopeFamily {
                 ))
             })?
         } else {
-            self.reduce_rigid_family_primary_terms(block_states, options, |row| {
-                let first = Self::rigid_baseline_primary_first(geometry, row, axis)?;
-                let other_first = Self::rigid_baseline_primary_first(geometry, row, other_axis)?;
-                let second = Self::rigid_baseline_primary_second(geometry, row, axis, other_axis)?;
-                if axis == other_axis {
-                    return self
-                        .rigid_family_direction_terms(row, block_states, first, second)
-                        .map(|terms| terms.1);
-                }
+            in_slope_frame!(self, P, Frame, {
+                self.reduce_rigid_family_primary_terms(block_states, options, |row| {
+                    let first = Self::rigid_baseline_primary_first::<P>(geometry, row, axis)?;
+                    let other_first =
+                        Self::rigid_baseline_primary_first::<P>(geometry, row, other_axis)?;
+                    let second =
+                        Self::rigid_baseline_primary_second::<P>(geometry, row, axis, other_axis)?;
+                    if axis == other_axis {
+                        return self
+                            .rigid_family_direction_terms::<P, Frame>(
+                                row,
+                                block_states,
+                                first,
+                                second,
+                            )
+                            .map(|terms| terms.1);
+                    }
 
-                let combined_first = std::array::from_fn(|index| first[index] + other_first[index]);
-                let twice_cross = std::array::from_fn(|index| 2.0 * second[index]);
-                let combined = self
-                    .rigid_family_direction_terms(row, block_states, combined_first, twice_cross)?
-                    .1;
-                let axis_diagonal = self
-                    .rigid_family_direction_terms(row, block_states, first, [0.0; N_PRIMARY])?
-                    .1;
-                let other_diagonal = self
-                    .rigid_family_direction_terms(row, block_states, other_first, [0.0; N_PRIMARY])?
-                    .1;
-                Ok(combine_rigid_family_primary_terms(
-                    &combined,
-                    0.5,
-                    &axis_diagonal,
-                    -0.5,
-                    &other_diagonal,
-                    -0.5,
-                ))
+                    let combined_first: [f64; P] =
+                        std::array::from_fn(|index| first[index] + other_first[index]);
+                    let twice_cross: [f64; P] =
+                        std::array::from_fn(|index| 2.0 * second[index]);
+                    let combined = self
+                        .rigid_family_direction_terms::<P, Frame>(
+                            row,
+                            block_states,
+                            combined_first,
+                            twice_cross,
+                        )?
+                        .1;
+                    let axis_diagonal = self
+                        .rigid_family_direction_terms::<P, Frame>(
+                            row,
+                            block_states,
+                            first,
+                            [0.0; P],
+                        )?
+                        .1;
+                    let other_diagonal = self
+                        .rigid_family_direction_terms::<P, Frame>(
+                            row,
+                            block_states,
+                            other_first,
+                            [0.0; P],
+                        )?
+                        .1;
+                    Ok(combine_rigid_family_primary_terms(
+                        &combined,
+                        0.5,
+                        &axis_diagonal,
+                        -0.5,
+                        &other_diagonal,
+                        -0.5,
+                    ))
+                })
             })?
         };
         Ok(Some(ExactNewtonJointPsiSecondOrderTerms {
@@ -663,16 +696,24 @@ impl SurvivalMarginalSlopeFamily {
                 })
             })?
         } else {
-            self.reduce_rigid_family_primary_terms(block_states, options, |row| {
-                let first = Self::rigid_baseline_primary_first(geometry, row, axis)?;
-                let direction = self.row_primary_direction_from_flat_dynamic(
-                    row,
-                    block_states,
-                    &slices,
-                    d_beta_flat,
-                )?;
-                let primary_direction = std::array::from_fn(|index| direction[index]);
-                self.rigid_family_direction_beta_drift(row, block_states, first, primary_direction)
+            in_slope_frame!(self, P, Frame, {
+                self.reduce_rigid_family_primary_terms(block_states, options, |row| {
+                    let first = Self::rigid_baseline_primary_first::<P>(geometry, row, axis)?;
+                    let direction = self.row_primary_direction_from_flat_dynamic(
+                        row,
+                        block_states,
+                        &slices,
+                        d_beta_flat,
+                    )?;
+                    let primary_direction: [f64; P] =
+                        std::array::from_fn(|index| direction[index]);
+                    self.rigid_family_direction_beta_drift::<P, Frame>(
+                        row,
+                        block_states,
+                        first,
+                        primary_direction,
+                    )
+                })
             })?
         };
         Ok(Some(operator.to_dense()))

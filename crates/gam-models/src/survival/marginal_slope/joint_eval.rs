@@ -99,14 +99,19 @@ impl SurvivalMarginalSlopeFamily {
         if self.effective_flex_active(block_states)? || self.flex_timewiggle_active() {
             self.evaluate_exact_newton_joint_dynamic_q_dense(block_states)
         } else {
-            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-            let rows = crate::row_kernel::RowSet::All;
-            let cache = build_row_kernel_cache(&kern, &rows)?;
-            Ok((
-                row_kernel_log_likelihood(&cache, &rows),
-                -row_kernel_gradient(&kern, &cache, &rows),
-                row_kernel_hessian_dense(&kern, &cache, &rows)?,
-            ))
+            in_slope_frame!(self, P, Frame, {
+                let kern = SurvivalMarginalSlopeRowKernel::<P, Frame>::new(
+                    self.clone(),
+                    block_states.to_vec(),
+                );
+                let rows = crate::row_kernel::RowSet::All;
+                let cache = build_row_kernel_cache(&kern, &rows)?;
+                Ok((
+                    row_kernel_log_likelihood(&cache, &rows),
+                    -row_kernel_gradient(&kern, &cache, &rows),
+                    row_kernel_hessian_dense(&kern, &cache, &rows)?,
+                ))
+            })
         }
     }
 
@@ -2158,10 +2163,23 @@ impl SurvivalMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<FamilyEvaluation, String> {
+        in_slope_frame!(self, P, Frame, {
+            self.evaluate_blockwise_exact_newton_dense_in_frame::<P, Frame>(block_states)
+        })
+    }
+
+    fn evaluate_blockwise_exact_newton_dense_in_frame<
+        const P: usize,
+        Frame: SlopeRowGeometry<P>,
+    >(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<FamilyEvaluation, String> {
         // Build RowKernel — the single source of truth for all exact-Newton
         // quantities.  The cache evaluates every row kernel once and stores
-        // (nll_i, g_i[4], H_i[4×4]).
-        let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
+        // (nll_i, g_i[P], H_i[P×P]).
+        let kern =
+            SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec());
         let rows = crate::row_kernel::RowSet::All;
         let cache = build_row_kernel_cache(&kern, &rows)?;
 
@@ -2186,9 +2204,9 @@ impl SurvivalMarginalSlopeFamily {
         let mut hess_logslope = Array2::<f64>::zeros((p_g, p_g));
         for row in 0..cache.n {
             let h = &cache.hessians[row];
-            let mut h_arr = Array2::<f64>::zeros((4, 4));
-            for a in 0..4 {
-                for b in 0..4 {
+            let mut h_arr = Array2::<f64>::zeros((P, P));
+            for a in 0..P {
+                for b in 0..P {
                     h_arr[[a, b]] = h[a][b];
                 }
             }

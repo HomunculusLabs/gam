@@ -937,3 +937,169 @@ pub(crate) enum FlexActivation {
     OffForRigidPilot,
     On,
 }
+
+/// Tensor the log-slope covariate design against a follow-up time margin
+/// (gam#2765, gam#2767).
+///
+/// The block's coefficient design becomes the row-wise Kronecker product
+/// `X_cov ⊗ᵣ B(log t)` evaluated at the row's EXIT time — the convention the
+/// time block already uses, so the block's own `ParameterBlockSpec` eta is `g₁`
+/// with no special case — and the entry and exit-derivative evaluations of the
+/// same basis are handed to the layout as the other two follow-up channels.
+///
+/// The penalty structure is the standard anisotropic tensor pair: every
+/// covariate penalty becomes `S_cov ⊗ I_time` (roughness in `x` at each time
+/// knot) and every time penalty becomes `I_cov ⊗ S_time` (roughness in `t` at
+/// each covariate coordinate), so the two directions keep independent smoothing
+/// parameters and `b(x, t)` can be smooth in `x` and nearly flat in `t`, or the
+/// other way round, without either choice being imposed.
+///
+/// Refusals rather than silent reinterpretation:
+///
+/// * a non-zero smooth **anchor** (`affine_offset`) — lifting a scalar anchor
+///   over a time basis needs an explicit time-dependent anchor function, and
+///   guessing one would change the fitted surface;
+/// * coefficient bounds or linear constraints — those are stated in the
+///   covariate coordinate chart, and the tensor product is a different chart;
+/// * a per-score topology — see [`LogslopeLayout::with_follow_up`].
+pub(crate) fn tensorize_logslope_design_over_time(
+    design: TermCollectionDesign,
+    template: &SurvivalCovariateTermBlockTemplate,
+) -> Result<(TermCollectionDesign, Option<LogslopeFollowUpDesigns>), String> {
+    let SurvivalCovariateTermBlockTemplate::TimeVarying {
+        time_basis_entry,
+        time_basis_exit,
+        time_basis_derivative_exit,
+        time_penalties,
+        ..
+    } = template
+    else {
+        return Ok((design, None));
+    };
+
+    if design.affine_offset.iter().any(|value| *value != 0.0) {
+        return Err(
+            "a follow-up-varying log-slope does not support a non-zero smooth anchor: tensoring \
+             a scalar boundary lift over the time basis requires an explicit time-dependent \
+             anchor function"
+                .to_string(),
+        );
+    }
+    if design.coefficient_lower_bounds.is_some() || design.linear_constraints.is_some() {
+        return Err(
+            "a follow-up-varying log-slope does not support coefficient bounds or linear \
+             constraints: they are stated in the covariate coordinate chart, and the time tensor \
+             product is a different chart"
+                .to_string(),
+        );
+    }
+
+    let p_cov = design.design.ncols();
+    let p_time = time_basis_exit.ncols();
+    if p_cov == 0 || p_time == 0 {
+        return Err(format!(
+            "a follow-up-varying log-slope needs a non-empty tensor product, got {p_cov}x{p_time}"
+        ));
+    }
+    let identity_time = Array2::<f64>::eye(p_time);
+    let identity_cov = Array2::<f64>::eye(p_cov);
+
+    let mut penalties = Vec::with_capacity(design.penalties.len() + time_penalties.len());
+    let mut nullspace_dims = Vec::with_capacity(penalties.capacity());
+    for (index, penalty) in design.penalties.iter().enumerate() {
+        let local = gam_terms::kronecker::kronecker_product(&penalty.local, &identity_time);
+        let start = penalty.col_range.start * p_time;
+        let end = penalty.col_range.end * p_time;
+        penalties.push(BlockwisePenalty {
+            col_range: start..end,
+            local,
+            prior_mean: gam_problem::CoefficientPriorMean::Zero,
+            structure_hint: None,
+            op: None,
+        });
+        // `null(S ⊗ I_t) = null(S) ⊗ R^{p_t}`, so the declared null dimension
+        // scales exactly by the time width.
+        nullspace_dims.push(
+            design
+                .nullspace_dims
+                .get(index)
+                .copied()
+                .unwrap_or_default()
+                * p_time,
+        );
+    }
+    for time_penalty in time_penalties {
+        if time_penalty.dim() != (p_time, p_time) {
+            return Err(format!(
+                "log-slope time-margin penalty is {}x{} but the margin has {p_time} columns",
+                time_penalty.nrows(),
+                time_penalty.ncols(),
+            ));
+        }
+        penalties.push(BlockwisePenalty {
+            col_range: 0..p_cov * p_time,
+            local: gam_terms::kronecker::kronecker_product(&identity_cov, time_penalty),
+            prior_mean: gam_problem::CoefficientPriorMean::Zero,
+            structure_hint: None,
+            op: None,
+        });
+        // `null(I_c ⊗ S_t) = R^{p_c} ⊗ null(S_t)`.
+        nullspace_dims.push(p_cov * symmetric_nullspace_dimension(time_penalty)?);
+    }
+
+    let cov_design = design.design.clone();
+    let follow_up = LogslopeFollowUpDesigns {
+        entry: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_entry),
+        derivative_exit: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_derivative_exit),
+    };
+
+    let n = cov_design.nrows();
+    let mut tensored = design;
+    tensored.design = crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_exit);
+    tensored.affine_offset = Array1::<f64>::zeros(n);
+    tensored.penalties = penalties;
+    tensored.nullspace_dims = nullspace_dims;
+    // Column-indexed reporting metadata describes the covariate chart, and the
+    // tensor product is a different one. Clearing it is the honest state: the
+    // resolved spec is what prediction and reporting rebuild from, and it still
+    // names the covariate terms — the per-column ranges simply no longer address
+    // single coefficients once each term owns a whole time margin.
+    tensored.penaltyinfo = Vec::new();
+    tensored.dropped_penaltyinfo = Vec::new();
+    tensored.linear_ranges = Vec::new();
+    tensored.random_effect_ranges = Vec::new();
+    tensored.intercept_range = 0..0;
+    Ok((tensored, Some(follow_up)))
+}
+
+/// Dimension of the null space of a symmetric positive-semidefinite penalty,
+/// measured against the same relative eigenvalue floor the penalty spectrum
+/// machinery uses elsewhere.
+fn symmetric_nullspace_dimension(matrix: &Array2<f64>) -> Result<usize, String> {
+    use gam_linalg::faer_ndarray::FaerEigh;
+    use faer::Side;
+    let (eigenvalues, _) = matrix
+        .eigh(Side::Lower)
+        .map_err(|error| format!("log-slope time-margin penalty eigendecomposition: {error}"))?;
+    let largest = eigenvalues.iter().fold(0.0_f64, |acc, value| acc.max(*value));
+    if largest <= 0.0 {
+        return Ok(matrix.nrows());
+    }
+    let floor = largest * (matrix.nrows() as f64) * f64::EPSILON;
+    Ok(eigenvalues.iter().filter(|value| **value <= floor).count())
+}
+
+/// Attach the follow-up channels a time-margined log-slope design produced, if
+/// any. Kept as one helper so the two layout-materialisation sites in the fit
+/// entry cannot disagree about whether the slope varies.
+pub(crate) fn attach_logslope_follow_up(
+    layout: LogslopeLayout,
+    follow_up: Option<&LogslopeFollowUpDesigns>,
+) -> Result<LogslopeLayout, String> {
+    match follow_up {
+        None => Ok(layout),
+        Some(follow_up) => {
+            layout.with_follow_up(follow_up.entry.clone(), follow_up.derivative_exit.clone())
+        }
+    }
+}

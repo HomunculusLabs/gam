@@ -11,39 +11,39 @@ impl SurvivalMarginalSlopeFamily {
     /// Three of the four rigid primaries are affine, so static sparsity retains
     /// only the ten potentially nonzero third-order channels. The resulting
     /// tower is independent of the directions later contracted into it.
-    pub(crate) fn build_row_primary_third_tower(
+    pub(crate) fn build_row_primary_third_tower<const P: usize, G: SlopeRowGeometry<P>>(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-    ) -> Result<SparseTower3<RIGID_LINEAR_MASK>, String> {
+    ) -> Result<SparseTower3<P, RIGID_LINEAR_MASK>, String> {
         let inputs = rigid_row_inputs(
             self,
             block_states,
             row,
             "survival marginal-slope rigid row helper third",
         )?;
-        let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let vars: [SparseTower3<RIGID_LINEAR_MASK>; N_PRIMARY] =
+        let p = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
+        let vars: [SparseTower3<P, RIGID_LINEAR_MASK>; P] =
             std::array::from_fn(|a| SparseTower3::variable(p[a], a));
-        rigid_row_nll(&vars, &inputs)
+        rigid_row_nll::<P, G, _>(&vars, &inputs)
     }
 
     /// Contract a previously evaluated sparse row tower with one direction,
     /// preserving the dense tower's exact accumulation order.
-    pub(crate) fn contract_row_primary_third_tower(
-        tower: &SparseTower3<RIGID_LINEAR_MASK>,
+    pub(crate) fn contract_row_primary_third_tower<const P: usize>(
+        tower: &SparseTower3<P, RIGID_LINEAR_MASK>,
         dir: &Array1<f64>,
-    ) -> Result<[[f64; N_PRIMARY]; N_PRIMARY], String> {
-        if dir.len() != N_PRIMARY {
+    ) -> Result<[[f64; P]; P], String> {
+        if dir.len() != P {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
-                    "survival rigid third contracted: dir length {} != primary dimension {N_PRIMARY}",
+                    "survival rigid third contracted: dir length {} != primary dimension {P}",
                     dir.len()
                 ),
             }
             .into());
         }
-        let mut dir_arr = [0.0_f64; N_PRIMARY];
+        let mut dir_arr = [0.0_f64; P];
         dir_arr.copy_from_slice(dir.as_slice().ok_or_else(|| {
             "survival rigid third contracted: non-contiguous direction".to_string()
         })?);
@@ -53,22 +53,22 @@ impl SurvivalMarginalSlopeFamily {
     /// Build one rigid row's third-order directional contraction without
     /// materializing the full third tensor. Single-axis callers retain this
     /// cheaper directional scalar; only multi-axis callers build a shared tower.
-    pub(crate) fn row_primary_third_contracted_tower(
+    pub(crate) fn row_primary_third_contracted_tower<const P: usize, G: SlopeRowGeometry<P>>(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
         dir: ArrayView1<'_, f64>,
-    ) -> Result<[[f64; N_PRIMARY]; N_PRIMARY], String> {
-        if dir.len() != N_PRIMARY {
+    ) -> Result<[[f64; P]; P], String> {
+        if dir.len() != P {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
-                    "survival rigid third contracted: dir length {} != primary dimension {N_PRIMARY}",
+                    "survival rigid third contracted: dir length {} != primary dimension {P}",
                     dir.len()
                 ),
             }
             .into());
         }
-        let mut dir_arr = [0.0_f64; N_PRIMARY];
+        let mut dir_arr = [0.0_f64; P];
         dir_arr.copy_from_slice(dir.as_slice().ok_or_else(|| {
             "survival rigid third contracted: non-contiguous direction".to_string()
         })?);
@@ -78,37 +78,37 @@ impl SurvivalMarginalSlopeFamily {
             row,
             "survival marginal-slope rigid row helper third",
         )?;
-        let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let vars: [OneSeed<N_PRIMARY>; N_PRIMARY] =
+        let p = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
+        let vars: [OneSeed<P>; P] =
             std::array::from_fn(|a| OneSeed::seed_direction(p[a], a, dir_arr[a]));
-        Ok(rigid_row_nll(&vars, &inputs)?.contracted_third())
+        Ok(rigid_row_nll::<P, G, _>(&vars, &inputs)?.contracted_third())
     }
 
     /// Build the row's fourth-order contracted tensor
     /// `T[a][b] = d_ea d_eb d_dir_u d_dir_v NLL_i` from the single-source rigid
     /// row NLL at the packed `TwoSeed<4>` bidirectional scalar (no dense `t4`).
-    pub(crate) fn row_primary_fourth_contracted_tower(
+    pub(crate) fn row_primary_fourth_contracted_tower<const P: usize, G: SlopeRowGeometry<P>>(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
         dir_u: ArrayView1<'_, f64>,
         dir_v: ArrayView1<'_, f64>,
-    ) -> Result<[[f64; 4]; 4], String> {
-        if dir_u.len() != N_PRIMARY || dir_v.len() != N_PRIMARY {
+    ) -> Result<[[f64; P]; P], String> {
+        if dir_u.len() != P || dir_v.len() != P {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
-                    "survival rigid fourth contracted: dir lengths ({},{}) != primary dimension {N_PRIMARY}",
+                    "survival rigid fourth contracted: dir lengths ({},{}) != primary dimension {P}",
                     dir_u.len(),
                     dir_v.len()
                 ),
             }
             .into());
         }
-        let mut u_arr = [0.0_f64; N_PRIMARY];
+        let mut u_arr = [0.0_f64; P];
         u_arr.copy_from_slice(dir_u.as_slice().ok_or_else(|| {
             "survival rigid fourth contracted: non-contiguous u direction".to_string()
         })?);
-        let mut v_arr = [0.0_f64; N_PRIMARY];
+        let mut v_arr = [0.0_f64; P];
         v_arr.copy_from_slice(dir_v.as_slice().ok_or_else(|| {
             "survival rigid fourth contracted: non-contiguous v direction".to_string()
         })?);
@@ -118,10 +118,10 @@ impl SurvivalMarginalSlopeFamily {
             row,
             "survival marginal-slope rigid row helper fourth",
         )?;
-        let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let vars: [TwoSeed<4>; 4] =
+        let p = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
+        let vars: [TwoSeed<P>; P] =
             std::array::from_fn(|a| TwoSeed::seed(p[a], a, u_arr[a], v_arr[a]));
-        Ok(rigid_row_nll(&vars, &inputs)?.contracted_fourth())
+        Ok(rigid_row_nll::<P, G, _>(&vars, &inputs)?.contracted_fourth())
     }
 
     /// Compute per-row primary gradient and Hessian from the direct symbolic
@@ -133,19 +133,37 @@ impl SurvivalMarginalSlopeFamily {
         row: usize,
         block_states: &[ParameterBlockState],
     ) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+        if self.slope_is_follow_up_varying() {
+            self.row_primary_gradient_hessian_in_frame::<
+                DYNAMIC_SLOPE_PRIMARIES,
+                DynamicSlopeGeometry,
+            >(row, block_states)
+        } else {
+            self.row_primary_gradient_hessian_in_frame::<
+                STATIC_SLOPE_PRIMARIES,
+                StaticSlopeGeometry,
+            >(row, block_states)
+        }
+    }
+
+    fn row_primary_gradient_hessian_in_frame<const P: usize, G: SlopeRowGeometry<P>>(
+        &self,
+        row: usize,
+        block_states: &[ParameterBlockState],
+    ) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
         let inputs = rigid_row_inputs(
             self,
             block_states,
             row,
             "survival marginal-slope rigid row helper kernel",
         )?;
-        let p = rigid_row_kernel_primaries(self, block_states, row)?;
-        let (nll, grad_arr, hess_arr) = rigid_row_order2(&p, &inputs)?;
+        let p = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
+        let (nll, grad_arr, hess_arr) = rigid_row_order2::<P, G>(&p, &inputs)?;
         // Convert stack arrays to ndarray types at the boundary.
         let grad = Array1::from_vec(grad_arr.to_vec());
-        let mut hess = Array2::zeros((N_PRIMARY, N_PRIMARY));
-        for i in 0..N_PRIMARY {
-            for j in 0..N_PRIMARY {
+        let mut hess = Array2::zeros((P, P));
+        for i in 0..P {
+            for j in 0..P {
                 hess[[i, j]] = hess_arr[i][j];
             }
         }
@@ -245,15 +263,27 @@ impl SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         dir: ArrayView1<'_, f64>,
     ) -> Result<Array2<f64>, String> {
-        // Batched path delegating to the shared k=5 jet helper. The stack
-        // tensor is then copied once into Array2 at the API boundary.
-        let r = self.row_primary_third_contracted_tower(row, block_states, dir)?;
-        let mut out = Array2::<f64>::zeros((N_PRIMARY, N_PRIMARY));
-        for a in 0..N_PRIMARY {
-            for b in 0..N_PRIMARY {
-                out[[a, b]] = r[a][b];
+        // Batched path delegating to the shared jet helper. The stack tensor is
+        // then copied once into Array2 at the API boundary.
+        fn to_array<const P: usize>(r: [[f64; P]; P]) -> Array2<f64> {
+            let mut out = Array2::<f64>::zeros((P, P));
+            for a in 0..P {
+                for b in 0..P {
+                    out[[a, b]] = r[a][b];
+                }
             }
+            out
         }
-        Ok(out)
+        if self.slope_is_follow_up_varying() {
+            Ok(to_array(self.row_primary_third_contracted_tower::<
+                DYNAMIC_SLOPE_PRIMARIES,
+                DynamicSlopeGeometry,
+            >(row, block_states, dir)?))
+        } else {
+            Ok(to_array(self.row_primary_third_contracted_tower::<
+                STATIC_SLOPE_PRIMARIES,
+                StaticSlopeGeometry,
+            >(row, block_states, dir)?))
+        }
     }
 }

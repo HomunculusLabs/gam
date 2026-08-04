@@ -1258,7 +1258,7 @@ where
         dimension,
         workspace,
     );
-    validate_rigid_row_admission(
+    validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
         features[FEATURE_QD1].value(),
         inputs,
         neg_eta0,
@@ -1764,7 +1764,13 @@ pub(crate) fn row_primary_closed_form_vector_into(
     let features = static_slope_feature_frame(q0, q1, qd1, linear, raw_variance, 0.0);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
         rigid_feature_frame_order2(&features, w, d, probit_scale);
-    validate_rigid_row_admission(qd1, &inputs, neg_eta0, neg_eta1, adjusted_derivative)?;
+    validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+        qd1,
+        &inputs,
+        neg_eta0,
+        neg_eta1,
+        adjusted_derivative,
+    )?;
 
     let (gradient, hessian) = derivative_cells.split_at_mut(dimension);
     rigid_vector_feature_pullback_into(
@@ -1854,7 +1860,7 @@ pub(crate) fn row_primary_closed_form(
         probit_scale,
         qd1_lower: derivative_guard,
     };
-    rigid_row_order2(&[q0, q1, qd1, g], &inputs)
+    rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(&[q0, q1, qd1, g], &inputs)
 }
 
 #[cfg(test)]

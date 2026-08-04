@@ -53,6 +53,15 @@ pub struct SurvivalMarginalSlopeTermSpec {
     pub logslopespec: TermCollectionSpec,
     pub logslopespecs: Option<Vec<TermCollectionSpec>>,
     pub logslope_offset: Array1<f64>,
+    /// Time margin for the log-slope block (gam#2765, gam#2767).
+    ///
+    /// `Static` — the default and everything built before this existed — is a
+    /// slope that is constant along follow-up. `TimeVarying` tensors the
+    /// log-slope covariate design against a B-spline margin in `log t`, exactly
+    /// as `threshold_time_k` / `sigma_time_k` already do for the location-scale
+    /// family, and the row program then carries `b` at entry, at exit, and its
+    /// exit-time rate instead of a single per-row scalar.
+    pub logslope_template: SurvivalCovariateTermBlockTemplate,
     pub score_warp: Option<DeviationBlockConfig>,
     pub link_dev: Option<DeviationBlockConfig>,
     /// Out-of-fold Stage-1 score-influence Jacobian `J = ∂z/∂θ₁` (n × p₁) for a

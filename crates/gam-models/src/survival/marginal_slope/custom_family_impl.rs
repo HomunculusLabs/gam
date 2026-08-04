@@ -322,13 +322,16 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 gradient,
             }));
         }
-        let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-        let rows = crate::row_kernel::RowSet::All;
-        let cache = build_row_kernel_cache(&kern, &rows)?;
-        Ok(Some(ExactNewtonJointGradientEvaluation {
-            log_likelihood: row_kernel_log_likelihood(&cache, &rows),
-            gradient: -row_kernel_gradient(&kern, &cache, &rows),
-        }))
+        in_slope_frame!(self, P, Frame, {
+            let kern =
+                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec());
+            let rows = crate::row_kernel::RowSet::All;
+            let cache = build_row_kernel_cache(&kern, &rows)?;
+            Ok(Some(ExactNewtonJointGradientEvaluation {
+                log_likelihood: row_kernel_log_likelihood(&cache, &rows),
+                gradient: -row_kernel_gradient(&kern, &cache, &rows),
+            }))
+        })
     }
 
     fn requires_joint_outer_hyper_path(&self) -> bool {
@@ -351,8 +354,16 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             return Ok(None);
         }
         if !self.effective_flex_active(block_states)? && !self.flex_timewiggle_active() {
-            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-            return Ok(Some(Arc::new(RowKernelHessianWorkspace::new(kern)?)));
+            return in_slope_frame!(self, P, Frame, {
+                let kern = SurvivalMarginalSlopeRowKernel::<P, Frame>::new(
+                    self.clone(),
+                    block_states.to_vec(),
+                );
+                Ok(Some(
+                    Arc::new(RowKernelHessianWorkspace::new(kern)?)
+                        as Arc<dyn ExactNewtonJointHessianWorkspace>,
+                ))
+            });
         }
         Ok(Some(Arc::new(
             SurvivalMarginalSlopeExactNewtonJointHessianWorkspace::new(
@@ -384,11 +395,15 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             // `RowSet`. The cache and every assembly function honour the
             // mask uniformly through the Horvitz–Thompson weights on each
             // `WeightedOuterRow`.
-            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-            let rows = crate::row_kernel::row_set_from_options(options, self.n);
-            return Ok(Some(Arc::new(RowKernelHessianWorkspace::with_rows(
-                kern, rows,
-            )?)));
+            return in_slope_frame!(self, P, Frame, {
+                let kern = SurvivalMarginalSlopeRowKernel::<P, Frame>::new(
+                    self.clone(),
+                    block_states.to_vec(),
+                );
+                let rows = crate::row_kernel::row_set_from_options(options, self.n);
+                Ok(Some(Arc::new(RowKernelHessianWorkspace::with_rows(kern, rows)?)
+                    as Arc<dyn ExactNewtonJointHessianWorkspace>))
+            });
         }
         // Flex / timewiggle path. This workspace is constructed by the INNER
         // joint Newton solver. Inner-coefficient evaluation must use the same
@@ -494,14 +509,17 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 )
                 .map(Some);
         }
-        let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
         let sl = d_beta_flat.as_slice().ok_or("non-contiguous d_beta")?;
-        crate::row_kernel::row_kernel_directional_derivative(
-            &kern,
-            &crate::row_kernel::RowSet::All,
-            sl,
-        )
-        .map(Some)
+        in_slope_frame!(self, P, Frame, {
+            let kern =
+                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec());
+            crate::row_kernel::row_kernel_directional_derivative(
+                &kern,
+                &crate::row_kernel::RowSet::All,
+                sl,
+            )
+            .map(Some)
+        })
     }
 
     fn exact_newton_joint_hessiansecond_directional_derivative(
@@ -540,16 +558,19 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 )
                 .map(Some);
         }
-        let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
         let su = d_beta_u_flat.as_slice().ok_or("non-contiguous d_beta_u")?;
         let sv = d_beta_v_flat.as_slice().ok_or("non-contiguous d_beta_v")?;
-        crate::row_kernel::row_kernel_second_directional_derivative(
-            &kern,
-            &crate::row_kernel::RowSet::All,
-            su,
-            sv,
-        )
-        .map(Some)
+        in_slope_frame!(self, P, Frame, {
+            let kern =
+                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec());
+            crate::row_kernel::row_kernel_second_directional_derivative(
+                &kern,
+                &crate::row_kernel::RowSet::All,
+                su,
+                sv,
+            )
+            .map(Some)
+        })
     }
 
     fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
@@ -578,12 +599,17 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             && !self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
         {
-            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-            let axes = crate::row_kernel::row_kernel_directional_derivative_all_axes(
-                &kern,
-                &crate::row_kernel::RowSet::All,
-            )?;
-            return Ok(Some(axes));
+            return in_slope_frame!(self, P, Frame, {
+                let kern = SurvivalMarginalSlopeRowKernel::<P, Frame>::new(
+                    self.clone(),
+                    block_states.to_vec(),
+                );
+                let axes = crate::row_kernel::row_kernel_directional_derivative_all_axes(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                )?;
+                Ok(Some(axes))
+            });
         }
 
         // Flex (no time-wiggle, no per-z): route the all-axes sweep through the
@@ -651,14 +677,19 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             && !self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
         {
-            let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
             let su = d_beta_u_flat.as_slice().ok_or("non-contiguous d_beta_u")?;
-            let axes = crate::row_kernel::row_kernel_second_directional_derivative_all_axes(
-                &kern,
-                &crate::row_kernel::RowSet::All,
-                su,
-            )?;
-            return Ok(Some(axes));
+            return in_slope_frame!(self, P, Frame, {
+                let kern = SurvivalMarginalSlopeRowKernel::<P, Frame>::new(
+                    self.clone(),
+                    block_states.to_vec(),
+                );
+                let axes = crate::row_kernel::row_kernel_second_directional_derivative_all_axes(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                    su,
+                )?;
+                Ok(Some(axes))
+            });
         }
 
         let p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
@@ -720,8 +751,11 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         {
             return Ok(None);
         }
-        let kern = SurvivalMarginalSlopeRowKernel::new(self.clone(), block_states.to_vec());
-        kern.contracted_trace_hessian(weight).map(Some)
+        in_slope_frame!(self, P, Frame, {
+            let kern =
+                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec());
+            kern.contracted_trace_hessian(weight).map(Some)
+        })
     }
 
     /// See [`Self::joint_jeffreys_information_contracted_trace_hessian_with_specs`]:

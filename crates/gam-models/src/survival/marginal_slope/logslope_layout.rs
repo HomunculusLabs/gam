@@ -118,6 +118,7 @@ impl LogslopeTopology {
                 )?;
                 Ok(LogslopeLayout {
                     coefficient_design,
+                    follow_up: None,
                     nrows,
                     current_width,
                     channels: LogslopeChannels::Shared {
@@ -142,6 +143,7 @@ impl LogslopeTopology {
                 }
                 Ok(LogslopeLayout {
                     coefficient_design,
+                    follow_up: None,
                     nrows,
                     current_width,
                     channels: LogslopeChannels::PerScore {
@@ -169,9 +171,50 @@ pub(crate) enum LogslopeChannels {
     },
 }
 
+/// The log-slope block's follow-up designs (gam#2765, gam#2767).
+///
+/// The coefficient design is the slope at the row's EXIT time — the same
+/// convention the time block uses, so the block's `ParameterBlockSpec` eta is
+/// already `g₁`. This carries the other two channels: the same coefficients
+/// read against the basis at the row's ENTRY time, and against the exit-time
+/// derivative of that basis.
+///
+/// `None` on a layout is the time-constant slope: `g₀ = g₁` and `ġ₁ = 0`
+/// identically, which is what every model built before this existed asks for.
+#[derive(Clone)]
+pub(crate) struct LogslopeFollowUpDesigns {
+    pub(crate) entry: DesignMatrix,
+    pub(crate) derivative_exit: DesignMatrix,
+}
+
+/// The log-slope block's `(primary, design)` channels for one layout.
+///
+/// A time-constant slope has exactly one; a follow-up-varying slope has three,
+/// in primary order.
+pub(crate) struct LogslopeChannelDesigns<'a> {
+    entries: [(usize, &'a DesignMatrix); 3],
+    len: usize,
+}
+
+impl<'a> LogslopeChannelDesigns<'a> {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[(usize, &'a DesignMatrix)] {
+        &self.entries[..self.len]
+    }
+}
+
+/// One row's slope index on its three follow-up channels.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SlopeRowChannels {
+    pub(crate) entry: f64,
+    pub(crate) exit: f64,
+    pub(crate) rate: f64,
+}
+
 #[derive(Clone)]
 pub(crate) struct LogslopeLayout {
     coefficient_design: DesignMatrix,
+    follow_up: Option<LogslopeFollowUpDesigns>,
     nrows: usize,
     current_width: usize,
     channels: LogslopeChannels,
@@ -181,6 +224,146 @@ impl LogslopeLayout {
     #[inline]
     pub(crate) fn is_per_score(&self) -> bool {
         matches!(self.channels, LogslopeChannels::PerScore { .. })
+    }
+
+    #[inline]
+    pub(crate) fn follow_up(&self) -> Option<&LogslopeFollowUpDesigns> {
+        self.follow_up.as_ref()
+    }
+
+    /// Whether this layout lets the slope move along the follow-up axis.
+    #[inline]
+    pub(crate) fn is_follow_up_varying(&self) -> bool {
+        self.follow_up.is_some()
+    }
+
+    /// Attach the entry and exit-derivative designs of a follow-up-varying
+    /// slope.
+    ///
+    /// A per-score layout is refused rather than truncated: its physical
+    /// channels are carved out of a raw design by coefficient range, and a
+    /// time margin would have to be tensored per channel with a per-channel
+    /// basis this type does not carry. Silently tensoring only the shared
+    /// channel would fit a different model than the one asked for.
+    pub(crate) fn with_follow_up(
+        mut self,
+        entry: DesignMatrix,
+        derivative_exit: DesignMatrix,
+    ) -> Result<Self, String> {
+        if self.is_per_score() {
+            return Err(
+                "a follow-up-varying log-slope is not supported for a per-score log-slope \
+                 topology: each physical score channel would need its own time margin"
+                    .to_string(),
+            );
+        }
+        for (name, design) in [("entry", &entry), ("derivative", &derivative_exit)] {
+            if design.nrows() != self.nrows || design.ncols() != self.current_width {
+                return Err(format!(
+                    "logslope follow-up {name} design is {}x{} but the layout is {}x{}",
+                    design.nrows(),
+                    design.ncols(),
+                    self.nrows,
+                    self.current_width,
+                ));
+            }
+        }
+        self.follow_up = Some(LogslopeFollowUpDesigns {
+            entry,
+            derivative_exit,
+        });
+        Ok(self)
+    }
+
+    /// The block's design channels paired with the primary each one
+    /// differentiates.
+    ///
+    /// This is the single place that knows a follow-up-varying slope feeds
+    /// three primaries and a time-constant one feeds a single primary, so every
+    /// Jacobian / pullback / assembly site downstream is written once as a loop
+    /// over channels instead of once per geometry.
+    pub(crate) fn primary_channels(&self) -> LogslopeChannelDesigns<'_> {
+        match self.follow_up.as_ref() {
+            None => LogslopeChannelDesigns {
+                entries: [
+                    (PRIMARY_SLOPE, &self.coefficient_design),
+                    (PRIMARY_SLOPE, &self.coefficient_design),
+                    (PRIMARY_SLOPE, &self.coefficient_design),
+                ],
+                len: 1,
+            },
+            Some(follow_up) => LogslopeChannelDesigns {
+                entries: [
+                    (PRIMARY_SLOPE, &follow_up.entry),
+                    (PRIMARY_SLOPE_EXIT, &self.coefficient_design),
+                    (PRIMARY_SLOPE_RATE, &follow_up.derivative_exit),
+                ],
+                len: 3,
+            },
+        }
+    }
+
+    /// The row's shared-channel offset. The log-slope offset is an external,
+    /// time-constant slope contribution, so it enters `g₀` and `g₁` alike and
+    /// contributes nothing to `ġ₁`.
+    #[inline]
+    pub(crate) fn shared_offset(&self, row: usize) -> Result<f64, String> {
+        match &self.channels {
+            LogslopeChannels::Shared { offset } => Ok(offset[row]),
+            LogslopeChannels::PerScore { .. } => Err(
+                "shared logslope offset requested from a per-score layout".to_string(),
+            ),
+        }
+    }
+
+    /// The row's slope index on all three follow-up channels, computed from the
+    /// coefficient vector alone.
+    ///
+    /// The shared-channel sibling of [`Self::row_channels`], for callers (the
+    /// effective-Jacobian audit) that hold `β` but not the block's formed eta.
+    #[inline]
+    pub(crate) fn row_channels_from_beta(
+        &self,
+        row: usize,
+        beta: ArrayView1<'_, f64>,
+    ) -> Result<SlopeRowChannels, String> {
+        let offset = self.shared_offset(row)?;
+        let exit = self.coefficient_design.dot_row_view(row, beta) + offset;
+        let Some(follow_up) = self.follow_up() else {
+            return Ok(SlopeRowChannels {
+                entry: exit,
+                exit,
+                rate: 0.0,
+            });
+        };
+        Ok(SlopeRowChannels {
+            entry: follow_up.entry.dot_row_view(row, beta) + offset,
+            exit,
+            rate: follow_up.derivative_exit.dot_row_view(row, beta),
+        })
+    }
+
+    /// The row's slope index on all three follow-up channels, given the block's
+    /// already-formed exit-time linear predictor.
+    #[inline]
+    pub(crate) fn row_channels(
+        &self,
+        row: usize,
+        beta: &Array1<f64>,
+        exit_eta: f64,
+    ) -> Result<SlopeRowChannels, String> {
+        let Some(follow_up) = self.follow_up() else {
+            return Ok(SlopeRowChannels {
+                entry: exit_eta,
+                exit: exit_eta,
+                rate: 0.0,
+            });
+        };
+        Ok(SlopeRowChannels {
+            entry: follow_up.entry.dot_row(row, beta) + self.shared_offset(row)?,
+            exit: exit_eta,
+            rate: follow_up.derivative_exit.dot_row(row, beta),
+        })
     }
 
     pub(crate) fn score_count(&self) -> usize {
@@ -487,6 +670,7 @@ mod tests {
             let current_width = coefficient_design.ncols();
             Self {
                 coefficient_design,
+                follow_up: None,
                 nrows,
                 current_width,
                 channels: LogslopeChannels::Shared {

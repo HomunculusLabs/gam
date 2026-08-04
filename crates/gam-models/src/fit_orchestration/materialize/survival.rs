@@ -482,6 +482,27 @@ pub(crate) fn materialize_survival<'a>(
     } else {
         SurvivalCovariateTermBlockTemplate::Static
     };
+    // The log-slope time margin (gam#2765, gam#2767). Built from the same
+    // primitive the threshold and sigma margins use, so the three blocks share
+    // one knot rule, one degree admission check and one replay path.
+    let logslope_template = if let Some(k) = config.logslope_time_k {
+        if survival_mode != SurvivalLikelihoodMode::MarginalSlope {
+            return Err(WorkflowError::InvalidConfig {
+                reason: "logslope_time_k applies to the survival marginal-slope likelihood; \
+                         the log-slope block does not exist in the other survival modes"
+                    .to_string(),
+            });
+        }
+        build_time_varying_survival_covariate_template(
+            &age_entry,
+            &age_exit,
+            k,
+            config.logslope_time_degree,
+            "logslope",
+        )?
+    } else {
+        SurvivalCovariateTermBlockTemplate::Static
+    };
     let log_sigmaspec = if let Some(noise) = config.noise_formula.as_deref() {
         let mut noise_parsed = parse_formula(&format!("{} ~ {noise}", parsed.response))?;
         apply_secondary_predictor_basis_parsimony(&mut noise_parsed.terms, data.values.nrows());
@@ -1018,6 +1039,7 @@ pub(crate) fn materialize_survival<'a>(
                 baseline_hyper: baseline_hyper.clone(),
                 time_block,
                 timewiggle_block: prepared.timewiggle_block.clone(),
+                logslope_template: logslope_template.clone(),
                 logslopespec: marginal_logslopespec.clone().ok_or_else(|| {
                     "marginal-slope survival is missing logslope spec".to_string()
                 })?,

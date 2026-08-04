@@ -568,7 +568,10 @@ impl SurvivalMarginalSlopeFamily {
                 // The row program is direction-independent through order three.
                 // Evaluate its exact statically sparse tower once, then contract
                 // each ψ axis without repeating any transcendental algebra.
-                let third_tower = self.build_row_primary_third_tower(row, block_states)?;
+                let third_tower = self.build_row_primary_third_tower::<
+                    STATIC_SLOPE_PRIMARIES,
+                    StaticSlopeGeometry,
+                >(row, block_states)?;
 
                 for axis_idx in 0..k {
                     let axis = &axes[axis_idx];
@@ -578,8 +581,9 @@ impl SurvivalMarginalSlopeFamily {
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
                         primary_direction_from_psi_row(axis.block_idx, &psi_row, axis.beta_psi);
-                    let third_stack =
-                        Self::contract_row_primary_third_tower(&third_tower, &dir)?;
+                    let third_stack = Self::contract_row_primary_third_tower::<
+                        STATIC_SLOPE_PRIMARIES,
+                    >(&third_tower, &dir)?;
                     let mut third = Array2::from_shape_fn(
                         (N_PRIMARY, N_PRIMARY),
                         |(a, b)| third_stack[a][b],

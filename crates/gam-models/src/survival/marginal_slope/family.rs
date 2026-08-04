@@ -197,6 +197,37 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     pub(crate) auto_subsample_last_rho: Arc<Mutex<Option<Array1<f64>>>>,
 }
 
+impl SurvivalMarginalSlopeFamily {
+    /// The row's slope index on its three follow-up channels (gam#2765).
+    ///
+    /// The block's own linear predictor is already the EXIT-time slope — the
+    /// log-slope block's `ParameterBlockSpec` design is the exit design, exactly
+    /// as the time block's is. A time-constant slope is the degenerate case
+    /// `g₀ = g₁`, `ġ₁ = 0`; a follow-up-varying one reads the other two channels
+    /// off the layout's entry / exit-derivative designs at the same
+    /// coefficients.
+    #[inline]
+    pub(crate) fn row_slope_channels(
+        &self,
+        row: usize,
+        block_states: &[ParameterBlockState],
+    ) -> Result<SlopeRowChannels, String> {
+        let state = block_states.get(2).ok_or_else(|| {
+            "survival marginal-slope row slope channels require the log-slope block state"
+                .to_string()
+        })?;
+        self.logslope_layout
+            .row_channels(row, &state.beta, state.eta[row])
+    }
+
+    /// Whether this family's slope moves along the follow-up axis. Selects the
+    /// six-primary row frame over the four-primary one.
+    #[inline]
+    pub(crate) fn slope_is_follow_up_varying(&self) -> bool {
+        self.logslope_layout.is_follow_up_varying()
+    }
+}
+
 /// Number of outer evaluations the survival auto-subsample schedule
 /// spends in Phase 1 before reverting to full data. Mirrors the BMS
 /// budget so the two families share an empirical noise-floor schedule.

@@ -126,6 +126,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let marginalspec_boot = joint_specs.remove(0);
     let (logslope_design, logslopespec_boot, logslope_topology) =
         combine_logslope_surface_designs(joint_designs, &joint_specs)?;
+    // gam#2765 / gam#2767: if the request asked for a follow-up-varying slope,
+    // the block's coefficient design is the covariate design tensored against a
+    // time margin, and the layout carries the other two follow-up channels. The
+    // `Static` template returns the design untouched, so every model built
+    // before this existed takes exactly the same path it did.
+    let (logslope_design, logslope_follow_up) =
+        tensorize_logslope_design_over_time(logslope_design, &spec.logslope_template)?;
     spec.marginal_offset = marginal_design
         .compose_offset(
             spec.marginal_offset.view(),
@@ -765,8 +772,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             FlexActivation::OffForRigidPilot => None,
             FlexActivation::On => influence_absorber_residualized.clone(),
         };
-        let logslope_layout = logslope_topology
-            .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?;
+        let logslope_layout = attach_logslope_follow_up(
+            logslope_topology
+                .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
+            logslope_follow_up.as_ref(),
+        )?;
         logslope_layout.validate_for(spec.z.ncols())?;
         Ok(SurvivalMarginalSlopeFamily {
             n,
@@ -804,8 +814,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                         flex: FlexActivation|
      -> Result<Vec<ParameterBlockSpec>, String> {
         let hints = hints.borrow();
-        let block_logslope_layout = logslope_topology
-            .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?;
+        let block_logslope_layout = attach_logslope_follow_up(
+            logslope_topology
+                .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
+            logslope_follow_up.as_ref(),
+        )?;
         block_logslope_layout.validate_for(spec.z.ncols())?;
         let mut cursor = 0usize;
         let rho_time = rho

@@ -51,6 +51,8 @@ pub(crate) use crate::cubic_cell_kernel as exact_kernel;
 
 pub(crate) use crate::survival::lognormal_kernel::{FrailtyScale, FrailtySpec};
 
+pub use crate::survival::location_scale::SurvivalCovariateTermBlockTemplate;
+
 pub(crate) use crate::marginal_slope_shared::{
     ObservedDenestedCellPartials, add_optional_matrix, add_optional_vector,
     add_two_surface_psi_outer, build_denested_partition_cells as shared_denested_partition_cells,
@@ -145,6 +147,7 @@ mod psi_terms;
 mod pullback;
 pub(crate) mod row_kernel;
 mod row_math;
+mod slope_geometry;
 mod spec;
 mod timepoint_exact;
 mod timewiggle_geometry;
@@ -165,6 +168,7 @@ pub(crate) use logslope_layout::*;
 pub(crate) use primary_geometry::*;
 pub(crate) use row_kernel::*;
 pub use row_math::*;
+pub(crate) use slope_geometry::*;
 pub use spec::*;
 
 #[cfg(test)]

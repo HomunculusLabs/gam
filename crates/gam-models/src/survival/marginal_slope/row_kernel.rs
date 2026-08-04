@@ -6,11 +6,6 @@ use super::*;
 
 use gam_math::jet_scalar::JetScalar;
 
-/// Bitmask of which `K=4` rigid primaries enter linearly: bit `a` set ⇒ axis `a`
-/// is linear. The higher-order sparse towers use this contract; order two is
-/// lowered directly from the canonical `row_program!` SSA graph instead of using a jet.
-pub(crate) const RIGID_LINEAR_MASK: u32 = (1 << 0) | (1 << 1) | (1 << 2);
-
 #[inline(always)]
 const fn axis_is_linear(mask: u32, a: usize) -> bool {
     (mask >> a) & 1 == 1
@@ -78,19 +73,19 @@ const fn t4_block_is_zero(mask: u32, i: usize, j: usize, k: usize, l: usize) -> 
 /// note); only the provably-zero linear-block reads are elided in `mul` /
 /// `compose_unary`. Used by the first-directional all-axes build-once path.
 #[derive(Clone, Copy)]
-pub(crate) struct SparseTower3<const LIN: u32> {
+pub(crate) struct SparseTower3<const K: usize, const LIN: u32> {
     pub(crate) v: f64,
-    pub(crate) g: [f64; 4],
-    pub(crate) h: [[f64; 4]; 4],
-    pub(crate) t3: [[[f64; 4]; 4]; 4],
+    pub(crate) g: [f64; K],
+    pub(crate) h: [[f64; K]; K],
+    pub(crate) t3: [[[f64; K]; K]; K],
 }
 
-impl<const LIN: u32> SparseTower3<LIN> {
+impl<const K: usize, const LIN: u32> SparseTower3<K, LIN> {
     /// Guard: every block whose READ we elide must be structurally zero here.
     #[inline(always)]
     fn check_contract(&self) {
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 if h_block_is_zero(LIN, i, j) {
                     assert!(
                         self.h[i][j] == 0.0,
@@ -98,7 +93,7 @@ impl<const LIN: u32> SparseTower3<LIN> {
                         self.h[i][j]
                     );
                 }
-                for k in 0..4 {
+                for k in 0..K {
                     if t3_block_is_zero(LIN, i, j, k) {
                         assert!(
                             self.t3[i][j][k] == 0.0,
@@ -112,13 +107,13 @@ impl<const LIN: u32> SparseTower3<LIN> {
     }
 }
 
-impl<const LIN: u32> JetScalar<4> for SparseTower3<LIN> {
+impl<const K: usize, const LIN: u32> JetScalar<K> for SparseTower3<K, LIN> {
     fn constant(c: f64) -> Self {
         Self {
             v: c,
-            g: [0.0; 4],
-            h: [[0.0; 4]; 4],
-            t3: [[[0.0; 4]; 4]; 4],
+            g: [0.0; K],
+            h: [[0.0; K]; K],
+            t3: [[[0.0; K]; K]; K],
         }
     }
     fn variable(x: f64, axis: usize) -> Self {
@@ -128,7 +123,7 @@ impl<const LIN: u32> JetScalar<4> for SparseTower3<LIN> {
     }
 }
 
-impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
+impl<const K: usize, const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<K, LIN> {
     fn value(&self) -> f64 {
         self.v
     }
@@ -136,11 +131,11 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
     fn add(&self, o: &Self) -> Self {
         let mut r = *self;
         r.v += o.v;
-        for i in 0..4 {
+        for i in 0..K {
             r.g[i] += o.g[i];
-            for j in 0..4 {
+            for j in 0..K {
                 r.h[i][j] += o.h[i][j];
-                for k in 0..4 {
+                for k in 0..K {
                     r.t3[i][j][k] += o.t3[i][j][k];
                 }
             }
@@ -156,11 +151,11 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
     fn scale(&self, s: f64) -> Self {
         let mut o = *self;
         o.v *= s;
-        for i in 0..4 {
+        for i in 0..K {
             o.g[i] *= s;
-            for j in 0..4 {
+            for j in 0..K {
                 o.h[i][j] *= s;
-                for k in 0..4 {
+                for k in 0..K {
                     o.t3[i][j][k] *= s;
                 }
             }
@@ -172,14 +167,14 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
         a.check_contract();
         b.check_contract();
         let mut out = Self::constant(a.v * b.v);
-        for i in 0..4 {
+        for i in 0..K {
             let mut s = 0.0;
             s += a.v * b.g[i];
             s += a.g[i] * b.v;
             out.g[i] = s;
         }
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 let mut s = 0.0;
                 if !h_block_is_zero(LIN, i, j) {
                     s += a.v * b.h[i][j];
@@ -192,9 +187,9 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
                 out.h[i][j] = s;
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
                     let mut s = 0.0;
                     if !t3_block_is_zero(LIN, i, j, k) {
                         s += a.v * b.t3[i][j][k];
@@ -229,13 +224,13 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
     fn compose_unary(&self, d: [f64; 5]) -> Self {
         self.check_contract();
         let mut out = Self::constant(d[0]);
-        for i in 0..4 {
+        for i in 0..K {
             let mut s = 0.0;
             s += d[1] * self.g[i];
             out.g[i] = s;
         }
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 let mut s = 0.0;
                 if !h_block_is_zero(LIN, i, j) {
                     s += d[1] * self.h[i][j];
@@ -244,9 +239,9 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
                 out.h[i][j] = s;
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
                     let mut s = 0.0;
                     if !t3_block_is_zero(LIN, i, j, k) {
                         s += d[1] * self.t3[i][j][k];
@@ -275,19 +270,19 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower3<LIN> {
 /// the provably-zero linear-block reads are elided in `mul` / `compose_unary`.
 /// Used by the second-directional all-axes build-once path.
 #[derive(Clone, Copy)]
-pub(crate) struct SparseTower4<const LIN: u32> {
+pub(crate) struct SparseTower4<const K: usize, const LIN: u32> {
     pub(crate) v: f64,
-    pub(crate) g: [f64; 4],
-    pub(crate) h: [[f64; 4]; 4],
-    pub(crate) t3: [[[f64; 4]; 4]; 4],
-    pub(crate) t4: [[[[f64; 4]; 4]; 4]; 4],
+    pub(crate) g: [f64; K],
+    pub(crate) h: [[f64; K]; K],
+    pub(crate) t3: [[[f64; K]; K]; K],
+    pub(crate) t4: [[[[f64; K]; K]; K]; K],
 }
 
-impl<const LIN: u32> SparseTower4<LIN> {
+impl<const K: usize, const LIN: u32> SparseTower4<K, LIN> {
     #[inline(always)]
     fn check_contract(&self) {
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 if h_block_is_zero(LIN, i, j) {
                     assert!(
                         self.h[i][j] == 0.0,
@@ -295,7 +290,7 @@ impl<const LIN: u32> SparseTower4<LIN> {
                         self.h[i][j]
                     );
                 }
-                for k in 0..4 {
+                for k in 0..K {
                     if t3_block_is_zero(LIN, i, j, k) {
                         assert!(
                             self.t3[i][j][k] == 0.0,
@@ -303,7 +298,7 @@ impl<const LIN: u32> SparseTower4<LIN> {
                             self.t3[i][j][k]
                         );
                     }
-                    for l in 0..4 {
+                    for l in 0..K {
                         if t4_block_is_zero(LIN, i, j, k, l) {
                             assert!(
                                 self.t4[i][j][k][l] == 0.0,
@@ -322,13 +317,13 @@ impl<const LIN: u32> SparseTower4<LIN> {
     /// order of [`gam_math::jet_tower::Tower4::fourth_contracted`] (k outer, l
     /// inner), so the second-directional consumer is bit-identical.
     #[inline]
-    pub(crate) fn fourth_contracted(&self, u: &[f64; 4], w: &[f64; 4]) -> [[f64; 4]; 4] {
-        let mut out = [[0.0; 4]; 4];
-        for i in 0..4 {
-            for j in 0..4 {
+    pub(crate) fn fourth_contracted(&self, u: &[f64; K], w: &[f64; K]) -> [[f64; K]; K] {
+        let mut out = [[0.0; K]; K];
+        for i in 0..K {
+            for j in 0..K {
                 let mut acc = 0.0;
-                for k in 0..4 {
-                    for l in 0..4 {
+                for k in 0..K {
+                    for l in 0..K {
                         acc += self.t4[i][j][k][l] * u[k] * w[l];
                     }
                 }
@@ -339,14 +334,14 @@ impl<const LIN: u32> SparseTower4<LIN> {
     }
 }
 
-impl<const LIN: u32> JetScalar<4> for SparseTower4<LIN> {
+impl<const K: usize, const LIN: u32> JetScalar<K> for SparseTower4<K, LIN> {
     fn constant(c: f64) -> Self {
         Self {
             v: c,
-            g: [0.0; 4],
-            h: [[0.0; 4]; 4],
-            t3: [[[0.0; 4]; 4]; 4],
-            t4: [[[[0.0; 4]; 4]; 4]; 4],
+            g: [0.0; K],
+            h: [[0.0; K]; K],
+            t3: [[[0.0; K]; K]; K],
+            t4: [[[[0.0; K]; K]; K]; K],
         }
     }
     fn variable(x: f64, axis: usize) -> Self {
@@ -356,20 +351,20 @@ impl<const LIN: u32> JetScalar<4> for SparseTower4<LIN> {
     }
 }
 
-impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
+impl<const K: usize, const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<K, LIN> {
     fn value(&self) -> f64 {
         self.v
     }
     fn add(&self, o: &Self) -> Self {
         let mut r = *self;
         r.v += o.v;
-        for i in 0..4 {
+        for i in 0..K {
             r.g[i] += o.g[i];
-            for j in 0..4 {
+            for j in 0..K {
                 r.h[i][j] += o.h[i][j];
-                for k in 0..4 {
+                for k in 0..K {
                     r.t3[i][j][k] += o.t3[i][j][k];
-                    for l in 0..4 {
+                    for l in 0..K {
                         r.t4[i][j][k][l] += o.t4[i][j][k][l];
                     }
                 }
@@ -386,13 +381,13 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
     fn scale(&self, s: f64) -> Self {
         let mut o = *self;
         o.v *= s;
-        for i in 0..4 {
+        for i in 0..K {
             o.g[i] *= s;
-            for j in 0..4 {
+            for j in 0..K {
                 o.h[i][j] *= s;
-                for k in 0..4 {
+                for k in 0..K {
                     o.t3[i][j][k] *= s;
-                    for l in 0..4 {
+                    for l in 0..K {
                         o.t4[i][j][k][l] *= s;
                     }
                 }
@@ -405,14 +400,14 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
         a.check_contract();
         b.check_contract();
         let mut out = Self::constant(a.v * b.v);
-        for i in 0..4 {
+        for i in 0..K {
             let mut s = 0.0;
             s += a.v * b.g[i];
             s += a.g[i] * b.v;
             out.g[i] = s;
         }
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 let mut s = 0.0;
                 if !h_block_is_zero(LIN, i, j) {
                     s += a.v * b.h[i][j];
@@ -425,9 +420,9 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
                 out.h[i][j] = s;
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
                     let mut s = 0.0;
                     if !t3_block_is_zero(LIN, i, j, k) {
                         s += a.v * b.t3[i][j][k];
@@ -457,10 +452,10 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
                 }
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
-                    for l in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
+                    for l in 0..K {
                         let mut s = 0.0;
                         if !t4_block_is_zero(LIN, i, j, k, l) {
                             s += a.v * b.t4[i][j][k][l];
@@ -520,13 +515,13 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
     fn compose_unary(&self, d: [f64; 5]) -> Self {
         self.check_contract();
         let mut out = Self::constant(d[0]);
-        for i in 0..4 {
+        for i in 0..K {
             let mut s = 0.0;
             s += d[1] * self.g[i];
             out.g[i] = s;
         }
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
                 let mut s = 0.0;
                 if !h_block_is_zero(LIN, i, j) {
                     s += d[1] * self.h[i][j];
@@ -535,9 +530,9 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
                 out.h[i][j] = s;
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
                     let mut s = 0.0;
                     if !t3_block_is_zero(LIN, i, j, k) {
                         s += d[1] * self.t3[i][j][k];
@@ -556,10 +551,10 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
                 }
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..4 {
-                    for l in 0..4 {
+        for i in 0..K {
+            for j in 0..K {
+                for k in 0..K {
+                    for l in 0..K {
                         let mut s = 0.0;
                         if !t4_block_is_zero(LIN, i, j, k, l) {
                             s += d[1] * self.t4[i][j][k][l];
@@ -618,12 +613,15 @@ impl<const LIN: u32> gam_math::nested_dual::JetField for SparseTower4<LIN> {
 /// arithmetic (same accumulation order), used by the build-once first-directional
 /// path on the pruned [`SparseTower3`] towers.
 #[inline]
-pub(crate) fn tower3_third_contracted(t3: &[[[f64; 4]; 4]; 4], dir: &[f64; 4]) -> [[f64; 4]; 4] {
-    let mut out = [[0.0; 4]; 4];
-    for a in 0..4 {
-        for b in 0..4 {
+pub(crate) fn tower3_third_contracted<const K: usize>(
+    t3: &[[[f64; K]; K]; K],
+    dir: &[f64; K],
+) -> [[f64; K]; K] {
+    let mut out = [[0.0; K]; K];
+    for a in 0..K {
+        for b in 0..K {
             let mut acc = 0.0;
-            for c in 0..4 {
+            for c in 0..K {
                 acc += t3[a][b][c] * dir[c];
             }
             out[a][b] = acc;
@@ -634,23 +632,36 @@ pub(crate) fn tower3_third_contracted(t3: &[[[f64; 4]; 4]; 4], dir: &[f64; 4]) -
 
 // ── RowKernel<4> implementation ───────────────────────────────────────
 
-pub(crate) struct SurvivalMarginalSlopeRowKernel {
+pub(crate) struct SurvivalMarginalSlopeRowKernel<const P: usize, G: SlopeRowGeometry<P>> {
     pub(crate) family: SurvivalMarginalSlopeFamily,
     pub(crate) block_states: Vec<ParameterBlockState>,
     pub(crate) slices: BlockSlices,
+    pub(crate) geometry: std::marker::PhantomData<G>,
 }
 
-impl SurvivalMarginalSlopeRowKernel {
+impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G> {
     pub(crate) fn new(
         family: SurvivalMarginalSlopeFamily,
         block_states: Vec<ParameterBlockState>,
     ) -> Self {
+        assert_eq!(
+            family.slope_is_follow_up_varying(),
+            G::FOLLOW_UP_VARYING,
+            "row kernel primary frame does not match the family's log-slope layout",
+        );
         let slices = block_slices(&family, &block_states);
         Self {
             family,
             block_states,
             slices,
+            geometry: std::marker::PhantomData,
         }
+    }
+
+    /// The log-slope block's `(primary, design)` channels for this frame.
+    #[inline]
+    pub(crate) fn logslope_channels(&self) -> LogslopeChannelDesigns<'_> {
+        self.family.logslope_layout.primary_channels()
     }
 }
 
@@ -672,8 +683,10 @@ mod rigid_row_admission_tests {
 
     fn admit(primaries: [f64; 4], inputs: &RigidRowInputs) -> Result<(), String> {
         let [neg_eta0, neg_eta1, adjusted_derivative] =
-            rigid_row_admission_witnesses(&primaries, inputs);
-        validate_rigid_row_admission(
+            rigid_row_admission_witnesses::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                &primaries, inputs,
+            );
+        validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
             primaries[2],
             inputs,
             neg_eta0,
@@ -700,19 +713,37 @@ mod rigid_row_admission_tests {
     }
 }
 
-pub(crate) fn rigid_row_kernel_primaries(
+/// The row's primary point in the frame `G` declares.
+///
+/// The three location channels come from the family's dynamic-`q` geometry. The
+/// slope channels come from the log-slope layout: one channel when the slope is
+/// time-constant, three (entry, exit, exit-rate) when it varies along follow-up
+/// (gam#2765).
+pub(crate) fn rigid_row_kernel_primaries<const P: usize, G: SlopeRowGeometry<P>>(
     family: &SurvivalMarginalSlopeFamily,
     block_states: &[ParameterBlockState],
     row: usize,
-) -> Result<[f64; 4], String> {
+) -> Result<[f64; P], String> {
     let q_geom = family.row_dynamic_q_values(row, block_states)?;
-    Ok([q_geom.q0, q_geom.q1, q_geom.qd1, block_states[2].eta[row]])
+    let mut primaries = [0.0; P];
+    primaries[PRIMARY_Q0] = q_geom.q0;
+    primaries[PRIMARY_Q1] = q_geom.q1;
+    primaries[PRIMARY_QD1] = q_geom.qd1;
+    let slope = family.row_slope_channels(row, block_states)?;
+    if G::FOLLOW_UP_VARYING {
+        primaries[PRIMARY_SLOPE] = slope.entry;
+        primaries[PRIMARY_SLOPE_EXIT] = slope.exit;
+        primaries[PRIMARY_SLOPE_RATE] = slope.rate;
+    } else {
+        primaries[PRIMARY_SLOPE] = slope.exit;
+    }
+    Ok(primaries)
 }
 
 /// The scalar-independent per-row inputs the generic rigid row NLL
 /// ([`rigid_row_nll`]) consumes: the f64 quantities computed ONCE per row and
 /// reused across every [`JetScalar`] instantiation (value/grad/Hessian, the
-/// contracted third/fourth, and the dense `Tower4<4>` oracle/all-axes path).
+/// contracted third/fourth, and the dense tower oracle/all-axes path).
 pub(crate) struct RigidRowInputs {
     pub(crate) row: usize,
     pub(crate) wi: f64,
@@ -743,80 +774,45 @@ pub(crate) fn rigid_row_inputs(
     })
 }
 
-#[inline(always)]
-fn rigid_row_feature_jets<S: JetScalar<4>>(
-    vars: &[S; 4],
-    inputs: &RigidRowInputs,
-) -> [S; RIGID_FEATURE_DIMENSION] {
-    let observed_g = vars[3].scale(inputs.probit_scale);
-    let linear = observed_g.scale(inputs.z_sum);
-    let variance = vars[3].mul(&vars[3]).scale(inputs.covariance_ones);
-    static_slope_feature_frame(
-        vars[0],
-        vars[1],
-        vars[2],
-        linear,
-        variance,
-        S::constant(0.0),
-    )
-}
-
-#[inline(always)]
-fn rigid_row_feature_values(
-    primaries: &[f64; 4],
-    inputs: &RigidRowInputs,
-) -> [f64; RIGID_FEATURE_DIMENSION] {
-    let [q0, q1, qd1, g] = *primaries;
-    let observed_g = inputs.probit_scale * g;
-    static_slope_feature_frame(
-        q0,
-        q1,
-        qd1,
-        observed_g * inputs.z_sum,
-        (g * g) * inputs.covariance_ones,
-        0.0,
-    )
-}
-
-/// Admission witnesses for the scalar/shared four-primary geometry, obtained by
-/// applying its `(q0,q1,qd1,g) -> (q0,q1,qd1,L,V)` feature map to the sliced
-/// witness surface emitted from the sole rigid likelihood declaration.
+/// Admission witnesses for a primary frame, obtained by applying its feature
+/// map to the sliced witness surface emitted from the sole rigid likelihood
+/// declaration.
 #[inline(always)]
 #[cfg(target_os = "linux")]
-pub(crate) fn rigid_row_admission_witnesses(
-    primaries: &[f64; 4],
+pub(crate) fn rigid_row_admission_witnesses<const P: usize, G: SlopeRowGeometry<P>>(
+    primaries: &[f64; P],
     inputs: &RigidRowInputs,
 ) -> [f64; 3] {
-    let features = rigid_row_feature_values(primaries, inputs);
+    let features = G::feature_frame(primaries, inputs);
     rigid_feature_frame_witnesses(&features, inputs.probit_scale)
 }
 
-/// The rigid survival marginal-slope row negative log-likelihood, evaluated
-/// over a generic four-primary [`JetScalar`] after mechanically constructing
-/// the five semantic features consumed by the sole `rigid_feature_program` AST.
-/// The same expression therefore yields every derivative channel a consumer
-/// needs (#736/#932 single-source contract):
+/// The survival marginal-slope row negative log-likelihood, evaluated over a
+/// generic [`JetScalar`] after mechanically constructing the nine semantic
+/// features consumed by the sole `rigid_feature_program` AST. The same
+/// expression therefore yields every derivative channel a consumer needs
+/// (#736/#932 single-source contract):
 ///
-/// * `S = Order2<4>`  → `(v, g, H)` (inner Newton / `row_kernel`, 168 B/row),
-/// * `S = OneSeed<4>` → contracted third `Σ_c ℓ_{abc} dir_c`
+/// * `S = Order2<P>`  → `(v, g, H)` (inner Newton / `row_kernel`),
+/// * `S = OneSeed<P>` → contracted third `Σ_c ℓ_{abc} dir_c`
 ///   (`row_third_contracted`),
-/// * `S = TwoSeed<4>` → contracted fourth `Σ_{cd} ℓ_{abcd} u_c v_d`
+/// * `S = TwoSeed<P>` → contracted fourth `Σ_{cd} ℓ_{abcd} u_c v_d`
 ///   (`row_fourth_contracted`),
-/// * `S = Tower4<4>`  → the full dense `(v,g,H,t3,t4)` oracle / #979 all-axes
+/// * `S = Tower4<P>`  → the full dense `(v,g,H,t3,t4)` oracle / #979 all-axes
 ///   build-once truth (via [`gam_math::jet_tower::program_full_tower`]).
 ///
-/// The feature map is `L=(s·g)·z_sum`, `V=g²·covariance_ones`; all probability
-/// algebra and special-function composition lives only in the feature program.
-pub(crate) fn rigid_row_nll<S: JetScalar<4>>(
-    vars: &[S; 4],
+/// The feature map belongs to the frame `G`; all probability algebra and
+/// special-function composition lives only in the feature program.
+pub(crate) fn rigid_row_nll<const P: usize, G: SlopeRowGeometry<P>, S: JetScalar<P>>(
+    vars: &[S; P],
     inputs: &RigidRowInputs,
 ) -> Result<S, String> {
-    let features = rigid_row_feature_jets(vars, inputs);
+    let features = G::feature_frame(vars, inputs);
     let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_program::<4, S>(&features, inputs.wi, inputs.di, inputs.probit_scale);
+        rigid_feature_frame_program::<P, S>(&features, inputs.wi, inputs.di, inputs.probit_scale);
 
-    validate_rigid_row_admission(
-        vars[2].value(),
+    validate_rigid_row_admission::<P, G>(
+        vars[PRIMARY_QD1].value(),
         inputs,
         neg_eta0,
         neg_eta1,
@@ -835,166 +831,90 @@ pub(crate) fn rigid_row_nll<S: JetScalar<4>>(
 /// rather than by hand, in the spirit of the single-source contract on
 /// [`rigid_row_nll`].
 ///
-/// The derivation is two observations about the feature map
-/// `(q0, q1, qd1, g) → (q0, q1, qd1, L, V)` with `L = (s·g)·z_sum` and
-/// `V = g²·covariance_ones`:
-///
-/// 1. `z_sum` reaches the program through `L` alone, and linearly, so
-///    `∂/∂z_sum = (s·g)·∂/∂L` on any function of the features. `V` does not
-///    involve `z_sum` at all.
-/// 2. The only feature-map entry that itself depends on `z_sum` is
-///    `∂L/∂g = s·z_sum`, whose `z_sum`-derivative is the constant `s`.
-///
-/// Differentiating the pullback `∂ℓ/∂p_a = Σ_f g_f·J_{f a}` therefore gives
+/// Differentiating the pullback `∂ℓ/∂p_a = Σ_f g_f·J_{f a}` gives
 ///
 /// ```text
-///     ∂²ℓ/∂p_a ∂z_sum = (s·g)·Σ_f H_{f L}·J_{f a}  +  g_L·∂J_{L a}/∂z_sum,
+///     ∂²ℓ/∂p_a ∂z_sum = Σ_f (Σ_h H_{f h}·∂h/∂z)·J_{f a}  +  Σ_f g_f·∂J_{f a}/∂z,
 /// ```
 ///
-/// with the second term supported on the log-slope primary only. For `K = 1`
-/// (`z_sum = z`, the only shape the conditional latent calibration is persisted
-/// for) this is the row's exact `∂/∂z`.
+/// and both `∂h/∂z` and `∂J/∂z` are owned by the frame
+/// ([`SlopeRowGeometry::score_sensitivity`]) — for a static slope the score
+/// reaches the entry AND exit location channels, which is what the single
+/// `linear` feature used to be. For `K = 1` (`z_sum = z`, the only shape the
+/// conditional latent calibration is persisted for) this is the row's exact
+/// `∂/∂z`.
 #[inline]
-pub(crate) fn rigid_row_primary_mixed_in_z(
-    primaries: &[f64; 4],
+pub(crate) fn rigid_row_primary_mixed_in_z<const P: usize, G: SlopeRowGeometry<P>>(
+    primaries: &[f64; P],
     inputs: &RigidRowInputs,
-) -> Result<[f64; 4], String> {
-    let features = rigid_row_feature_values(primaries, inputs);
+) -> Result<[f64; P], String> {
+    let features = G::feature_frame(primaries, inputs);
     let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
         rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
-    validate_rigid_row_admission(
-        primaries[FEATURE_QD1],
+    validate_rigid_row_admission::<P, G>(
+        primaries[PRIMARY_QD1],
         inputs,
         neg_eta0,
         neg_eta1,
         adjusted_derivative,
     )?;
-    // `∂η/∂z_sum`: the observed slope. Same quantity `rigid_observed_logslope`
-    // names, read here off the feature map so the two cannot drift. A static
-    // slope reaches `z_sum` through BOTH location channels (`L0` at entry and
-    // `L1` at exit are the same functional), so every `∂/∂z_sum` below sums the
-    // pair — that pair is exactly what the single `linear` feature used to be
-    // before the slope was given its own follow-up axis (gam#2765).
-    let observed_slope = inputs.probit_scale * primaries[3];
-    // The same feature-map Jacobian columns `rigid_row_order2` builds for the
-    // log-slope primary.
-    let d_linear_d_g = inputs.probit_scale * inputs.z_sum;
-    let d_variance_d_g = 2.0 * primaries[3] * inputs.covariance_ones;
-    let jacobian_to_g = |feature: usize| -> f64 {
-        if feature == FEATURE_LINEAR0 || feature == FEATURE_LINEAR1 {
-            d_linear_d_g
-        } else {
-            d_variance_d_g
+    let jacobian = G::feature_jacobian(primaries, inputs);
+    let sensitivity = G::score_sensitivity(primaries, inputs);
+    // `Σ_h H_{f h}·∂h/∂z_sum`, one entry per feature.
+    let hessian_in_z: [f64; RIGID_FEATURE_DIMENSION] = std::array::from_fn(|feature| {
+        let mut channel = 0.0;
+        for other in 0..RIGID_FEATURE_DIMENSION {
+            channel += feature_hessian[feature][other] * sensitivity.feature[other];
         }
-    };
-    let mixed_in_z = |feature: usize| -> f64 {
-        feature_hessian[feature][FEATURE_LINEAR0] + feature_hessian[feature][FEATURE_LINEAR1]
-    };
-    let slope_channel = STATIC_SLOPE_ACTIVE_FEATURES
-        .iter()
-        .map(|&feature| mixed_in_z(feature) * jacobian_to_g(feature))
-        .sum::<f64>();
-    Ok([
-        observed_slope * mixed_in_z(FEATURE_Q0),
-        observed_slope * mixed_in_z(FEATURE_Q1),
-        observed_slope * mixed_in_z(FEATURE_QD1),
-        observed_slope * slope_channel
-            + (feature_gradient[FEATURE_LINEAR0] + feature_gradient[FEATURE_LINEAR1])
-                * inputs.probit_scale,
-    ])
+        channel
+    });
+    let mut mixed = [0.0; P];
+    for axis in 0..P {
+        let mut channel = 0.0;
+        for slot in 0..G::active_feature_count(axis) {
+            let feature = G::active_feature(axis, slot);
+            channel += hessian_in_z[feature] * jacobian[feature][axis]
+                + feature_gradient[feature] * sensitivity.jacobian[feature][axis];
+        }
+        mixed[axis] = channel;
+    }
+    Ok(mixed)
 }
 
 /// Direct value/gradient/Hessian lowering of the canonical nine-feature row
-/// program followed by the universal second-order pullback into the scalar/shared
-/// four-primary geometry. The fixed stack buffers and active-feature map expose
-/// only the three identity rows plus the four `g -> (L0,L1,V0,V1)` channels a
-/// time-constant slope reaches.
+/// program followed by the universal second-order pullback into the frame `G`.
+/// The fixed stack buffers and active-feature map expose only the channels the
+/// frame's slope primaries actually reach.
 #[inline(always)]
-pub(crate) fn rigid_row_order2(
-    primaries: &[f64; 4],
+pub(crate) fn rigid_row_order2<const P: usize, G: SlopeRowGeometry<P>>(
+    primaries: &[f64; P],
     inputs: &RigidRowInputs,
-) -> Result<(f64, [f64; 4], [[f64; 4]; 4]), String> {
-    let features = rigid_row_feature_values(primaries, inputs);
+) -> Result<(f64, [f64; P], [[f64; P]; P]), String> {
+    let features = G::feature_frame(primaries, inputs);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
         rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
-    validate_rigid_row_admission(
-        primaries[FEATURE_QD1],
+    validate_rigid_row_admission::<P, G>(
+        primaries[PRIMARY_QD1],
         inputs,
         neg_eta0,
         neg_eta1,
         adjusted_derivative,
     )?;
 
-    const DIMENSION: usize = 4;
-    let mut jacobian = [0.0; RIGID_FEATURE_DIMENSION * DIMENSION];
-    jacobian[FEATURE_Q0 * DIMENSION + FEATURE_Q0] = 1.0;
-    jacobian[FEATURE_Q1 * DIMENSION + FEATURE_Q1] = 1.0;
-    jacobian[FEATURE_QD1 * DIMENSION + FEATURE_QD1] = 1.0;
-    let d_linear_d_g = inputs.probit_scale * inputs.z_sum;
-    let d_variance_d_g = 2.0 * primaries[3] * inputs.covariance_ones;
-    jacobian[FEATURE_LINEAR0 * DIMENSION + 3] = d_linear_d_g;
-    jacobian[FEATURE_LINEAR1 * DIMENSION + 3] = d_linear_d_g;
-    jacobian[FEATURE_VARIANCE0 * DIMENSION + 3] = d_variance_d_g;
-    jacobian[FEATURE_VARIANCE1 * DIMENSION + 3] = d_variance_d_g;
-
-    let mut gradient = [0.0; DIMENSION];
-    let mut flat_hessian = [0.0; DIMENSION * DIMENSION];
+    let jacobian = G::feature_jacobian(primaries, inputs);
+    let mut gradient = [0.0; P];
+    let mut hessian = [[0.0; P]; P];
     order2_feature_pullback_into(
         &feature_gradient,
         &feature_hessian,
-        &jacobian,
-        |axis| {
-            if axis < 3 {
-                1
-            } else {
-                STATIC_SLOPE_ACTIVE_FEATURES.len()
-            }
-        },
-        |axis, slot| {
-            if axis < 3 {
-                axis
-            } else {
-                STATIC_SLOPE_ACTIVE_FEATURES[slot]
-            }
-        },
-        DIMENSION,
+        jacobian.as_flattened(),
+        G::active_feature_count,
+        G::active_feature,
+        P,
         &mut gradient,
-        &mut flat_hessian,
-        |gradient, hessian| {
-            // `∂²V_k/∂g² = 2·covariance_ones` on both variance channels; the
-            // location channels are linear in `g` and contribute nothing here.
-            hessian[3 * DIMENSION + 3] += (gradient[FEATURE_VARIANCE0]
-                + gradient[FEATURE_VARIANCE1])
-                * 2.0
-                * inputs.covariance_ones;
-        },
+        hessian.as_flattened_mut(),
+        |gradient, hessian| G::add_feature_curvature(gradient, inputs, hessian),
     );
-    let hessian = [
-        [
-            flat_hessian[0],
-            flat_hessian[1],
-            flat_hessian[2],
-            flat_hessian[3],
-        ],
-        [
-            flat_hessian[4],
-            flat_hessian[5],
-            flat_hessian[6],
-            flat_hessian[7],
-        ],
-        [
-            flat_hessian[8],
-            flat_hessian[9],
-            flat_hessian[10],
-            flat_hessian[11],
-        ],
-        [
-            flat_hessian[12],
-            flat_hessian[13],
-            flat_hessian[14],
-            flat_hessian[15],
-        ],
-    ];
     Ok((value, gradient, hessian))
 }
 
@@ -1002,7 +922,7 @@ pub(crate) fn rigid_row_order2(
 /// the already-admitted GPU gather. The three witnesses come from the same
 /// `row_program!` declaration: directly from the generic program on CPU and
 /// from its dependency-sliced scalar witness schedule during GPU admission.
-pub(crate) fn validate_rigid_row_admission(
+pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P>>(
     qd1: f64,
     inputs: &RigidRowInputs,
     neg_eta0: f64,
@@ -1021,6 +941,30 @@ pub(crate) fn validate_rigid_row_admission(
             reason: format!(
                 "survival marginal-slope monotonicity violated at row {row}: raw time derivative={:.3e} must be at least derivative_guard={:.3e}; transformed time derivative={:.3e}",
                 qd1, qd1_lower, adjusted_derivative
+            ),
+        }
+        .into());
+    }
+
+    // `q′(t) ≥ derivative_guard` is the MARGINAL monotonicity constraint — the
+    // population survival index has to be increasing — and the inner solver
+    // holds it as a linear inequality on the time block. With a time-constant
+    // slope it also implies the likelihood-domain condition `η′₁ > 0`, because
+    // `η′₁ = q′·c` and `c ≥ 1`; that implication is exactly what a
+    // follow-up-varying slope breaks, since `η′₁` picks up `q₁·c′₁ + ṡ·ż` which
+    // carry no sign (gam#2765). `log η′₁` is in the row program, so the honest
+    // place for the extra condition is the likelihood domain: outside it the
+    // objective is `+∞` and the step is rejected, rather than a `NaN` reaching
+    // the solver. On the static frame this branch is unreachable given the
+    // guard above, so it changes no existing fit.
+    if inputs.di != 0.0 && !(adjusted_derivative > 0.0) {
+        return Err(SurvivalMarginalSlopeError::MonotonicityViolation {
+            reason: format!(
+                "survival marginal-slope transformed time derivative must be positive at row \
+                 {row} on the {} frame: got {:.3e} (raw time derivative={:.3e})",
+                G::NAME,
+                adjusted_derivative,
+                qd1,
             ),
         }
         .into());
@@ -1056,32 +1000,36 @@ pub(crate) fn validate_rigid_row_admission(
 /// via the `program_*` helpers. Instantiating this same method at `S = Tower4`
 /// through [`gam_math::jet_tower::program_full_tower`] supplies the dense oracle;
 /// there is no second tower-only program surface.
-impl gam_math::jet_tower::RowProgram<4> for SurvivalMarginalSlopeRowKernel {
+impl<const P: usize, G: SlopeRowGeometry<P>> gam_math::jet_tower::RowProgram<P>
+    for SurvivalMarginalSlopeRowKernel<P, G>
+{
     fn n_rows(&self) -> usize {
         self.family.n
     }
 
-    fn primaries(&self, row: usize) -> Result<[f64; 4], String> {
-        rigid_row_kernel_primaries(&self.family, &self.block_states, row)
+    fn primaries(&self, row: usize) -> Result<[f64; P], String> {
+        rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)
     }
 
-    fn eval<S: JetScalar<4>>(&self, row: usize, p: &[S; 4]) -> Result<S, String> {
+    fn eval<S: JetScalar<P>>(&self, row: usize, p: &[S; P]) -> Result<S, String> {
         let inputs = rigid_row_inputs(
             &self.family,
             &self.block_states,
             row,
             "survival marginal-slope rigid row program",
         )?;
-        rigid_row_nll(p, &inputs)
+        rigid_row_nll::<P, G, S>(p, &inputs)
     }
 }
 
-impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
+impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
+    for SurvivalMarginalSlopeRowKernel<P, G>
+{
     fn n_coefficients(&self) -> usize {
         self.slices.total
     }
 
-    fn row_kernel(&self, row: usize) -> Result<(f64, [f64; 4], [[f64; 4]; 4]), String> {
+    fn row_kernel(&self, row: usize) -> Result<(f64, [f64; P], [[f64; P]; P]), String> {
         // #932: the macro lowers value/gradient/Hessian directly from the SAME
         // parsed SSA graph as `rigid_row_nll` and CUDA. No dense higher-order
         // tower, forward order-two jet, dependency mask, or hand chain rule is
@@ -1092,8 +1040,8 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             row,
             "survival marginal-slope rigid row kernel",
         )?;
-        let p = rigid_row_kernel_primaries(&self.family, &self.block_states, row)?;
-        rigid_row_order2(&p, &inputs)
+        let p = rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
+        rigid_row_order2::<P, G>(&p, &inputs)
     }
 
     /// Batched all-rows `(nll, grad, hess)` via the A100 NVRTC survival row-jet
@@ -1109,9 +1057,15 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
     /// primaries.
     fn batched_value_grad_hess_all(
         &self,
-    ) -> Option<Result<(Vec<f64>, Vec<[f64; 4]>, Vec<[[f64; 4]; 4]>), String>> {
+    ) -> Option<Result<(Vec<f64>, Vec<[f64; P]>, Vec<[[f64; P]; P]>), String>> {
         use crate::gpu_kernels::survival_rowjet::survival_rigid_row_vgh_device_selected;
 
+        // The device pullback is written for the four-primary frame. A
+        // follow-up-varying slope takes the ordinary per-row CPU path rather
+        // than a silently different lowering.
+        if G::FOLLOW_UP_VARYING {
+            return None;
+        }
         let n = self.family.n;
         match survival_rigid_row_vgh_device_selected(n) {
             Ok(true) => {}
@@ -1128,7 +1082,8 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             let gather: Result<Vec<SurvivalRowInputs>, String> = (0..n)
                 .into_par_iter()
                 .map(|row| {
-                    let p = rigid_row_kernel_primaries(&self.family, &self.block_states, row)?;
+                    let p =
+                        rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
                     let inputs = rigid_row_inputs(
                         &self.family,
                         &self.block_states,
@@ -1136,16 +1091,19 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                         "survival marginal-slope rigid row kernel (batched)",
                     )?;
                     let [neg_eta0, neg_eta1, adjusted_derivative] =
-                        rigid_row_admission_witnesses(&p, &inputs);
-                    validate_rigid_row_admission(
-                        p[2],
+                        rigid_row_admission_witnesses::<P, G>(&p, &inputs);
+                    validate_rigid_row_admission::<P, G>(
+                        p[PRIMARY_QD1],
                         &inputs,
                         neg_eta0,
                         neg_eta1,
                         adjusted_derivative,
                     )?;
                     Ok(SurvivalRowInputs {
-                        primaries: p,
+                        // `G::FOLLOW_UP_VARYING` is false on this branch, so
+                        // `P == STATIC_SLOPE_PRIMARIES` and this is a copy, not
+                        // a truncation.
+                        primaries: std::array::from_fn(|axis| p[axis]),
                         wi: inputs.wi,
                         di: inputs.di,
                         z_sum: inputs.z_sum,
@@ -1161,13 +1119,16 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                 Ok(channels) => channels,
                 Err(error) => return Some(Err(error)),
             };
-            let mut grads = vec![[0.0_f64; 4]; n];
-            let mut hesss = vec![[[0.0_f64; 4]; 4]; n];
+            let mut grads = vec![[0.0_f64; P]; n];
+            let mut hesss = vec![[[0.0_f64; P]; P]; n];
             for row in 0..n {
-                for a in 0..4 {
-                    grads[row][a] = ch.grad[row * 4 + a];
-                    for b in 0..4 {
-                        hesss[row][a][b] = ch.hess[row * 16 + a * 4 + b];
+                for a in 0..STATIC_SLOPE_PRIMARIES {
+                    grads[row][a] = ch.grad[row * STATIC_SLOPE_PRIMARIES + a];
+                    for b in 0..STATIC_SLOPE_PRIMARIES {
+                        hesss[row][a][b] = ch.hess
+                            [row * STATIC_SLOPE_PRIMARIES * STATIC_SLOPE_PRIMARIES
+                                + a * STATIC_SLOPE_PRIMARIES
+                                + b];
                     }
                 }
             }
@@ -1181,22 +1142,23 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
         None
     }
 
-    fn jacobian_action(&self, row: usize, d_beta: &[f64]) -> [f64; 4] {
+    fn jacobian_action(&self, row: usize, d_beta: &[f64]) -> [f64; P] {
         let d_beta = ndarray::ArrayView1::from(d_beta);
         let d_time = d_beta.slice(s![self.slices.time.clone()]);
         let d_marginal = d_beta.slice(s![self.slices.marginal.clone()]);
         let d_logslope = d_beta.slice(s![self.slices.logslope.clone()]);
-        [
-            self.family.design_entry.dot_row_view(row, d_time)
-                + self.family.marginal_design.dot_row_view(row, d_marginal),
-            self.family.design_exit.dot_row_view(row, d_time)
-                + self.family.marginal_design.dot_row_view(row, d_marginal),
-            self.family.design_derivative_exit.dot_row_view(row, d_time),
-            self.family
-                .logslope_layout
-                .coefficient_design()
-                .dot_row_view(row, d_logslope),
-        ]
+        let mut action = [0.0; P];
+        let marginal = self.family.marginal_design.dot_row_view(row, d_marginal);
+        action[PRIMARY_Q0] = self.family.design_entry.dot_row_view(row, d_time) + marginal;
+        action[PRIMARY_Q1] = self.family.design_exit.dot_row_view(row, d_time) + marginal;
+        action[PRIMARY_QD1] = self
+            .family
+            .design_derivative_exit
+            .dot_row_view(row, d_time);
+        for &(primary, design) in self.logslope_channels().as_slice() {
+            action[primary] = design.dot_row_view(row, d_logslope);
+        }
+        action
     }
 
     fn jacobian_action_matrix(&self, factor: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
@@ -1233,43 +1195,43 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
         })
     }
 
-    fn jacobian_transpose_action(&self, row: usize, v: &[f64; 4], out: &mut [f64]) {
+    fn jacobian_transpose_action(&self, row: usize, v: &[f64; P], out: &mut [f64]) {
         {
             let mut time = ndarray::ArrayViewMut1::from(&mut out[self.slices.time.clone()]);
             self.family
                 .design_entry
-                .axpy_row_into(row, v[0], &mut time)
+                .axpy_row_into(row, v[PRIMARY_Q0], &mut time)
                 .expect("time entry axpy dim mismatch");
             self.family
                 .design_exit
-                .axpy_row_into(row, v[1], &mut time)
+                .axpy_row_into(row, v[PRIMARY_Q1], &mut time)
                 .expect("time exit axpy dim mismatch");
             self.family
                 .design_derivative_exit
-                .axpy_row_into(row, v[2], &mut time)
+                .axpy_row_into(row, v[PRIMARY_QD1], &mut time)
                 .expect("time deriv axpy dim mismatch");
         }
         {
             let mut marginal = ndarray::ArrayViewMut1::from(&mut out[self.slices.marginal.clone()]);
             self.family
                 .marginal_design
-                .axpy_row_into(row, v[0] + v[1], &mut marginal)
+                .axpy_row_into(row, v[PRIMARY_Q0] + v[PRIMARY_Q1], &mut marginal)
                 .expect("marginal axpy dim mismatch");
         }
         {
             let mut logslope = ndarray::ArrayViewMut1::from(&mut out[self.slices.logslope.clone()]);
-            self.family
-                .logslope_layout
-                .coefficient_design()
-                .axpy_row_into(row, v[3], &mut logslope)
-                .expect("logslope axpy dim mismatch");
+            for &(primary, design) in self.logslope_channels().as_slice() {
+                design
+                    .axpy_row_into(row, v[primary], &mut logslope)
+                    .expect("logslope axpy dim mismatch");
+            }
         }
     }
 
-    fn add_pullback_hessian(&self, row: usize, h: &[[f64; 4]; 4], target: &mut Array2<f64>) {
-        let mut h_arr = Array2::<f64>::zeros((4, 4));
-        for a in 0..4 {
-            for b in 0..4 {
+    fn add_pullback_hessian(&self, row: usize, h: &[[f64; P]; P], target: &mut Array2<f64>) {
+        let mut h_arr = Array2::<f64>::zeros((P, P));
+        for a in 0..P {
+            for b in 0..P {
                 h_arr[[a, b]] = h[a][b];
             }
         }
@@ -1299,7 +1261,7 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
     fn hessian_dense_override(
         &self,
         rows: &crate::row_kernel::RowSet,
-        row_hessians: &[[[f64; 4]; 4]],
+        row_hessians: &[[[f64; P]; P]],
     ) -> Option<Result<Array2<f64>, String>> {
         if !matches!(rows, crate::row_kernel::RowSet::All) {
             return None;
@@ -1319,7 +1281,8 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             &self.family.design_derivative_exit,
         ];
         let marginal_design = &self.family.marginal_design;
-        let logslope_design = self.family.logslope_layout.coefficient_design();
+        let logslope_channels = self.logslope_channels();
+        let logslope_designs = logslope_channels.as_slice();
 
         Some((|| {
             fn dense_chunk<'a>(
@@ -1423,8 +1386,13 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                 ("time-exit", time_designs[1]),
                 ("time-derivative", time_designs[2]),
                 ("marginal", marginal_design),
-                ("logslope", logslope_design),
-            ] {
+            ]
+            .into_iter()
+            .chain(
+                logslope_designs
+                    .iter()
+                    .map(|&(_, design)| ("logslope", design)),
+            ) {
                 if design.nrows() != n {
                     return Err(format!(
                         "survival marginal-slope dense Hessian {label} rows={} != hessians={n}",
@@ -1432,7 +1400,7 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                     ));
                 }
             }
-            let weights: [[Array1<f64>; 4]; 4] = std::array::from_fn(|primary_a| {
+            let weights: [[Array1<f64>; P]; P] = std::array::from_fn(|primary_a| {
                 std::array::from_fn(|primary_b| {
                     Array1::from_iter(
                         row_hessians
@@ -1471,40 +1439,46 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                 ]),
                 "marginal/marginal",
             )?;
-            add_weighted_cross(
-                logslope_design,
-                logslope_design,
-                &weights[3][3],
-                dense.slice_mut(s![
-                    self.slices.logslope.clone(),
-                    self.slices.logslope.clone()
-                ]),
-                "logslope/logslope",
-            )?;
-
-            let mg_weight = &weights[0][3] + &weights[1][3];
-            add_weighted_cross(
-                marginal_design,
-                logslope_design,
-                &mg_weight,
-                dense.slice_mut(s![
-                    self.slices.marginal.clone(),
-                    self.slices.logslope.clone()
-                ]),
-                "marginal/logslope",
-            )?;
-
-            for primary_a in 0..3 {
+            for &(primary_left, design_left) in logslope_designs {
+                for &(primary_right, design_right) in logslope_designs {
+                    add_weighted_cross(
+                        design_left,
+                        design_right,
+                        &weights[primary_left][primary_right],
+                        dense.slice_mut(s![
+                            self.slices.logslope.clone(),
+                            self.slices.logslope.clone()
+                        ]),
+                        "logslope/logslope",
+                    )?;
+                }
+                let mg_weight =
+                    &weights[PRIMARY_Q0][primary_left] + &weights[PRIMARY_Q1][primary_left];
                 add_weighted_cross(
-                    time_designs[primary_a],
-                    logslope_design,
-                    &weights[primary_a][3],
+                    marginal_design,
+                    design_left,
+                    &mg_weight,
                     dense.slice_mut(s![
-                        self.slices.time.clone(),
+                        self.slices.marginal.clone(),
                         self.slices.logslope.clone()
                     ]),
-                    "time/logslope",
+                    "marginal/logslope",
                 )?;
+            }
+
+            for primary_a in 0..3 {
+                for &(primary_slope, design_slope) in logslope_designs {
+                    add_weighted_cross(
+                        time_designs[primary_a],
+                        design_slope,
+                        &weights[primary_a][primary_slope],
+                        dense.slice_mut(s![
+                            self.slices.time.clone(),
+                            self.slices.logslope.clone()
+                        ]),
+                        "time/logslope",
+                    )?;
+                }
                 let tm_weight = &weights[primary_a][0] + &weights[primary_a][1];
                 add_weighted_cross(
                     time_designs[primary_a],
@@ -1558,23 +1532,23 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                     time_designs[1].is_sparse(),
                     time_designs[2].is_sparse(),
                     marginal_design.is_sparse(),
-                    logslope_design.is_sparse(),
+                    logslope_designs.iter().any(|&(_, d)| d.is_sparse()),
                     time_designs[0].ncols(),
                     time_designs[1].ncols(),
                     time_designs[2].ncols(),
                     marginal_design.ncols(),
-                    logslope_design.ncols(),
+                    logslope_designs[0].1.ncols(),
                 );
             });
             Ok(dense)
         })())
     }
 
-    fn add_diagonal_quadratic(&self, row: usize, h: &[[f64; 4]; 4], diag: &mut [f64]) {
+    fn add_diagonal_quadratic(&self, row: usize, h: &[[f64; P]; P], diag: &mut [f64]) {
         let designs: [(usize, &DesignMatrix); 3] = [
-            (0, &self.family.design_entry),
-            (1, &self.family.design_exit),
-            (2, &self.family.design_derivative_exit),
+            (PRIMARY_Q0, &self.family.design_entry),
+            (PRIMARY_Q1, &self.family.design_exit),
+            (PRIMARY_QD1, &self.family.design_derivative_exit),
         ];
         for &(pi, des) in &designs {
             {
@@ -1592,7 +1566,8 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
             }
         }
         {
-            let alpha = h[0][0] + 2.0 * h[0][1] + h[1][1];
+            let alpha =
+                h[PRIMARY_Q0][PRIMARY_Q0] + 2.0 * h[PRIMARY_Q0][PRIMARY_Q1] + h[PRIMARY_Q1][PRIMARY_Q1];
             let mut md = ndarray::ArrayViewMut1::from(&mut diag[self.slices.marginal.clone()]);
             self.family
                 .marginal_design
@@ -1600,12 +1575,25 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
                 .expect("marginal squared_axpy dim mismatch");
         }
         {
-            let mut gd = ndarray::ArrayViewMut1::from(&mut diag[self.slices.logslope.clone()]);
-            self.family
-                .logslope_layout
-                .coefficient_design()
-                .squared_axpy_row_into(row, h[3][3], &mut gd)
-                .expect("logslope squared_axpy dim mismatch");
+            let channels = self.logslope_channels();
+            let slope_designs = channels.as_slice();
+            for (index, &(primary, design)) in slope_designs.iter().enumerate() {
+                let mut gd =
+                    ndarray::ArrayViewMut1::from(&mut diag[self.slices.logslope.clone()]);
+                design
+                    .squared_axpy_row_into(row, h[primary][primary], &mut gd)
+                    .expect("logslope squared_axpy dim mismatch");
+                for &(other_primary, other_design) in &slope_designs[index + 1..] {
+                    design
+                        .crossdiag_axpy_row_into(
+                            row,
+                            other_design,
+                            2.0 * h[primary][other_primary],
+                            &mut gd,
+                        )
+                        .expect("logslope crossdiag dim mismatch");
+                }
+            }
         }
     }
 
@@ -1686,8 +1674,8 @@ impl RowKernel<4> for SurvivalMarginalSlopeRowKernel {
     }
 }
 
-impl SurvivalMarginalSlopeRowKernel {
-    /// Assemble the `(n_out × 4·rank)` joint Jacobian-action projection `Jᵢ · F`
+impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G> {
+    /// Assemble the `(n_out × P·rank)` joint Jacobian-action projection `Jᵢ · F`
     /// from the four primary axes — `[entry+marginal | exit+marginal |
     /// derivative | logslope]` — given a per-axis builder `axis(design,
     /// factor_block)` that produces that design's `n_out × rank` contribution.
@@ -1720,17 +1708,30 @@ impl SurvivalMarginalSlopeRowKernel {
         let mut axis1 = axis(&self.family.design_exit, f_time);
         axis1 += &jf_marginal;
         let axis2 = axis(&self.family.design_derivative_exit, f_time);
-        let axis3 = axis(self.family.logslope_layout.coefficient_design(), f_logslope);
-
-        crate::row_kernel::row_kernel_pack_jf_axes::<4>(
-            n_out,
-            rank,
-            [(0, axis0), (1, axis1), (2, axis2), (3, axis3)],
-        )
+        // One slot per primary, filled by index rather than by push order, so a
+        // frame whose slope owns three primaries cannot silently pack them into
+        // the wrong axes.
+        let mut slots: [Option<Array2<f64>>; P] = std::array::from_fn(|_| None);
+        slots[PRIMARY_Q0] = Some(axis0);
+        slots[PRIMARY_Q1] = Some(axis1);
+        slots[PRIMARY_QD1] = Some(axis2);
+        for &(primary, design) in self.logslope_channels().as_slice() {
+            slots[primary] = Some(axis(design, f_logslope));
+        }
+        let axes: [(usize, Array2<f64>); P] = std::array::from_fn(|primary| {
+            (
+                primary,
+                slots[primary].take().expect(
+                    "every primary of the frame owns exactly one J·F axis: the three location \
+                     channels plus the log-slope layout's follow-up channels",
+                ),
+            )
+        });
+        crate::row_kernel::row_kernel_pack_jf_axes::<P>(n_out, rank, axes)
     }
 }
 
-impl SurvivalMarginalSlopeRowKernel {
+impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G> {
     /// Build every row's fourth-order primary tower ONCE for the
     /// second-directional all-axes path.
     ///
@@ -1746,7 +1747,7 @@ impl SurvivalMarginalSlopeRowKernel {
     /// is therefore bit-for-bit what `program_full_tower(row)` would produce, so the
     /// build-once batched override contracts against it without changing any
     /// downstream arithmetic.
-    fn build_row_towers(&self) -> Result<Vec<SparseTower4<RIGID_LINEAR_MASK>>, String> {
+    fn build_row_towers(&self) -> Result<Vec<SparseTower4<P, RIGID_LINEAR_MASK>>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
         (0..n)
             .into_par_iter()
@@ -1757,10 +1758,11 @@ impl SurvivalMarginalSlopeRowKernel {
                     row,
                     "survival marginal-slope rigid row fourth tower (build-once)",
                 )?;
-                let p = rigid_row_kernel_primaries(&self.family, &self.block_states, row)?;
-                let vars: [SparseTower4<RIGID_LINEAR_MASK>; 4] =
+                let p =
+                    rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
+                let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
                     std::array::from_fn(|a| SparseTower4::variable(p[a], a));
-                rigid_row_nll(&vars, &inputs)
+                rigid_row_nll::<P, G, _>(&vars, &inputs)
             })
             .collect()
     }
@@ -1777,7 +1779,7 @@ impl SurvivalMarginalSlopeRowKernel {
     /// 5000/5000 rows `to_bits`-identical to the engine `Tower3<4>` / `Tower4<4>`
     /// `t3` channel). The cached `t3` is bit-for-bit what the dense tower would
     /// produce.
-    fn build_row_third_towers(&self) -> Result<Vec<SparseTower3<RIGID_LINEAR_MASK>>, String> {
+    fn build_row_third_towers(&self) -> Result<Vec<SparseTower3<P, RIGID_LINEAR_MASK>>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
         (0..n)
             .into_par_iter()
@@ -1788,10 +1790,11 @@ impl SurvivalMarginalSlopeRowKernel {
                     row,
                     "survival marginal-slope rigid row third tower (build-once)",
                 )?;
-                let p = rigid_row_kernel_primaries(&self.family, &self.block_states, row)?;
-                let vars: [SparseTower3<RIGID_LINEAR_MASK>; 4] =
+                let p =
+                    rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
+                let vars: [SparseTower3<P, RIGID_LINEAR_MASK>; P] =
                     std::array::from_fn(|a| SparseTower3::variable(p[a], a));
-                rigid_row_nll(&vars, &inputs)
+                rigid_row_nll::<P, G, _>(&vars, &inputs)
             })
             .collect()
     }
@@ -1862,7 +1865,7 @@ impl SurvivalMarginalSlopeRowKernel {
                     .to_string()
             })?;
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
-        let expected = (n, 4 * p);
+        let expected = (n, P * p);
         if jacobians.dim() != expected {
             return Err(format!(
                 "survival marginal-slope all-axes J·I shape {:?}, expected {:?}",
@@ -1883,7 +1886,7 @@ impl SurvivalMarginalSlopeRowKernel {
         // BLAS-3 Grams rather than n scalar p×p pullbacks. The row weights are
         // built in index order from the same cached tower, so only the Gram's
         // associative reduction changes (covered by the all-axes oracle).
-        let jacobian_blocks: [Array2<f64>; 4] = std::array::from_fn(|primary| {
+        let jacobian_blocks: [Array2<f64>; P] = std::array::from_fn(|primary| {
             jacobians
                 .slice(s![.., primary * p..(primary + 1) * p])
                 .to_owned()
@@ -1892,11 +1895,11 @@ impl SurvivalMarginalSlopeRowKernel {
             .into_par_iter()
             .map(|axis| {
                 let mut total = Array2::<f64>::zeros((p, p));
-                for primary_left in 0..4 {
-                    for primary_right in primary_left..4 {
+                for primary_left in 0..P {
+                    for primary_right in primary_left..P {
                         let weights = Array1::from_shape_fn(n, |row| {
                             let mut weight = 0.0;
-                            for direction_primary in 0..4 {
+                            for direction_primary in 0..P {
                                 weight += towers[row].t3[primary_left][primary_right]
                                     [direction_primary]
                                     * jacobian_blocks[direction_primary][[row, axis]];
@@ -1926,7 +1929,7 @@ impl SurvivalMarginalSlopeRowKernel {
     fn second_directional_derivative_all_axes_from_towers(
         &self,
         d_beta_u: &[f64],
-        towers: &[SparseTower4<RIGID_LINEAR_MASK>],
+        towers: &[SparseTower4<P, RIGID_LINEAR_MASK>],
     ) -> Result<Vec<Array2<f64>>, String> {
         let p = self.n_coefficients();
         (0..p)
@@ -1991,12 +1994,12 @@ impl SurvivalMarginalSlopeRowKernel {
         self.chunked_pullback_reduce(p, |row, acc| -> Result<(), String> {
             let w_row = self.primary_trace_weight(row, weight)?;
             let t4 = &towers[row].t4;
-            let mut coeff = [[0.0_f64; 4]; 4];
-            for c in 0..4 {
-                for d in 0..4 {
+            let mut coeff = [[0.0_f64; P]; P];
+            for c in 0..P {
+                for d in 0..P {
                     let mut s = 0.0;
-                    for a in 0..4 {
-                        for b in 0..4 {
+                    for a in 0..P {
+                        for b in 0..P {
                             s += w_row[a][b] * t4[a][b][c][d];
                         }
                     }
@@ -2027,7 +2030,7 @@ impl SurvivalMarginalSlopeRowKernel {
         &self,
         row: usize,
         weight: &Array2<f64>,
-    ) -> Result<[[f64; 4]; 4], String> {
+    ) -> Result<[[f64; P]; P], String> {
         let xt_e = self
             .family
             .design_entry
@@ -2050,51 +2053,55 @@ impl SurvivalMarginalSlopeRowKernel {
             .marginal_design
             .try_row_chunk(row..row + 1)
             .map_err(|e| format!("primary_trace_weight: marginal_design row chunk failed: {e}"))?;
-        let xg = self
-            .family
-            .logslope_layout
-            .coefficient_design()
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("primary_trace_weight: logslope_design row chunk failed: {e}"))?;
+        let channels = self.logslope_channels();
+        let slope_designs = channels.as_slice();
+        let slope_rows = slope_designs
+            .iter()
+            .map(|&(primary, design)| {
+                design
+                    .try_row_chunk(row..row + 1)
+                    .map(|chunk| (primary, chunk))
+                    .map_err(|e| {
+                        format!("primary_trace_weight: logslope_design row chunk failed: {e}")
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
         struct Component<'a> {
             vec: ArrayView1<'a, f64>,
             range: std::ops::Range<usize>,
         }
-        let components: [Vec<Component<'_>>; 4] = [
-            vec![
-                Component {
-                    vec: xt_e.row(0),
-                    range: self.slices.time.clone(),
-                },
-                Component {
-                    vec: xm.row(0),
-                    range: self.slices.marginal.clone(),
-                },
-            ],
-            vec![
-                Component {
-                    vec: xt_x.row(0),
-                    range: self.slices.time.clone(),
-                },
-                Component {
-                    vec: xm.row(0),
-                    range: self.slices.marginal.clone(),
-                },
-            ],
-            vec![Component {
-                vec: xt_d.row(0),
-                range: self.slices.time.clone(),
-            }],
-            vec![Component {
-                vec: xg.row(0),
+        let mut components: [Vec<Component<'_>>; P] = std::array::from_fn(|_| Vec::new());
+        components[PRIMARY_Q0].push(Component {
+            vec: xt_e.row(0),
+            range: self.slices.time.clone(),
+        });
+        components[PRIMARY_Q0].push(Component {
+            vec: xm.row(0),
+            range: self.slices.marginal.clone(),
+        });
+        components[PRIMARY_Q1].push(Component {
+            vec: xt_x.row(0),
+            range: self.slices.time.clone(),
+        });
+        components[PRIMARY_Q1].push(Component {
+            vec: xm.row(0),
+            range: self.slices.marginal.clone(),
+        });
+        components[PRIMARY_QD1].push(Component {
+            vec: xt_d.row(0),
+            range: self.slices.time.clone(),
+        });
+        for (primary, chunk) in &slope_rows {
+            components[*primary].push(Component {
+                vec: chunk.row(0),
                 range: self.slices.logslope.clone(),
-            }],
-        ];
+            });
+        }
 
-        let mut w_row = [[0.0_f64; 4]; 4];
-        for a in 0..4 {
-            for b in 0..4 {
+        let mut w_row = [[0.0_f64; P]; P];
+        for a in 0..P {
+            for b in 0..P {
                 let mut acc = 0.0;
                 for ca in &components[a] {
                     for cb in &components[b] {

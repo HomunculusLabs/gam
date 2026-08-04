@@ -561,6 +561,18 @@ pub struct FitConfig {
     pub threshold_time_degree: usize,
     pub sigma_time_k: Option<usize>,
     pub sigma_time_degree: usize,
+    /// Number of B-spline basis functions on the `log t` margin of the
+    /// **log-slope** block for the survival marginal-slope family (gam#2765,
+    /// gam#2767). `None` — the default — is a slope that does not move along
+    /// follow-up. Any `Some(k)` makes `b` a fitted surface in `(x, t)`: the
+    /// log-slope covariate design is tensored against the time margin and the
+    /// row program carries `b` at the row's entry time, at its exit time, and
+    /// the exit-time rate, so the event density picks up the `q₁·c′₁ + ḃᵀz`
+    /// terms a constant slope zeroes out.
+    pub logslope_time_k: Option<usize>,
+    /// Polynomial degree of that margin. Shares the default (`3`) and the
+    /// `k >= degree + 1` admission rule with the threshold and sigma margins.
+    pub logslope_time_degree: usize,
 
     // Location-scale (GAMLSS)
     /// If set, fit a location-scale model with this formula for the noise parameter.
@@ -765,6 +777,8 @@ impl Default for FitConfig {
             threshold_time_degree: 3,
             sigma_time_k: None,
             sigma_time_degree: 3,
+            logslope_time_k: None,
+            logslope_time_degree: 3,
             noise_formula: None,
             logslope_formula: None,
             z_column: None,

@@ -121,6 +121,8 @@ fn fit_request_document_from_fit_args(
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_degree: Some(args.sigma_time_degree),
         sigma_time_k: args.sigma_time_k,
+        logslope_time_degree: Some(args.logslope_time_degree),
+        logslope_time_k: args.logslope_time_k,
         smooth_descriptors,
         // `None` (flag unset) flows through so the Surv() seam resolves the one
         // canonical default; `Some(mode)` is the explicit request (#2301).
@@ -189,6 +191,8 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         threshold_time_degree: args.threshold_time_degree,
         sigma_time_k: args.sigma_time_k,
         sigma_time_degree: args.sigma_time_degree,
+        logslope_time_k: args.logslope_time_k,
+        logslope_time_degree: args.logslope_time_degree,
         noise_formula: args.predict_noise.clone(),
         logslope_formula: args.logslope_formula.clone(),
         z_column: args.z_column.clone(),
@@ -329,6 +333,8 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             threshold_time_degree: fit_config.threshold_time_degree,
             sigma_time_k: fit_config.sigma_time_k,
             sigma_time_degree: fit_config.sigma_time_degree,
+            logslope_time_k: fit_config.logslope_time_k,
+            logslope_time_degree: fit_config.logslope_time_degree,
             scale_dimensions: fit_config.scale_dimensions,
             pilot_subsample_threshold: args.pilot_subsample_threshold,
             out: args.out.clone(),
@@ -1731,6 +1737,11 @@ pub(crate) fn validate_fit_args_preflight(
                 fit_config.sigma_time_k,
                 fit_config.sigma_time_degree,
             )?;
+            validate_time_margin_args(
+                "request.config.logslope_time_k",
+                fit_config.logslope_time_k,
+                fit_config.logslope_time_degree,
+            )?;
             if fit_config.time_basis.trim().eq_ignore_ascii_case("ispline") {
                 parse_survival_time_basis_config(
                     &fit_config.time_basis,
@@ -1853,6 +1864,7 @@ pub(crate) fn validate_fit_args_preflight(
             || fit_config.baseline_makeham.is_some()
             || args.threshold_time_k.is_some()
             || args.sigma_time_k.is_some()
+            || args.logslope_time_k.is_some()
             || survival_likelihood_raw != "transformation"
             || baseline_target_raw != "linear"
             || time_basis_raw != "ispline"
@@ -1879,6 +1891,11 @@ pub(crate) fn validate_fit_args_preflight(
         args.threshold_time_degree,
     )?;
     validate_time_margin_args("--sigma-time-k", args.sigma_time_k, args.sigma_time_degree)?;
+    validate_time_margin_args(
+        "--logslope-time-k",
+        args.logslope_time_k,
+        args.logslope_time_degree,
+    )?;
     if time_basis_raw == "ispline" {
         parse_survival_time_basis_config(
             &fit_config.time_basis,

@@ -220,6 +220,10 @@ pub fn resolve_fit_request_config(
     if let Some(value) = json_config.sigma_time_degree {
         fit_config.sigma_time_degree = value;
     }
+    fit_config.logslope_time_k = json_config.logslope_time_k;
+    if let Some(value) = json_config.logslope_time_degree {
+        fit_config.logslope_time_degree = value;
+    }
     fit_config.z_column = json_config.z_column;
     if let Some(formula) = json_config.logslope_formula {
         fit_config.logslope_formula = Some(formula);

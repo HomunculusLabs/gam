@@ -178,6 +178,100 @@ impl LogslopeBlockJacobian {
     }
 }
 
+impl LogslopeBlockJacobian {
+    /// Exact `(η₀, η₁, η′₁)` rows when the slope moves along follow-up
+    /// (gam#2765).
+    ///
+    /// With `c(g) = √(1 + s²Σg²)`, so `c′ = s²Σg/c` and `c″ = s²Σ/c³`,
+    ///
+    /// ```text
+    ///   ∂η₀/∂β = (q₀·c′(g₀) + s·z)·G₀
+    ///   ∂η₁/∂β = (q₁·c′(g₁) + s·z)·G₁
+    ///   ∂η′₁/∂β = (q̇₁·c′(g₁) + q₁·c″(g₁)·ġ₁)·G₁ + (q₁·c′(g₁) + s·z)·Ġ
+    /// ```
+    ///
+    /// where `G₀`, `G₁`, `Ġ` are the layout's entry, exit and exit-derivative
+    /// design rows. Setting `g₀ = g₁`, `ġ₁ = 0`, `G₀ = G₁`, `Ġ = 0` recovers the
+    /// time-constant rows below exactly, which is the check that the two
+    /// branches are one formula.
+    ///
+    /// Scalar/shared score only: the follow-up margin is refused for a per-score
+    /// topology at layout construction, so `z_sum` and `Σ` are scalars here.
+    fn write_follow_up_varying_rows(
+        &self,
+        jac: &mut Array2<f64>,
+        rows: &std::ops::Range<usize>,
+        chunk: usize,
+        p: usize,
+        s: f64,
+        beta: ArrayView1<'_, f64>,
+        scalars: Option<&SurvivalMarginalSlopeFamilyScalars>,
+    ) -> Result<(), String> {
+        if self.z.ncols() != 1 {
+            return Err(format!(
+                "a follow-up-varying log-slope effective Jacobian is scalar-score only, got K={}",
+                self.z.ncols(),
+            ));
+        }
+        let covariance_ones = self.covariance.quadratic_form_unchecked(&[1.0]);
+        let channels = self.layout.primary_channels();
+        let designs = channels.as_slice();
+        if designs.len() != 3 {
+            return Err(format!(
+                "a follow-up-varying log-slope must expose three design channels, got {}",
+                designs.len(),
+            ));
+        }
+        let (entry_design, exit_design, rate_design) = (designs[0].1, designs[1].1, designs[2].1);
+        for i in rows.clone() {
+            let local_i = i - rows.start;
+            let slope = self.layout.row_channels_from_beta(i, beta)?;
+            if !slope.entry.is_finite() || !slope.exit.is_finite() || !slope.rate.is_finite() {
+                return Err(format!(
+                    "follow-up-varying log-slope effective Jacobian row {i} has a non-finite \
+                     slope channel"
+                ));
+            }
+            let (q0, q1, qd1) = match scalars {
+                Some(values) => (values.q0_i[i], values.q1_i[i], values.qd1_i[i]),
+                None => (0.0, 0.0, 0.0),
+            };
+            let curvature = |g: f64| -> (f64, f64) {
+                let c = (1.0 + s * s * g * g * covariance_ones).sqrt();
+                (
+                    s * s * covariance_ones * g / c,
+                    s * s * covariance_ones / (c * c * c),
+                )
+            };
+            let (c_first_entry, _) = curvature(slope.entry);
+            let (c_first_exit, c_second_exit) = curvature(slope.exit);
+            let z = self.z[[i, 0]];
+            let entry_weight = q0 * c_first_entry + s * z;
+            let exit_weight = q1 * c_first_exit + s * z;
+            let rate_from_exit = qd1 * c_first_exit + q1 * c_second_exit * slope.rate;
+            let entry_row = entry_design
+                .try_row_chunk(i..i + 1)
+                .map_err(|e| format!("logslope follow-up entry row {i}: {e}"))?;
+            let exit_row = exit_design
+                .try_row_chunk(i..i + 1)
+                .map_err(|e| format!("logslope follow-up exit row {i}: {e}"))?;
+            let rate_row = rate_design
+                .try_row_chunk(i..i + 1)
+                .map_err(|e| format!("logslope follow-up derivative row {i}: {e}"))?;
+            for j in 0..p {
+                let entry_column = entry_row[[0, j]];
+                let exit_column = exit_row[[0, j]];
+                let rate_column = rate_row[[0, j]];
+                jac[[local_i, j]] = entry_weight * entry_column;
+                jac[[chunk + local_i, j]] = exit_weight * exit_column;
+                jac[[2 * chunk + local_i, j]] =
+                    rate_from_exit * exit_column + exit_weight * rate_column;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
     fn effective_jacobian_rows(
         &self,
@@ -238,6 +332,10 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
             }
         }
         let mut jac = Array2::<f64>::zeros((3 * chunk, p));
+        if self.layout.is_follow_up_varying() {
+            self.write_follow_up_varying_rows(&mut jac, &rows, chunk, p, s, beta, scalars)?;
+            return Ok(jac);
+        }
         let mut workspace = self.layout.row_workspace(self.z.ncols())?;
         let mut sigma_g = vec![0.0; self.z.ncols()];
         for i in rows.clone() {

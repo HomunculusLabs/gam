@@ -37,7 +37,13 @@ fn compiled_sigma_primary_terms(
     let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0);
     let (_, feature_gradient, feature_hessian, witnesses) =
         rigid_feature_frame_order2(&features, inputs.wi, inputs.di, 1.0);
-    validate_rigid_row_admission(qd1, inputs, witnesses[0], witnesses[1], witnesses[2])?;
+    validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+        qd1,
+        inputs,
+        witnesses[0],
+        witnesses[1],
+        witnesses[2],
+    )?;
 
     // `∂features/∂b` and `∂²features/∂b²` of the static-slope frame. Both
     // location channels move with `z`, both variance channels with `2·cov·b`,
@@ -293,7 +299,10 @@ impl SurvivalMarginalSlopeFamily {
             primaries[2],
             primaries[3].mul(scale),
         ];
-        rigid_row_nll(&observed_primaries, &inputs)
+        rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+            &observed_primaries,
+            &inputs,
+        )
     }
 
     fn row_sigma_primary_terms(
@@ -302,7 +311,10 @@ impl SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         second_sigma: bool,
     ) -> Result<CompiledSigmaPrimaryTerms, String> {
-        let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
+        let primaries = rigid_row_kernel_primaries::<
+            STATIC_SLOPE_PRIMARIES,
+            StaticSlopeGeometry,
+        >(self, block_states, row)?;
         let scale = self.sigma_scale_derivatives()?;
         let mut inputs = rigid_row_inputs(
             self,
@@ -586,7 +598,10 @@ impl SurvivalMarginalSlopeFamily {
                     &slices,
                     d_beta_flat,
                 )?;
-                let primaries = rigid_row_kernel_primaries(self, block_states, row)?;
+                let primaries = rigid_row_kernel_primaries::<
+            STATIC_SLOPE_PRIMARIES,
+            StaticSlopeGeometry,
+        >(self, block_states, row)?;
                 let direction = std::array::from_fn(|axis| row_dir[axis]);
                 let terms = first_parameter_directional_order2_terms(
                     primaries,

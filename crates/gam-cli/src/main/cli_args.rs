@@ -192,6 +192,8 @@ pub(crate) struct FitArgs {
             "threshold_time_degree",
             "sigma_time_k",
             "sigma_time_degree",
+            "logslope_time_k",
+            "logslope_time_degree",
             "adaptive_regularization",
             "scale_dimensions",
             "precompute_conformal",
@@ -350,6 +352,15 @@ pub(crate) struct FitArgs {
     /// B-spline degree for the time margin of the log-sigma tensor product.
     #[arg(long = "sigma-time-degree", default_value_t = 3, value_parser = parse_positive_usize_cli)]
     pub(crate) sigma_time_degree: usize,
+    /// Number of B-spline basis functions for the time margin of the log-slope
+    /// tensor product in the survival marginal-slope family, i.e. how much the
+    /// latent score's effect is allowed to move along the follow-up axis.
+    /// Omitted = a slope that is constant within a person.
+    #[arg(long = "logslope-time-k", value_parser = parse_positive_usize_cli)]
+    pub(crate) logslope_time_k: Option<usize>,
+    /// B-spline degree for the time margin of the log-slope tensor product.
+    #[arg(long = "logslope-time-degree", default_value_t = 3, value_parser = parse_positive_usize_cli)]
+    pub(crate) logslope_time_degree: usize,
     /// Enable MM-based spatial adaptive regularization (Charbonnier majorizer)
     /// for compatible smooth terms. Off by default — pass
     /// `--adaptive-regularization true` to opt in. Only consulted by the bare
@@ -495,6 +506,8 @@ pub(crate) struct SurvivalArgs {
     pub(crate) threshold_time_degree: usize,
     pub(crate) sigma_time_k: Option<usize>,
     pub(crate) sigma_time_degree: usize,
+    pub(crate) logslope_time_k: Option<usize>,
+    pub(crate) logslope_time_degree: usize,
     pub(crate) scale_dimensions: bool,
     pub(crate) pilot_subsample_threshold: usize,
     pub(crate) out: Option<PathBuf>,
