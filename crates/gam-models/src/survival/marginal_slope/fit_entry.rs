@@ -41,8 +41,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &spec.latent_z_policy,
     )?;
     spec.z = z_standardized;
-    let score_covariance = marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
-    let z_primary = spec.z.column(0).to_owned();
     let n = spec.age_entry.len();
     let (initial_sigma, learned_sigma_initial, learned_log_sigma_coordinate) = match &spec.frailty {
         FrailtySpec::GaussianShift {
@@ -76,21 +74,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             }
         };
     let probit_scale = probit_frailty_scale(initial_sigma);
-    let baseline_started = std::time::Instant::now();
-    let baseline_slope = pooled_survival_baseline(
-        &spec.event_target,
-        &spec.weights,
-        &z_primary,
-        &spec.time_block.offset_entry,
-        &spec.time_block.offset_exit,
-        &spec.time_block.derivative_offset_exit,
-        probit_scale,
-    );
-    log::info!(
-        "[survival-marginal-slope] baseline seed slope={:.6e} elapsed={:.3}s",
-        baseline_slope,
-        baseline_started.elapsed().as_secs_f64(),
-    );
 
     let logslope_specs_input = spec
         .logslopespecs
@@ -155,6 +138,33 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             "survival marginal-slope logslope block",
         )
         .map_err(|error| error.to_string())?;
+    // gam#2768: the automatic latent-measure gate, on the same marginal-index
+    // span a(C) BMS conditions on. This has to sit HERE and not beside
+    // `standardize_latent_z_matrix_with_policy` above: the conditioning block is
+    // the frozen marginal design, which does not exist until the joint build
+    // just above. Everything that reads the latent score — the pooled baseline
+    // seed, the score covariance Σ, the score-warp seed basis, every design and
+    // every kernel evaluation — is therefore sequenced after it, so no consumer
+    // can see the uncalibrated axis.
+    let latent_z_calibrations =
+        resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
+    let score_covariance = marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
+    let z_primary = spec.z.column(0).to_owned();
+    let baseline_started = std::time::Instant::now();
+    let baseline_slope = pooled_survival_baseline(
+        &spec.event_target,
+        &spec.weights,
+        &z_primary,
+        &spec.time_block.offset_entry,
+        &spec.time_block.offset_exit,
+        &spec.time_block.derivative_offset_exit,
+        probit_scale,
+    );
+    log::info!(
+        "[survival-marginal-slope] baseline seed slope={:.6e} elapsed={:.3}s",
+        baseline_slope,
+        baseline_started.elapsed().as_secs_f64(),
+    );
     let common_logslope_offset = &spec.logslope_offset + baseline_slope;
     if logslope_topology.is_per_score() && logslope_topology.score_count() != spec.z.ncols() {
         return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
@@ -1658,6 +1668,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         baseline_offset_residuals,
         baseline_offset_curvatures,
         z_normalization,
+        latent_z_calibrations,
         score_covariance: score_covariance.to_dense(),
         time_block_penalties_len: time_penalties_len,
         time_wiggle_knots: spec

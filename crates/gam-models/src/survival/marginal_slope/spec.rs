@@ -128,6 +128,22 @@ pub struct SurvivalMarginalSlopeFitResult {
     pub baseline_offset_residuals: OffsetChannelResiduals,
     pub baseline_offset_curvatures: OffsetChannelCurvatures,
     pub z_normalization: LatentZNormalization,
+    /// The automatic latent-measure gate's decision, one entry per latent-score
+    /// column in column order (gam#2768). `LatentMeasureCalibration::None` means
+    /// the gate did not fire on that column and z reached the kernel unchanged.
+    ///
+    /// This is *fit state that prediction must replay*: the fitted coefficients
+    /// are defined on the calibrated axis, so a predictor that re-derived the
+    /// map from its own sample — or skipped it — would evaluate a different
+    /// model. The saved payload carries it for exactly that reason.
+    ///
+    /// The measure itself is always `LatentMeasureKind::StandardNormal` here and
+    /// is not stored: this family's row program is the closed-form
+    /// standard-normal probit lowering and owns no empirical-grid branch, so the
+    /// gate is asked for `EmpiricalLatentMeasureSupport::StandardNormalOnly` and
+    /// the invariant is *checked* at the call site rather than carried as a
+    /// field that could only ever hold one value.
+    pub latent_z_calibrations: Vec<crate::bms::LatentMeasureCalibration>,
     pub score_covariance: Array2<f64>,
     pub time_block_penalties_len: usize,
     pub time_wiggle_knots: Option<Array1<f64>>,

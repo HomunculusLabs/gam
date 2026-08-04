@@ -1944,10 +1944,19 @@ pub(crate) fn build_latent_measure_with_geometry(
         EmpiricalLatentMeasureSupport::Available,
         "BMS",
     )?;
-    debug_assert!(
-        decision.unmodelled_residual.is_none(),
-        "an Available-empirical caller always has a measure for the residual law"
-    );
+    if decision.unmodelled_residual.is_some() {
+        // Structurally unreachable: an `Available` caller always has an
+        // empirical measure to carry a failing residual law, so the gate never
+        // hands one back unmodelled. Checked rather than assumed, because the
+        // silent alternative is publishing a standard-normal kernel over a
+        // sample the gate rejected — the exact failure this decision exists to
+        // make impossible.
+        return Err(
+            "BMS latent-measure gate returned an unmodelled residual law even though the \
+             empirical latent measure is available to this kernel"
+                .to_string(),
+        );
+    }
     Ok((decision.kind, decision.calibration))
 }
 
