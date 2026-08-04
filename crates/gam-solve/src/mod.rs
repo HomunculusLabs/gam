@@ -33,6 +33,7 @@ pub mod mixture_link;
 pub mod objective_base;
 pub mod orthogonal_reparam;
 pub mod parallel_strategy;
+pub mod penalty_invariance;
 pub mod persistent_warm_start;
 pub mod pirls;
 pub(crate) mod priority_selection;

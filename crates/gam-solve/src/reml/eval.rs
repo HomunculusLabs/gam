@@ -3024,7 +3024,7 @@ mod smoothing_correction_outcome_tests {
                 let spectrum = match self_hessian_for_diagnosis.as_ref() {
                     Ok(h) => {
                         match crate::estimate::smoothing_correction::invert_identified_rho_hessian(
-                            h, 0, &finalgrad,
+                            h, 0, &finalgrad, None,
                         ) {
                             Ok(inv) => format!(
                                 "active={}/{} structural_zero={} below_gradient_floor={} \

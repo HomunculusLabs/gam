@@ -468,7 +468,7 @@ fn smoothing_correction_gram(
 /// *"how wrong is this matrix?"* — the assembly error of `H` itself, which is
 /// the `‖δH‖₂` a criterion-level resolution question needs and which is nine
 /// orders larger on the fixtures #2690 measured. Do not read one for the other.
-fn eigenpair_backward_error_bound(
+pub(crate) fn eigenpair_backward_error_bound(
     matrix: &Array2<f64>,
     eigenvalues: &Array1<f64>,
     eigenvectors: &Array2<f64>,
@@ -499,72 +499,6 @@ fn eigenpair_backward_error_bound(
         max_residual_norm.max(arithmetic_bound),
     )
     .map_err(|error| error.to_string())
-}
-
-fn penalty_map_structural_nullity(
-    canonical: &[gam_terms::construction::CanonicalPenalty],
-    coefficient_dimension: usize,
-) -> Result<usize, String> {
-    use gam_linalg::faer_ndarray::FaerEigh;
-
-    let k = canonical.len();
-    if k == 0 {
-        return Ok(0);
-    }
-    for (index, penalty) in canonical.iter().enumerate() {
-        let block_dimension = penalty.col_range.end.saturating_sub(penalty.col_range.start);
-        if penalty.col_range.end > coefficient_dimension
-            || penalty.local.dim() != (block_dimension, block_dimension)
-        {
-            return Err(format!(
-                "canonical penalty {index} has range {:?}, local shape {:?}, coefficient dimension {coefficient_dimension}",
-                penalty.col_range,
-                penalty.local.dim()
-            ));
-        }
-    }
-    // Gram matrix of the unscaled derivative maps S_k. Positive lambdas only
-    // rescale columns and therefore cannot change this structural rank.
-    let mut gram = Array2::<f64>::zeros((k, k));
-    for i in 0..k {
-        for j in i..k {
-            let start = canonical[i].col_range.start.max(canonical[j].col_range.start);
-            let end = canonical[i].col_range.end.min(canonical[j].col_range.end);
-            let mut inner = 0.0_f64;
-            for global_row in start..end {
-                for global_col in start..end {
-                    inner += canonical[i].local[[
-                        global_row - canonical[i].col_range.start,
-                        global_col - canonical[i].col_range.start,
-                    ]] * canonical[j].local[[
-                        global_row - canonical[j].col_range.start,
-                        global_col - canonical[j].col_range.start,
-                    ]];
-                }
-            }
-            gram[[i, j]] = inner;
-            gram[[j, i]] = inner;
-        }
-    }
-    let (eigenvalues, eigenvectors) = gram
-        .eigh(faer::Side::Lower)
-        .map_err(|error| format!("penalty-map Gram eigendecomposition failed: {error}"))?;
-    // The Gram is assembled analytically, so its rank boundary is judged by the
-    // Weyl law (#2690), never by the finite-difference one.
-    let gram_resolution = eigenpair_backward_error_bound(&gram, &eigenvalues, &eigenvectors)?;
-    let zero_bound = gram_resolution.resolution();
-    let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
-    if minimum < -zero_bound {
-        let neg_zero_bound = -zero_bound;
-        return Err(format!(
-            "penalty-map Gram matrix has negative eigenvalue {minimum:.3e} below backward-error bound {neg_zero_bound:.3e}"
-        ));
-    }
-    let rank = eigenvalues
-        .iter()
-        .filter(|&&eigenvalue| eigenvalue > zero_bound)
-        .count();
-    Ok(k - rank)
 }
 
 /// Invert the ρ-Hessian on the subspace where its curvature is actually
@@ -616,42 +550,44 @@ fn penalty_map_structural_nullity(
 /// `geo_disease_eas_matern` refuses at `|σ|/floor = 1.005540`, i.e. the identity
 /// holding to 0.55%, and the sign of that 0.55% residual is the whole verdict.
 ///
-/// Every branch below has its boundary there:
+/// Every branch would have its boundary there:
 ///
 /// * `σ < −floor` fires when the residual is negative and `g < 0`;
 /// * `σ > floor` (⟹ `Active`) fires when the residual is positive and `g > 0`,
 ///   which drops `identified_null` and then trips the nullity check instead —
 ///   the `geo_disease_matern` refusal.
 ///
-/// **Do not respond by widening `floor`.** The quantity is not under-resolved;
-/// it is being compared against itself. The repair is to excuse such a direction
-/// by STRUCTURE — deflate the penalty map's certified null subspace, lifted to
-/// ρ by `diag(λ)⁻¹`, before any of these tests run — so that no direction is
-/// judged by a test whose boundary it occupies identically. That needs the Gram
-/// eigenvectors `penalty_map_structural_nullity` already computes and discards.
+/// **The repair was not to widen `floor`.** The quantity is not under-resolved;
+/// it was being compared against itself. `invariance` is the penalty map's
+/// certified null subspace, lifted to ρ by `diag(λ)⁻¹`
+/// ([`crate::penalty_invariance`]), and it is DEFLATED before any of the tests
+/// below run: those directions are accounted as the structural zeros the
+/// penalty map says they are, and only the orthogonal complement is judged, by
+/// the existing rule, unchanged. Passing `None` reproduces the pre-#2676
+/// behaviour bit for bit, which is what every model without a redundant penalty
+/// map gets.
 ///
 /// # ⚠ This is NOT literally the same standard the certificate applied
 ///
-/// The doc above says this mirrors `run.rs`'s certificate. Two differences,
-/// recorded so nobody re-derives the equivalence:
+/// The doc above says this mirrors `run.rs`'s certificate. One difference
+/// remains, recorded so nobody re-derives the equivalence:
 ///
-/// 1. the certificate tests PSD on the **interior sub-block with the railed
-///    coordinates removed** (`excluded`, from
-///    `OuterCriterionCertificate::lambdas_railed`), precisely because "a
-///    rail-caused indefiniteness in the saturated direction is expected and
-///    excluded". This site receives no exclusion set and judges every
-///    coordinate. (Not established as the cause of the #2676 refusals: Path 1
-///    reports `railed = []`.)
-/// 2. `σ_i + Σ_k|g_k|v_k² ≥ 0` on `H`'s own eigenvectors is the Rayleigh
-///    quotient of `H + diag(|g|)` at particular vectors — it is IMPLIED by that
-///    matrix being PSD, not equivalent to it. So with an empty exclusion set,
-///    and given the SAME `H` and `g`, this test cannot fail in exact arithmetic
-///    on a point the certificate passed. When it does, what disagreed is the two
-///    subsystems' evaluations, not the fit.
+/// * `σ_i + Σ_k|g_k|v_k² ≥ 0` on `H`'s own eigenvectors is the Rayleigh
+///   quotient of `H + diag(|g|)` at particular vectors — it is IMPLIED by that
+///   matrix being PSD, not equivalent to it. So with an empty exclusion set,
+///   and given the SAME `H` and `g`, this test cannot fail in exact arithmetic
+///   on a point the certificate passed. When it does, what disagreed is the two
+///   subsystems' evaluations, not the fit.
+///
+/// The other difference — that the certificate excludes railed coordinates and
+/// this site excluded nothing — is gone as of #2676: both sites now deflate the
+/// same invariance through [`crate::penalty_invariance::judged_subspace_basis`],
+/// and the certificate's rail exclusion is expressed through the same call.
 pub(crate) fn invert_identified_rho_hessian(
     hessian_rho: &Array2<f64>,
     expected_structural_nullity: usize,
     outer_gradient: &Array1<f64>,
+    invariance: Option<&Array2<f64>>,
 ) -> Result<InvertedRhoHessian, String> {
     let n = hessian_rho.nrows();
     if expected_structural_nullity > n {
@@ -671,7 +607,24 @@ pub(crate) fn invert_identified_rho_hessian(
     gam_linalg::utils::validate_finite_symmetric_matrix(hessian_rho, "rho Hessian")
         .map_err(|error| error.to_string())?;
 
-    let (eigenvalues, eigenvectors) = hessian_rho
+    // #2676: the criterion is EXACTLY constant along `diag(lambda)^{-1} null(G)`,
+    // so the curvature there is `sum_k g_k t_k^2` — the chain-rule term, not a
+    // measurement. Judge its orthogonal complement and account those directions
+    // as the structural zeros the penalty map certifies. With no invariance
+    // (`deflation = None`) every line below runs on `hessian_rho` itself, so a
+    // model without a redundant penalty map does not move by an ulp.
+    let deflation = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    let judged = deflation.and_then(|basis| {
+        crate::penalty_invariance::judged_subspace_basis(n, &[], Some(basis))
+    });
+    let deflated_dimension = judged.as_ref().map_or(0, |basis| n - basis.ncols());
+    let compressed = judged
+        .as_ref()
+        .map(|basis| crate::penalty_invariance::compress_to_judged_subspace(hessian_rho, basis));
+    let work = compressed.as_ref().unwrap_or(hessian_rho);
+    let judged_dimension = work.nrows();
+
+    let (judged_eigenvalues, judged_eigenvectors) = work
         .eigh(faer::Side::Lower)
         .map_err(|error| format!("rho-Hessian eigendecomposition failed: {error}"))?;
     // `hessian_rho` is an ANALYTIC Hessian, so the applicable curvature law is
@@ -680,8 +633,34 @@ pub(crate) fn invert_identified_rho_hessian(
     // criterion, and `ε_f` — the value-level evaluation error the FD law needs
     // — bounds the error of a separately-coded second derivative not at all.
     let curvature_resolution =
-        eigenpair_backward_error_bound(hessian_rho, &eigenvalues, &eigenvectors)?;
+        eigenpair_backward_error_bound(work, &judged_eigenvalues, &judged_eigenvectors)?;
     let zero_bound = curvature_resolution.resolution();
+
+    // Every direction, in ρ coordinates and in one order: the deflated
+    // invariance first (its Rayleigh quotient reported as measured, never
+    // judged), then the judged complement.
+    let mut eigenvalues = Array1::<f64>::zeros(n);
+    let mut eigenvectors = Array2::<f64>::zeros((n, n));
+    for column in 0..deflated_dimension {
+        let direction = deflation
+            .expect("a deflated dimension implies a deflation basis")
+            .column(column)
+            .to_owned();
+        eigenvalues[column] = direction.dot(&hessian_rho.dot(&direction));
+        eigenvectors.column_mut(column).assign(&direction);
+    }
+    for index in 0..judged_dimension {
+        let target = deflated_dimension + index;
+        eigenvalues[target] = judged_eigenvalues[index];
+        match judged.as_ref() {
+            Some(basis) => eigenvectors
+                .column_mut(target)
+                .assign(&basis.dot(&judged_eigenvectors.column(index))),
+            None => eigenvectors
+                .column_mut(target)
+                .assign(&judged_eigenvectors.column(index)),
+        }
+    }
 
     // Per-direction resolution floor: the eigensolver's own backward error, or
     // the outer certificate's gradient floor along this eigenvector, whichever
@@ -698,7 +677,7 @@ pub(crate) fn invert_identified_rho_hessian(
         if floor.is_finite() { floor.max(zero_bound) } else { zero_bound }
     };
 
-    for i in 0..n {
+    for i in deflated_dimension..n {
         let sigma = eigenvalues[i];
         let floor = direction_floor(i);
         if sigma < -floor {
@@ -725,7 +704,14 @@ pub(crate) fn invert_identified_rho_hessian(
     for i in 0..n {
         let sigma = eigenvalues[i];
         let floor = direction_floor(i);
-        let class = if sigma > floor {
+        let class = if i < deflated_dimension {
+            // #2676: this direction is not judged at all. Its curvature is
+            // `sum_k g_k t_k^2` by the chain rule and by nothing else, so
+            // `sigma > floor`, `|sigma| <= zero_bound` and `sigma < -floor`
+            // are three readings of one rounding residual. It IS the penalty
+            // map's certified null, so it is accounted as one.
+            EigenClassification::StructuralZero
+        } else if sigma > floor {
             EigenClassification::Active
         } else if sigma.abs() <= zero_bound {
             // Zero to the eigensolver's own backward error: this is the
@@ -794,17 +780,33 @@ pub(crate) fn invert_identified_rho_hessian(
     }
 
     gam_linalg::matrix::symmetrize_in_place(&mut inverse);
+    // Certify `H V = P` in the coordinates the spectrum was actually taken in.
+    // Without a deflation those are the ρ coordinates themselves, verbatim.
+    // With one they are the judged complement, and they have to be: the lifted
+    // eigenvectors satisfy `(Z'HZ)u = σu`, so `H(Zu)` retains an invariance-
+    // block component of size `‖Q'HZ‖ = ‖Q' diag(g) Z‖` — the same chain-rule
+    // term again, since `Q'·diag(λ)H_λ = (diag(λ)Q)'H_λ = 0` on the certified
+    // null. Certifying the ρ-space product would therefore be re-testing the
+    // gradient, at the one site whose whole purpose is to stop doing that.
+    let (certify_matrix, certify_inverse, certify_projector) = match judged.as_ref() {
+        Some(basis) => (
+            compressed.clone().expect("a judged basis implies a compression"),
+            basis.t().dot(&inverse).dot(basis),
+            basis.t().dot(&projector).dot(basis),
+        ),
+        None => (hessian_rho.clone(), inverse.clone(), projector.clone()),
+    };
     let matrix_max_abs = gam_linalg::utils::validate_finite_symmetric_matrix(
-        hessian_rho,
+        &certify_matrix,
         "structurally singular rho Hessian",
     )
     .map_err(|error| error.to_string())?;
-    let residual = hessian_rho.dot(&inverse) - &projector;
+    let residual = certify_matrix.dot(&certify_inverse) - &certify_projector;
     gam_linalg::utils::certify_linear_system_residual(
-        n,
+        certify_matrix.nrows(),
         matrix_max_abs,
-        &projector,
-        &inverse,
+        &certify_projector,
+        &certify_inverse,
         &residual,
         "rho-Hessian structural pseudoinverse",
     )
@@ -1195,20 +1197,32 @@ pub(crate) fn compute_smoothing_correction(
             ),
         };
     }
-    let structural_nullity = match penalty_map_structural_nullity(ct, n_coeffs_trans) {
-        Ok(nullity) => nullity,
-        Err(error) => {
-            return SmoothingCorrectionComputation {
-                correction: None,
-                rho_covariance: None,
-                active_rank: None,
-                spectrum: None,
-                status: SmoothingCorrectionStatus::Unavailable(
-                    SmoothingCorrectionUnavailable::PenaltyStructure { error },
-                ),
-            };
-        }
-    };
+    // #2676: the SAME object supplies the certified nullity COUNT and the
+    // subspace itself. They used to be split — the count was kept, the
+    // eigenvectors thrown away — which is why the gate could only ask "how
+    // many directions must be null?" and never "is THIS direction one of
+    // them?". Nothing else about the count changes: with zero prior means the
+    // augmented Gram is bit-identical to the `tr(S_i S_j)` one this replaces.
+    let invariance =
+        match crate::penalty_invariance::PenaltyMapInvariance::from_canonical_penalties(
+            ct,
+            n_coeffs_trans,
+        ) {
+            Ok(invariance) => invariance,
+            Err(error) => {
+                return SmoothingCorrectionComputation {
+                    correction: None,
+                    rho_covariance: None,
+                    active_rank: None,
+                    spectrum: None,
+                    status: SmoothingCorrectionStatus::Unavailable(
+                        SmoothingCorrectionUnavailable::PenaltyStructure { error },
+                    ),
+                };
+            }
+        };
+    let structural_nullity = invariance.dimension();
+    let lifted_invariance = invariance.theta_directions(lambdas, n_rho, 0);
 
     // Step 1: Compute the Jacobian J = d(beta)/d(rho) in transformed space.
     //
@@ -1378,8 +1392,12 @@ pub(crate) fn compute_smoothing_correction(
     // Step 3: invert the exact, unperturbed Hessian on its explicitly
     // identified spectral subspace. A diagonal ridge would change V_rho and
     // therefore the covariance estimand while being invisible in the result.
-    let inverted =
-        match invert_identified_rho_hessian(&hessian_rho, structural_nullity, outer_gradient) {
+    let inverted = match invert_identified_rho_hessian(
+        &hessian_rho,
+        structural_nullity,
+        outer_gradient,
+        lifted_invariance.as_ref(),
+    ) {
         Ok(inverse) => inverse,
         Err(error) => {
             log::warn!("Exact LAML rho-Hessian inversion failed: {error}");
