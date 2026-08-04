@@ -4067,6 +4067,8 @@ mod tests {
             link_deviation_runtime: None,
             gaussian_frailty_sd: None,
             latent_z_calibration: None,
+            latent_conditioning_span:
+                gam_inference::predict_io::LatentConditioningSpan::PrimaryDesign,
             latent_z_conditional_calibration: None,
         };
         let theta = predictor.theta();
