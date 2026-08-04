@@ -117,9 +117,11 @@ slope surface.
 If the score is already conditionally `N(0, 1)` — for example a
 standardised score produced outside this pipeline — pass it directly with
 `z_column=` and omit the Stage-1 recipe. This raw-`z` path uses the
-free-warp `score_warp` fallback (it can only defend the covariate-free
-component of any residual miscalibration); prefer the calibrated chain
-above when the score is conditioned on covariates here.
+free-warp `score_warp` fallback for shape miscalibration, and the
+automatic latent-measure gate described below for conditional
+miscalibration; prefer the calibrated chain above when the score's
+Stage-1 model is itself part of what you want the fit to be orthogonal
+to.
 
 ```python
 model = gamfit.fit(
@@ -144,6 +146,54 @@ gam fit data.csv 'case ~ s(age) + matern(pc1, pc2, pc3)' \
 ```
 
 Bernoulli marginal-slope currently consumes a single `z_column`.
+
+### The automatic latent-measure gate
+
+You do not have to get the raw score exactly right. Both marginal-slope
+families run an automatic gate on the score before it reaches the kernel,
+and both run the same one.
+
+The gate matters because the parameterisation's whole point is an
+identity that is *conditional*:
+
+```text
+E_z[Φ(q·√(1+b²) + b·z)] = Φ(q)        for   z | C ~ N(0, 1),
+```
+
+which is what makes `q` the **marginal** index. It needs `z | C` standard
+normal, not merely `z` standard normal — and those are very different
+requirements. A score can be exactly `N(0, 1)` overall while every
+conditional law `z | C` is shifted, in which case `b(C)·E[z|C]` leaks into
+`q` and the marginal coefficients are wrong. No transform of the score's
+*marginal* distribution can fix that, because the marginal distribution is
+already correct.
+
+So the gate looks at the conditional moments first:
+
+1. a Rao score test on `E[z|C]` and `Var(z|C)` over the marginal-index
+   span. If it fires, the score is replaced by
+   `ζ = (z − m(C))/√v(C)`, which is conditionally centred and at unit
+   variance by construction;
+2. otherwise, a standard-normal adequacy check on the pooled score;
+3. otherwise, a weighted mid-rank inverse-normal transform, re-checked on
+   its own output.
+
+Whatever it decides is **persisted with the model** and replayed at
+prediction and in leave-one-out diagnostics, because the fitted
+coefficients live on the calibrated axis: a predictor that rebuilt the
+score differently would be evaluating a different model.
+
+Two family differences are worth knowing. The Bernoulli kernel owns an
+empirical-grid branch, so when no transform makes the score adequately
+normal it falls back to the exact empirical latent measure. The survival
+kernel is the closed-form standard-normal probit lowering and has no such
+branch, so it keeps the closest available transform and *says* — through
+the fit's `LatentZCheckMode` — that the residual shape is unmodelled.
+And when the conditional branch fires, the score becomes a generated
+regressor: the coefficient covariance carries a Murphy–Topel correction
+for the first stage's estimation error, or is withheld with a typed reason
+if the fit's shape cannot supply the correction. It is never published
+uncorrected.
 
 ## Frailty in marginal-slope survival
 
