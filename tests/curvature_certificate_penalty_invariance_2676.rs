@@ -34,8 +34,15 @@ use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{FitRequest, FitResult, StandardFitRequest};
 use ndarray::Array1;
 
-const N_ROWS: usize = 900;
-const N_PCS: usize = 6;
+// Chosen by sweeping `examples/repro2676_geo_disease_matern` over
+// `(centers, n, n_pcs)`: this is the smallest cell measured that BOTH carries
+// the exact redundancy and completes (2.7 s here). The redundancy is a property
+// of the (centers, n_pcs) pair rather than of `n` — `(10, 6)` has none,
+// `(10, 16)` and `(24, 16)` do — so neither constant is arbitrary and neither
+// may be tuned to make a red test green. If this cell ever stops being
+// redundant the first test below says so by name.
+const N_ROWS: usize = 1500;
+const N_PCS: usize = 16;
 const CENTERS: usize = 10;
 const SEED: u64 = 20260226;
 
@@ -80,7 +87,6 @@ fn spec() -> TermCollectionSpec {
 #[test]
 fn the_matern_joint_spatial_penalty_map_really_is_redundant_2676() {
     let (x, _) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
-    let x = x.slice(ndarray::s![.., ..N_PCS]).to_owned();
     let design = gam::smooth::build_term_collection_design(x.view(), &spec())
         .expect("the Matern joint spatial design must build");
 
@@ -156,8 +162,7 @@ fn the_matern_joint_spatial_penalty_map_really_is_redundant_2676() {
 /// verdict that used to be a coin flip is now a property of the penalty map.
 #[test]
 fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
-    let (x_full, y) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
-    let x = x_full.slice(ndarray::s![.., ..N_PCS]).to_owned();
+    let (x, y) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
     let n = y.len();
 
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {

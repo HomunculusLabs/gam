@@ -370,10 +370,62 @@ pub fn judged_subspace_basis(
             return Some(basis);
         }
     };
-    // Project the deflation directions onto the interior coordinates and
-    // re-orthonormalise: an excluded coordinate is already removed from the
-    // judged space, so only the interior part of each direction can constrain
-    // what is left.
+    use gam_linalg::faer_ndarray::FaerEigh;
+    // Deflate only the part of the invariance that lives INSIDE the judged
+    // face.
+    //
+    // The identity that licenses deflation — `t' H_rho t = sum_k g_k t_k^2` —
+    // is a statement about the FULL direction `t`. Simply dropping `t`'s
+    // excluded components and deflating what is left would break it by
+    // `O(||t_excluded|| * ||H||)`, and in the extreme (an invariance direction
+    // that is mostly ON an excluded coordinate) it would deflate a direction
+    // carrying REAL curvature — hiding exactly what the certificate exists to
+    // find. So take the maximal subspace of `span(deflate)` whose excluded
+    // components vanish: `deflate * null(R)` with `R` the excluded rows.
+    //
+    // "Vanish" is judged at orthonormality round-off (`64 * n * EPSILON`,
+    // squared because `R'R` carries squared norms) — the columns of `deflate`
+    // are orthonormal, so that is the scale at which a component is
+    // indistinguishable from an exact zero. Anything above it is kept in the
+    // judged block, i.e. the pre-#2676 verdict, which is the conservative
+    // direction and costs nothing on a fit with no railed coordinate (the case
+    // every #2676 refusal reports).
+    let deflate_owned;
+    let deflate = if excluded_set.is_empty() {
+        deflate
+    } else {
+        let mut excluded_rows =
+            Array2::<f64>::zeros((excluded_set.len(), deflate.ncols()));
+        for (target, &row) in excluded_set.iter().enumerate() {
+            for column in 0..deflate.ncols() {
+                excluded_rows[[target, column]] = deflate[[row, column]];
+            }
+        }
+        let mut gram = excluded_rows.t().dot(&excluded_rows);
+        gam_linalg::matrix::symmetrize_in_place(&mut gram);
+        let (eigenvalues, eigenvectors) = gram.eigh(faer::Side::Lower).ok()?;
+        let round_off = 64.0 * (dimension as f64) * f64::EPSILON;
+        let free: Vec<usize> = (0..deflate.ncols())
+            .filter(|&index| eigenvalues[index] <= round_off * round_off)
+            .collect();
+        if free.is_empty() {
+            let mut basis = Array2::<f64>::zeros((dimension, interior.len()));
+            for (column, &row) in interior.iter().enumerate() {
+                basis[[row, column]] = 1.0;
+            }
+            return Some(basis);
+        }
+        let mut selector = Array2::<f64>::zeros((deflate.ncols(), free.len()));
+        for (column, &source) in free.iter().enumerate() {
+            selector
+                .column_mut(column)
+                .assign(&eigenvectors.column(source));
+        }
+        deflate_owned = deflate.dot(&selector);
+        &deflate_owned
+    };
+    // Restrict to the interior coordinates. Exact by the selection above: every
+    // surviving column's excluded components are zero to round-off.
     let mut restricted = Array2::<f64>::zeros((interior.len(), deflate.ncols()));
     for column in 0..deflate.ncols() {
         for (target, &row) in interior.iter().enumerate() {
@@ -396,7 +448,6 @@ pub fn judged_subspace_basis(
     // exactly {0, 1}, so selecting eigenvalues above 1/2 is a decision with an
     // O(1) margin rather than one taken at round-off scale — the whole point of
     // this module is to stop deciding things at round-off scale.
-    use gam_linalg::faer_ndarray::FaerEigh;
     let mut projector = Array2::<f64>::eye(interior_dimension);
     projector -= &orthonormal.dot(&orthonormal.t());
     gam_linalg::matrix::symmetrize_in_place(&mut projector);
