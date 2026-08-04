@@ -3863,6 +3863,60 @@ impl<'a> RemlState<'a> {
         self.soft_rho_guard_prior_atom(rho).gradient().clone()
     }
 
+    /// The directions of `rho` along which this criterion is EXACTLY constant
+    /// by construction of its penalty map, at `rho` (#2676).
+    ///
+    /// Orthonormal columns, `k x d`, or `None` when the penalty map carries no
+    /// redundancy — which is every ordinary model, and which leaves the outer
+    /// certificate on its pre-#2676 path bit for bit.
+    ///
+    /// The invariance itself is a property of the `S_i` alone and is cached;
+    /// only the lift `t = diag(lambda)^{-1} w` depends on where the optimizer
+    /// currently is. See [`crate::penalty_invariance`] for why the certificate
+    /// must not judge these directions.
+    pub(crate) fn criterion_invariant_directions(
+        &self,
+        rho: &Array1<f64>,
+    ) -> Option<ndarray::Array2<f64>> {
+        let k = self.canonical_penalties.len();
+        if k == 0 || rho.len() != k {
+            return None;
+        }
+        // Deliberately NOT cached on the state. On a spatial route the penalty
+        // map is rebuilt at every psi (`reset_surface`), and the invariance is a
+        // property of the CURRENT `S_i`: the redundancy's coefficient
+        // (`S_2 = c(psi) S_0`) moves with psi, so a once-per-fit cache would
+        // deflate a direction the criterion is no longer flat along. The Gram is
+        // `O(k^2 * block^2)` and this hook runs only at certification, a handful
+        // of times per outer run.
+        let invariance =
+            match crate::penalty_invariance::PenaltyMapInvariance::from_canonical_penalties(
+                self.canonical_penalties.as_slice(),
+                self.p,
+            ) {
+                Ok(invariance) => invariance,
+                Err(error) => {
+                    // Not a refusal: an unformable Gram means the certificate
+                    // simply has no invariance to excuse, which is exactly where
+                    // it stood before this hook existed.
+                    log::debug!("[#2676] penalty-map invariance unavailable: {error}");
+                    return None;
+                }
+            };
+        if invariance.dimension() == 0 {
+            return None;
+        }
+        log::info!(
+            "[#2676] the penalty map carries an exact {}-dimensional invariance (k={k}, \
+             resolution={:.3e}); the outer curvature certificate deflates it instead of judging \
+             a chain-rule term against its own absolute value",
+            invariance.dimension(),
+            invariance.resolution(),
+        );
+        let lambdas = rho.mapv(f64::exp);
+        invariance.theta_directions(&lambdas, k, 0)
+    }
+
     // Gamma(a, b) precision hyperprior identity.
     //
     // For one penalty block, lambda = exp(rho) and

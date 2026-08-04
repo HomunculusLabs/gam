@@ -4056,7 +4056,7 @@ fn run_exact_joint_spatial_optimization(
         }
     };
 
-    let mut obj = problem.build_objective_with_eval_order(
+    let obj = problem.build_objective_with_eval_order(
         &mut ctx,
         |ctx: &mut &mut SpatialJointContext<'_>, theta: &Array1<f64>| {
             let t0 = std::time::Instant::now();
@@ -4131,6 +4131,22 @@ fn run_exact_joint_spatial_optimization(
             );
             eval
         }),
+    );
+
+    // #2676: publish the criterion's EXACT invariance so the outer certificate
+    // deflates it instead of judging a chain-rule term against its own absolute
+    // value. The closure speaks rho; `ClosureObjective` embeds it into
+    // `theta = [rho, psi]` with exact zeros in the psi block from the declared
+    // layout, because the invariance lives entirely in the penalty map.
+    //
+    // Read at the CURRENT psi, not once per fit: on this route the penalty map
+    // is rebuilt at every psi, so the redundancy's coefficient
+    // (`S_2 = c(psi) S_0`) moves and a snapshot would deflate a direction the
+    // criterion is no longer flat along.
+    let mut obj = obj.with_criterion_invariance(
+        |ctx: &mut &mut SpatialJointContext<'_>, rho: &Array1<f64>| {
+            ctx.evaluator.criterion_invariant_directions(rho)
+        },
     );
 
     let run_label = match kind {

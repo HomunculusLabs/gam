@@ -812,6 +812,7 @@ impl OuterProblem {
             exact_polish_fn: None,
             rail_face_limit_fn: None,
             soft_rho_guard_gradient_fn: None,
+            criterion_invariance_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -852,6 +853,7 @@ impl OuterProblem {
             exact_polish_fn: None,
             rail_face_limit_fn: None,
             soft_rho_guard_gradient_fn: None,
+            criterion_invariance_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -894,6 +896,7 @@ impl OuterProblem {
             exact_polish_fn: None,
             rail_face_limit_fn: None,
             soft_rho_guard_gradient_fn: None,
+            criterion_invariance_fn: None,
             screening_proxy_fn: Some(screening_proxy_fn),
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -1796,26 +1799,54 @@ pub(crate) fn certificate_hessian_is_psd(hessian: &Array2<f64>) -> Option<bool> 
 /// the interior is empty — there is no feasible curvature to certify and the rail
 /// KKT signs are the whole certificate — so the empty sub-block is trivially PSD.
 /// With no railed coordinate it is exactly [`certificate_hessian_is_psd`].
+/// # The invariance argument (#2676)
+///
+/// `invariance` carries the directions along which the criterion is EXACTLY
+/// constant by construction of its penalty map (see
+/// [`crate::penalty_invariance`]). They are removed from the judged subspace
+/// alongside the railed coordinates, for the same reason: a coordinate railed
+/// at its bound and a direction the criterion does not vary along are both
+/// places where "is the curvature positive?" has no answer that is about the
+/// fit. On such a direction `t' H_rho t = sum_k g_k t_k^2` identically, so its
+/// sign is the sign of the disagreement between the gradient code and the
+/// Hessian code — measured at `|sigma|/floor = 0.99925` on `geo_disease_matern`.
+///
+/// `None` reproduces the pre-#2676 sub-block extraction bit for bit; that is
+/// what every objective declaring no invariance gets, which is nearly all of
+/// them.
 pub(crate) fn certificate_hessian_is_psd_off_railed(
     hessian: &Array2<f64>,
     railed: &[usize],
+    invariance: Option<&Array2<f64>>,
 ) -> Option<bool> {
-    if railed.is_empty() {
+    let n = hessian.nrows();
+    let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    if railed.is_empty() && deflate.is_none() {
         return certificate_hessian_is_psd(hessian);
     }
-    let n = hessian.nrows();
-    let railed_set: std::collections::BTreeSet<usize> = railed.iter().copied().collect();
-    let interior: Vec<usize> = (0..n).filter(|k| !railed_set.contains(k)).collect();
-    if interior.is_empty() {
+    let judged = crate::penalty_invariance::judged_subspace_basis(n, railed, deflate);
+    let Some(judged) = judged else {
+        // Nothing left to judge: every coordinate is railed, or the criterion is
+        // flat in every direction. There is no feasible curvature to certify and
+        // the rail KKT signs are the whole certificate.
         return Some(true);
-    }
-    let mut sub = Array2::<f64>::zeros((interior.len(), interior.len()));
-    for (i, &ri) in interior.iter().enumerate() {
-        for (j, &rj) in interior.iter().enumerate() {
-            sub[[i, j]] = hessian[[ri, rj]];
+    };
+    if deflate.is_none() {
+        // Exactly the historical sub-block extraction: `judged` is the interior
+        // indicator basis, so build the sub-block directly rather than through a
+        // matrix product, keeping this path bit-identical.
+        let railed_set: std::collections::BTreeSet<usize> = railed.iter().copied().collect();
+        let interior: Vec<usize> = (0..n).filter(|k| !railed_set.contains(k)).collect();
+        let mut sub = Array2::<f64>::zeros((interior.len(), interior.len()));
+        for (i, &ri) in interior.iter().enumerate() {
+            for (j, &rj) in interior.iter().enumerate() {
+                sub[[i, j]] = hessian[[ri, rj]];
+            }
         }
+        return certificate_hessian_is_psd(&sub);
     }
-    certificate_hessian_is_psd(&sub)
+    let compressed = crate::penalty_invariance::compress_to_judged_subspace(hessian, &judged);
+    certificate_hessian_is_psd(&compressed)
 }
 
 /// Interior-PSD verdict judged ABOVE the per-coordinate gradient-residue noise
@@ -1883,16 +1914,17 @@ pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
     hessian: &Array2<f64>,
     excluded: &[usize],
     gradient: &Array1<f64>,
+    invariance: Option<&Array2<f64>>,
 ) -> Option<bool> {
     let n = hessian.nrows();
     if gradient.len() != n {
-        return certificate_hessian_is_psd_off_railed(hessian, excluded);
+        return certificate_hessian_is_psd_off_railed(hessian, excluded, invariance);
     }
     let mut floored = hessian.clone();
     for k in 0..n {
         floored[[k, k]] += gradient[k].abs();
     }
-    certificate_hessian_is_psd_off_railed(&floored, excluded)
+    certificate_hessian_is_psd_off_railed(&floored, excluded, invariance)
 }
 
 /// Measure the gradient-residue floor's clearance on the interior sub-block:
@@ -1909,6 +1941,7 @@ pub(crate) fn interior_curvature_floor_clearance(
     hessian: &Array2<f64>,
     excluded: &[usize],
     gradient: &Array1<f64>,
+    invariance: Option<&Array2<f64>>,
 ) -> Option<CurvatureFloorClearance> {
     use faer::Side;
     use gam_linalg::faer_ndarray::FaerEigh;
@@ -1932,6 +1965,20 @@ pub(crate) fn interior_curvature_floor_clearance(
     if sub.iter().any(|v| !v.is_finite()) {
         return None;
     }
+    // #2676: report the minimum of the block the verdict was actually reached
+    // on. Reporting the raw interior minimum beside a verdict taken on the
+    // deflated complement is what made every historical `[INDEF-HESS]` line
+    // ambiguous: the number named a direction the decision no longer involved.
+    let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    let sub = match deflate
+        .and_then(|basis| crate::penalty_invariance::judged_subspace_basis(n, excluded, Some(basis)))
+    {
+        Some(judged) => crate::penalty_invariance::compress_to_judged_subspace(hessian, &judged),
+        None => sub,
+    };
+    if sub.nrows() == 0 {
+        return None;
+    }
     let interior_min_eigenvalue = sub
         .eigh(Side::Lower)
         .ok()?
@@ -1948,7 +1995,7 @@ pub(crate) fn interior_curvature_floor_clearance(
         .iter()
         .fold(0.0_f64, |acc, &k| acc.max(gradient[k].abs()));
     let cleared = certificate_hessian_is_psd_off_railed_above_gradient_floor(
-        hessian, excluded, gradient,
+        hessian, excluded, gradient, invariance,
     ) == Some(true);
     Some(CurvatureFloorClearance {
         interior_min_eigenvalue,
@@ -1994,6 +2041,7 @@ fn negative_curvature_escape_point(
     gradient: &Array1<f64>,
     hessian: &Array2<f64>,
     railed: &[usize],
+    invariance: Option<&Array2<f64>>,
     baseline_cost: f64,
     bounds: &(Array1<f64>, Array1<f64>),
     context: &str,
@@ -2042,13 +2090,36 @@ fn negative_curvature_escape_point(
         );
         return None;
     }
-    let m = interior.len();
-    let mut sub = Array2::<f64>::zeros((m, m));
-    for (i, &ri) in interior.iter().enumerate() {
-        for (j, &rj) in interior.iter().enumerate() {
-            sub[[i, j]] = hessian[[ri, rj]];
+    // #2676: the escape must search the SAME subspace the certificate judged.
+    // `judged_subspace_basis` returns the interior indicator basis when there is
+    // no invariance, so `sub` and the lift below are bit-identical on that path;
+    // with one, the escape stops being able to pick the criterion-invariant
+    // direction — where the only "negative curvature" available is the
+    // chain-rule term `sum_k g_k t_k^2`, i.e. the residual gradient wearing a
+    // curvature's clothes — instead of the genuine saddle direction that
+    // refused.
+    let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    let Some(judged) = crate::penalty_invariance::judged_subspace_basis(n, railed, deflate) else {
+        log::info!(
+            "[CERTIFICATE] {context}: saddle escape declined -- after removing the railed \
+             coordinates and the criterion's own invariance there is no direction left to \
+             search"
+        );
+        return None;
+    };
+    let m = judged.ncols();
+    let sub = match deflate {
+        Some(_) => crate::penalty_invariance::compress_to_judged_subspace(hessian, &judged),
+        None => {
+            let mut sub = Array2::<f64>::zeros((m, m));
+            for (i, &ri) in interior.iter().enumerate() {
+                for (j, &rj) in interior.iter().enumerate() {
+                    sub[[i, j]] = hessian[[ri, rj]];
+                }
+            }
+            sub
         }
-    }
+    };
     let (eigenvalues, eigenvectors) = match sub.eigh(Side::Lower) {
         Ok(pair) => pair,
         Err(err) => {
@@ -2102,12 +2173,12 @@ fn negative_curvature_escape_point(
         );
         return None;
     }
-    // Lift the interior eigenvector into the full ρ space, exactly zero on every
-    // railed coordinate so the backtracking step below holds all rails fixed.
-    let mut direction = Array1::<f64>::zeros(n);
-    for (i, &ri) in interior.iter().enumerate() {
-        direction[ri] = v_sub[i] / dir_norm;
-    }
+    // Lift the judged eigenvector into the full ρ space through the same basis
+    // the sub-block was taken in. Its rows are exactly zero on every railed
+    // coordinate, so the backtracking step below still holds all rails fixed;
+    // with no invariance the basis is the interior indicator matrix and this is
+    // the historical scatter, multiplication by exact zeros and ones.
+    let direction = judged.dot(&v_sub.mapv(|value| value / dir_norm));
     // First-order-consistent sign: move against the (tiny) gradient's projection
     // onto `v` so the linear term never opposes the curvature descent. With a
     // stationary gradient the tie is arbitrary; the opposite sign is tried below
@@ -4061,6 +4132,24 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // bound, ρ and non-ρ alike. See `certificate_railed_coordinates` for why
     // the λ-block report cannot be used here.
     let certificate_railed = certificate_railed_coordinates(&result.rho, config);
+    // #2676: the directions along which THIS criterion is exactly constant by
+    // construction of its penalty map. Read once, at the certified point, and
+    // threaded to every curvature test below, so the certificate and the
+    // smoothing correction judge the same subspace instead of being able to
+    // reach opposite verdicts on one matrix at one point. `None` for every
+    // objective that declares no invariance, which restores the pre-#2676
+    // behaviour bit for bit.
+    let criterion_invariance = obj.criterion_invariant_directions(&result.rho);
+    if let Some(basis) = criterion_invariance.as_ref() {
+        log::info!(
+            "[CERTIFICATE] {context}: deflating {} criterion-invariant direction(s) of {} \
+             before the curvature verdict -- their rho-curvature is the chain-rule term \
+             `sum_k g_k t_k^2` identically, so its sign measures the gradient code against \
+             the Hessian code, not the fit (#2676)",
+            basis.ncols(),
+            basis.nrows(),
+        );
+    }
     // The λ-block REPORT that ships on the certificate. Same predicate,
     // narrower scan, because `lambdas_railed` indexes smoothing parameters.
     let railed_lambda_block = certificate_railed_lambdas(&result.rho, layout.rho_dim(), config);
@@ -4200,7 +4289,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
     let mut certified_projected_grad_norm = projected_grad_norm;
     if projected_grad_norm > stationarity_bound
         && let Some(hessian) = analytic_hessian.as_ref()
-        && certificate_hessian_is_psd_off_railed(hessian, &certificate_railed) == Some(true)
+        && certificate_hessian_is_psd_off_railed(
+            hessian,
+            &certificate_railed,
+            criterion_invariance.as_ref(),
+        ) == Some(true)
     {
         let n = layout.n_params;
         // Curvature scale of the analytic outer Hessian: its dominant diagonal,
@@ -4319,7 +4412,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // for a genuine PSD certificate keeps receiving.
         curvature: match analytic_hessian.as_ref() {
             Some(hessian) => CurvatureEvidence::from_measurement(
-                certificate_hessian_is_psd_off_railed(hessian, &certificate_railed),
+                certificate_hessian_is_psd_off_railed(
+                    hessian,
+                    &certificate_railed,
+                    criterion_invariance.as_ref(),
+                ),
             ),
             // A screening pass deliberately declines the order-four ladder
             // (the documented design at `CertificationFidelity`); a Mint pass
@@ -4343,7 +4440,12 @@ fn certify_outer_optimality_at_terminal_fidelity(
         railed_facts: railed_coordinate_facts(&result.rho, &certificate_railed, config),
         // The floor's verdict on that same curvature, recorded beside it.
         curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
-            interior_curvature_floor_clearance(hessian, &certificate_railed, &projected_gradient)
+            interior_curvature_floor_clearance(
+                hessian,
+                &certificate_railed,
+                &projected_gradient,
+                criterion_invariance.as_ref(),
+            )
         }),
     };
     // Certify-time tail snap (#2348 Inc 2). About to refuse a point whose
@@ -4678,6 +4780,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &gradient,
                 &hessian,
                 &certificate_railed,
+                criterion_invariance.as_ref(),
                 baseline_cost,
                 &bounds,
                 context,
@@ -5135,10 +5238,16 @@ fn try_certify_asymptote_rail(
     // curvature for a minimum. A rail-caused indefiniteness in the saturated
     // direction is expected and excluded; genuine interior negative curvature is
     // not, and refuses the certificate.
+    // #2676: read from the objective at THIS point, exactly as the generic
+    // verdict does. A rail certificate that judged the invariance would decline
+    // on the same rounding residual the generic path used to refuse on, and the
+    // two paths would disagree about one matrix.
+    let criterion_invariance = obj.criterion_invariant_directions(rho);
     if certificate_hessian_is_psd_off_railed_above_gradient_floor(
         inputs.hessian,
         railed,
         projected_gradient,
+        criterion_invariance.as_ref(),
     ) != Some(true)
     {
         return Ok(Err("interior Hessian sub-block is not PSD".to_string()));
@@ -5752,8 +5861,13 @@ fn try_tail_snap_to_rail(
         .copied()
         .chain(candidates.iter().map(|(k, _)| *k))
         .collect();
-    if certificate_hessian_is_psd_off_railed_above_gradient_floor(hessian, &excluded, gradient)
-        != Some(true)
+    let criterion_invariance = obj.criterion_invariant_directions(rho);
+    if certificate_hessian_is_psd_off_railed_above_gradient_floor(
+        hessian,
+        &excluded,
+        gradient,
+        criterion_invariance.as_ref(),
+    ) != Some(true)
     {
         return Ok(TailSnapOutcome::Declined(
             "interior Hessian sub-block not PSD".to_string(),

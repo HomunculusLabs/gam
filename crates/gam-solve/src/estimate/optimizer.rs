@@ -1374,6 +1374,18 @@ where
                     state.soft_rho_guard_gradient(rho)
                 },
             );
+            // #2676: publish the criterion's EXACT invariance — the directions
+            // of rho along which the penalty map, and therefore the criterion,
+            // does not move at all. The outer certificate deflates them instead
+            // of judging a chain-rule term against its own absolute value. Same
+            // seam as the barrier hook above: the closure speaks rho, and
+            // `ClosureObjective` applies the theta embedding from the declared
+            // layout.
+            let obj = obj.with_criterion_invariance(
+                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
+                    state.criterion_invariant_directions(rho)
+                },
+            );
             // Standard REML publishes its current original-basis coefficients
             // and consumes a cached coefficient vector through the symmetric
             // hook below. The runner calls it only after reset and only for the
@@ -1727,6 +1739,18 @@ where
             let obj = obj.with_soft_rho_guard_gradient(
                 |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
                     state.soft_rho_guard_gradient(rho)
+                },
+            );
+            // #2676: publish the criterion's EXACT invariance — the directions
+            // of rho along which the penalty map, and therefore the criterion,
+            // does not move at all. The outer certificate deflates them instead
+            // of judging a chain-rule term against its own absolute value. Same
+            // seam as the barrier hook above: the closure speaks rho, and
+            // `ClosureObjective` applies the theta embedding from the declared
+            // layout.
+            let obj = obj.with_criterion_invariance(
+                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
+                    state.criterion_invariant_directions(rho)
                 },
             );
             // Same exact-seed cache publish/consume symmetry as the standard

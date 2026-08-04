@@ -301,12 +301,12 @@ fn a_narrow_window_still_gets_a_real_second_order_verdict() {
     let railed = certificate_railed_coordinates(&array![0.0], &config);
     let indefinite = array![[-1.0]];
     assert_eq!(
-        certificate_hessian_is_psd_off_railed(&indefinite, &railed),
+        certificate_hessian_is_psd_off_railed(&indefinite, &railed, None),
         Some(false),
         "an indefinite curvature at an interior kappa must refuse",
     );
     assert_eq!(
-        certificate_hessian_is_psd_off_railed(&indefinite, &[0]),
+        certificate_hessian_is_psd_off_railed(&indefinite, &[0], None),
         Some(true),
         "control: with the coordinate railed there is nothing left to judge",
     );

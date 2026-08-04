@@ -729,6 +729,18 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// warm-start successive outer evaluations instead of cold-starting PIRLS
     /// from zero every iteration — especially important for GLM families (Poisson,
     /// NB, Binomial) that cannot use the Gaussian Gram tensor n-free shortcut.
+    /// The criterion's exact invariance directions at this `rho` (#2676).
+    ///
+    /// Forwards to the wrapped [`RemlState`], which owns the canonical penalty
+    /// map the invariance is a property of. Published so a spatial joint driver
+    /// can install the outer certificate's deflation hook without reaching into
+    /// the evaluator's internals — and, importantly, so the answer is taken
+    /// from the penalty map as it stands at the CURRENT psi rather than from a
+    /// once-per-fit snapshot.
+    pub fn criterion_invariant_directions(&self, rho: &Array1<f64>) -> Option<Array2<f64>> {
+        self.reml_state.criterion_invariant_directions(rho)
+    }
+
     pub fn current_beta(&self) -> Option<Array1<f64>> {
         self.reml_state.current_original_basis_beta()
     }

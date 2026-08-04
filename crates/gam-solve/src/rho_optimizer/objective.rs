@@ -255,6 +255,37 @@ pub trait OuterObjective {
         None
     }
 
+    /// Directions of the outer coordinate along which this criterion is EXACTLY
+    /// constant by construction, at `theta` (#2676).
+    ///
+    /// Orthonormal columns, `theta.len() x d`, or `None` when the objective
+    /// declares no such invariance — which is the default and which reproduces
+    /// every pre-#2676 verdict bit for bit.
+    ///
+    /// A penalized criterion sees `lambda` only through
+    /// `sum_i lambda_i (beta - mu_i)' S_i (beta - mu_i)`, so any `w` with
+    /// `sum_i w_i S_i = 0` (plus the two conditions a nonzero `mu_i` imposes)
+    /// leaves it unchanged along `lambda + s w`. Lifted to `rho = log lambda`
+    /// by `t = diag(lambda)^{-1} w`, the exact chain rule
+    /// `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)` gives
+    /// `t' H_rho t = sum_k g_k t_k^2` — the curvature there is a function of the
+    /// GRADIENT, which the certificate has separately judged against its
+    /// stationarity bound. Judging it again as curvature, against a floor that
+    /// is the same quantity's absolute value, decides the certificate on a
+    /// rounding residual.
+    ///
+    /// The certificate therefore deflates these directions before any PSD test
+    /// and judges their orthogonal complement by the unchanged rule. See
+    /// [`crate::penalty_invariance`] for the derivation, what deflating cannot
+    /// hide, and why a wider floor is the wrong answer.
+    fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
+        log::trace!(
+            "[#2676] this objective declares no criterion invariance (theta_dim={})",
+            theta.len()
+        );
+        None
+    }
+
     /// Restore to a clean baseline for the next multi-start candidate.
     fn reset(&mut self);
 
@@ -926,6 +957,12 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         self.inner.soft_rho_guard_gradient(rho)
     }
 
+    fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
+        // The invariance is a property of the wrapped criterion's penalty map;
+        // the checkpoint layer neither adds nor persists one.
+        self.inner.criterion_invariant_directions(theta)
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Forward to the wrapped objective, then prime our last-inner-beta
         // cache so a subsequent finalize-write encodes the seeded β if no
@@ -1049,6 +1086,12 @@ pub struct ClosureObjective<
     /// `None` means "no barrier", and the certificate subtracts nothing.
     pub(crate) soft_rho_guard_gradient_fn:
         Option<Box<dyn FnMut(&mut S, &Array1<f64>) -> Array1<f64>>>,
+    /// Optional criterion-invariance hook (#2676). Installed by objectives whose
+    /// penalty map carries an exact linear redundancy; `None` means "no
+    /// invariance", and the certificate deflates nothing — the pre-#2676
+    /// behaviour, bit for bit.
+    pub(crate) criterion_invariance_fn:
+        Option<Box<dyn FnMut(&mut S, &Array1<f64>) -> Option<Array2<f64>>>>,
     /// Optional seed-screening ranking proxy closure. When `None`,
     /// `eval_screening_proxy()` falls back to `eval_cost()` (the trait
     /// default), preserving legacy behavior for non-REML objectives.
@@ -1208,6 +1251,54 @@ where
         Some(published)
     }
 
+    fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
+        // Same seam discipline as the barrier hook above (#2629): the closure
+        // speaks rho, the certificate speaks theta, and the psi/link block is
+        // EXACTLY zero because the invariance lives entirely in the penalty
+        // map. Doing the embedding here, from the declared layout, is what lets
+        // the standard-REML and the exact-joint spatial arms install a
+        // byte-identical hook.
+        let layout = self.cap.theta_layout();
+        if theta.len() != layout.n_params {
+            log::trace!(
+                "[#2676] invariance publication declined: theta length {} is not the declared \
+                 n_params {} (rho_dim={}, psi_dim={})",
+                theta.len(),
+                layout.n_params,
+                layout.rho_dim(),
+                layout.psi_dim
+            );
+            return None;
+        }
+        let rho_dim = layout.rho_dim();
+        let rho = theta.slice(ndarray::s![..rho_dim]).to_owned();
+        let directions = self.criterion_invariance_fn.as_mut()?(&mut self.state, &rho)?;
+        // A hook answering in the wrong shape is reported as an ABSENCE rather
+        // than spliced in: deflating a direction that is not the criterion's
+        // invariance would remove real curvature from the certificate's view,
+        // which is the one failure this whole mechanism must not have.
+        if directions.nrows() != rho_dim
+            || directions.ncols() == 0
+            || !directions.iter().all(|value| value.is_finite())
+        {
+            log::trace!(
+                "[#2676] invariance publication declined: the hook returned a {}x{} block for a \
+                 rho block of {rho_dim}, or a non-finite one",
+                directions.nrows(),
+                directions.ncols(),
+            );
+            return None;
+        }
+        if layout.psi_dim == 0 {
+            return Some(directions);
+        }
+        let mut published = Array2::<f64>::zeros((layout.n_params, directions.ncols()));
+        published
+            .slice_mut(ndarray::s![..rho_dim, ..])
+            .assign(&directions);
+        Some(published)
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Empty β: by convention, "no warm-start available" — treat as a
         // no-op install. Distinct from `NoSlot` because the objective may
@@ -1315,6 +1406,24 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
         self.soft_rho_guard_gradient_fn = Some(Box::new(guard));
         self
     }
+
+    /// Publish the criterion's exact invariance directions (#2676).
+    ///
+    /// The closure receives the FULL outer point and returns orthonormal
+    /// columns in the same coordinates, so an objective with auxiliary `psi` or
+    /// link coordinates supplies the embedding itself (the rho block is what
+    /// carries the invariance; every other coordinate is exactly zero).
+    ///
+    /// An objective whose criterion is not built on a penalty map must not
+    /// install this hook: `None` is the correct answer, and publishing an empty
+    /// matrix would be indistinguishable from publishing a real one.
+    pub fn with_criterion_invariance<Finv>(mut self, invariance: Finv) -> Self
+    where
+        Finv: FnMut(&mut S, &Array1<f64>) -> Option<Array2<f64>> + 'static,
+    {
+        self.criterion_invariance_fn = Some(Box::new(invariance));
+        self
+    }
 }
 
 impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp> ClosureObjective<S, Fc, Fe, Fr, Fefs, Feo, Fsp>
@@ -1354,6 +1463,7 @@ where
             exact_polish_fn: self.exact_polish_fn,
             rail_face_limit_fn: self.rail_face_limit_fn,
             soft_rho_guard_gradient_fn: self.soft_rho_guard_gradient_fn,
+            criterion_invariance_fn: self.criterion_invariance_fn,
             screening_proxy_fn: self.screening_proxy_fn,
             seed_fn: Some(seed_fn),
             terminal_eval_order: self.terminal_eval_order,
@@ -1780,6 +1890,26 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         let native = self.to_native(rho);
         let guard = self.inner.soft_rho_guard_gradient(&native)?;
         (guard.len() == self.perm.len()).then(|| permute_to_canonical(&guard, &self.perm))
+    }
+
+    fn criterion_invariant_directions(&mut self, rho: &Array1<f64>) -> Option<Array2<f64>> {
+        // The invariance columns are indexed by rho-coordinate, so their ROWS
+        // permute exactly like `eval_to_canonical` permutes the gradient. The
+        // columns index the invariance's own basis and do not permute. Getting
+        // this wrong would deflate the wrong coordinate pattern — a direction
+        // the criterion is NOT flat along — and silently hide real curvature.
+        let native = self.to_native(rho);
+        let directions = self.inner.criterion_invariant_directions(&native)?;
+        if directions.nrows() != self.perm.len() {
+            return None;
+        }
+        let mut canonical = Array2::<f64>::zeros(directions.dim());
+        for (canonical_row, &native_row) in self.perm.iter().enumerate() {
+            for column in 0..directions.ncols() {
+                canonical[[canonical_row, column]] = directions[[native_row, column]];
+            }
+        }
+        Some(canonical)
     }
 
     fn reset(&mut self) {

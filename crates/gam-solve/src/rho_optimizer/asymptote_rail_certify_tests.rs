@@ -331,13 +331,13 @@ fn interior_psd_gate_floors_tail_residue_but_keeps_genuine_saddles_2349() {
     let gradient = array![-1.057, -1.0228e-3];
     let excluded = [0usize];
     assert_eq!(
-        certificate_hessian_is_psd_off_railed(&hessian, &excluded),
+        certificate_hessian_is_psd_off_railed(&hessian, &excluded, None),
         Some(false),
         "raw gate must see the corrupted sub-resolution entry as indefinite"
     );
     assert_eq!(
         certificate_hessian_is_psd_off_railed_above_gradient_floor(
-            &hessian, &excluded, &gradient
+            &hessian, &excluded, &gradient, None
         ),
         Some(true),
         "the gradient floor must absorb the O(|g|) trace-pair residue"
@@ -345,7 +345,7 @@ fn interior_psd_gate_floors_tail_residue_but_keeps_genuine_saddles_2349() {
     let saddle = array![[0.2828, 0.0004], [0.0004, -0.5]];
     assert_eq!(
         certificate_hessian_is_psd_off_railed_above_gradient_floor(
-            &saddle, &excluded, &gradient
+            &saddle, &excluded, &gradient, None
         ),
         Some(false),
         "a genuine interior saddle dwarfs the bound-scale floor and refuses"
@@ -376,7 +376,7 @@ fn gradient_floor_absorbs_at_most_max_interior_gradient_weyl_bound() {
             let gradient = array![-1.4017, g_interior];
             let hessian = array![[0.2828, 0.0004], [0.0004, lambda_min]];
             let floored = certificate_hessian_is_psd_off_railed_above_gradient_floor(
-                &hessian, &excluded, &gradient,
+                &hessian, &excluded, &gradient, None,
             );
             if g_interior < lambda_min.abs() {
                 assert_eq!(
@@ -391,7 +391,7 @@ fn gradient_floor_absorbs_at_most_max_interior_gradient_weyl_bound() {
             // against the same floor, so the certificate's evidence and its
             // gate can never disagree.
             let clearance =
-                interior_curvature_floor_clearance(&hessian, &excluded, &gradient)
+                interior_curvature_floor_clearance(&hessian, &excluded, &gradient, None)
                     .expect("a finite 1×1 interior sub-block has a clearance");
             assert_eq!(
                 clearance.gradient_floor, g_interior,

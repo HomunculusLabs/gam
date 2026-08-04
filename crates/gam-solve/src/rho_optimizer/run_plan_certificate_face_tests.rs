@@ -67,13 +67,13 @@ fn railed_psi_coordinate_is_on_the_certificate_face_not_only_the_lambda_report_2
     // the λ-only report and positive definite against the true active face.
     let hessian = array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]];
     assert_eq!(
-        certificate_hessian_is_psd_off_railed(&hessian, &[]),
+        certificate_hessian_is_psd_off_railed(&hessian, &[], None),
         Some(false),
         "control: judged against an empty face the saturated ψ row makes the \
          full Hessian indefinite — this is what the λ-only scan produced"
     );
     assert_eq!(
-        certificate_hessian_is_psd_off_railed(&hessian, &[2]),
+        certificate_hessian_is_psd_off_railed(&hessian, &[2], None),
         Some(true),
         "judged on the feasible tangent subspace at the active ψ bound, the \
          curvature is admissible"

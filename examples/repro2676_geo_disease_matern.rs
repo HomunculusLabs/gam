@@ -8,8 +8,9 @@
 //! NOT a test — examples skip dev-deps, so the generator is inlined from
 //! `gam_test_support::synthetic::geo_disease_columns` verbatim.
 //!
-//! Run: `cargo run --release --example repro2676_geo_disease_matern -- [k] [n] [n_pcs]`
-//! with `RUST_LOG=warn` to see the `[INDEF-HESS]` / `[CERTIFICATE]` dumps.
+//! Run: `cargo run --release --example repro2676_geo_disease_matern -- [k] [n] [n_pcs] [log_level]`
+//! The `[INDEF-HESS]` dumps are at `warn` (the default); pass `info` as the
+//! fourth argument to see which objective certifies and what it deflated.
 
 use gam::basis::{CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternNu};
 use gam::estimate::FitOptions;
@@ -164,11 +165,17 @@ fn fit_options() -> FitOptions {
 }
 
 fn main() {
-    gam_solve::progress_log::init_logging_at(log::LevelFilter::Warn);
+    // `RUST_LOG=info` is what makes the certificate's own route visible; the
+    // `[INDEF-HESS]` dumps are already at `warn`.
+    // Log level is a positional argument, not `RUST_LOG`: reading the
+    // environment is banned repo-wide (`build.rs`'s scanner, `feedback_no_env_vars`).
     let args: Vec<String> = std::env::args().collect();
     let centers: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
     let n_pcs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
+    let level = args.get(4).map(String::as_str).unwrap_or("warn");
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Warn);
+    gam_solve::progress_log::set_log_level(level);
 
     eprintln!("[repro2676] centers={centers} n={n} n_pcs={n_pcs}");
     let (x_full, y) = geo_disease_columns(n, 20260226);
