@@ -3880,6 +3880,16 @@ impl<'a> RemlState<'a> {
     ) -> Option<ndarray::Array2<f64>> {
         let k = self.canonical_penalties.len();
         if k == 0 || rho.len() != k {
+            // Loud enough to find, quiet enough to leave on: a silent decline
+            // here looks exactly like "this penalty map has no redundancy", and
+            // the two have opposite meanings for the certificate.
+            if k > 0 {
+                log::debug!(
+                    "[#2676] invariance declined: the caller passed {} rho coordinate(s) for a \
+                     penalty map of {k}",
+                    rho.len(),
+                );
+            }
             return None;
         }
         // Deliberately NOT cached on the state. On a spatial route the penalty

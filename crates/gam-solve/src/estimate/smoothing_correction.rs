@@ -619,9 +619,12 @@ pub(crate) fn invert_identified_rho_hessian(
     // (`deflation = None`) every line below runs on `hessian_rho` itself, so a
     // model without a redundant penalty map does not move by an ulp.
     let deflation = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
-    let judged = deflation.and_then(|basis| {
-        crate::penalty_invariance::judged_subspace_basis(n, &[], Some(basis))
-    });
+    let judged = deflation
+        .and_then(|basis| crate::penalty_invariance::judged_subspace_basis(n, &[], Some(basis)))
+        // A basis that spans everything deflates nothing, and compressing
+        // against it would only re-symmetrize `hessian_rho` in the last bits.
+        // Drop back to the untouched path instead.
+        .filter(|basis| basis.ncols() < n);
     let deflated_dimension = judged.as_ref().map_or(0, |basis| n - basis.ncols());
     let compressed = judged
         .as_ref()

@@ -163,11 +163,18 @@ impl PenaltyMapInvariance {
 
         // The centering vectors c_i = S_i mu_i, in GLOBAL coefficient
         // coordinates so that overlapping blocks add correctly, and the
-        // scalars q_i = mu_i' S_i mu_i.
-        let mut centering = Array2::<f64>::zeros((k, coefficient_dimension));
+        // scalars q_i = mu_i' S_i mu_i. Allocated only when some prior mean is
+        // nonzero: `k x p` is 13 MB at `k = 50, p = 4096`, and the overwhelming
+        // majority of penalty maps are centered at zero, where `A_i` is `S_i`
+        // bordered by exact zeros and the whole border term vanishes.
+        let centered = canonical
+            .iter()
+            .any(|penalty| penalty.prior_mean.iter().any(|value| *value != 0.0));
+        let mut centering =
+            Array2::<f64>::zeros((k, if centered { coefficient_dimension } else { 0 }));
         let mut quadratic = Array1::<f64>::zeros(k);
         for (index, penalty) in canonical.iter().enumerate() {
-            if penalty.prior_mean.iter().all(|value| *value == 0.0) {
+            if !centered || penalty.prior_mean.iter().all(|value| *value == 0.0) {
                 continue;
             }
             let start = penalty.col_range.start;
@@ -204,7 +211,7 @@ impl PenaltyMapInvariance {
                 // The two border blocks of A_i contribute 2 c_i . c_j, the
                 // corner contributes q_i q_j.
                 let mut border = 0.0_f64;
-                for column in 0..coefficient_dimension {
+                for column in 0..centering.ncols() {
                     border += centering[[i, column]] * centering[[j, column]];
                 }
                 inner += 2.0 * border + quadratic[i] * quadratic[j];

@@ -278,6 +278,22 @@ pub trait OuterObjective {
     /// and judges their orthogonal complement by the unchanged rule. See
     /// [`crate::penalty_invariance`] for the derivation, what deflating cannot
     /// hide, and why a wider floor is the wrong answer.
+    ///
+    /// # Who has opted in, and who has not
+    ///
+    /// Installed by the two REML arms and the spatial joint arm, whose criterion
+    /// is built on a [`gam_terms::construction::CanonicalPenalty`] bundle that
+    /// `PenaltyMapInvariance` reads directly.
+    ///
+    /// NOT installed by the custom-family route, which is the other production
+    /// site that sets `require_measured_psd`. Its penalties live as
+    /// `ParameterBlockSpec::penalties` (plus, for the one family that has them,
+    /// a `JointPenaltyBundle`), so publishing an invariance there means first
+    /// mapping that layout onto the outer rho vector — and a WRONG map deflates
+    /// a direction the criterion is not flat along, which is strictly worse than
+    /// deflating nothing. Left at the default until someone can derive that map
+    /// and gate it: `None` is exactly the pre-#2676 behaviour, so nothing there
+    /// regresses, and no fixture on this issue routes through it.
     fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
         log::trace!(
             "[#2676] this objective declares no criterion invariance (theta_dim={})",

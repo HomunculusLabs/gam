@@ -8,9 +8,14 @@
 //! NOT a test — examples skip dev-deps, so the generator is inlined from
 //! `gam_test_support::synthetic::geo_disease_columns` verbatim.
 //!
-//! Run: `cargo run --release --example repro2676_geo_disease_matern -- [k] [n] [n_pcs] [log_level]`
+//! Run: `cargo run --release --example repro2676_geo_disease_matern --`
+//!      `[k] [n] [n_pcs] [log_level] [base|eas]`
 //! The `[INDEF-HESS]` dumps are at `warn` (the default); pass `info` as the
-//! fourth argument to see which objective certifies and what it deflated.
+//! fourth argument to see which objective certifies and what it deflated. The
+//! fifth selects the generator: `base` is the `geo_disease_matern` cell
+//! (n=4000, seed 20260226), `eas` is `geo_disease_eas_matern_k*`
+//! (n=6000, seed 20260301), which is where PATH 1 — the outer certificate's
+//! `INDEFINITE CURVATURE AT INTERIOR OPTIMUM` — was reported.
 
 use gam::basis::{CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternNu};
 use gam::estimate::FitOptions;
@@ -76,6 +81,62 @@ impl Rng {
 
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
+}
+
+/// `gam_test_support::synthetic::geo_disease_eas_columns`, inlined: the
+/// generator behind `geo_disease_eas_matern_k12` / `_k24`, which is where this
+/// issue's PATH 1 (the outer certificate's
+/// `INDEFINITE CURVATURE AT INTERIOR OPTIMUM`) was reported.
+fn geo_disease_eas_columns(n: usize, seed: u64, n_pcs: usize) -> (Array2<f64>, Array1<f64>) {
+    let n = n.max(5);
+    let n_pcs = n_pcs.max(3);
+    let mut rng = Rng::new(seed);
+    let mut x = Array2::<f64>::zeros((n, n_pcs));
+    let mut y = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let eas = rng.bernoulli(0.23);
+        let lat = if eas {
+            rng.uniform_range(15.0, 52.0)
+        } else {
+            rng.uniform_range(-55.0, 70.0)
+        };
+        let lon = if eas {
+            rng.uniform_range(95.0, 145.0)
+        } else {
+            rng.uniform_range(-175.0, 175.0)
+        };
+        let mut eta = if eas {
+            (0.10_f64 / 0.90_f64).ln()
+        } else {
+            (0.02_f64 / 0.98_f64).ln()
+        };
+        if eas {
+            let lat_e = (lat - 33.5) / 11.0;
+            let lon_e = (lon - 120.0) / 10.0;
+            eta += 3.25 * (1.35 * lat_e).sin() - 2.85 * (1.55 * lon_e).cos()
+                + 2.50 * (1.10 * lat_e * lon_e).sin()
+                + 1.90 * (1.60 * lat_e + 0.45 * lon_e).cos()
+                + rng.normal(0.0, 0.20);
+        } else {
+            eta += rng.normal(0.0, 0.08);
+        }
+        y[i] = if rng.bernoulli(sigmoid(eta)) { 1.0 } else { 0.0 };
+        let lat_s = lat / 90.0;
+        let lon_s = lon / 180.0;
+        for j in 0..n_pcs {
+            let jf = j as f64;
+            let a = 0.98 - 0.05 * jf;
+            let b = 0.26 + 0.03 * jf;
+            let c = if j % 2 == 0 { 1.0 } else { -1.0 } * (0.12 + 0.01 * jf);
+            let d = if j >= 8 { 0.22 } else { 0.06 };
+            x[[i, j]] = a * lat_s
+                + b * lon_s
+                + c * lat_s * lon_s
+                + d * (if eas { 1.0 } else { 0.0 })
+                + rng.normal(0.0, 0.13 + 0.018 * jf);
+        }
+    }
+    (x, y)
 }
 
 fn geo_disease_columns(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
@@ -174,12 +235,18 @@ fn main() {
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
     let n_pcs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
     let level = args.get(4).map(String::as_str).unwrap_or("warn");
+    // `base` = the `geo_disease_matern` cell (n=4000, seed 20260226);
+    // `eas` = the `geo_disease_eas_matern_k*` cells (n=6000, seed 20260301).
+    let family = args.get(5).map(String::as_str).unwrap_or("base");
     gam_solve::progress_log::init_logging_at(log::LevelFilter::Warn);
     gam_solve::progress_log::set_log_level(level);
 
-    eprintln!("[repro2676] centers={centers} n={n} n_pcs={n_pcs}");
-    let (x_full, y) = geo_disease_columns(n, 20260226);
-    let x = if n_pcs >= 16 {
+    eprintln!("[repro2676] family={family} centers={centers} n={n} n_pcs={n_pcs}");
+    let (x_full, y) = match family {
+        "eas" => geo_disease_eas_columns(n, 20260301, n_pcs.max(16)),
+        _ => geo_disease_columns(n, 20260226),
+    };
+    let x = if x_full.ncols() <= n_pcs {
         x_full
     } else {
         x_full.slice(ndarray::s![.., ..n_pcs]).to_owned()
