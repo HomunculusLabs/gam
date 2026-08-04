@@ -427,6 +427,16 @@ fn bms_declines_covariance_and_still_mints_point_estimates_2718() {
                 "gam#2718: the declaration must name the measure the adequacy gate selected"
             );
         }
+        Some(
+            declined @ CovarianceDeclined::SurvivalMarginalSlopeGeneratedRegressorSensitivityUnavailable {
+                ..
+            },
+        ) => panic!(
+            "gam#2718: this is a BERNOULLI marginal-slope fit, so the survival family's \
+             generated-regressor declaration (gam#2768) cannot be the reason its covariance was \
+             withheld. Reaching it means the two withholding seams have been crossed: {}",
+            declined.explain()
+        ),
         None => panic!(
             "gam#2718: the covariance was withheld with NO declaration. A silent absence is \
              indistinguishable from `never requested`, which is exactly the state a consumer \
