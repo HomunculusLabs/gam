@@ -1,5 +1,63 @@
 ## Unreleased
 
+- **The survival marginal-slope's effect can vary along the follow-up axis
+  (#2765, #2767).** `logslope_time_k` / `--logslope-time-k` make `b` a fitted
+  surface in `(x, t)` instead of a per-row constant, so a latent score whose
+  effect attenuates with age is now a model the family can express.
+
+  **What was wrong.** The family carried three follow-up channels for the
+  location index `q` — its value at entry, at exit, and its exit-time derivative,
+  because the likelihood is `log S(t₁) − log S(t₀)` and an event row picks up
+  `log η′(t₁)` — and exactly **one** channel for the slope. Time reached `η` only
+  through `q`. `logslopespec` was a static term collection, and the row program's
+  primary vector was `(q₀, q₁, q̇₁, g)`.
+
+  **Why episode splitting was not a workaround.** This is a *transformation*
+  model, `S(t|x,z) = Φ(−η(t))`, not a hazard model. Splitting a subject into
+  intervals with a piecewise-constant `b` gives per-row contributions
+  `log S(t₁;b₁) − log S(t₀;b₁)` that do not telescope into any survival function.
+  The slope had to move inside the row program.
+
+  **Why the generalization is the right one.** The factor
+  `c = √(1 + bᵀΣb)` in `η = q·c + bᵀz` is not decoration: it is exactly the
+  rescaling that makes the *marginal* law invariant to the slope, since
+  `E_z Φ(−(q·c + bᵀz)) = Φ(−q)`. That identity holds **pointwise in `t`**, so
+  `b → b(t)` preserves the family's defining property — and it forces `c` to
+  inherit the time dependence, giving
+  `η′(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz`. The last two terms are what the
+  rigid kernel was missing.
+
+  **The shape of the fix.** A `SlopeRowGeometry` the row program is generic over:
+  `StaticSlopeGeometry` is the four-primary frame every existing model uses and
+  is the `db/dt = 0` face of the six-primary `DynamicSlopeGeometry`. Both feed
+  the *same* `row_program!` declaration — only the feature map differs — so the
+  likelihood is still written down once. The frames are compile-time distinct
+  because the row towers are dense in the primary count (the fourth-order tower
+  is `P⁴`): a model that does not ask for a varying slope must not pay `5×` for a
+  channel that is structurally a copy and a zero.
+
+  The log-slope design is tensored against a `log t` B-spline margin by the same
+  `build_time_varying_survival_covariate_template` the threshold and sigma
+  margins use, with the standard anisotropic penalty pair `S_cov ⊗ I_t` and
+  `I_c ⊗ S_t` so smoothness in `x` and in `t` keep independent smoothing
+  parameters.
+
+  Two consequences the generalization forced. `q′ ≥ derivative_guard` is the
+  *marginal* monotonicity constraint and it implied the likelihood-domain
+  condition `η′₁ > 0` only because `η′₁ = q′·c` with `c ≥ 1`; a varying slope
+  breaks that implication, so `η′₁ > 0` is now an explicit domain check (on the
+  static frame it is unreachable, so no existing fit moves). And
+  `LogslopeBlockJacobian` gained the exact `(η₀, η₁, η′₁)` rows for the varying
+  case — the identifiability audit would otherwise have been reading the Jacobian
+  of a model that is not being fitted.
+
+  **Refused rather than reinterpreted:** a per-score log-slope topology; a
+  non-zero smooth anchor, coefficient bounds, or linear constraints on the
+  log-slope surface; and *saving* a fit that used the margin, because the on-disk
+  contract rebuilds the block from the covariate term spec alone and would
+  evaluate a different model at predict. The resolved knots ride on the fit
+  result for the predictor that will replay them.
+
 - **The survival marginal-slope runs the automatic latent-measure gate, and the
   conditional calibration it escalates to now actually delivers a unit-variance
   score (#2768).** Three things, in the order they were found.

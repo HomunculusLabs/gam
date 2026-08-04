@@ -112,6 +112,56 @@ function of covariates given by `logslope_formula`. In the Python API,
 omitting `logslope_formula` reuses the main covariate formula for the
 slope surface.
 
+## Letting the slope vary along follow-up (survival)
+
+`logslope_formula` makes the slope a surface in *covariates*. On the survival
+likelihood it can also be a surface in *follow-up time*, which is the natural
+question for a score whose effect is thought to attenuate with age:
+
+```python
+model = gamfit.fit(
+    df,
+    "Surv(entry, exit, event) ~ s(bmi)",
+    survival_likelihood="marginal-slope",
+    z_column="z",
+    logslope_formula="s(bmi)",
+    config={"logslope_time_k": 6},   # B-spline margin in log(time)
+)
+```
+
+`logslope_time_k` tensors the log-slope covariate design against a B-spline
+margin in `log t`, exactly as `threshold_time_k` and `sigma_time_k` do for the
+location-scale family, so `b` becomes a fitted surface `b(x, t)` with
+independent smoothing parameters for the covariate and time directions.
+`logslope_time_degree` (default `3`) sets the margin's polynomial degree; the
+same `k >= degree + 1` rule applies. The CLI spelling is `--logslope-time-k` /
+`--logslope-time-degree`.
+
+Why this needs family support rather than data reshaping: the marginal-slope
+likelihood is a *transformation* model, `S(t | x, z) = Φ(−η(t))`, not a hazard
+model. Splitting each subject into intervals with a piecewise-constant slope —
+the usual Cox `tt()` workaround — gives per-row contributions
+`log S(t₁) − log S(t₀)` that do not telescope into any survival function. The
+slope has to move inside the row likelihood, which also means the event density
+picks up the two terms a constant slope zeroes out:
+
+```
+η′(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)·z
+```
+
+Current boundaries, all of which are refused with a message rather than
+silently reinterpreted:
+
+- a per-score log-slope topology (a vector latent score with one slope surface
+  per coordinate) cannot take a single time margin;
+- a non-zero smooth anchor, coefficient bounds, or linear constraints on the
+  log-slope surface are stated in the covariate coordinate chart, and the time
+  tensor product is a different chart;
+- a fit that used the margin cannot be **saved** yet: the on-disk contract
+  rebuilds the log-slope block from its covariate term spec, which would
+  evaluate a different model at predict. The fit itself is valid — read the
+  coefficients and the slope surface off the fit result.
+
 ## Externally calibrated score (raw `z_column`)
 
 If the score is already conditionally `N(0, 1)` — for example a
