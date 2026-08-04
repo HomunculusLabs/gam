@@ -6154,6 +6154,11 @@ fn pinned_equal_rho_bounds_are_accepted_2370() {
 #[path = "run_plan_certificate_face_tests.rs"]
 mod run_plan_certificate_face_tests;
 
+// #2676: the certificate must not decide on a direction along which the
+// criterion is exactly constant. Split out for the length budget.
+#[path = "criterion_invariance_certificate_tests_2676.rs"]
+mod criterion_invariance_certificate_tests_2676;
+
 // The outer stationarity band: the #2613 stiff-ridge replay, the cost-stall
 // window, the band anchor, and the #2458 derived standard without declared
 // curvature. Split out for the source-file length budget.

@@ -1,0 +1,295 @@
+// Child module of `run_plan::run_plan_tests` (see the `#[path]` declaration
+// there): #2676 — the outer curvature certificate must not decide on a
+// direction along which the criterion is EXACTLY constant. Scope comes from the
+// parent via `use super::*`; the split is purely physical.
+//
+// ─── The defect, as a property rather than an instance ───
+//
+// `rho = log lambda` is a nonlinear reparameterisation, so for ANY smooth `V`
+//
+//     H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)
+//
+// holds exactly. Every criterion here sees `lambda` only through
+// `sum_i lambda_i S_i`, so a `w` with `sum_i w_i S_i = 0` makes `V` constant
+// along `lambda + s w`, i.e. `H_lambda w = 0`. Lift by `t = diag(lambda)^-1 w`:
+//
+//     t' H_rho t         = sum_k g_k t_k^2
+//     t' (H_rho + diag|g|) t = 2 sum_k g_k^+ t_k^2
+//
+// and where the gradient components on `t`'s support are NEGATIVE the second
+// line is exactly ZERO. So the certificate's `H + diag(|g|) PSD?` test is not
+// merely close to failing on that direction — it is a numerical zero against a
+// zero, and the verdict is the sign of the assembly residual.
+//
+// The gates below assert exactly that: a perturbation of HALF the gate's own
+// gradient floor — the quantity it adds to the diagonal precisely so that
+// residues of that size cannot be called a saddle — flips the undeflated
+// verdict, and does not flip the deflated one.
+
+use super::*;
+use ndarray::{Array1, Array2, array};
+
+/// Build the exact #2676 configuration: a criterion depending on `lambda` only
+/// through `Lambda = lambda_0 + c*lambda_2` and `lambda_1`, at a
+/// nearly-stationary point with a negative reduced gradient.
+///
+/// Returns `(H_rho, g_rho, t)` where `t` is the normalised lift of the exact
+/// null direction `w = (c, 0, -1)`.
+fn redundant_rho_system(scale: f64) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+    let lambdas = array![1.5_f64, 4.0, 1.5 / scale];
+    // Strictly positive definite in the IDENTIFIED coordinates: there is no
+    // negative curvature anywhere in this construction.
+    let reduced = array![[0.8_f64, -0.2], [-0.2, 0.5]];
+    let jacobian = array![[1.0_f64, 0.0], [0.0, 1.0], [scale, 0.0]];
+    let h_lambda = jacobian.dot(&reduced).dot(&jacobian.t());
+    // A genuine differential of the same reduced criterion, with a NEGATIVE
+    // component on the redundant pair — which is what makes the floored test's
+    // Rayleigh quotient exactly zero on the lift.
+    let g_reduced = array![-3.0e-5_f64, 7.0e-6];
+    let g_lambda = jacobian.dot(&g_reduced);
+    let mut g_rho = Array1::<f64>::zeros(3);
+    let mut h_rho = Array2::<f64>::zeros((3, 3));
+    for i in 0..3 {
+        g_rho[i] = lambdas[i] * g_lambda[i];
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            h_rho[[i, j]] = lambdas[i] * h_lambda[[i, j]] * lambdas[j];
+        }
+        h_rho[[i, i]] += g_rho[i];
+    }
+    // t proportional to diag(lambda)^-1 (c, 0, -1).
+    let raw = array![scale / lambdas[0], 0.0, -1.0 / lambdas[2]];
+    let norm = raw.dot(&raw).sqrt();
+    let mut basis = Array2::<f64>::zeros((3, 1));
+    for row in 0..3 {
+        basis[[row, 0]] = raw[row] / norm;
+    }
+    (h_rho, g_rho, basis)
+}
+
+/// THE IDENTITY the certificate's floor is supposed to protect against, and
+/// the one direction where it protects by exactly ZERO.
+///
+/// `H + diag(|g|)` exists so a curvature residue of size `O(|g_k|)` cannot be
+/// called a saddle. Along the criterion's invariance that protection is
+/// identically cancelled:
+///
+///     t' (H_rho + diag|g|) t = t' diag(l) H_lambda diag(l) t + sum_k (g_k + |g_k|) t_k^2
+///                            =            0                 +      2 sum_k g_k^+ t_k^2
+///
+/// and with the gradient NEGATIVE on `t`'s support the second term is zero too.
+/// Everywhere else the same floor contributes at least `min_k |g_k|`. So the
+/// floor is worth `|g|` on every direction except the one it is being asked to
+/// adjudicate, where it is worth nothing.
+#[test]
+fn the_gradient_floor_protects_every_direction_except_the_invariance_2676() {
+    let (h_rho, g_rho, invariance) = redundant_rho_system(0.75);
+    let mut floored = h_rho.clone();
+    for k in 0..3 {
+        floored[[k, k]] += g_rho[k].abs();
+    }
+    let matrix_scale = h_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    let t = invariance.column(0).to_owned();
+    let on_invariance = t.dot(&floored.dot(&t));
+    assert!(
+        on_invariance.abs() <= 64.0 * f64::EPSILON * matrix_scale,
+        "the floored quotient on the invariance must be zero to round-off of the matrix scale \
+         {matrix_scale:.3e}, got {on_invariance:.6e}"
+    );
+    // And the floor really is doing work elsewhere: on the judged complement
+    // the same matrix is bounded away from zero by orders.
+    let judged = crate::penalty_invariance::judged_subspace_basis(3, &[], Some(&invariance))
+        .expect("a 2-dimensional complement");
+    let compressed = crate::penalty_invariance::compress_to_judged_subspace(&floored, &judged);
+    use gam_linalg::faer_ndarray::FaerEigh;
+    let (eigenvalues, _) = compressed.eigh(faer::Side::Lower).expect("eigh");
+    let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        minimum > 1.0e-3,
+        "the judged complement must carry real curvature (got {minimum:.6e}), or this fixture \
+         is not separating the artifact from the criterion"
+    );
+}
+
+/// THE ACCEPTANCE, stated as the property and not as one host's rounding.
+///
+/// Perturb the assembled `H_rho` ALONG the invariance by `+-delta` with
+/// `delta = 0.5 * max_k |g_k|` — HALF the very floor this same test adds to the
+/// diagonal to absorb `O(|g|)` residues, and orders below the matrix's own
+/// scale. A gate that flips there is deciding on the gradient, not on the
+/// curvature.
+///
+/// Undeflated: the two perturbations give OPPOSITE verdicts.
+/// Deflated: both give `Some(true)`, and there is nothing left to flip.
+#[test]
+fn a_perturbation_below_the_certificates_own_floor_flips_the_undeflated_verdict_2676() {
+    let (h_rho, g_rho, invariance) = redundant_rho_system(0.75);
+    let matrix_scale = h_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    let gradient_floor = g_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    let delta = 0.5 * gradient_floor;
+    assert!(
+        delta < 1.0e-5 * matrix_scale,
+        "the perturbation {delta:.3e} must be negligible against the matrix scale \
+         {matrix_scale:.3e}, or the fixture is not making the point"
+    );
+
+    let mut undeflated = Vec::new();
+    let mut deflated = Vec::new();
+    for sign in [-1.0_f64, 1.0] {
+        let t = invariance.column(0).to_owned();
+        let mut perturbed = h_rho.clone();
+        for i in 0..3 {
+            for j in 0..3 {
+                perturbed[[i, j]] += sign * delta * t[i] * t[j];
+            }
+        }
+        undeflated.push(certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &perturbed, &[], &g_rho, None,
+        ));
+        deflated.push(certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &perturbed,
+            &[],
+            &g_rho,
+            Some(&invariance),
+        ));
+    }
+
+    assert_eq!(
+        undeflated,
+        vec![Some(false), Some(true)],
+        "the pre-#2676 gate must be shown to flip under a {delta:.3e} perturbation — half its \
+         own gradient floor — of a matrix whose scale is {matrix_scale:.3e}; if it does not, \
+         this fixture no longer reproduces the defect and the gate below proves nothing"
+    );
+    assert_eq!(
+        deflated,
+        vec![Some(true), Some(true)],
+        "deflating the criterion's own invariance must reach the SAME verdict on both signs: \
+         the residual's sign is not evidence about the fit"
+    );
+}
+
+/// The other half of the same statement: deflation must not make the gate
+/// permissive. A genuine saddle — #2665's regime, `lambda_min` orders above the
+/// gradient floor — still refuses with the invariance deflated, because it does
+/// not live in the deflated subspace.
+#[test]
+fn a_genuine_saddle_still_refuses_with_the_invariance_deflated_2676() {
+    let (h_rho, g_rho, invariance) = redundant_rho_system(0.75);
+    // Plant negative curvature on the coordinate the invariance does NOT touch
+    // (`t_1 = 0` by construction), so the saddle is entirely inside the judged
+    // complement.
+    let mut saddle = h_rho.clone();
+    saddle[[1, 1]] = -1.5;
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &saddle,
+            &[],
+            &g_rho,
+            Some(&invariance),
+        ),
+        Some(false),
+        "a -1.5 direction against a {:.1e} gradient floor must refuse whatever is deflated",
+        g_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max),
+    );
+    // And the same matrix without the saddle certifies, so the refusal above is
+    // the planted curvature and not the deflation machinery.
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &h_rho,
+            &[],
+            &g_rho,
+            Some(&invariance),
+        ),
+        Some(true),
+    );
+}
+
+/// Inertness: with `invariance = None` every verdict is what it was before
+/// #2676, including on matrices where the deflated answer differs. This is the
+/// guarantee that ordinary models — every objective that declares no invariance
+/// — do not move.
+#[test]
+fn no_declared_invariance_reproduces_the_pre_2676_verdicts_2676() {
+    let (h_rho, g_rho, invariance) = redundant_rho_system(0.75);
+    // A matrix whose undeflated verdict is `false` and whose deflated verdict
+    // is `true`: the two must not be confused.
+    let t = invariance.column(0).to_owned();
+    let gradient_floor = g_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    let mut perturbed = h_rho.clone();
+    for i in 0..3 {
+        for j in 0..3 {
+            perturbed[[i, j]] -= 0.5 * gradient_floor * t[i] * t[j];
+        }
+    }
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(&perturbed, &[], &g_rho, None),
+        Some(false),
+        "the undeflated gate must still see the perturbed invariance as indefinite"
+    );
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &perturbed,
+            &[],
+            &g_rho,
+            Some(&invariance),
+        ),
+        Some(true),
+    );
+    // Railed-coordinate handling is unchanged on the `None` path: the judged
+    // block is the interior sub-block, bit for bit.
+    let indefinite = array![
+        [1.0_f64, 0.0, 0.0],
+        [0.0, -3.0, 0.0],
+        [0.0, 0.0, 2.0],
+    ];
+    let zero_gradient = Array1::<f64>::zeros(3);
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &indefinite,
+            &[1],
+            &zero_gradient,
+            None,
+        ),
+        Some(true),
+        "excluding the negative coordinate leaves a PD sub-block"
+    );
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &indefinite,
+            &[0],
+            &zero_gradient,
+            None,
+        ),
+        Some(false),
+        "excluding a positive coordinate leaves the negative one in the judged block"
+    );
+}
+
+/// The clearance record must speak about the block the verdict was reached on.
+/// Before #2676 it reported the raw interior minimum beside a verdict taken
+/// elsewhere, which is how `[INDEF-HESS]` lines came to name a direction the
+/// decision did not involve.
+#[test]
+fn the_recorded_minimum_is_taken_on_the_judged_block_2676() {
+    let (h_rho, g_rho, invariance) = redundant_rho_system(0.75);
+    let raw = interior_curvature_floor_clearance(&h_rho, &[], &g_rho, None)
+        .expect("a finite 3x3 block has a clearance");
+    let judged = interior_curvature_floor_clearance(&h_rho, &[], &g_rho, Some(&invariance))
+        .expect("a finite 3x3 block has a clearance");
+    assert!(
+        raw.interior_min_eigenvalue < 1.0e-4,
+        "the raw minimum is the chain-rule artifact, of gradient scale (got {:.3e})",
+        raw.interior_min_eigenvalue
+    );
+    assert!(
+        judged.interior_min_eigenvalue > 1.0e-3,
+        "the judged minimum must be the criterion's own curvature, orders above it (got {:.3e})",
+        judged.interior_min_eigenvalue
+    );
+    assert_eq!(
+        raw.gradient_floor, judged.gradient_floor,
+        "the floor is a property of the gradient over the judged COORDINATES and does not move"
+    );
+}
