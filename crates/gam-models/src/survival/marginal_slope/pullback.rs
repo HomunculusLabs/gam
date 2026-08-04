@@ -201,17 +201,28 @@ impl SurvivalMarginalSlopeFamily {
         let flex_primary = self
             .effective_flex_active(block_states)?
             .then(|| flex_primary_slices(self));
-        let mut out = Array1::<f64>::zeros(flex_primary.as_ref().map_or(N_PRIMARY, |p| p.total));
+        let mut out = Array1::<f64>::zeros(
+            flex_primary
+                .as_ref()
+                .map_or_else(|| self.core_primary_dimension(), |p| p.total),
+        );
         let d_time = d_beta_flat.slice(s![slices.time.clone()]);
         let d_marginal = d_beta_flat.slice(s![slices.marginal.clone()]);
 
         let q0_dir = q_geom.dq0_time.dot(&d_time) + q_geom.dq0_marginal.dot(&d_marginal);
         let q1_dir = q_geom.dq1_time.dot(&d_time) + q_geom.dq1_marginal.dot(&d_marginal);
         let qd1_dir = q_geom.dqd1_time.dot(&d_time) + q_geom.dqd1_marginal.dot(&d_marginal);
+        let d_logslope = d_beta_flat.slice(s![slices.logslope.clone()]);
+        // One direction entry per log-slope follow-up channel. A time-constant
+        // slope has exactly one, at `PRIMARY_SLOPE`; a follow-up-varying slope
+        // has three (gam#2765). The flex layout below is time-constant only —
+        // the two are refused together at construction — so it keeps reading the
+        // single `primary.g` slot.
+        let slope_channels = self.logslope_layout.primary_channels();
         let g_dir = self
             .logslope_layout
             .coefficient_design()
-            .dot_row_view(row, d_beta_flat.slice(s![slices.logslope.clone()]));
+            .dot_row_view(row, d_logslope);
 
         if let Some(primary) = flex_primary.as_ref() {
             out[primary.q0] = q0_dir;
@@ -223,10 +234,12 @@ impl SurvivalMarginalSlopeFamily {
                     .assign(&d_beta_flat.slice(s![block_range]));
             }
         } else {
-            out[0] = q0_dir;
-            out[1] = q1_dir;
-            out[2] = qd1_dir;
-            out[3] = g_dir;
+            out[PRIMARY_Q0] = q0_dir;
+            out[PRIMARY_Q1] = q1_dir;
+            out[PRIMARY_QD1] = qd1_dir;
+            for &(primary, design) in slope_channels.as_slice() {
+                out[primary] = design.dot_row_view(row, d_logslope);
+            }
         }
         Ok(out)
     }

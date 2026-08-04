@@ -102,7 +102,7 @@ impl SurvivalMarginalSlopeFamily {
                         row,
                         &slices,
                         &q_geom,
-                        g.slice(s![0..N_PRIMARY]),
+                        g.slice(s![0..self.core_primary_dimension()]),
                         &mut grad_acc,
                     )?;
                     for (primary_range, joint_range) in identity_blocks.iter() {

@@ -175,6 +175,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             }
             .into());
         }
+        if spec.score_influence_jacobian.is_some() {
+            return Err(SurvivalMarginalSlopeError::InvalidInput {
+                reason: "a follow-up-varying log-slope is not yet supported together with a CTN \
+                         Stage-1 influence absorber: the absorber adds a trailing primary that \
+                         the time-constant frame's cross-block assembly indexes by position"
+                    .to_string(),
+            }
+            .into());
+        }
         if spec.timewiggle_block.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying log-slope is not yet supported together with a \

@@ -214,24 +214,49 @@ impl BlockHessianAccumulator {
             .syr_row_into(row, mm_weight, &mut self.h_mm)
             .map_err(|e| format!("add_pullback marginal syr_row_into: {e}"))?;
 
-        // Logslope×logslope: single rank-1
-        family
-            .logslope_layout
-            .coefficient_design()
-            .syr_row_into(row, primary_hessian[[3, 3]], &mut self.h_gg)
-            .map_err(|e| format!("add_pullback logslope syr_row_into: {e}"))?;
+        // Logslope×logslope: one rank-1 per follow-up channel pair (exactly one
+        // pair when the slope is time-constant).
+        let slope_channels = family.logslope_layout.primary_channels();
+        let slope_designs = slope_channels.as_slice();
+        for &(left_primary, left_design) in slope_designs {
+            for &(right_primary, right_design) in slope_designs {
+                let weight = primary_hessian[[left_primary, right_primary]];
+                if weight == 0.0 {
+                    continue;
+                }
+                if left_primary == right_primary {
+                    left_design
+                        .syr_row_into(row, weight, &mut self.h_gg)
+                        .map_err(|e| format!("add_pullback logslope syr_row_into: {e}"))?;
+                    continue;
+                }
+                let left_chunk = left_design
+                    .try_row_chunk(row..row + 1)
+                    .map_err(|e| format!("add_pullback logslope try_row_chunk: {e}"))?;
+                let right_chunk = right_design
+                    .try_row_chunk(row..row + 1)
+                    .map_err(|e| format!("add_pullback logslope try_row_chunk: {e}"))?;
+                ndarray::linalg::general_mat_mul(
+                    weight,
+                    &left_chunk.row(0).view().insert_axis(Axis(1)),
+                    &right_chunk.row(0).view().insert_axis(Axis(0)),
+                    1.0,
+                    &mut self.h_gg,
+                );
+            }
+        }
 
+        for &(slope_primary, slope_design) in slope_designs {
         // Marginal×logslope cross-block
-        let mg_weight = primary_hessian[[0, 3]] + primary_hessian[[1, 3]];
+        let mg_weight =
+            primary_hessian[[0, slope_primary]] + primary_hessian[[1, slope_primary]];
         if mg_weight != 0.0 {
             let m_chunk = family
                 .marginal_design
                 .try_row_chunk(row..row + 1)
                 .map_err(|e| format!("add_pullback marginal_design try_row_chunk: {e}"))?;
             let m_row = m_chunk.row(0);
-            let g_chunk = family
-                .logslope_layout
-                .coefficient_design()
+            let g_chunk = slope_design
                 .try_row_chunk(row..row + 1)
                 .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
             let g_row = g_chunk.row(0);
@@ -246,13 +271,11 @@ impl BlockHessianAccumulator {
 
         // Time×logslope cross-block
         let tg_weights = [
-            primary_hessian[[0, 3]],
-            primary_hessian[[1, 3]],
-            primary_hessian[[2, 3]],
+            primary_hessian[[0, slope_primary]],
+            primary_hessian[[1, slope_primary]],
+            primary_hessian[[2, slope_primary]],
         ];
-        let g_chunk = family
-            .logslope_layout
-            .coefficient_design()
+        let g_chunk = slope_design
             .try_row_chunk(row..row + 1)
             .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
         let g_row = g_chunk.row(0);
@@ -271,6 +294,7 @@ impl BlockHessianAccumulator {
                 1.0,
                 &mut self.h_tg,
             );
+        }
         }
 
         // Time×marginal cross-block
@@ -1070,6 +1094,20 @@ impl BlockHessianAccumulator {
         lift: &TimewiggleMarginalPsiRowLift,
         ph: &Array2<f64>,
     ) -> Result<(), String> {
+        // This is the FLEX / time-wiggle assembler, and it reads the slope's
+        // single primary column by index. Both of those surfaces are refused
+        // together with a follow-up-varying slope at construction, so this is a
+        // guard against a future caller rather than a reachable branch — but an
+        // unguarded index here would silently assemble the Hessian of a
+        // different model (gam#2765).
+        if family.logslope_layout.is_follow_up_varying() {
+            return Err(
+                "the flex / time-wiggle pullback assembler does not carry a \
+                 follow-up-varying log-slope's three primary channels"
+                    .to_string(),
+            );
+        }
+
         let jt = [&qg.dq0_time, &qg.dq1_time, &qg.dqd1_time];
         let jm = [&qg.dq0_marginal, &qg.dq1_marginal, &qg.dqd1_marginal];
         let ut = [&lift.u_q0_time, &lift.u_q1_time, &lift.u_qd1_time];

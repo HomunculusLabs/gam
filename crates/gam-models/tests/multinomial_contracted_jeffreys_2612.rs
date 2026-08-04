@@ -1,7 +1,5 @@
-use gam_models::custom_family::{
-    CustomFamily, ParameterBlockState, PenaltyMatrix,
-};
 use gam_models::MultinomialFamily;
+use gam_models::custom_family::{CustomFamily, ParameterBlockState, PenaltyMatrix};
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 
@@ -41,11 +39,7 @@ fn contracted_jeffreys_trace_hessian_matches_every_pairwise_axis() {
         ((row + column + 1) as f64).sin()
     });
     let contracted = family
-        .joint_jeffreys_information_contracted_trace_hessian_with_specs(
-            &states,
-            &specs,
-            &weight,
-        )
+        .joint_jeffreys_information_contracted_trace_hessian_with_specs(&states, &specs, &weight)
         .expect("the fused contraction succeeds")
         .expect("multinomial exposes the fused contraction");
     assert!(
@@ -59,11 +53,7 @@ fn contracted_jeffreys_trace_hessian_matches_every_pairwise_axis() {
             let mut e_right = Array1::<f64>::zeros(dim);
             e_right[right] = 1.0;
             let pairwise = family
-                .exact_newton_joint_hessiansecond_directional_derivative(
-                    &states,
-                    &e_left,
-                    &e_right,
-                )
+                .exact_newton_joint_hessiansecond_directional_derivative(&states, &e_left, &e_right)
                 .expect("the pairwise second derivative succeeds")
                 .expect("multinomial exposes exact second derivatives");
             let expected = weight
@@ -116,16 +106,12 @@ fn batched_jeffreys_axis_derivatives_match_the_defining_directional_hooks() {
     let specs = family.build_block_specs();
 
     let batched_first = family
-        .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
-            &states,
-            &specs,
-        )
+        .joint_jeffreys_information_directional_derivative_all_axes_with_specs(&states, &specs)
         .expect("the batched first derivative succeeds")
         .expect("multinomial exposes batched first derivatives");
     assert_eq!(batched_first.len(), dim);
 
-    let fixed_direction =
-        Array1::<f64>::from_shape_fn(dim, |axis| 0.17 * (axis + 1) as f64 - 0.31);
+    let fixed_direction = Array1::<f64>::from_shape_fn(dim, |axis| 0.17 * (axis + 1) as f64 - 0.31);
     let batched_second = family
         .joint_jeffreys_information_second_directional_all_axes_with_specs(
             &states,
@@ -141,9 +127,7 @@ fn batched_jeffreys_axis_derivatives_match_the_defining_directional_hooks() {
         unit_axis[axis] = 1.0;
         let expected_first = family
             .joint_jeffreys_information_directional_derivative_with_specs(
-                &states,
-                &specs,
-                &unit_axis,
+                &states, &specs, &unit_axis,
             )
             .expect("the defining first directional derivative succeeds")
             .expect("multinomial exposes first directional derivatives");
@@ -161,9 +145,7 @@ fn batched_jeffreys_axis_derivatives_match_the_defining_directional_hooks() {
             ("first", &batched_first[axis], &expected_first),
             ("second", &batched_second[axis], &expected_second),
         ] {
-            for (entry, (&actual, &expected)) in
-                actual.iter().zip(expected.iter()).enumerate()
-            {
+            for (entry, (&actual, &expected)) in actual.iter().zip(expected.iter()).enumerate() {
                 assert!(
                     (actual - expected).abs() <= 2.0e-10 * (1.0 + expected.abs()),
                     "batched {label} derivative axis {axis}, entry {entry}: \

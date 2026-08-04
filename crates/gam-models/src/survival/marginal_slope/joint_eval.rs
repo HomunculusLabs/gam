@@ -153,7 +153,7 @@ impl SurvivalMarginalSlopeFamily {
                         row,
                         &slices,
                         &q_geom,
-                        f_pi.slice(s![0..N_PRIMARY]),
+                        f_pi.slice(s![0..self.core_primary_dimension()]),
                         &mut acc.1,
                     )?;
                     for (primary_range, joint_range) in &identity_blocks {
@@ -1175,7 +1175,7 @@ impl SurvivalMarginalSlopeFamily {
                     row,
                     slices,
                     q_geom,
-                    primary_hessian.slice(s![0..N_PRIMARY, primary_range.start + local]),
+                    primary_hessian.slice(s![0..self.core_primary_dimension(), primary_range.start + local]),
                     joint_range,
                     local,
                     acc,

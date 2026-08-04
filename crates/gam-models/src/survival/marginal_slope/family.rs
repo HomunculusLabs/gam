@@ -226,6 +226,18 @@ impl SurvivalMarginalSlopeFamily {
     pub(crate) fn slope_is_follow_up_varying(&self) -> bool {
         self.logslope_layout.is_follow_up_varying()
     }
+
+    /// How many primaries the family's CORE (non-flex) row frame carries. The
+    /// runtime counterpart of the `SlopeRowGeometry` const parameter, for the
+    /// `ndarray`-shaped surfaces that carry the frame dynamically.
+    #[inline]
+    pub(crate) fn core_primary_dimension(&self) -> usize {
+        if self.slope_is_follow_up_varying() {
+            DYNAMIC_SLOPE_PRIMARIES
+        } else {
+            STATIC_SLOPE_PRIMARIES
+        }
+    }
 }
 
 /// Number of outer evaluations the survival auto-subsample schedule

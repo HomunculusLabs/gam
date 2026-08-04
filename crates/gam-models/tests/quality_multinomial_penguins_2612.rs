@@ -60,12 +60,12 @@
 //! estimand-matched at that column.
 
 use csv::StringRecord;
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::FitConfig;
 use gam_models::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
     predict_multinomial_formula_plugin,
 };
-use gam_data::encode_recordswith_inferred_schema;
-use gam_models::fit_orchestration::FitConfig;
 use gam_test_support::reference::{Column, relative_l2, run_r};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -462,8 +462,8 @@ fn gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_d
     // is left once the estimand is matched, and `gam_logloss` minus it is what
     // the posterior width costs. Neither is asserted here; the pass criterion
     // stays the estimand gam actually publishes.
-    let gam_plugin_mat = predict_multinomial_formula_plugin(&model, &test_ds)
-        .expect("gam plug-in predict held-out");
+    let gam_plugin_mat =
+        predict_multinomial_formula_plugin(&model, &test_ds).expect("gam plug-in predict held-out");
     assert_eq!(
         gam_plugin_mat.dim(),
         (n_test, K),

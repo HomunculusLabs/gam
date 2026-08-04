@@ -197,7 +197,16 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
         // Keep the baseline time surface only as flexible as the planted
         // `q(t) = a₀ + a₁·log t` needs.
         time_num_internal_knots: 3,
-        baseline_target: "linear".to_string(),
+        // A Weibull baseline, not the linear default. Two reasons: the planted
+        // `q(t) = a₀ + a₁·log t` IS a Weibull-shaped index, so the offset chart
+        // is a faithful frame for it; and a linear baseline with no spatial term
+        // leaves the joint outer problem with zero auxiliary and zero kappa
+        // axes, which today takes a driver fast path that returns no outer
+        // certificate and makes the survival marginal-slope entry refuse. That
+        // refusal reproduces identically with `logslope_time_k` unset, so it is
+        // a pre-existing property of that model shape and not of the follow-up
+        // margin.
+        baseline_target: "weibull".to_string(),
         ..FitConfig::default()
     };
 
