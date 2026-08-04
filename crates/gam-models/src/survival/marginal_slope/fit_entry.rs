@@ -1687,7 +1687,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     };
     if let Some(calibration) = latent_calibration.primary_conditional() {
         let conditioning = latent_calibration.conditioning.as_ref().ok_or_else(|| {
-            "survival marginal-slope conditional latent calibration without its conditioning              block"
+            "survival marginal-slope conditional latent calibration without its conditioning \
+             block"
                 .to_string()
         })?;
         let correction_family = make_family(
