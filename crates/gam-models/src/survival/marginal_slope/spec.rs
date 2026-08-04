@@ -163,6 +163,54 @@ pub struct SurvivalMarginalSlopeFitResult {
     pub influence_absorber_design: Option<Array2<f64>>,
 }
 
+impl SurvivalMarginalSlopeFitResult {
+    /// Split [`Self::latent_z_calibrations`] into the single-surface pair the
+    /// on-disk model contract carries (`latent_z_rank_int_calibration`,
+    /// `latent_z_conditional_calibration`).
+    ///
+    /// The two are mutually exclusive per score column by construction: the gate
+    /// escalates to the conditional location-scale correction *instead of*
+    /// rank-INT, never alongside it.
+    ///
+    /// `K > 1` is a refusal, not a truncation. The saved payload carries one
+    /// `z_column`, one logslope term collection and one calibration, so a
+    /// multi-surface fit whose second-or-later score was calibrated cannot be
+    /// represented: prediction would rebuild that column's latent axis WITHOUT
+    /// the map the fit applied to it and evaluate a different model. Dropping it
+    /// silently is the failure mode this whole issue is about, so it is named at
+    /// the point of loss.
+    pub fn persisted_latent_z_calibrations(
+        &self,
+    ) -> Result<
+        (
+            Option<crate::bms::LatentZRankIntCalibration>,
+            Option<crate::bms::LatentZConditionalCalibration>,
+        ),
+        String,
+    > {
+        use crate::bms::LatentMeasureCalibration;
+        for (column, calibration) in self.latent_z_calibrations.iter().enumerate().skip(1) {
+            if !matches!(calibration, LatentMeasureCalibration::None) {
+                return Err(format!(
+                    "survival marginal-slope latent-score column {column} carries an automatic \
+                     latent calibration, but the saved-model contract holds exactly one score \
+                     surface: persisting this fit would give prediction an uncalibrated axis for \
+                     that column and a different model from the one that was fitted. Fit the \
+                     multi-surface model without the automatic gate \
+                     (LatentMeasureSpec::StandardNormal) if it must be saved"
+                ));
+            }
+        }
+        Ok(match self.latent_z_calibrations.first() {
+            None | Some(LatentMeasureCalibration::None) => (None, None),
+            Some(LatentMeasureCalibration::RankInverseNormal(cal)) => (Some(cal.clone()), None),
+            Some(LatentMeasureCalibration::ConditionalLocationScale(cal)) => {
+                (None, Some(cal.clone()))
+            }
+        })
+    }
+}
+
 pub(crate) fn validate_spec(spec: &SurvivalMarginalSlopeTermSpec) -> Result<(), String> {
     let n = spec.age_entry.len();
     log::info!(

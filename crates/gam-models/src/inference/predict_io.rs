@@ -41,6 +41,33 @@ pub struct PredictInput {
     pub auxiliary_matrix: Option<Array2<f64>>,
 }
 
+/// Where the conditional latent calibration's conditioning span `a(C)` lives
+/// inside a [`PredictInput`] for a given host family (gam#2768).
+///
+/// The fit regressed z on the *marginal-index* design and prediction must
+/// reproduce that exact span — a different set of columns is a different map, and
+/// silently applying it would evaluate a different model from the one that was
+/// fitted. The two marginal-slope hosts package that span differently:
+///
+/// * the Bernoulli predictor's primary design **is** the marginal design;
+/// * the survival predictor's primary design is the q-design
+///   `[time | timewiggle | marginal]`, because q is a function of time as well as
+///   of the covariates. Its marginal-index span is therefore the trailing block,
+///   not the whole design.
+///
+/// Naming that difference here is what lets one predictor serve both without
+/// either guessing. The width is cross-checked against the calibration's own
+/// `basis_ncols` on every application, so a host that names the wrong block is
+/// refused rather than silently mis-conditioned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LatentConditioningSpan {
+    /// The whole primary design is the conditioning span.
+    PrimaryDesign,
+    /// The conditioning span is the trailing `ncols` columns of the primary
+    /// design.
+    PrimaryDesignTail { ncols: usize },
+}
+
 pub struct BernoulliMarginalSlopePredictor {
     pub beta_marginal: Array1<f64>,
     pub beta_logslope: Array1<f64>,
@@ -58,6 +85,10 @@ pub struct BernoulliMarginalSlopePredictor {
     pub gaussian_frailty_sd: Option<f64>,
     pub latent_z_calibration: Option<LatentZRankIntCalibration>,
     pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
+    /// Which block of [`PredictInput::design`] carries the conditioning span the
+    /// conditional calibration was fit against. Ignored when
+    /// `latent_z_conditional_calibration` is `None`.
+    pub latent_conditioning_span: LatentConditioningSpan,
 }
 
 /// Saved marginal-slope affine row coordinates after replaying every fitted
@@ -549,8 +580,22 @@ impl BernoulliMarginalSlopePredictor {
         let Some(cal) = self.latent_z_conditional_calibration.as_ref() else {
             return Ok(z.clone());
         };
-        let a_block = input.design.to_dense();
-        cal.apply(z.view(), a_block.view())
+        let design = input.design.to_dense();
+        let a_block = match self.latent_conditioning_span {
+            LatentConditioningSpan::PrimaryDesign => design.view(),
+            LatentConditioningSpan::PrimaryDesignTail { ncols } => {
+                let width = design.ncols();
+                if ncols > width {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "conditional latent calibration names the trailing {ncols} columns of the \
+                         primary design as its conditioning span, but that design has only \
+                         {width} columns"
+                    )));
+                }
+                design.slice(ndarray::s![.., width - ncols..])
+            }
+        };
+        cal.apply(z.view(), a_block)
             .map_err(EstimationError::InvalidInput)
     }
 
@@ -1121,6 +1166,7 @@ impl BernoulliMarginalSlopePredictor {
         link_deviation_runtime: Option<SavedCompiledFlexBlock>,
         latent_z_calibration: Option<crate::bms::LatentZRankIntCalibration>,
         latent_z_conditional_calibration: Option<crate::bms::LatentZConditionalCalibration>,
+        latent_conditioning_span: LatentConditioningSpan,
     ) -> Result<Self, String> {
         let gaussian_frailty_sd = match frailty {
             FrailtySpec::None => None,
@@ -1223,6 +1269,7 @@ impl BernoulliMarginalSlopePredictor {
             gaussian_frailty_sd,
             latent_z_calibration,
             latent_z_conditional_calibration,
+            latent_conditioning_span,
         })
     }
 

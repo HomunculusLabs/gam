@@ -1088,6 +1088,8 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 None => None,
             };
             let saved_offset_baseline = fit.baseline_config.clone();
+            let (persisted_rank_int, persisted_conditional) =
+                fit.persisted_latent_z_calibrations()?;
             let payload = assemble_survival_marginal_slope_payload(
                 SurvivalMarginalSlopeInputs {
                     formula,
@@ -1111,6 +1113,8 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                         mean: fit.z_normalization.mean,
                         sd: fit.z_normalization.sd,
                     },
+                    latent_z_rank_int_calibration: persisted_rank_int,
+                    latent_z_conditional_calibration: persisted_conditional,
                     baseline_logslope: fit.baseline_slope,
                     timewiggle: baseline_timewiggle,
                     score_warp_runtime: fit.score_warp_runtime.as_ref(),

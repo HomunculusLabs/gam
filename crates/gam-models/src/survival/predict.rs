@@ -18,7 +18,9 @@ use crate::inference::model::{
     survival_baseline_config_from_model,
 };
 use gam_data::EncodedDataset;
-use crate::inference::predict_io::{BernoulliMarginalSlopePredictor, PredictInput};
+use crate::inference::predict_io::{
+    BernoulliMarginalSlopePredictor, LatentConditioningSpan, PredictInput,
+};
 use crate::model_types::{BlockRole, FittedBlock, FittedLinkState, UnifiedFitResult};
 use crate::probability::signed_probit_logcdf_and_mills_ratio;
 use crate::survival::construction::{
@@ -4778,9 +4780,17 @@ pub fn build_saved_survival_marginal_slope_predictor(
         saved_score_runtime,
         saved_link_runtime,
         model.latent_z_rank_int_calibration.clone(),
-        // Survival marginal-slope never engages the BMS-only conditional Auto
-        // gate (#905); the field is always `None` for survival fits.
         model.latent_z_conditional_calibration.clone(),
+        // gam#2768: the survival marginal-slope now runs the same automatic
+        // conditional gate BMS does, so this field is no longer always `None` —
+        // and the survival predictor's primary design is the q-design
+        // `[time | timewiggle | marginal]`, NOT the marginal design. The span the
+        // fit conditioned on is its trailing covariate block; naming anything
+        // else here would rebuild `a(C)` from time columns and apply a different
+        // map from the one the fit applied.
+        LatentConditioningSpan::PrimaryDesignTail {
+            ncols: cov_design.ncols(),
+        },
     )?;
 
     let pred_input = PredictInput {

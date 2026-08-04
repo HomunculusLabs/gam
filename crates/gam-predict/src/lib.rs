@@ -12,7 +12,7 @@ pub use affine_design::*;
 pub use alo::*;
 pub use conformal::*;
 pub use gam_models::inference::predict_io::{
-    BernoulliMarginalSlopePredictor, PredictInput, PredictResult,
+    BernoulliMarginalSlopePredictor, LatentConditioningSpan, PredictInput, PredictResult,
 };
 pub use gam_problem::dispersion_cov::se_from_covariance;
 pub use generative::*;
@@ -1136,6 +1136,8 @@ impl FittedModelPredictExt for FittedModel {
             runtime.link_deviation,
             runtime.latent_z_rank_int_calibration,
             runtime.latent_z_conditional_calibration,
+            // The Bernoulli predictor's primary design IS the marginal design.
+            LatentConditioningSpan::PrimaryDesign,
         )
     }
 

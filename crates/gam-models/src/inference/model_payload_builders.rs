@@ -1101,6 +1101,12 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     pub logslope_formula: String,
     pub z_column: String,
     pub latent_z_normalization: SavedLatentZNormalization,
+    /// The automatic latent-measure gate's decision for the persisted score
+    /// surface (gam#2768), split by
+    /// [`SurvivalMarginalSlopeFitResult::persisted_latent_z_calibrations`].
+    /// Mutually exclusive; both `None` when the gate did not fire.
+    pub latent_z_rank_int_calibration: Option<LatentZRankIntCalibration>,
+    pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
     pub baseline_logslope: f64,
     /// Frozen nonlinear time-wiggle authority, including the raw fitted tail.
     pub timewiggle: Option<SurvivalTimewiggle>,
@@ -1188,7 +1194,16 @@ pub fn assemble_survival_marginal_slope_payload(
     payload.z_column = Some(inputs.z_column.clone());
     payload.z_columns = Some(vec![inputs.z_column]);
     payload.latent_z_normalization = Some(inputs.latent_z_normalization);
+    // Not an assumption: the survival marginal-slope row program is the
+    // closed-form standard-normal probit lowering and owns no empirical-grid
+    // branch, so its latent-measure gate is asked for
+    // `EmpiricalLatentMeasureSupport::StandardNormalOnly` and the invariant is
+    // enforced at the gate's call site in
+    // `survival/marginal_slope/latent_measure.rs`. What the gate CAN vary is the
+    // pre-transform applied to z before that kernel, and that is the pair below.
     payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
+    payload.latent_z_rank_int_calibration = inputs.latent_z_rank_int_calibration;
+    payload.latent_z_conditional_calibration = inputs.latent_z_conditional_calibration;
     payload.logslope_baseline = Some(inputs.baseline_logslope);
     payload.logslope_baselines = Some(vec![inputs.baseline_logslope]);
     if let Some(timewiggle) = inputs.timewiggle {
@@ -2115,6 +2130,8 @@ fn payload_for_survival_marginal_slope(
     };
     let saved_offset_baseline =
         survival_marginal_slope_offset_baseline_config(&age_exit, &baseline_cfg);
+    let (persisted_rank_int, persisted_conditional) =
+        ms_result.persisted_latent_z_calibrations()?;
 
     // Thin adapter over the shared core assembler. The FFI's source-specific
     // work is re-deriving the survival response columns, baseline config, and
@@ -2143,6 +2160,8 @@ fn payload_for_survival_marginal_slope(
                 mean: ms_result.z_normalization.mean,
                 sd: ms_result.z_normalization.sd,
             },
+            latent_z_rank_int_calibration: persisted_rank_int,
+            latent_z_conditional_calibration: persisted_conditional,
             baseline_logslope: ms_result.baseline_slope,
             timewiggle,
             score_warp_runtime: ms_result.score_warp_runtime.as_ref(),
