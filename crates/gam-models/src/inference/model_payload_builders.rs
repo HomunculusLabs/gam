@@ -1994,6 +1994,27 @@ fn payload_for_survival_marginal_slope(
     };
     use ndarray::s;
 
+    // gam#2765 / gam#2767: a follow-up-varying slope fits a real model, and the
+    // point estimates are on a well-defined axis — but it cannot be SAVED yet.
+    // `logslope_design` is the tensor product `X_cov ⊗ᵣ B(log t)` while
+    // `logslopespec_resolved` still names only the covariate factor, so a loaded
+    // model would rebuild `p_cov` design columns against a `p_cov·p_time`
+    // coefficient vector and evaluate a different model. Refusing at persistence
+    // rather than at the fit is the same call this family already makes for a
+    // non-reproducible latent conditioning span (see
+    // `SurvivalMarginalSlopeFitResult::latent_conditioning_reproducible`): what
+    // is impossible is the REPLAY, not the estimate.
+    if ms_result.logslope_time_basis.is_some() {
+        return Err(
+            "a survival marginal-slope fit with logslope_time_k cannot be saved yet: the \
+             log-slope block's design is the covariate design tensored against its follow-up \
+             time margin, and the on-disk contract rebuilds that block from the covariate \
+             term spec alone, which would evaluate a different model at predict. The fit \
+             itself is valid — read the coefficients and the slope surface from the fit \
+             result."
+                .to_string(),
+        );
+    }
     let frozen_marginal = freeze_term_collection_from_design(
         &ms_result.marginalspec_resolved,
         &ms_result.marginal_design,
