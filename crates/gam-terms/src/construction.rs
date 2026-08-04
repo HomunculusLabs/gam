@@ -1286,11 +1286,34 @@ impl CanonicalPenalty {
 /// the Frobenius inner product. Pairs with different `col_range` cannot be
 /// functionally identical and are skipped.
 ///
+/// # ⚠ This detector is a SCREEN, not the authority (#2676)
+///
+/// It sees proportional PAIRS. The criterion's actual invariance is the null
+/// space of the penalty map's Gram, `{w : sum_i w_i S_i = 0}`, which contains
+/// every linear redundancy — including three-term ones no pairwise cosine can
+/// find. `gam_solve::penalty_invariance::PenaltyMapInvariance` computes that
+/// subspace and is what the curvature certificate and the smoothing correction
+/// consult. Use this function for the human-facing warning; do not use it to
+/// decide anything numeric.
+///
+/// # ⚠ And it is NOT a saddle
+///
+/// This warning used to say the redundancy makes the LAML cost carry "a
+/// Z₂-symmetric saddle". It does not. The criterion is EXACTLY CONSTANT along
+/// the redundancy in `lambda` — it is a flat direction, not a descending one —
+/// and every apparent negative curvature there is the chain-rule term of
+/// `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, whose sign is
+/// the sign of a rounding residual (measured at `|sigma|/floor = 0.99925` on
+/// `geo_disease_matern`). An optimizer converging there has not converged to a
+/// saddle; it has converged to a point on a manifold of points that all give
+/// the SAME fit, because they all give the same assembled penalty. That is a
+/// non-identifiability of `lambda`, worth reporting, and not a defect in the
+/// answer.
+///
 /// Logging policy:
 /// - `cos > 1 - 1e-8` → `log::warn!` with `[PENALTY-REDUNDANCY]`. Every such
-///   pair is emitted because it represents a structural model error (the LAML
-///   cost has a Z₂-symmetric saddle that ARC's cubic regularization will
-///   happily converge to under first-order stationarity).
+///   pair is emitted because the smoothing parameters are then not separately
+///   identified: only their combination `lambda_i + c*lambda_j` is.
 /// - `0.99 < cos ≤ 1 - 1e-8` → `log::info!` with `[PENALTY-SIMILARITY]`.
 ///   At large scale (`k > 64`) only the top-3 highest-cosine such pairs are
 ///   logged to bound log volume.
@@ -1359,10 +1382,13 @@ pub fn report_penalty_pair_redundancy(canonical: &[CanonicalPenalty]) -> Vec<(us
     for &(i, j, cos) in &redundant {
         log::warn!(
             "[PENALTY-REDUNDANCY] penalties i={i} j={j} are structurally identical \
-             (cos={cos:.6}) — model is over-parameterized along their antisymmetric \
-             direction; expect a Z₂-symmetric saddle in the LAML cost. Consider \
-             re-specifying (e.g. anisotropic→isotropic for spatial smoothers with \
-             weak axis signal)."
+             (cos={cos:.6}) — only their COMBINATION is identified, so the criterion is \
+             exactly constant along their antisymmetric direction and lambda_{i} / lambda_{j} \
+             are not separately estimable. The fit itself is unaffected (every point of that \
+             manifold assembles the same penalty), and the curvature certificate deflates the \
+             direction rather than judging a chain-rule term there (#2676). Consider \
+             re-specifying (e.g. anisotropic→isotropic for spatial smoothers with weak axis \
+             signal) if you need the individual smoothing parameters to mean something."
         );
     }
 

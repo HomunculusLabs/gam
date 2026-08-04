@@ -253,9 +253,14 @@ pub(crate) struct RhoSensitivitySpectrum {
     /// `Qs · J` — the coefficient sensitivities `∂β̂/∂ρ` in the ORIGINAL
     /// coefficient basis, `p_orig × n_rho`.
     pub sensitivity_orig: Array2<f64>,
-    /// Eigenvalues of the ρ-space LAML Hessian, in eigensolver order.
+    /// The certified ρ-spectrum MODULO the penalty map's exact invariance
+    /// (#2676): the deflated directions first, each carrying its measured
+    /// Rayleigh quotient `t' H t` (which is `Σ_k g_k t_k²` by the chain rule,
+    /// not a curvature), then the judged complement's eigenvalues in
+    /// eigensolver order. With no invariance declared this is exactly the
+    /// ρ-Hessian's own spectrum, in eigensolver order, as it always was.
     pub eigenvalues: Array1<f64>,
-    /// Matching eigenvectors, `n_rho × n_rho`.
+    /// Matching directions, `n_rho × n_rho`.
     pub eigenvectors: Array2<f64>,
     /// Per-direction verdict from [`invert_identified_rho_hessian`].
     pub classifications: Vec<EigenClassification>,
@@ -918,6 +923,21 @@ fn dump_indefinite_rho_hessian_diagnostic(
     };
 
     log::warn!("[INDEF-HESS] rho={:?}", final_rho.as_slice().unwrap_or(&[]),);
+    if let Some(inv) = inverted {
+        let deflated = inv
+            .classifications
+            .iter()
+            .take_while(|class| matches!(class, EigenClassification::StructuralZero))
+            .count();
+        if deflated > 0 {
+            log::warn!(
+                "[INDEF-HESS] the leading {deflated} direction(s) below may be the penalty map's \
+                 certified invariance, DEFLATED before any test (#2676): for those, the reported \
+                 value is the Rayleigh quotient `t' H t = sum_k g_k t_k^2` -- a chain-rule term, \
+                 not a curvature measurement"
+            );
+        }
+    }
     log::warn!(
         "[INDEF-HESS] eigenvalues={:?}",
         eigenvalues_ref.as_slice().unwrap_or(&[]),

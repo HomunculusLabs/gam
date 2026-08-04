@@ -1,5 +1,59 @@
 ## Unreleased
 
+- **A curvature certificate no longer decides on a direction along which the
+  criterion is exactly constant (#2676).** Three `geo_disease_*_matern`
+  scenarios refused with `INDEFINITE CURVATURE AT INTERIOR OPTIMUM`
+  (`interior lambda_min = -5.048e-6`) or with a smoothing-correction
+  contradiction decided by a **0.55% margin**. Neither refusal was a
+  measurement of the fit.
+
+  **What was wrong.** `rho = log lambda` is a nonlinear reparameterisation, so
+  for any smooth criterion `H_rho = diag(l) H_lambda diag(l) + diag(g_rho)`
+  holds exactly — the second term is pure chain rule and carries no curvature.
+  Every criterion here sees `lambda` only through the assembled penalty
+  `sum_i lambda_i (b - mu_i)' S_i (b - mu_i)`, so a `w` with `sum_i w_i S_i = 0`
+  makes the criterion EXACTLY constant along `lambda + s w`. Lift it to rho by
+  `t = diag(lambda)^-1 w` and
+
+      t' H_rho t = sum_k (g_rho)_k t_k^2      exactly, at every point,
+
+  which is bounded by `sum_k |(g_rho)_k| t_k^2` — *verbatim* the per-direction
+  floor both gates compare against, with equality when the gradient shares a
+  sign on the support. The direction did not sit near the decision boundary of
+  those gates; it sat **on it, by identity**, and which side it landed on was
+  the sign of the disagreement between the gradient code and the Hessian code.
+  Measured on `geo_disease_matern`: `sigma = 2.0930992e-5`,
+  `sum_k g_k v_k^2 = 2.0946774e-5`, intrinsic `-1.578e-8` — the identity holding
+  to `7.5e-4`, on a minimum eigenvector equal to the antisymmetric direction of
+  a penalty pair with `cos = 1.000000`.
+
+  **The fix, and what it is not.** Not a wider floor: the comparison was
+  degenerate, not under-resolved. `gam_solve::penalty_invariance` computes the
+  invariance from the penalty map alone — the null space of the Gram of the
+  augmented operators, so a nonzero prior mean that BREAKS a proportionality is
+  seen rather than assumed away — lifts it to rho, and returns the orthogonal
+  complement. The outer certificate (`run.rs`) and the smoothing correction
+  (`invert_identified_rho_hessian`) both deflate that subspace and apply the
+  existing rule, unchanged, to what is left. No tolerance is chosen: the rank
+  boundary is the eigensolver's own Weyl backward error, the instrument already
+  used for this Gram.
+
+  **What this does not change.** An objective declaring no invariance — every
+  objective except the two REML arms and the spatial joint arm, and those only
+  on a redundant penalty map — reaches a bit-identical verdict; the deflated
+  path is not taken. A genuine saddle is untouched: #2665's
+  `lambda_min = -1.6e3` is not in the deflated subspace and still refuses.
+
+  **Related corrections.** The saddle-escape search now looks in the same
+  subspace the certificate judged, so it can no longer step along the invariance
+  — where the only "negative curvature" available is the residual gradient
+  wearing a curvature's clothes — instead of along the genuine saddle that
+  refused. `interior_min_eigenvalue` is now reported from the block the verdict
+  was reached on. And the `[PENALTY-REDUNDANCY]` warning no longer says a
+  redundant penalty map produces "a Z2-symmetric saddle": the criterion is flat
+  there, not descending, and the fit is unaffected — what is lost is only the
+  separate identifiability of the individual smoothing parameters.
+
 - **The survival marginal-slope's effect can vary along the follow-up axis
   (#2765, #2767).** `logslope_time_k` / `--logslope-time-k` make `b` a fitted
   surface in `(x, t)` instead of a per-row constant, so a latent score whose
