@@ -207,8 +207,29 @@ impl SurvivalMarginalSlopeFitResult {
         ),
         String,
     > {
+        split_persisted_latent_calibrations(
+            &self.latent_z_calibrations,
+            self.latent_conditioning_reproducible,
+        )
+    }
+}
+
+/// The persistence decision itself, over exactly what it reads. Split out from
+/// the fit result so both refusals are exercisable without standing up a whole
+/// fit.
+pub(crate) fn split_persisted_latent_calibrations(
+    calibrations: &[crate::bms::LatentMeasureCalibration],
+    conditioning_reproducible: bool,
+) -> Result<
+    (
+        Option<crate::bms::LatentZRankIntCalibration>,
+        Option<crate::bms::LatentZConditionalCalibration>,
+    ),
+    String,
+> {
+    {
         use crate::bms::LatentMeasureCalibration;
-        for (column, calibration) in self.latent_z_calibrations.iter().enumerate().skip(1) {
+        for (column, calibration) in calibrations.iter().enumerate().skip(1) {
             if !matches!(calibration, LatentMeasureCalibration::None) {
                 return Err(format!(
                     "survival marginal-slope latent-score column {column} carries an automatic \
@@ -220,13 +241,19 @@ impl SurvivalMarginalSlopeFitResult {
                 ));
             }
         }
-        Ok(match self.latent_z_calibrations.first() {
+        Ok(match calibrations.first() {
             None | Some(LatentMeasureCalibration::None) => (None, None),
             Some(LatentMeasureCalibration::RankInverseNormal(cal)) => (Some(cal.clone()), None),
             Some(LatentMeasureCalibration::ConditionalLocationScale(cal)) => {
-                if !self.latent_conditioning_reproducible {
+                if !conditioning_reproducible {
                     return Err(
-                        "survival marginal-slope conditional latent calibration was fit against                          the marginal design frozen before the spatial length-scale search, and                          that search then moved the design: prediction rebuilds a(C) from the                          RESOLVED marginal spec, so a saved model would apply a different latent                          map than the one its coefficients were fitted under. Pin the marginal                          formula's spatial length_scale=, or supply an already                          conditionally-standardised score, if this model must be saved"
+                        "survival marginal-slope conditional latent calibration was fit against \
+                         the marginal design frozen before the spatial length-scale search, and \
+                         that search then moved the design: prediction rebuilds a(C) from the \
+                         RESOLVED marginal spec, so a saved model would apply a different latent \
+                         map than the one its coefficients were fitted under. Pin the marginal \
+                         formula's spatial length_scale=, or supply an already \
+                         conditionally-standardised score, if this model must be saved"
                             .to_string(),
                     );
                 }

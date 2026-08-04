@@ -472,3 +472,91 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::super::spec::split_persisted_latent_calibrations;
+    use crate::bms::{
+        LatentMeasureCalibration, LatentZConditionalCalibration, LatentZRankIntCalibration,
+    };
+    use ndarray::Array2;
+
+    fn conditional() -> LatentMeasureCalibration {
+        LatentMeasureCalibration::ConditionalLocationScale(LatentZConditionalCalibration {
+            mean_coeffs: vec![0.0, 0.5],
+            var_coeffs: Vec::new(),
+            basis_ncols: 1,
+            var_floor: 1e-8,
+            homoskedastic_var: 0.75,
+            post_mean: 0.0,
+            post_sd: 1.0,
+            theta1_cov: Array2::<f64>::zeros((2, 2)),
+        })
+    }
+
+    fn rank_int() -> LatentMeasureCalibration {
+        LatentMeasureCalibration::RankInverseNormal(LatentZRankIntCalibration {
+            sorted_z: vec![-1.0, 0.0, 1.0],
+            weighted_cdf: vec![0.25, 0.5, 0.75],
+            post_mean: 0.0,
+            post_sd: 1.0,
+        })
+    }
+
+    #[test]
+    fn an_unfired_gate_persists_nothing() {
+        let (rank, cond) =
+            split_persisted_latent_calibrations(&[LatentMeasureCalibration::None], true)
+                .expect("no calibration is always persistable");
+        assert!(rank.is_none() && cond.is_none());
+    }
+
+    #[test]
+    fn the_two_branches_persist_into_their_own_field() {
+        let (rank, cond) =
+            split_persisted_latent_calibrations(&[rank_int()], true).expect("rank-INT persists");
+        assert!(rank.is_some() && cond.is_none());
+        let (rank, cond) = split_persisted_latent_calibrations(&[conditional()], true)
+            .expect("conditional persists");
+        assert!(rank.is_none() && cond.is_some());
+    }
+
+    /// A conditioning span the resolved marginal spec would NOT rebuild is a
+    /// refusal, not a warning: the saved model would apply a different latent map
+    /// than its coefficients were fitted under, and nothing downstream could tell.
+    #[test]
+    fn an_unreproducible_conditioning_span_refuses_to_persist() {
+        let error = split_persisted_latent_calibrations(&[conditional()], false)
+            .expect_err("an unreproducible span must refuse");
+        assert!(
+            error.contains("RESOLVED marginal spec"),
+            "the refusal must name what prediction would rebuild instead; got {error}"
+        );
+        // A rank-INT calibration does not condition on anything, so the same
+        // state must NOT refuse it.
+        split_persisted_latent_calibrations(&[rank_int()], false)
+            .expect("rank-INT conditions on nothing and is unaffected by the span");
+    }
+
+    /// The saved contract holds one score surface. A K>1 fit whose SECOND score
+    /// was calibrated cannot be represented, and the loss is named at the point
+    /// of loss rather than truncated.
+    #[test]
+    fn a_calibrated_secondary_score_refuses_to_persist() {
+        let error = split_persisted_latent_calibrations(
+            &[LatentMeasureCalibration::None, conditional()],
+            true,
+        )
+        .expect_err("a calibrated second score must refuse");
+        assert!(
+            error.contains("column 1"),
+            "the refusal must name the column that cannot be carried; got {error}"
+        );
+        // An uncalibrated second score carries nothing to lose.
+        split_persisted_latent_calibrations(
+            &[conditional(), LatentMeasureCalibration::None],
+            true,
+        )
+        .expect("only the persisted surface was calibrated");
+    }
+}
