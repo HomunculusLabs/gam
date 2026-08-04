@@ -2830,7 +2830,7 @@ fn murphy_topel_test_calibration() -> LatentZConditionalCalibration {
         var_coeffs: vec![1.2, 0.3],  // v(C) = max(1.2 + 0.3·a, floor)
         basis_ncols: 1,
         var_floor: 0.05,
-        global_var: 1.0,
+        homoskedastic_var: 1.0,
         post_mean: 0.0,
         post_sd: 1.0,
         // Diagonal first-stage covariances; PSD, distinct scales per block.
@@ -3165,7 +3165,7 @@ fn murphy_topel_test_calibration_basis2() -> LatentZConditionalCalibration {
         var_coeffs: vec![1.1, 0.2],
         basis_ncols: 1,
         var_floor: 0.05,
-        global_var: 1.0,
+        homoskedastic_var: 1.0,
         post_mean: 0.0,
         post_sd: 1.0,
         theta1_cov: ndarray::array![

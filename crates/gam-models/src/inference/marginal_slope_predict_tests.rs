@@ -15,7 +15,9 @@
 
 use crate::bms::{EmpiricalZGrid, LatentMeasureKind, empirical_intercept_from_marginal};
 use crate::inference::model::{SavedCompiledFlexBlock, SavedLatentZNormalization};
-use crate::inference::predict_io::{BernoulliMarginalSlopePredictor, PredictInput};
+use crate::inference::predict_io::{
+    BernoulliMarginalSlopePredictor, LatentConditioningSpan, PredictInput,
+};
 use crate::probability::normal_cdf;
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::types::InverseLink;
@@ -86,6 +88,7 @@ fn bernoulli_marginal_slope_predictor_rejects_structurally_invalid_or_unknown_ru
         link_deviation_runtime: None,
         gaussian_frailty_sd: None,
         latent_z_calibration: None,
+        latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
         latent_z_conditional_calibration: None,
     };
     let err = score_only
@@ -263,6 +266,7 @@ fn bernoulli_marginal_slope_rigid_gaussian_frailty_uses_scaled_closed_form() {
         link_deviation_runtime: None,
         gaussian_frailty_sd: Some(0.8),
         latent_z_calibration: None,
+        latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
         latent_z_conditional_calibration: None,
     };
     let theta = predictor.theta();
@@ -333,6 +337,7 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
         link_deviation_runtime: None,
         gaussian_frailty_sd: None,
         latent_z_calibration: None,
+        latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
         latent_z_conditional_calibration: None,
     };
     let input = PredictInput {
@@ -386,6 +391,7 @@ fn bernoulli_marginal_slope_predictor_rejects_nonprobit_base_link_scale() {
         link_deviation_runtime: None,
         gaussian_frailty_sd: Some(0.8),
         latent_z_calibration: None,
+        latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
         latent_z_conditional_calibration: None,
     };
     let theta = predictor.theta();

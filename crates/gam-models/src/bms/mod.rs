@@ -960,18 +960,47 @@ pub struct LatentZConditionalCalibration {
     /// Coefficients for the conditional variance
     /// `v(C) = max(β_v·[1 | a(C)], var_floor)`. Length `1 + basis_ncols`, or
     /// empty when the conditional-variance block of the Rao gate was not
-    /// significant (mean-only correction); then `v(C) ≡ global_var`.
+    /// significant (mean-only correction); then `v(C) ≡ homoskedastic_var`.
     pub var_coeffs: Vec<f64>,
     /// Number of marginal-design columns in the basis (excludes the leading
     /// intercept). The predict-time marginal design must present exactly this
     /// many columns.
     pub basis_ncols: usize,
     /// Floor on the fitted conditional variance, in the (normalized)
-    /// latent-score scale (= `AUTO_Z_CONDITIONAL_VAR_FLOOR_FRAC · global_var`).
+    /// latent-score scale (= `AUTO_Z_CONDITIONAL_VAR_FLOOR_FRAC ·` the global
+    /// weighted variance of the training score).
     pub var_floor: f64,
-    /// Global weighted variance of the (normalized) training latent score. Used
-    /// as `v(C)` when `var_coeffs` is empty.
-    pub global_var: f64,
+    /// The homoskedastic conditional variance `v(C) ≡ Var(z | C)`, used when the
+    /// Breusch-Pagan stage did not fire and `v` is therefore constant in `C`.
+    ///
+    /// This is the *residual* variance of the conditional-mean regression,
+    /// `Σ w (z − m̂(C))² / Σ w`, and NOT the global (marginal) variance of z —
+    /// which is what it used to hold, and what its old on-disk name still says
+    /// (gam#2768).
+    ///
+    /// The distinction is the whole correction. `ζ = (z − m(C))/√v` is supposed
+    /// to be conditionally standard normal, because the marginal-slope identity
+    /// that makes `q` the MARGINAL index,
+    /// `E_ζ[Φ(q√(1+b²) + bζ)] = Φ(q)`, holds only at `Var(ζ|C) = 1`; at
+    /// `Var(ζ|C) = v` it becomes `Φ(q√(1+b²)/√(1+b²v))`, a multiplicative
+    /// distortion of every marginal coefficient. Dividing by the marginal
+    /// variance guaranteed `v ≠ 1`: with z standardised,
+    /// `1 = Var(m(C)) + E[Var(z|C)]`, so the residual variance is `1 − R²` and
+    /// is strictly below the marginal variance *whenever the gate fires at all*.
+    /// The bug was therefore not a corner case — it was on every fired gate, and
+    /// it grew with exactly the conditional structure the correction exists to
+    /// remove. At `R² = 0.25` it left `sd(ζ) = 0.87` against the `post_sd ≈ 1`
+    /// this struct documents, distorted the marginal coefficients by ~4%, and
+    /// (worse) made the calibrated residual fail the standard-normal adequacy
+    /// re-check on the SD clause alone at any appreciable n — sending BMS to the
+    /// empirical measure and, per gam#2718, withholding the covariance.
+    ///
+    /// Kept under the on-disk name `global_var` so a model saved before the fix
+    /// still deserializes AND still applies the map it was fitted with: the
+    /// stored number is whatever that fit divided by, and predict must reproduce
+    /// the fit, not the current formula.
+    #[serde(rename = "global_var")]
+    pub homoskedastic_var: f64,
     /// Weighted mean of the calibrated training sample (sanity-check, ≈ 0).
     pub post_mean: f64,
     /// Weighted SD of the calibrated training sample (sanity-check, ≈ 1).
@@ -1021,7 +1050,7 @@ impl LatentZConditionalCalibration {
 
     pub(crate) fn conditional_var(&self, a_row: ArrayView1<'_, f64>) -> f64 {
         if self.var_coeffs.is_empty() {
-            self.global_var.max(self.var_floor)
+            self.homoskedastic_var.max(self.var_floor)
         } else {
             Self::affine(&self.var_coeffs, a_row).max(self.var_floor)
         }
@@ -1841,12 +1870,34 @@ pub(crate) fn fit_conditional_latent_calibration_if_needed(
         )?,
         None => mean_cov,
     };
+    // gam#2768: the homoskedastic branch's `v(C)` is the RESIDUAL variance of
+    // the conditional-mean regression, not the marginal variance of z. See the
+    // field doc for why the difference is the correction rather than a detail:
+    // with z standardised, `1 = Var(m(C)) + E[Var(z|C)]`, so the marginal
+    // variance overstates `Var(z|C)` by exactly the structure the gate just
+    // detected, and dividing by it leaves `ζ` at `sd = √(1−R²)`.
+    //
+    // Its own estimation uncertainty is not propagated into `theta1_cov`, for
+    // the same reason the marginal variance's never was: the second-stage
+    // Murphy-Topel correction treats a CONSTANT scale as known, and a plug-in
+    // variance's contribution is one order down in `n` from the mean
+    // coefficients' (`θ₁` carries the mean block, whose sensitivity
+    // `∂ζ/∂m = −1/√v` is O(1)). When the Breusch-Pagan stage fires, `v(C)` is a
+    // fitted function of the basis and IS carried in `θ₁`.
+    let homoskedastic_var = {
+        let residual_sum = mean_residuals
+            .iter()
+            .zip(weights.iter())
+            .map(|(&e, &w)| w * e * e)
+            .sum::<f64>();
+        (residual_sum / total_weight).max(var_floor)
+    };
     let mut calibration = LatentZConditionalCalibration {
         mean_coeffs,
         var_coeffs,
         basis_ncols: p,
         var_floor,
-        global_var,
+        homoskedastic_var,
         post_mean: 0.0,
         post_sd: 1.0,
         theta1_cov,
@@ -2857,6 +2908,11 @@ mod flex_verify_932_tests;
 // timing is eprintln-only per the SPEC ban on wall-clock correctness budgets.
 #[cfg(test)]
 mod flex_measure_932_tests;
+// gam#2768 unit gates on the shared latent-measure decision and the conditional
+// location-scale calibration it escalates to. Bare `#[cfg(test)] mod` with the
+// allowed `*_tests` name so the build.rs ban-scanner exempts it.
+#[cfg(test)]
+mod latent_measure_2768_tests;
 pub(crate) mod row_primary_hessian;
 
 pub use block_specs::fit_bernoulli_marginal_slope_terms;
