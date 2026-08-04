@@ -2205,6 +2205,24 @@ pub enum CovarianceDeclined {
         /// `LatentMeasureKind`: `global-empirical` or `local-empirical`.
         latent_measure: String,
     },
+    /// Survival marginal-slope, conditional latent-z calibration active, and a
+    /// fit shape whose per-row `d(score_beta,i)/d(zeta_i)` channel the family
+    /// cannot supply (gam#2768).
+    ///
+    /// Same contract as the variant above and for the same reason: the naive
+    /// covariance treats the generated regressor `zeta` as known, so it omits
+    /// the first-stage uncertainty and is too narrow. The two shapes that reach
+    /// this are a score-warp / link-deviation block (the latent score enters the
+    /// row a second time through a basis evaluated at it, so the rigid mixed
+    /// derivative is not the row's) and `K > 1` (the shared-slope kernel sees
+    /// only `z_sum`, so a per-coordinate sensitivity is not separable).
+    ///
+    /// Point estimation is unaffected and IS published.
+    SurvivalMarginalSlopeGeneratedRegressorSensitivityUnavailable {
+        /// The family's own account of which channel it could not produce.
+        /// Not named `reason`: that is this enum's serde tag.
+        unavailable_channel: String,
+    },
 }
 
 impl CovarianceDeclined {
@@ -2227,6 +2245,22 @@ impl CovarianceDeclined {
                      would be too narrow and, on the wire, indistinguishable from corrected \
                      ones. The point estimates are unaffected and are published. See gam#2484 \
                      for the non-local sensitivity and gam#2718 for this contract."
+                )
+            }
+            Self::SurvivalMarginalSlopeGeneratedRegressorSensitivityUnavailable {
+                unavailable_channel,
+            } => {
+                format!(
+                    "no coefficient covariance was published for this survival marginal-slope \
+                     fit: the conditional latent-z location-scale calibration fired, so the \
+                     fitted score is a GENERATED regressor whose first stage was estimated from \
+                     the same data, and the Murphy-Topel correction for that needs a per-row \
+                     mixed derivative of the score in the latent coordinate which this fit's \
+                     shape cannot supply -- {unavailable_channel}. Publishing the UNCORRECTED \
+                     covariance instead is not admissible: it omits the first-stage uncertainty \
+                     the correction exists to add, so the intervals would be too narrow and, on \
+                     the wire, indistinguishable from corrected ones. The point estimates are \
+                     unaffected and are published. See gam#2768."
                 )
             }
         }

@@ -825,6 +825,77 @@ pub(crate) fn rigid_row_nll<S: JetScalar<4>>(
     Ok(nll)
 }
 
+/// `∂/∂z` of the rigid row NLL's PRIMARY gradient: the mixed `(primary, latent
+/// score)` second derivative, before any block-Jacobian scatter (gam#2768).
+///
+/// This is the row channel the Murphy–Topel generated-regressor covariance
+/// correction contracts against — `s_i = ∂(score_β,i)/∂ζ_i` is exactly this
+/// vector pushed through the same primary→β Jacobian the gradient uses — and it
+/// is derived MECHANICALLY from the sole `rigid_feature_program` declaration
+/// rather than by hand, in the spirit of the single-source contract on
+/// [`rigid_row_nll`].
+///
+/// The derivation is two observations about the feature map
+/// `(q0, q1, qd1, g) → (q0, q1, qd1, L, V)` with `L = (s·g)·z_sum` and
+/// `V = g²·covariance_ones`:
+///
+/// 1. `z_sum` reaches the program through `L` alone, and linearly, so
+///    `∂/∂z_sum = (s·g)·∂/∂L` on any function of the features. `V` does not
+///    involve `z_sum` at all.
+/// 2. The only feature-map entry that itself depends on `z_sum` is
+///    `∂L/∂g = s·z_sum`, whose `z_sum`-derivative is the constant `s`.
+///
+/// Differentiating the pullback `∂ℓ/∂p_a = Σ_f g_f·J_{f a}` therefore gives
+///
+/// ```text
+///     ∂²ℓ/∂p_a ∂z_sum = (s·g)·Σ_f H_{f L}·J_{f a}  +  g_L·∂J_{L a}/∂z_sum,
+/// ```
+///
+/// with the second term supported on the log-slope primary only. For `K = 1`
+/// (`z_sum = z`, the only shape the conditional latent calibration is persisted
+/// for) this is the row's exact `∂/∂z`.
+#[inline]
+pub(crate) fn rigid_row_primary_mixed_in_z(
+    primaries: &[f64; 4],
+    inputs: &RigidRowInputs,
+) -> Result<[f64; 4], String> {
+    let [q0, q1, qd1, linear, variance] = rigid_row_feature_values(primaries, inputs);
+    let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
+        rigid_feature_program_order2(
+            q0,
+            q1,
+            qd1,
+            linear,
+            variance,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+        );
+    validate_rigid_row_admission(
+        primaries[FEATURE_QD1],
+        inputs,
+        neg_eta0,
+        neg_eta1,
+        adjusted_derivative,
+    )?;
+    // `∂η/∂z_sum`: the observed slope. Same quantity `rigid_observed_logslope`
+    // names, read here off the feature map so the two cannot drift.
+    let observed_slope = inputs.probit_scale * primaries[3];
+    // The same feature-map Jacobian columns `rigid_row_order2` builds for the
+    // log-slope primary.
+    let d_linear_d_g = inputs.probit_scale * inputs.z_sum;
+    let d_variance_d_g = 2.0 * primaries[3] * inputs.covariance_ones;
+    Ok([
+        observed_slope * feature_hessian[FEATURE_Q0][FEATURE_LINEAR],
+        observed_slope * feature_hessian[FEATURE_Q1][FEATURE_LINEAR],
+        observed_slope * feature_hessian[FEATURE_QD1][FEATURE_LINEAR],
+        observed_slope
+            * (feature_hessian[FEATURE_LINEAR][FEATURE_LINEAR] * d_linear_d_g
+                + feature_hessian[FEATURE_VARIANCE][FEATURE_LINEAR] * d_variance_d_g)
+            + feature_gradient[FEATURE_LINEAR] * inputs.probit_scale,
+    ])
+}
+
 /// Direct value/gradient/Hessian lowering of the canonical five-feature row
 /// program followed by the universal second-order pullback into the scalar/shared
 /// four-primary geometry. The fixed stack buffers and active-feature map expose

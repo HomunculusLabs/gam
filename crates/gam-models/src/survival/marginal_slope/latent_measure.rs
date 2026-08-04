@@ -31,8 +31,41 @@ use super::*;
 
 use crate::bms::{
     EmpiricalLatentMeasureSupport, LatentMeasureCalibration, LatentMeasureKind, LatentZCheckMode,
-    build_latent_measure_decision,
+    LatentZConditionalCalibration, build_latent_measure_decision,
 };
+
+/// Everything the fit and its persistence need from the automatic gate: the
+/// per-coordinate decisions, the score the gate saw *before* calibrating it, and
+/// the conditioning block it conditioned on.
+///
+/// The raw score and the conditioning block are not diagnostics. The
+/// Murphy-Topel generated-regressor correction needs both — it differentiates
+/// the first stage, which regressed the RAW score on that block — and the
+/// conditioning block is also what the persistence gate compares against the
+/// finally-resolved marginal design to decide whether prediction can reproduce
+/// the map at all.
+pub(crate) struct SurvivalLatentScoreCalibration {
+    /// One decision per latent-score column, in column order.
+    pub(crate) per_score: Vec<LatentMeasureCalibration>,
+    /// The (normalised, pre-calibration) latent scores the gate was handed.
+    pub(crate) raw_scores: Array2<f64>,
+    /// The conditioning span `a(C)` the conditional branch used, when it was
+    /// built. `None` when the CTN Stage-1 absorber suppressed it.
+    pub(crate) conditioning: Option<std::sync::Arc<Array2<f64>>>,
+}
+
+impl SurvivalLatentScoreCalibration {
+    /// The conditional location-scale calibration on the PRIMARY score, if the
+    /// Rao gate escalated to one. This is the only branch with a generated
+    /// regressor: rank-INT is a fixed monotone map of the marginal ECDF and the
+    /// identity is not estimated at all.
+    pub(crate) fn primary_conditional(&self) -> Option<&LatentZConditionalCalibration> {
+        match self.per_score.first() {
+            Some(LatentMeasureCalibration::ConditionalLocationScale(cal)) => Some(cal),
+            _ => None,
+        }
+    }
+}
 
 /// Run the automatic latent-measure gate over every latent-score coordinate and
 /// replace `spec.z` by the calibrated score in place.
@@ -54,8 +87,9 @@ use crate::bms::{
 pub(crate) fn resolve_survival_latent_score_calibration(
     spec: &mut SurvivalMarginalSlopeTermSpec,
     marginal_design: &TermCollectionDesign,
-) -> Result<Vec<LatentMeasureCalibration>, String> {
+) -> Result<SurvivalLatentScoreCalibration, String> {
     let k = spec.z.ncols();
+    let raw_scores = spec.z.clone();
     // #461 seam, mirrored from BMS: when a CTN Stage-1 influence absorber is
     // active the conditional leakage is already absorbed by the absorber's own
     // orthogonalisation, and replacing z here would perturb the widened-marginal
@@ -141,7 +175,11 @@ pub(crate) fn resolve_survival_latent_score_calibration(
         calibrations.push(decision.calibration);
     }
     spec.z = calibrated_scores;
-    Ok(calibrations)
+    Ok(SurvivalLatentScoreCalibration {
+        per_score: calibrations,
+        raw_scores,
+        conditioning,
+    })
 }
 
 fn calibration_label(calibration: &LatentMeasureCalibration) -> &'static str {

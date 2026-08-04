@@ -8766,3 +8766,81 @@ fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
         );
     }
 }
+
+/// `rigid_row_primary_mixed_in_z` must equal a central finite difference of the
+/// canonical row program's PRIMARY gradient in the latent score (gam#2768).
+///
+/// This is the only new row-level mathematics the generated-regressor covariance
+/// correction needs: the block scatter that turns it into `∂(score_β)/∂ζ` reuses
+/// the production gradient accumulator unchanged, so it is correct by
+/// construction, and this gate is what stands behind the chain rule that
+/// produces the vector it scatters.
+///
+/// The grid deliberately spans both censored and event rows, both signs of the
+/// slope (`c(g)` is even in `g` while the `s(g)·z` channel is odd, so a sign
+/// error in the `L`-channel term survives a positive-only grid), a non-unit
+/// probit frailty scale, and a non-unit `covariance_ones` — the last of which is
+/// what a hand derivation assuming `Var(z) = 1` would get wrong, because the
+/// fitted score covariance is only approximately one.
+#[test]
+fn rigid_row_primary_mixed_in_z_matches_finite_difference() {
+    let derivative_guard = 1e-8;
+    let mut checked = 0usize;
+    for &(q0, q1, qd1) in &[
+        (-1.30, -0.40, 0.90),
+        (-2.10, 0.65, 1.70),
+        (0.25, 1.10, 0.35),
+    ] {
+        for &g in &[-0.85_f64, -0.20, 0.0, 0.30, 1.40] {
+            for &z in &[-1.75_f64, -0.30, 0.55, 2.20] {
+                for &d in &[0.0_f64, 1.0] {
+                    for &(w, probit_scale, covariance_ones) in &[
+                        (1.0_f64, 1.0_f64, 1.0_f64),
+                        (0.7, 0.82, 1.13),
+                        (2.4, 1.35, 0.76),
+                    ] {
+                        let inputs_at = |z_value: f64| RigidRowInputs {
+                            row: 0,
+                            wi: w,
+                            di: d,
+                            z_sum: z_value,
+                            covariance_ones,
+                            probit_scale,
+                            qd1_lower: derivative_guard,
+                        };
+                        let primaries = [q0, q1, qd1, g];
+                        let analytic =
+                            rigid_row_primary_mixed_in_z(&primaries, &inputs_at(z))
+                                .expect("analytic mixed derivative");
+                        // Central difference of the primary gradient in z. The
+                        // step is scaled to |z| so the relative truncation error
+                        // stays ~h² across the grid.
+                        let h = 1e-5 * (1.0 + z.abs());
+                        let (_, grad_plus, _) =
+                            rigid_row_order2(&primaries, &inputs_at(z + h)).expect("gradient +h");
+                        let (_, grad_minus, _) =
+                            rigid_row_order2(&primaries, &inputs_at(z - h)).expect("gradient -h");
+                        for axis in 0..4 {
+                            let fd = (grad_plus[axis] - grad_minus[axis]) / (2.0 * h);
+                            let scale = analytic[axis].abs().max(fd.abs()).max(1.0);
+                            assert_close(
+                                analytic[axis],
+                                fd,
+                                2e-5 * scale,
+                                &format!(
+                                    "mixed d2(NLL)/d(primary {axis})dz at q=({q0},{q1},{qd1}) \
+                                     g={g} z={z} d={d} w={w} s={probit_scale} V={covariance_ones}"
+                                ),
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        checked, 360,
+        "the grid must be exercised in full; a silently skipped cell is not a passing gate"
+    );
+}

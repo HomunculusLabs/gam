@@ -146,8 +146,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // seed, the score covariance Σ, the score-warp seed basis, every design and
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
-    let latent_z_calibrations =
-        resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
+    let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
     let score_covariance = marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
     let z_primary = spec.z.column(0).to_owned();
     let baseline_started = std::time::Instant::now();
@@ -1656,8 +1655,57 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
 
     let mut resolved_specs = solved.resolved_specs;
     let designs = solved.designs;
+    let mut solved_fit = solved.fit;
+    // gam#2768 GENERATED-REGRESSOR SEAM. When the conditional location-scale
+    // gate fired, the joint solve above treated the calibrated score
+    // `ζ = (z − m̂(C))/√v̂(C)` as KNOWN, so `covariance_conditional` is the naive
+    // second-stage covariance that ignores the first stage's estimation error.
+    // The correction is PSD, so the naive one is always too narrow; publishing
+    // it uncorrected is what gam#2718 rules inadmissible.
+    //
+    // Two reproducibility facts are settled here, both about the conditioning
+    // span `a(C)`. First, the correction differentiates the FIRST stage, so it
+    // needs the raw score and the span that stage regressed it on — not the
+    // calibrated score the fit consumed. Second, prediction rebuilds `a(C)` from
+    // the *resolved* marginal spec, while the gate ran against the design frozen
+    // before the spatial length-scale search: if that search moved the design,
+    // the map at predict is not the map at fit, and the model must not be saved
+    // claiming otherwise.
+    let latent_conditioning_reproducible = match latent_calibration.conditioning.as_ref() {
+        Some(conditioning) if latent_calibration.primary_conditional().is_some() => {
+            let resolved = designs[0]
+                .design
+                .try_to_dense_arc("survival marginal-slope resolved conditioning check")?;
+            conditioning.shape() == resolved.shape()
+                && conditioning
+                    .iter()
+                    .zip(resolved.iter())
+                    .all(|(gate, resolved)| (gate - resolved).abs() <= 1e-10 * (1.0 + gate.abs()))
+        }
+        // No conditional calibration ⇒ nothing to reproduce.
+        _ => true,
+    };
+    if let Some(calibration) = latent_calibration.primary_conditional() {
+        let conditioning = latent_calibration.conditioning.as_ref().ok_or_else(|| {
+            "survival marginal-slope conditional latent calibration without its conditioning              block"
+                .to_string()
+        })?;
+        let correction_family = make_family(
+            &designs[0],
+            &designs[1],
+            certified_theta,
+            FlexActivation::On,
+        )?;
+        apply_survival_generated_regressor_correction(
+            &correction_family,
+            calibration,
+            &mut solved_fit,
+            latent_calibration.raw_scores.column(0),
+            conditioning.view(),
+        )?;
+    }
     Ok(SurvivalMarginalSlopeFitResult {
-        fit: solved.fit,
+        fit: solved_fit,
         marginalspec_resolved: resolved_specs.remove(0),
         logslopespec_resolved: resolved_specs.remove(0),
         marginal_design: designs[0].clone(),
@@ -1668,7 +1716,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         baseline_offset_residuals,
         baseline_offset_curvatures,
         z_normalization,
-        latent_z_calibrations,
+        latent_z_calibrations: latent_calibration.per_score,
+        latent_conditioning_reproducible,
         score_covariance: score_covariance.to_dense(),
         time_block_penalties_len: time_penalties_len,
         time_wiggle_knots: spec
