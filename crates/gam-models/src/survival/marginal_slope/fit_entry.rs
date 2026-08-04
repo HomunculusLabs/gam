@@ -133,6 +133,58 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // before this existed takes exactly the same path it did.
     let (logslope_design, logslope_follow_up) =
         tensorize_logslope_design_over_time(logslope_design, &spec.logslope_template)?;
+    if logslope_follow_up.is_some() {
+        // The spatial-psi hyperparameter path, the learned-frailty scale jet and
+        // the flex/time-wiggle surfaces all evaluate the row program through the
+        // four-primary frame. Each is a real combination to support, and each is
+        // a separate piece of chain rule; refusing by name is honest, whereas
+        // running them would silently differentiate a model that is not the one
+        // being fitted.
+        if !spatial_length_scale_term_indices(&logslopespec_boot).is_empty() {
+            return Err(SurvivalMarginalSlopeError::InvalidInput {
+                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                         spatial (automatic length-scale) term on the log-slope surface: the \
+                         spatial hyperparameter derivatives are lowered through the \
+                         time-constant primary frame"
+                    .to_string(),
+            }
+            .into());
+        }
+        if !matches!(spec.frailty, FrailtySpec::None) {
+            return Err(SurvivalMarginalSlopeError::InvalidInput {
+                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                         Gaussian-shift frailty: the frailty scale jet is lowered through the \
+                         time-constant primary frame"
+                    .to_string(),
+            }
+            .into());
+        }
+        if spec.score_warp.is_some() || spec.link_dev.is_some() {
+            return Err(SurvivalMarginalSlopeError::InvalidInput {
+                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                         score-warp or link-deviation flex block: those surfaces add their own \
+                         primaries on top of the time-constant frame"
+                    .to_string(),
+            }
+            .into());
+        }
+        if spec.timewiggle_block.is_some() {
+            return Err(SurvivalMarginalSlopeError::InvalidInput {
+                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                         time-wiggle baseline"
+                    .to_string(),
+            }
+            .into());
+        }
+    }
+    let logslope_template = spec.logslope_template.clone();
+    // The outer spatial/kappa search rebuilds the block designs from their term
+    // specs on every probe, so the time margin has to be applied where the
+    // design is CONSUMED, not once up front. This is that map, applied
+    // identically at every consumption site.
+    let tensorize_logslope = move |design: &TermCollectionDesign| {
+        tensorize_logslope_design_over_time(design.clone(), &logslope_template)
+    };
     spec.marginal_offset = marginal_design
         .compose_offset(
             spec.marginal_offset.view(),
@@ -772,6 +824,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             FlexActivation::OffForRigidPilot => None,
             FlexActivation::On => influence_absorber_residualized.clone(),
         };
+        let (logslope_design, logslope_follow_up) = tensorize_logslope(logslope_design)?;
         let logslope_layout = attach_logslope_follow_up(
             logslope_topology
                 .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
@@ -814,6 +867,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                         flex: FlexActivation|
      -> Result<Vec<ParameterBlockSpec>, String> {
         let hints = hints.borrow();
+        let (owned_logslope_design, logslope_follow_up) = tensorize_logslope(logslope_design)?;
+        let logslope_design = &owned_logslope_design;
         let block_logslope_layout = attach_logslope_follow_up(
             logslope_topology
                 .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
@@ -1723,7 +1778,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         marginalspec_resolved: resolved_specs.remove(0),
         logslopespec_resolved: resolved_specs.remove(0),
         marginal_design: designs[0].clone(),
-        logslope_design: designs[1].clone(),
+        // The tensor product, not the covariate factor: this is the design the
+        // fitted coefficients live against.
+        logslope_design: tensorize_logslope(&designs[1])?.0,
         logslope_time_basis: spec
             .logslope_template
             .resolved_time_basis()
