@@ -673,7 +673,7 @@ impl LatentZNormalization {
 /// latent score.
 ///
 /// When the latent z fails the standard-normal auto-detection
-/// (`latent_z_is_standard_normal_enough`), the BMS family applied to
+/// (`latent_z_normal_adequacy`), the BMS family applied to
 /// pretend the score is N(0,1) anyway would distort the closed-form
 /// probit log-CDF kernel. The historical fallback (local- or
 /// global-empirical latent measure) is *mathematically correct* but
@@ -693,7 +693,7 @@ impl LatentZNormalization {
 /// Gaussian. The closed-form standard-normal kernel is therefore
 /// adequate only when the calibrated sample itself passes the same
 /// standard-normal adequacy gate applied to raw z
-/// (`latent_z_is_standard_normal_enough`);
+/// (`latent_z_normal_adequacy`);
 /// `build_latent_measure_with_geometry` re-checks the calibrated
 /// sample and falls back to the mathematically exact global-empirical
 /// latent measure when that re-check fails. On the passing path the
@@ -2229,18 +2229,6 @@ impl LatentNormalAdequacy {
             clause("max_abs", self.max_abs, self.max_abs_tol),
         )
     }
-}
-
-/// Whether a latent-z sample may use the closed-form standard-normal kernel.
-///
-/// Thin over [`latent_z_normal_adequacy`]: the conjunction and the evidence are
-/// the same object, and a caller that only needs the decision takes this.
-pub(crate) fn latent_z_is_standard_normal_enough(
-    z: &Array1<f64>,
-    weights: &Array1<f64>,
-    policy: &LatentZPolicy,
-) -> Result<bool, String> {
-    Ok(latent_z_normal_adequacy(z, weights, policy)?.passes())
 }
 
 /// Measure a latent-z sample against the standard-normal adequacy gate,
