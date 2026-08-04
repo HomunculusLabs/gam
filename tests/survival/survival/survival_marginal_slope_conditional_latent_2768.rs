@@ -61,7 +61,7 @@ use gam::{
 use gam::utils::splitmix64;
 use ndarray::Array1;
 
-const N: usize = 4_000;
+const N: usize = 3_000;
 /// Conditional correlation `Corr(z, x)`; also the conditional-mean slope.
 const M_SHIFT: f64 = 0.5;
 /// True conditional slope on the standardised latent score.
@@ -179,15 +179,26 @@ fn slope_on_x(values: &Array1<f64>, x: &Array1<f64>) -> f64 {
     cov / var
 }
 
+/// The fit shape both arms use. Smooth on both channels because the
+/// marginal-slope joint Newton is measurably better conditioned there: an
+/// intercept-only log-slope block leaves the joint Hessian with a rank-1 block
+/// whose null-space shrinkage direction is the whole block, and every candidate
+/// rho seed's inner solve then stalls at its cycle budget (measured on this very
+/// fixture before the shape was changed). The truth is linear in `x` and so lies
+/// inside both smooths' spans, which is what lets the projection below read it
+/// back without assuming a coefficient index.
+const MARGINAL_FORMULA: &str = "Surv(time, event) ~ smooth(x)";
+const LOGSLOPE_FORMULA: &str = "smooth(x)";
+
 fn fit_arm(fixture: &Fixture, z_column: &str) -> ArmSummary {
     let cfg = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some(z_column.to_string()),
-        logslope_formula: Some("1".to_string()),
+        logslope_formula: Some(LOGSLOPE_FORMULA.to_string()),
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     };
-    let result = fit_from_formula("Surv(time, event) ~ x", &fixture.dataset, &cfg)
+    let result = fit_from_formula(MARGINAL_FORMULA, &fixture.dataset, &cfg)
         .unwrap_or_else(|e| panic!("survival marginal-slope fit on z_column={z_column}: {e}"));
     let FitResult::SurvivalMarginalSlope(fit) = result else {
         panic!("expected a SurvivalMarginalSlope fit result for z_column={z_column}");
