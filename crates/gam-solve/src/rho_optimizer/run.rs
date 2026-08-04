@@ -1798,7 +1798,9 @@ pub(crate) fn certificate_hessian_is_psd(hessian: &Array2<f64>) -> Option<bool> 
 /// so this can never over-certify a real saddle. When every coordinate is railed
 /// the interior is empty — there is no feasible curvature to certify and the rail
 /// KKT signs are the whole certificate — so the empty sub-block is trivially PSD.
-/// With no railed coordinate it is exactly [`certificate_hessian_is_psd`].
+/// With no railed coordinate and no declared invariance it is exactly
+/// [`certificate_hessian_is_psd`].
+///
 /// # The invariance argument (#2676)
 ///
 /// `invariance` carries the directions along which the criterion is EXACTLY
