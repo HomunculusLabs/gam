@@ -1883,12 +1883,108 @@ pub(crate) fn build_intercept_basis(a_block: ArrayView2<'_, f64>) -> Array2<f64>
     basis
 }
 
+/// Which latent measures the *calling family's row kernel* can actually
+/// evaluate.
+///
+/// This is the only thing that differs between the two marginal-slope families'
+/// latent-measure decisions, so it is the only argument
+/// [`build_latent_measure_decision`] takes to serve both. The Bernoulli kernel
+/// owns an empirical-grid branch (`empirical_rigid_primary_grad_hess_closed_form`
+/// and its higher-order siblings, driven by a per-row intercept Newton solve);
+/// the survival marginal-slope kernel does not — its row program is the
+/// closed-form standard-normal probit lowering and nothing else. A decision that
+/// handed the survival family a `GlobalEmpirical` measure would be a measure it
+/// cannot evaluate, so the two families must reach *different* terminal states
+/// from the *same* gate. Making the capability an argument is what keeps the
+/// gate itself a single object (gam#2768).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EmpiricalLatentMeasureSupport {
+    /// The caller can evaluate `LatentMeasureKind::GlobalEmpirical`.
+    Available,
+    /// The caller can only evaluate `LatentMeasureKind::StandardNormal`.
+    StandardNormalOnly,
+}
+
+/// The latent-measure gate's verdict: the measure the kernel will integrate
+/// against, the pre-transform applied to z before it reaches that kernel, and —
+/// for a [`EmpiricalLatentMeasureSupport::StandardNormalOnly`] caller — the
+/// adequacy ledger of the sample the standard-normal kernel is actually being
+/// handed when that sample failed the gate.
+pub(crate) struct LatentMeasureDecision {
+    pub(crate) kind: LatentMeasureKind,
+    pub(crate) calibration: LatentMeasureCalibration,
+    /// `Some` only for a `StandardNormalOnly` caller, and only when the sample
+    /// the kernel sees failed the standard-normal adequacy gate with no
+    /// empirical measure available to carry the residual law. Never a silent
+    /// state: the caller must route it through its own [`LatentZCheckMode`].
+    pub(crate) unmodelled_residual: Option<LatentNormalAdequacy>,
+}
+
+impl LatentMeasureDecision {
+    fn standard_normal(calibration: LatentMeasureCalibration) -> Self {
+        Self {
+            kind: LatentMeasureKind::StandardNormal,
+            calibration,
+            unmodelled_residual: None,
+        }
+    }
+}
+
 pub(crate) fn build_latent_measure_with_geometry(
     z: &Array1<f64>,
     weights: &Array1<f64>,
     policy: &LatentZPolicy,
     conditioning: Option<ArrayView2<'_, f64>>,
 ) -> Result<(LatentMeasureKind, LatentMeasureCalibration), String> {
+    let decision = build_latent_measure_decision(
+        z,
+        weights,
+        policy,
+        conditioning,
+        EmpiricalLatentMeasureSupport::Available,
+        "BMS",
+    )?;
+    debug_assert!(
+        decision.unmodelled_residual.is_none(),
+        "an Available-empirical caller always has a measure for the residual law"
+    );
+    Ok((decision.kind, decision.calibration))
+}
+
+/// The latent-measure gate, shared by both marginal-slope families.
+///
+/// The gate order is fixed and family-independent:
+///
+/// 1. the conditional `E[z|C]` / `Var(z|C)` Rao gate on the marginal-index span
+///    `a(C)` (#905) — the `b(C)·m(C)` leakage the pooled gate cannot see and
+///    that rank-INT provably cannot fix, so it takes precedence;
+/// 2. the pooled standard-normal adequacy gate on raw z;
+/// 3. the weighted mid-rank inverse-normal transform, re-gated on its own
+///    output.
+///
+/// What differs between families is only the *terminal* state when the sample a
+/// kernel would see fails the adequacy gate, and that is exactly what `support`
+/// selects. With [`EmpiricalLatentMeasureSupport::Available`] the decision falls
+/// back to the mathematically exact empirical latent measure. With
+/// [`EmpiricalLatentMeasureSupport::StandardNormalOnly`] there is no such
+/// fallback, so the decision instead keeps the *best available pre-transform* —
+/// the one whose sample is closest to the kernel's own assumption — and returns
+/// the failing ledger rather than dropping it.
+///
+/// Keeping the pre-transform in that case is not a smaller version of the
+/// empirical branch, it is the correct choice among the two axes a
+/// standard-normal-only kernel can be given: the kernel assumes N(0,1) by
+/// construction, the mid-rank transform matches every quantile of that law up to
+/// the sample's own discreteness, and raw z can be arbitrarily far from it. The
+/// residual inadequacy is reported, never absorbed.
+pub(crate) fn build_latent_measure_decision(
+    z: &Array1<f64>,
+    weights: &Array1<f64>,
+    policy: &LatentZPolicy,
+    conditioning: Option<ArrayView2<'_, f64>>,
+    support: EmpiricalLatentMeasureSupport,
+    context: &str,
+) -> Result<LatentMeasureDecision, String> {
     match policy.latent_measure {
         LatentMeasureSpec::Auto { grid_size } => {
             // #905: conditional `E[z|C]`/`Var(z|C)` Rao gate. Inspect the latent
@@ -1912,23 +2008,40 @@ pub(crate) fn build_latent_measure_with_geometry(
                 let zeta = cal.apply(z.view(), a_block)?;
                 let residual_adequacy = latent_z_normal_adequacy(&zeta, weights, policy)?;
                 let residual_is_standard_normal = residual_adequacy.passes();
-                let kind = if residual_is_standard_normal {
-                    LatentMeasureKind::StandardNormal
-                } else {
-                    build_global_empirical_latent_measure(&zeta, weights, grid_size)?
+                let kind = match (residual_is_standard_normal, support) {
+                    (true, _) | (false, EmpiricalLatentMeasureSupport::StandardNormalOnly) => {
+                        LatentMeasureKind::StandardNormal
+                    }
+                    (false, EmpiricalLatentMeasureSupport::Available) => {
+                        build_global_empirical_latent_measure(&zeta, weights, grid_size)?
+                    }
                 };
                 log::info!(
-                    "[BMS latent-z] conditional location-scale calibrated: basis_ncols={} var_active={} post_mean={:.3e} post_sd={:.3e} residual_measure={} (E[z|C]/Var(z|C) Rao gate fired)",
+                    "[{context} latent-z] conditional location-scale calibrated: basis_ncols={} var_active={} post_mean={:.3e} post_sd={:.3e} residual_measure={} (E[z|C]/Var(z|C) Rao gate fired)",
                     cal.basis_ncols,
                     !cal.var_coeffs.is_empty(),
                     cal.post_mean,
                     cal.post_sd,
-                    if residual_is_standard_normal {
+                    if matches!(kind, LatentMeasureKind::StandardNormal) {
                         "standard-normal"
                     } else {
                         "global-empirical"
                     },
                 );
+                if !residual_is_standard_normal
+                    && support == EmpiricalLatentMeasureSupport::StandardNormalOnly
+                {
+                    // No empirical measure exists for this kernel, so the
+                    // conditional correction is kept (it removes the first-order
+                    // `b(C)·m(C)` leakage regardless of the residual's shape)
+                    // and the residual's distance from the kernel's assumption
+                    // is handed back to the caller's `LatentZCheckMode`.
+                    return Ok(LatentMeasureDecision {
+                        kind,
+                        calibration: LatentMeasureCalibration::ConditionalLocationScale(cal),
+                        unmodelled_residual: Some(residual_adequacy),
+                    });
+                }
                 if !residual_is_standard_normal {
                     // gam#2484: this pair is a legitimate POINT-ESTIMATION
                     // state, so it is minted rather than refused here -- but a
@@ -1937,7 +2050,7 @@ pub(crate) fn build_latent_measure_with_geometry(
                     // stages away with no reference back to the decision that
                     // caused it. Say so at the decision, with the evidence.
                     log::warn!(
-                        "[BMS latent-z] the calibrated residual FAILED the standard-normal \
+                        "[{context} latent-z] the calibrated residual FAILED the standard-normal \
                          adequacy gate, so the second-stage latent measure is global-empirical. \
                          Point estimation is unaffected; a Murphy-Topel generated-regressor \
                          covariance will be REFUSED for this fit, because that correction needs \
@@ -1947,14 +2060,15 @@ pub(crate) fn build_latent_measure_with_geometry(
                         residual_adequacy.ledger(),
                     );
                 }
-                return Ok((
+                return Ok(LatentMeasureDecision {
                     kind,
-                    LatentMeasureCalibration::ConditionalLocationScale(cal),
-                ));
+                    calibration: LatentMeasureCalibration::ConditionalLocationScale(cal),
+                    unmodelled_residual: None,
+                });
             }
-            if latent_z_is_standard_normal_enough(z, weights, policy)? {
-                Ok((
-                    LatentMeasureKind::StandardNormal,
+            let pooled_adequacy = latent_z_normal_adequacy(z, weights, policy)?;
+            if pooled_adequacy.passes() {
+                Ok(LatentMeasureDecision::standard_normal(
                     LatentMeasureCalibration::None,
                 ))
             } else {
@@ -1970,39 +2084,72 @@ pub(crate) fn build_latent_measure_with_geometry(
                 // global-empirical latent measure on the raw score.
                 let calibration = LatentZRankIntCalibration::fit(z, weights)?;
                 let calibrated = calibration.apply_to_training(z)?;
-                if latent_z_is_standard_normal_enough(&calibrated, weights, policy)? {
+                let calibrated_adequacy = latent_z_normal_adequacy(&calibrated, weights, policy)?;
+                if calibrated_adequacy.passes() {
                     log::info!(
-                        "[BMS latent-z] rank-INT calibrated: post_mean={:.3e} post_sd={:.3e} knots={}",
+                        "[{context} latent-z] rank-INT calibrated: post_mean={:.3e} post_sd={:.3e} knots={}",
                         calibration.post_mean,
                         calibration.post_sd,
                         calibration.sorted_z.len(),
                     );
-                    Ok((
-                        LatentMeasureKind::StandardNormal,
+                    Ok(LatentMeasureDecision::standard_normal(
                         LatentMeasureCalibration::RankInverseNormal(calibration),
                     ))
                 } else {
-                    log::info!(
-                        "[BMS latent-z] rank-INT output failed the standard-normal adequacy gate (post_mean={:.3e} post_sd={:.3e} knots={}); using the global-empirical latent measure",
-                        calibration.post_mean,
-                        calibration.post_sd,
-                        calibration.sorted_z.len(),
-                    );
-                    Ok((
-                        build_global_empirical_latent_measure(z, weights, grid_size)?,
-                        LatentMeasureCalibration::None,
-                    ))
+                    match support {
+                        EmpiricalLatentMeasureSupport::Available => {
+                            log::info!(
+                                "[{context} latent-z] rank-INT output failed the standard-normal adequacy gate (post_mean={:.3e} post_sd={:.3e} knots={}); using the global-empirical latent measure",
+                                calibration.post_mean,
+                                calibration.post_sd,
+                                calibration.sorted_z.len(),
+                            );
+                            Ok(LatentMeasureDecision {
+                                kind: build_global_empirical_latent_measure(
+                                    z, weights, grid_size,
+                                )?,
+                                calibration: LatentMeasureCalibration::None,
+                                unmodelled_residual: None,
+                            })
+                        }
+                        EmpiricalLatentMeasureSupport::StandardNormalOnly => {
+                            // Both candidate axes are inadequate and there is no
+                            // empirical measure to carry either law. Take the
+                            // one the gate itself measures as closer to the
+                            // kernel's assumption -- by construction the mid-rank
+                            // transform matches every quantile of N(0,1) up to
+                            // the sample's discreteness, which raw z need not do
+                            // at all -- and report the residual gap.
+                            Ok(LatentMeasureDecision {
+                                kind: LatentMeasureKind::StandardNormal,
+                                calibration: LatentMeasureCalibration::RankInverseNormal(
+                                    calibration,
+                                ),
+                                unmodelled_residual: Some(calibrated_adequacy),
+                            })
+                        }
+                    }
                 }
             }
         }
-        LatentMeasureSpec::StandardNormal => Ok((
-            LatentMeasureKind::StandardNormal,
+        LatentMeasureSpec::StandardNormal => Ok(LatentMeasureDecision::standard_normal(
             LatentMeasureCalibration::None,
         )),
-        LatentMeasureSpec::GlobalEmpirical { grid_size } => {
-            let kind = build_global_empirical_latent_measure(z, weights, grid_size)?;
-            Ok((kind, LatentMeasureCalibration::None))
-        }
+        LatentMeasureSpec::GlobalEmpirical { grid_size } => match support {
+            EmpiricalLatentMeasureSupport::Available => Ok(LatentMeasureDecision {
+                kind: build_global_empirical_latent_measure(z, weights, grid_size)?,
+                calibration: LatentMeasureCalibration::None,
+                unmodelled_residual: None,
+            }),
+            EmpiricalLatentMeasureSupport::StandardNormalOnly => Err(format!(
+                "{context} was asked for a global-empirical latent measure, but its row kernel \
+                 exists only in the closed-form standard-normal branch: there is no empirical-grid \
+                 lowering to integrate against. Use the Auto latent measure (which will apply the \
+                 conditional location-scale or rank inverse-normal pre-transform when the data \
+                 need one) or fit this data with the Bernoulli marginal-slope family, whose kernel \
+                 owns the empirical branch"
+            )),
+        },
     }
 }
 
