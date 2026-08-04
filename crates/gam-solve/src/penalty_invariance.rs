@@ -467,6 +467,38 @@ pub fn judged_subspace_basis(
     Some(basis)
 }
 
+/// Orthonormal basis of the orthogonal complement of `basis` in `R^dimension`
+/// — i.e. exactly the directions [`judged_subspace_basis`] removed.
+///
+/// Derived from `basis` rather than from whatever was passed in as the
+/// deflation: the judged basis is the authority on what was actually deflated
+/// (the face restriction and the dependence drop can both shrink it), and a
+/// caller reconstructing that set from its own input would be reading a
+/// different subspace than the one the verdict was taken on.
+///
+/// Same `I - Z Z'` projector construction, with the same O(1) selection margin.
+pub fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Option<Array2<f64>> {
+    use gam_linalg::faer_ndarray::FaerEigh;
+    if basis.nrows() != dimension || dimension == 0 || basis.ncols() >= dimension {
+        return None;
+    }
+    let mut projector = Array2::<f64>::eye(dimension);
+    projector -= &basis.dot(&basis.t());
+    gam_linalg::matrix::symmetrize_in_place(&mut projector);
+    let (eigenvalues, eigenvectors) = projector.eigh(faer::Side::Lower).ok()?;
+    let kept: Vec<usize> = (0..dimension)
+        .filter(|&index| eigenvalues[index] > 0.5)
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let mut removed = Array2::<f64>::zeros((dimension, kept.len()));
+    for (column, &source) in kept.iter().enumerate() {
+        removed.column_mut(column).assign(&eigenvectors.column(source));
+    }
+    Some(removed)
+}
+
 /// Compress a symmetric matrix onto the judged subspace: `Z' H Z`.
 pub fn compress_to_judged_subspace(matrix: &Array2<f64>, basis: &Array2<f64>) -> Array2<f64> {
     let mut compressed = basis.t().dot(matrix).dot(basis);

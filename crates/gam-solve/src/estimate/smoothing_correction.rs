@@ -647,11 +647,21 @@ pub(crate) fn invert_identified_rho_hessian(
     // Every direction, in ρ coordinates and in one order: the deflated
     // invariance first (its Rayleigh quotient reported as measured, never
     // judged), then the judged complement.
+    //
+    // The deflated block is read back OUT of the judged basis rather than taken
+    // from `deflation`'s own columns. Those are not the same set in general:
+    // `judged_subspace_basis` can shrink the deflation (the railed-face
+    // restriction, the dependence drop), and reporting the input's columns here
+    // would name a subspace the verdict was not taken on.
+    let removed = judged
+        .as_ref()
+        .and_then(|basis| crate::penalty_invariance::deflated_directions(n, basis));
     let mut eigenvalues = Array1::<f64>::zeros(n);
     let mut eigenvectors = Array2::<f64>::zeros((n, n));
     for column in 0..deflated_dimension {
-        let direction = deflation
-            .expect("a deflated dimension implies a deflation basis")
+        let direction = removed
+            .as_ref()
+            .expect("a deflated dimension implies a removed subspace")
             .column(column)
             .to_owned();
         eigenvalues[column] = direction.dot(&hessian_rho.dot(&direction));
