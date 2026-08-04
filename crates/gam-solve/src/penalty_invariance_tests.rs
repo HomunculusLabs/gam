@@ -290,3 +290,42 @@ fn embedding_into_a_wider_theta_zeroes_the_non_rho_block_2676() {
         assert_eq!(lifted[[row, 0]], 0.0, "psi coordinate {row} must be zero");
     }
 }
+
+/// The disjoint-supports fast path is a THEOREM, and it must agree with the
+/// Gram it skips. An ordinary additive model — one penalty per smooth, each on
+/// its own coefficient block — has no invariance, and the shortcut must reach
+/// that answer for the reason stated (positive-definite diagonal plus a rank-1
+/// PSD border) and not by accident.
+#[test]
+fn disjoint_penalty_supports_have_no_invariance_2676() {
+    // Three blocks on 0..2, 2..5, 5..7 — the additive-model layout.
+    let s0 = array![[2.0_f64, 0.5], [0.5, 1.0]];
+    let s1 = array![[3.0_f64, 1.0, 0.0], [1.0, 2.0, 0.5], [0.0, 0.5, 1.5]];
+    let s2 = array![[4.0_f64, -1.0], [-1.0, 2.0]];
+    let mut bundle = vec![penalty(s0, 7), penalty(s1, 7), penalty(s2, 7)];
+    bundle[1].col_range = 2..5;
+    bundle[2].col_range = 5..7;
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 7).expect("gram decomposes");
+    assert_eq!(invariance.dimension(), 0);
+
+    // And the shortcut is not hiding a disagreement: force the general path by
+    // overlapping the FIRST TWO ranges by one column with a penalty that is
+    // zero on the shared column, so the Gram is still block-diagonal and the
+    // answer must be unchanged.
+    let mut overlapping = bundle.clone();
+    let mut widened = Array2::<f64>::zeros((3, 3));
+    widened
+        .slice_mut(ndarray::s![..2, ..2])
+        .assign(&overlapping[0].local);
+    overlapping[0].local = widened;
+    overlapping[0].col_range = 0..3;
+    overlapping[0].prior_mean = Array1::zeros(3);
+    let general =
+        PenaltyMapInvariance::from_canonical_penalties(&overlapping, 7).expect("gram decomposes");
+    assert_eq!(
+        general.dimension(),
+        0,
+        "the general Gram path must agree with the disjoint-support shortcut"
+    );
+}

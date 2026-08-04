@@ -161,6 +161,40 @@ impl PenaltyMapInvariance {
             }
         }
 
+        // ── Disjoint supports carry no invariance, and that is a theorem ──
+        //
+        // If no two penalties share a coefficient column then `tr(S_i S_j) = 0`
+        // and `c_i . c_j = 0` for every `i != j`, so
+        //
+        //     G = diag(||S_i||_F^2 + 2||c_i||^2) + q q',    q_i = mu_i' S_i mu_i,
+        //
+        // which is a positive-definite diagonal plus a rank-1 PSD term: strictly
+        // positive definite, hence `null(G) = {0}`. This is the ordinary
+        // additive model — one penalty per smooth, on its own coefficient block
+        // — i.e. very nearly every fit, and it exits here in `O(k^2)` range
+        // comparisons instead of the `O(k^2 * block^2)` Gram. That matters
+        // because this runs at every certification and `block` can be large.
+        //
+        // Guarded on every `||S_i||_F > 0`: a rank-zero penalty would make the
+        // diagonal singular, and `canonicalize_penalty_specs` drops those, but
+        // this constructor is public and must not assume it.
+        let norms: Vec<f64> = canonical
+            .iter()
+            .map(|penalty| penalty.local.iter().map(|value| value * value).sum::<f64>())
+            .collect();
+        let shares_support = (0..k).any(|i| {
+            ((i + 1)..k).any(|j| {
+                canonical[i].col_range.start < canonical[j].col_range.end
+                    && canonical[j].col_range.start < canonical[i].col_range.end
+            })
+        });
+        if !shares_support && norms.iter().all(|value| *value > 0.0) {
+            return Ok(Self {
+                basis: Array2::zeros((k, 0)),
+                resolution: 0.0,
+            });
+        }
+
         // The centering vectors c_i = S_i mu_i, in GLOBAL coefficient
         // coordinates so that overlapping blocks add correctly, and the
         // scalars q_i = mu_i' S_i mu_i. Allocated only when some prior mean is

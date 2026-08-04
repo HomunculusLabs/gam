@@ -2674,7 +2674,23 @@ mod tests {
         else {
             panic!("expected diagonal Kronecker PIRLS penalty");
         };
-        let expected = [11.0, 21.5, 10.5, 31.5];
+        // Pure `sum_d lambda_d * e_d[idx_d]`, plus `lambda_2` on the joint null
+        // and nowhere else — which is what this test's NAME asserts, and what it
+        // did not actually assert until `9c6c188b7` (#2623) deleted the hidden
+        // `penalty_shrinkage_ridge`:
+        //
+        //   (0,0)  e = (0, 0)  joint null  -> lambda_2       = 11
+        //   (0,1)  e = (0, 3)              -> 7*3            = 21
+        //   (1,0)  e = (2, 0)              -> 5*2            = 10
+        //   (1,1)  e = (2, 3)              -> 5*2 + 7*3      = 31
+        //
+        // The former `[11.0, 21.5, 10.5, 31.5]` is exactly this plus the `0.5`
+        // rho-independent ridge on every non-null direction — the term #2623
+        // removed as "a different model, not numerical conditioning", whose own
+        // commit message says it deleted "tests that institutionalized it". This
+        // one was missed, so it has been red on `main` since; the joint-null
+        // entry is unchanged because the ridge was never added there.
+        let expected = [11.0, 21.0, 10.0, 31.0];
         for (idx, expected_diag) in expected.iter().copied().enumerate() {
             assert!(
                 (diag[idx] - expected_diag).abs() <= 1e-12,
