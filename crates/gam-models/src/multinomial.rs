@@ -4677,6 +4677,7 @@ mod reference_class_invariance_tests {
 
     use super::*;
     use gam_data::load_dataset_projected;
+    use gam_linalg::faer_ndarray::FaerEigh;
     use std::fmt::Write as _;
     use std::fs;
     use tempfile::tempdir;
@@ -5394,6 +5395,188 @@ mod reference_class_invariance_tests {
                 }
                 eprintln!("#2612 FD (jeffreys={armed}) coord {k:2}:{worst}");
             }
+        }
+    }
+
+    /// #2612 discriminator (zz_measure): at the point the armed refit now stops
+    /// at, is the negative curvature the terminal certificate reports a property
+    /// of the CRITERION, or of the analytic Hessian that reports it?
+    ///
+    /// With the mode-response operator fixed the armed refit reaches
+    /// `|Pg| = 1.276e-3` against `bound = 2.290e-3` and BFGS terminates on its
+    /// gradient tolerance — stationarity is certified. What refuses is the
+    /// second-order conjunct: `interior lambda_min = -1.128e-2` against
+    /// `gradient_floor = 9.616e-4`. The outer Hessian for a Jeffreys-armed family
+    /// is knowingly incomplete (the `D2_beta H_Phi` term needs third directional
+    /// derivatives no family exposes), so that verdict has two readings and they
+    /// call for opposite work:
+    ///
+    ///   * the criterion really does fall along that eigenvector, and the SEARCH
+    ///     stopped early at a saddle — the optimizer owes an escape;
+    ///   * the criterion rises along it, and the CERTIFICATE is reading a matrix
+    ///     that is not the criterion's curvature — the Hessian owes a repair.
+    ///
+    /// The discriminator does not need an exact Hessian: walk the criterion
+    /// itself along the reported minimum eigenvector and read whether the value
+    /// goes down. Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2612_penguins_terminal_negative_curvature_is_real() {
+        let td = tempdir().expect("tempdir");
+        let Some(train) = penguins_stride3_train(&td) else {
+            eprintln!("#2612 penguins curvature probe SKIPPED: dataset unavailable");
+            return;
+        };
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 100,
+            tol: 1e-8,
+            ..MultinomialFitRequest::new(
+                &train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+                &config,
+            )
+        };
+        let parts = penalized_multinomial_formula_parts(&request)
+            .expect("production formula parts must build");
+        let mut probe_options = parts.options.clone();
+        probe_options.compute_covariance = false;
+
+        // The rho the armed refit terminates at, from its own refusal report.
+        const TERMINAL_RHO: [f64; 24] = [
+            0.5479760615083404,
+            4.953765284885532,
+            8.498719656305731,
+            -2.802688029911322,
+            -2.995598248166518,
+            -2.802688029911322,
+            8.909882365327132,
+            8.909882365327132,
+            1.9116946378497857,
+            -1.058535206379601,
+            0.0313034971834482,
+            -8.433811582477187,
+            8.69436831319073,
+            8.69436831319073,
+            8.69436831319073,
+            -0.6515139527220641,
+            -0.6515139527220641,
+            -0.6515139527220641,
+            8.897044748938537,
+            6.570949527783591,
+            7.234627505361151,
+            -0.5549484578569235,
+            -8.433811582477187,
+            -0.9887101040185263,
+        ];
+        let rho = ndarray::Array1::from(TERMINAL_RHO.to_vec());
+        let evaluate = |rho: &ndarray::Array1<f64>, mode| {
+            let fam = parts
+                .family
+                .clone()
+                .with_joint_jeffreys_term(true)
+                .with_joint_initial_log_lambdas(rho.to_vec());
+            crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                &fam,
+                &parts.blocks,
+                &probe_options,
+                rho,
+                mode,
+            )
+        };
+
+        let base = match evaluate(&rho, gam_problem::EvalMode::ValueGradientHessian) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "#2612 curvature probe base REFUSED: {}",
+                    format!("{e}").chars().take(300).collect::<String>()
+                );
+                return;
+            }
+        };
+        let Some(hessian) = base.outer_hessian.clone() else {
+            eprintln!("#2612 curvature probe: no analytic outer Hessian was materialized");
+            return;
+        };
+        eprintln!(
+            "#2612 curvature probe: V={:.12e} |g|inf={:.3e} inner_conv={}",
+            base.objective,
+            base.gradient.iter().fold(0.0_f64, |a, v| a.max(v.abs())),
+            base.inner_converged,
+        );
+
+        // The certificate's curvature verdict is taken on the INTERIOR sub-block
+        // — the free (un-railed) coordinates only — so the direction to walk is
+        // that block's minimum eigenvector, embedded with zeros on the railed
+        // ones. Walking the FULL Hessian's minimum eigenvector instead measures
+        // a direction the box blocks, and reads back the criterion's first-order
+        // slope against the rail rather than its curvature on the face.
+        //
+        // The railed set is the one the refit's own refusal reported.
+        const RAILED: [usize; 18] = [
+            2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23,
+        ];
+        let free: Vec<usize> = (0..hessian.nrows())
+            .filter(|k| !RAILED.contains(k))
+            .collect();
+        let mut sub = ndarray::Array2::<f64>::zeros((free.len(), free.len()));
+        for (i, &ri) in free.iter().enumerate() {
+            for (j, &rj) in free.iter().enumerate() {
+                sub[[i, j]] = 0.5 * (hessian[[ri, rj]] + hessian[[rj, ri]]);
+            }
+        }
+        eprintln!(
+            "#2612 curvature probe: free coordinates {free:?}  gradient there = {:?}",
+            free.iter()
+                .map(|&k| format!("{:+.4e}", base.gradient[k]))
+                .collect::<Vec<_>>()
+        );
+        let (evals, evecs) = match sub.eigh(faer::Side::Lower) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("#2612 curvature probe: interior-block eigendecomposition failed: {e}");
+                return;
+            }
+        };
+        let mut order: Vec<usize> = (0..evals.len()).collect();
+        order.sort_by(|a, b| evals[*a].partial_cmp(&evals[*b]).expect("finite"));
+        eprintln!(
+            "#2612 curvature probe: interior sub-block spectrum = {:?}",
+            order
+                .iter()
+                .map(|&i| format!("{:.4e}", evals[i]))
+                .collect::<Vec<_>>()
+        );
+
+        // Walk the criterion along the interior block's minimum eigenvector. A
+        // genuine negative-curvature direction lowers the value on BOTH sides.
+        let mut direction = ndarray::Array1::<f64>::zeros(hessian.nrows());
+        for (i, &k) in free.iter().enumerate() {
+            direction[k] = evecs[[i, order[0]]];
+        }
+        for step in [1e-3_f64, 1e-2, 1e-1, 5e-1] {
+            let mut readings = Vec::new();
+            for sign in [1.0_f64, -1.0] {
+                let trial = &rho + &(&direction * (sign * step));
+                match evaluate(&trial, gam_problem::EvalMode::ValueOnly) {
+                    Ok(d) => readings.push(format!(
+                        "{sign:+.0}: dV={:+.6e} inner_conv={}",
+                        d.objective - base.objective,
+                        d.inner_converged
+                    )),
+                    Err(e) => readings.push(format!(
+                        "{sign:+.0}: REFUSED {}",
+                        format!("{e}").chars().take(120).collect::<String>()
+                    )),
+                }
+            }
+            let predicted = 0.5 * evals[order[0]] * step * step;
+            eprintln!(
+                "#2612 curvature probe: step={step:.0e} predicted dV={predicted:+.6e}  {}",
+                readings.join("   ")
+            );
         }
     }
 
