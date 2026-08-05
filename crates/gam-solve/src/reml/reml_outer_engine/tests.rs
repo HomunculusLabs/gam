@@ -9168,9 +9168,12 @@ struct NoDrift;
 impl HessianDerivativeProvider for NoDrift {
     fn hessian_derivative_correction(
         &self,
-        _mode_response: &Array1<f64>,
+        mode_response: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        Ok(Some(Array2::zeros((2, 2))))
+        // Shape read off the mode response rather than hard-coded, so this
+        // stays a "no drift" provider at any coefficient width.
+        let width = mode_response.len();
+        Ok(Some(Array2::zeros((width, width))))
     }
 
     fn has_corrections(&self) -> bool {
