@@ -282,7 +282,8 @@ pub mod smooth {
     // inference/curvature/coefficient-group integration tests — keep resolving.
     pub use gam_models::fit_orchestration::drivers::{
         CurvatureInference, FittedTermCollectionWithSpec, SmoothLrCorrection,
-        SmoothLrReferenceDf, SmoothTermLrInference, SpatialLengthScaleOptimizationTiming,
+        SmoothLrReferenceDf, SmoothLrReferenceSource, SmoothTermLrInference,
+        SpatialLengthScaleOptimizationTiming,
         build_term_collection_designs_and_freeze_joint, build_term_collection_designs_joint,
         curvature_inference_forspec, fit_term_collection_forspec,
         fit_term_collection_with_coefficient_groups,

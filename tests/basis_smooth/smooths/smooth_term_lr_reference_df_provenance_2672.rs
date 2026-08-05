@@ -1,30 +1,33 @@
-//! #2672: Wood's smoothing-selection-corrected `edf1` must reach the smooth-term
-//! LR reference d.f. on models that carry a PARAMETRIC term, not only on the
+//! #2672: the LR statistic's own null spectrum must reach the smooth-term
+//! reference on models that carry a PARAMETRIC term, not only on the
 //! `y ~ s(x)` shape every other fixture uses.
 //!
-//! `edf1 = 2·tr(F_jj) − tr(F_jj²)` is computed from the coefficient influence
-//! `F = H⁻¹X'WX`. `F` transforms by SIMILARITY under the parametric column
-//! conditioning — `F_orig = M·F_int·M⁻¹` — and the back-transform used to drop it
-//! rather than apply that map, on the stated ground that the primitive was not
-//! carried. It was: `left_multiply_by_m` and `right_multiply_by_m_inv` are both
-//! defined on the same type. The drop was invisible because
-//! `backtransform_external_result` returns early when the conditioning is
-//! inactive, and the conditioning is active exactly when the model has a
-//! non-intercept parametric column — which no fixture reading `F` back had.
+//! The reference is built from `w = eig(2·F_jj − F_jj²)` on the tested block of
+//! the coefficient influence `F = H⁻¹X'WX`. `F` transforms by SIMILARITY under
+//! the parametric column conditioning — `F_orig = M·F_int·M⁻¹` — and the
+//! back-transform used to drop it rather than apply that map, on the stated
+//! ground that the primitive was not carried. It was: `left_multiply_by_m` and
+//! `right_multiply_by_m_inv` are both defined on the same type. The drop was
+//! invisible because `backtransform_external_result` returns early when the
+//! conditioning is inactive, and the conditioning is active exactly when the
+//! model has a non-intercept parametric column — which no fixture reading `F`
+//! back had.
 //!
-//! With `F` gone, `wood_reference_df` returned `None` for every such model and
-//! the whole-term LR test silently fell back to the raw conditional EDF: the
-//! anti-conservative reference #1766 replaced, measured there at a 5%-level FPR
-//! of ~0.15. The two `smooth_term_lr_size_calibration` fixtures are exactly this
-//! shape (`y ~ x + s(z)`).
+//! With `F` gone the whole spectrum is unavailable and the reference falls back
+//! to the unit-weight shape `χ²_{max(edf, null_dim, 1)}` — every retained
+//! direction counted as if it were unpenalized, which is the anti-conservative
+//! reference #1766 replaced, measured there at a 5%-level FPR of ~0.15. The two
+//! `smooth_term_lr_size_calibration` fixtures are exactly this shape
+//! (`y ~ x + s(z)`).
 //!
-//! The guard is stated as a CONTRAST rather than as a bare "must be Some", so it
-//! cannot pass by the reference d.f. becoming unconditionally available for some
-//! unrelated reason: the parametric-term model and the pure-smooth control must
-//! BOTH publish `wood_edf1`, and both must satisfy Wood's analytic band
-//! `edf ≤ edf1 ≤ 2·edf`.
+//! The guard is stated as a CONTRAST rather than as a bare "must be the spectral
+//! lane", so it cannot pass by the spectrum becoming unconditionally available
+//! for some unrelated reason: the parametric-term model and the pure-smooth
+//! control must BOTH report `NullSpectrum`, both must satisfy Wood's analytic
+//! band `edf ≤ Σw ≤ 2·edf`, and both must publish p-values that are the ones
+//! their own reference produces.
 
-use gam::smooth::smooth_term_lr_inference_forspec;
+use gam::smooth::{SmoothLrReferenceSource, smooth_term_lr_inference_forspec};
 use gam::{
     FitConfig, FitRequest, FitResult, encode_recordswith_inferred_schema, fit_from_formula,
     init_parallelism, materialize,
@@ -174,7 +177,7 @@ fn per_term_edf_plus_unpenalized_columns_equals_edf_total_2672() {
 }
 
 #[test]
-fn wood_edf1_reaches_the_reference_df_with_a_parametric_term_2672() {
+fn the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672() {
     init_parallelism();
     let data = dataset(150, 20672, 0.9);
 
@@ -187,23 +190,25 @@ fn wood_edf1_reaches_the_reference_df_with_a_parametric_term_2672() {
 
     for (label, r) in [("y ~ x + s(z)", &conditioned), ("y ~ s(z)", &unconditioned)] {
         let p = r.ref_df_provenance;
-        let edf1 = p.wood_edf1.unwrap_or_else(|| {
-            panic!(
-                "{label}: Wood's edf1 must reach the LR reference d.f.; \
-                 `wood_reference_df` returned None, which means the coefficient \
-                 influence F = H⁻¹X'WX was unavailable — the #2672 similarity-map \
-                 drop. Provenance: {p:?}"
-            )
-        });
-        // Wood's analytic band. `edf1 = 2·tr(F) − tr(F²) = Σ_i λ_i(2 − λ_i)` with
-        // the block's influence eigenvalues `λ_i ∈ [0, 1]`, so it can neither
-        // fall below `tr(F) = edf` nor exceed `2·edf`. A violation means the
-        // block being differenced is not the block whose trace produced `edf`.
+        assert_eq!(
+            p.source,
+            SmoothLrReferenceSource::NullSpectrum,
+            "{label}: the reference must come from the statistic's own null \
+             spectrum. The unit-weight fallback means the coefficient influence \
+             F = H⁻¹X'WX was unavailable — the #2672 similarity-map drop. \
+             Provenance: {p:?}"
+        );
+        // Wood's analytic band, which is now a statement about the spectrum's
+        // first moment: `Σ w_j = Σ_i λ_i(2 − λ_i)` with the block's influence
+        // eigenvalues `λ_i ∈ [0, 1]`, so it can neither fall below
+        // `tr(F) = edf` nor exceed `2·edf`. A violation means the block being
+        // differenced is not the block whose trace produced `edf`.
         let slack = 1e-6 * p.edf.abs().max(1.0);
         assert!(
-            edf1 >= p.edf - slack && edf1 <= 2.0 * p.edf + slack,
-            "{label}: edf1 = {edf1} must lie in Wood's band [edf, 2·edf] = \
+            p.mean >= p.edf - slack && p.mean <= 2.0 * p.edf + slack,
+            "{label}: the spectral mean {} must lie in Wood's band [edf, 2·edf] = \
              [{}, {}]; provenance {p:?}",
+            p.mean,
             p.edf,
             2.0 * p.edf
         );
@@ -215,12 +220,46 @@ fn wood_edf1_reaches_the_reference_df_with_a_parametric_term_2672() {
              d.f. for this guard to constrain anything; got edf = {}",
             p.edf
         );
-        // And the reference the test is scored against must be at least that
-        // band's lower end: the assembly floors, it never truncates.
+        // Cauchy–Schwarz on the same spectrum: `(Σw)² ≤ q·Σw²` and
+        // `Σw² ≤ (max w)·Σw ≤ Σw`, so the resolved shape and scale must satisfy
+        // `ν ≤ q` and `g ≤ 1`, with equality exactly when every weight is one
+        // (an unpenalized block). Both bounds are analytic, so a violation is an
+        // assembly error rather than a fixture accident.
+        let block = r.ref_df_provenance;
         assert!(
-            r.ref_df >= edf1 - slack,
-            "{label}: ref_df = {} must not fall below edf1 = {edf1}; provenance {p:?}",
-            r.ref_df
+            block.scale > 0.0 && block.scale <= 1.0 + 1e-12,
+            "{label}: the reference scale g = Σw²/Σw must lie in (0, 1]; got {}",
+            block.scale
+        );
+        assert!(
+            block.chi_square_df >= 1.0 - 1e-9,
+            "{label}: ν = (Σw)²/Σw² is at least one whenever any weight is \
+             positive; got {}",
+            block.chi_square_df
+        );
+        // `ref_df` is the mean, so it is `ν·g` by construction. Pinning the
+        // identity catches a future edit that lets the three drift apart.
+        assert!(
+            (r.ref_df - block.chi_square_df * block.scale).abs() <= 1e-9 * r.ref_df.abs().max(1.0),
+            "{label}: ref_df {} must equal ν·g = {}·{}",
+            r.ref_df,
+            block.chi_square_df,
+            block.scale
+        );
+        // The published p-values must be the ones this reference produces —
+        // the report cannot carry a tail probability from a different law than
+        // the one it publishes.
+        assert!(
+            (r.p_value_uncorrected - block.tail_probability(r.statistic_lr)).abs() <= 1e-12,
+            "{label}: p_value_uncorrected {} is not P(χ²_ν > W/g) = {}",
+            r.p_value_uncorrected,
+            block.tail_probability(r.statistic_lr)
+        );
+        assert!(
+            (r.p_value_corrected - block.tail_probability(r.statistic_corrected)).abs() <= 1e-12,
+            "{label}: p_value_corrected {} is not P(χ²_ν > W*/g) = {}",
+            r.p_value_corrected,
+            block.tail_probability(r.statistic_corrected)
         );
     }
 }

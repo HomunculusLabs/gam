@@ -39,7 +39,10 @@
 //! while holding the MC band tight enough for the directional claims; the small-n
 //! cells (where the correction matters and a fit is cheap) carry the load.
 
-use gam::smooth::{SmoothLrCorrection, SmoothTermLrInference, smooth_term_lr_inference_forspec};
+use gam::smooth::{
+    SmoothLrCorrection, SmoothLrReferenceSource, SmoothTermLrInference,
+    smooth_term_lr_inference_forspec,
+};
 use gam::{
     FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
 };
@@ -173,9 +176,13 @@ impl SizeCounts {
             .bartlett_factor_conditional
             .unwrap_or(r.bartlett_factor)
             .max(f64::MIN_POSITIVE);
-        let chi2 = statrs::distribution::ChiSquared::new(r.ref_df).expect("chi2");
-        use statrs::distribution::ContinuousCDF;
-        let p_fixed = (1.0 - chi2.cdf(r.statistic_lr / c_fixed)).clamp(0.0, 1.0);
+        // Read the fixed-λ lane off the SAME reference the driver used, through
+        // the report's own accessor. Reconstructing it as `P(χ²_{ref_df} > W/c)`
+        // was correct only while `ref_df` was a chi-square degrees of freedom;
+        // it is the null MEAN now, and the reference is the `(ν, g)` pair.
+        let p_fixed = r
+            .ref_df_provenance
+            .tail_probability(r.statistic_lr / c_fixed);
         if !(p_first.is_finite() && p_est.is_finite() && p_fixed.is_finite()) {
             return;
         }
@@ -563,34 +570,32 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
     );
 }
 
-/// DIAGNOSTIC (not a contract, #2672): the same grid, scored against several
-/// CANDIDATE reference d.f. definitions from one set of fits.
+/// DIAGNOSTIC (not a contract, #2672): the same grid, scored against the
+/// reference SHAPES the driver could use, from one set of fits.
 ///
-/// `ref_df` does two jobs at once — it is the χ² reference the p-value is read
-/// from, and (through `mean_w = ref_df + Δε` inside `lawley_lr_bartlett_factor`)
-/// the leading term of the statistic's own null mean. Choosing it is therefore a
-/// design question with a measurable answer, and re-fitting the grid once per
-/// candidate would be four times the work for no extra information: every
-/// candidate is a function of quantities `ref_df_provenance` already publishes,
-/// and `Δε` is recoverable exactly from the applied factor as `(c − 1)·d`.
+/// The statistic's null law is `W = Σ_j w_j χ²_1` with `w = eig(2F_jj − F_jj²)`,
+/// so `Σ w_j` (Wood's `edf1`) is its MEAN and `Σ w_j²` is half its variance.
+/// Every candidate below is a different answer to "what do you do with those two
+/// numbers", and all of them are functions of what `ref_df_provenance` publishes,
+/// so no candidate needs its own refit.
 ///
-/// The candidates, and what each one would mean if it is the calibrated one:
+/// * `spectral` — the shipped reference: `P(χ²_ν > W/g)` with `ν = (Σw)²/Σw²`
+///   and `g = Σw²/Σw`. Matches mean and variance; exact when the weights are
+///   equal, including the unpenalized `w ≡ 1 ⇒ χ²_q`.
+/// * `mean-chi2` — `P(χ²_{Σw} > W)`, the pre-#2672 shape with the WPS inflation
+///   and the floors removed. Matches only the mean, so it carries variance
+///   `2Σw` where the statistic carries `2Σw²`; the arm that measures what
+///   matching one moment costs.
+/// * `mean-chi2-floor1` — the same with `.max(1.0)`, the #1766 degeneracy floor.
+///   The floor exists only because `χ²_{d→0}` calls any positive `W` maximally
+///   significant; this arm separates "the floor was load-bearing" from "the floor
+///   was compensating for the wrong shape".
 ///
-/// * `shipped` — `max(edf1, edf) + wps`, i.e. Wood's selection-corrected edf1
-///   PLUS the Wood–Pya–Säfken ρ̂-uncertainty inflation #1872 added on top.
-/// * `no-wps` — `max(edf1, edf)`. #1872 added the WPS term to fix an
-///   anti-conservatism measured while `wood_reference_df` was returning `None`
-///   on this very fixture, so its premise did not survive the influence-matrix
-///   repair. It is also a second correction for λ̂ sampling variation on top of
-///   the analytic one the estimated-λ Lawley lane already applies.
-/// * `edf-only` — `max(edf, 1)`, the raw conditional EDF #1766 replaced. The
-///   control arm: if this is the calibrated one, edf1 is the wrong instrument.
-///
-/// Each candidate is scored twice, uncorrected (`P(χ²_d > W)`) and Bartlett
-/// -corrected (`P(χ²_d > W/c)` with `c = (d + Δε)/d`), so the correction's
-/// contribution is separable from the reference's.
+/// Each candidate is scored uncorrected and Bartlett-corrected (`Δε = (c−1)·d`
+/// recovered exactly from the applied factor), so the correction's contribution
+/// stays separable from the reference's.
 #[test]
-fn zz_measure_size_under_candidate_reference_dfs_2672() {
+fn zz_measure_size_under_candidate_reference_shapes_2672() {
     init_parallelism();
 
     const REPS: usize = 120;
@@ -606,10 +611,10 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
         sum_d: f64,
     }
 
-    const NAMES: [&str; 3] = ["shipped", "no-wps", "edf-only"];
+    const NAMES: [&str; 3] = ["spectral", "mean-chi2", "mean-chi2-floor1"];
 
     eprintln!(
-        "[zz2672-size] {:>16} {:>4} {:>3} {:>5} {:>8} | candidate       mean_d   size@.05(raw/cor)  size@.01(cor)",
+        "[zz2672-size] {:>16} {:>4} {:>3} {:>5} {:>8} | candidate           mean_nu   size@.05(raw/cor)  size@.01(cor)",
         "family", "n", "k", "used", "mean_W"
     );
     for &family in &families {
@@ -618,6 +623,7 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
                 let mut counts = [CandCounts::default(); 3];
                 let mut used = 0usize;
                 let mut sum_w = 0.0;
+                let mut fallback_lane = 0usize;
                 for rep in 0..REPS {
                     let seed = mix_seed(family.label(), n, k, rep);
                     let data = null_replicate(family, n, seed);
@@ -628,26 +634,30 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
                         continue;
                     }
                     let prov = r.ref_df_provenance;
+                    if !matches!(prov.source, SmoothLrReferenceSource::NullSpectrum) {
+                        fallback_lane += 1;
+                    }
                     // `c = mean_w/d` with `mean_w = d + Δε`, so `Δε = (c − 1)·d`
                     // exactly — no re-derivation of the Lawley assembly needed.
                     let delta_eps = (r.bartlett_factor - 1.0) * r.ref_df;
-                    let base = prov.wood_edf1.unwrap_or(0.0).max(prov.edf);
-                    let ds = [
-                        r.ref_df,
-                        base.max(prov.null_dim as f64).max(1.0),
-                        prov.edf.max(prov.null_dim as f64).max(1.0),
+                    // (shape, scale) per candidate.
+                    let shapes = [
+                        (prov.chi_square_df, prov.scale),
+                        (prov.mean, 1.0),
+                        (prov.mean.max(1.0), 1.0),
                     ];
                     used += 1;
                     sum_w += r.statistic_lr;
-                    for (slot, d) in ds.iter().copied().enumerate() {
-                        if !(d.is_finite() && d > 0.0) {
+                    for (slot, (nu, g)) in shapes.iter().copied().enumerate() {
+                        if !(nu.is_finite() && nu > 0.0 && g.is_finite() && g > 0.0) {
                             continue;
                         }
-                        let chi2 = statrs::distribution::ChiSquared::new(d).expect("chi2");
+                        let chi2 = statrs::distribution::ChiSquared::new(nu).expect("chi2");
                         use statrs::distribution::ContinuousCDF;
-                        let sf = |w: f64| (1.0 - chi2.cdf(w)).clamp(0.0, 1.0);
+                        let sf = |w: f64| (1.0 - chi2.cdf(w / g)).clamp(0.0, 1.0);
+                        let d = r.ref_df;
                         let c = ((d + delta_eps) / d).max(f64::MIN_POSITIVE);
-                        counts[slot].sum_d += d;
+                        counts[slot].sum_d += nu;
                         if sf(r.statistic_lr) <= 0.05 {
                             counts[slot].raw_05 += 1;
                         }
@@ -662,7 +672,7 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
                 let denom = used.max(1) as f64;
                 for (slot, name) in NAMES.iter().enumerate() {
                     eprintln!(
-                        "[zz2672-size] {:>16} {n:>4} {k:>3} {used:>5} {:>8.4} | {name:<10} {:>8.4}   {:.3} / {:.3}        {:.3}",
+                        "[zz2672-size] {:>16} {n:>4} {k:>3} {used:>5} {:>8.4} | {name:<16} {:>8.4}   {:.3} / {:.3}        {:.3}",
                         family.label(),
                         sum_w / denom,
                         counts[slot].sum_d / denom,
@@ -671,14 +681,21 @@ fn zz_measure_size_under_candidate_reference_dfs_2672() {
                         counts[slot].cor_01 as f64 / denom,
                     );
                 }
+                if fallback_lane > 0 {
+                    eprintln!(
+                        "[zz2672-size] {:>16} {n:>4} {k:>3}: {fallback_lane}/{used} replicates \
+                         scored on the UNIT-WEIGHT fallback lane (no influence matrix), so their \
+                         `spectral` row is not a spectral reference",
+                        family.label()
+                    );
+                }
             }
         }
     }
     eprintln!(
         "[zz2672-size] read: nominal 0.05 / 0.01; MC s.e. at {REPS} reps is {:.4} / {:.4}. \
-         `mean_W` against each candidate's `mean_d` is the first-order mean check — \
-         the reference d.f. IS the statistic's first-order null mean under \
-         `E[W] = d + Δε`.",
+         `mean_W` against the `mean-chi2` row's `mean_nu` is the first-order mean check — \
+         that candidate's shape parameter IS the statistic's null mean.",
         size_se(0.05, REPS),
         size_se(0.01, REPS)
     );

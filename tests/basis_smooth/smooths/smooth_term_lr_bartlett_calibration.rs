@@ -35,7 +35,7 @@
 //! This is the truth-recovery / calibration bar (not a reference-tool match):
 //! the ground truth here is the exact null distribution of the LR statistic.
 
-use gam::smooth::smooth_term_lr_inference_forspec;
+use gam::smooth::{SmoothLrReferenceSource, smooth_term_lr_inference_forspec};
 use gam::{
     FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
 };
@@ -344,42 +344,42 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     );
 }
 
-/// DIAGNOSTIC (not a contract, #2672): decompose the reference d.f. `d` against
-/// the empirical null mean of `W`, component by component.
+/// DIAGNOSTIC (not a contract, #2672): the reference's two spectral moments
+/// against the empirical null behaviour of `W`.
 ///
-/// `d` is BOTH the χ² reference the test is scored against AND — through
-/// `E[W] = d + Δε` inside `lawley_lr_bartlett_factor` — the leading term of the
-/// statistic's own null mean. So `mean(W) = 2.03` against `d = 5.71` with a
-/// Bartlett factor of `1.0027` has two readings that the published scalars
-/// cannot separate:
+/// The statistic's null law is `W = Σ_j w_j χ²_1` with `w = eig(2F_jj − F_jj²)`,
+/// so `mean = Σ w_j` is `E[W|λ]` and `second = Σ w_j²` is `Var(W|λ)/2`. Two
+/// readings the printed table separates:
 ///
-/// * the Lawley cumulant assembly is missing the term that would supply
-///   `Δε ≈ −3.67`, or
-/// * `d` itself is over-counted and the assembly is right that `Δε ≈ 0`.
+/// * `mean` tracking `mean(W)` ⇒ the reference's location is right and any
+///   residual miscalibration is shape, not level;
+/// * `nu` far below the block dimension with `g` far below one ⇒ the weights are
+///   spread, which is exactly the regime where a mean-matched χ² (the pre-#2672
+///   reference) is conservative and the scaled reference is not.
 ///
-/// `ref_df_provenance` names the supplier. Read the printed table as: `wood_edf1`
-/// tracking `mean(W)` ⇒ the reference is sound and the shift is missing;
-/// `wood_edf1 + rho_uncertainty` overshooting `mean(W)` by the observed factor ⇒
-/// the reference is inflated by a component that does not belong in the null
-/// mean of this statistic.
+/// `pooled(W)/pooled(mean)` is NOT expected to be one: `λ̂` is selected from the
+/// same data, so the pairing is per-replicate and the unconditional means need
+/// not agree. That mismatch is what the per-replicate reference exists to absorb,
+/// and reading it as a defect is the mistake this thread made twice.
 #[test]
-fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
+fn zz_measure_reference_spectral_moments_against_empirical_lr_mean() {
     init_parallelism();
 
     const N: usize = 60;
     const REPS: usize = 40;
 
     let mut sum_w = 0.0;
-    let mut sum_wood = 0.0;
+    let mut sum_mean = 0.0;
+    let mut sum_second = 0.0;
+    let mut sum_nu = 0.0;
+    let mut sum_scale = 0.0;
     let mut sum_edf = 0.0;
-    let mut sum_rho = 0.0;
-    let mut sum_ref = 0.0;
     let mut sum_factor = 0.0;
-    let mut wood_missing = 0usize;
+    let mut fallback = 0usize;
     let mut count = 0usize;
     eprintln!(
         "[zz2672] {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>4}",
-        "rep", "W", "ref_df", "wood_edf1", "edf", "rho_unc", "c", "nd"
+        "rep", "W", "mean", "second", "nu", "g", "c", "nd"
     );
     for rep in 0..REPS {
         let data = null_replicate(N, 1000 + rep as u64);
@@ -388,46 +388,48 @@ fn zz_measure_reference_df_provenance_against_empirical_lr_mean() {
             continue;
         }
         let p = r.ref_df_provenance;
-        let wood = p.wood_edf1.unwrap_or(f64::NAN);
-        if p.wood_edf1.is_none() {
-            wood_missing += 1;
+        if !matches!(p.source, SmoothLrReferenceSource::NullSpectrum) {
+            fallback += 1;
         }
         if rep < 12 {
             eprintln!(
                 "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4}",
                 r.statistic_lr,
-                r.ref_df,
-                wood,
-                p.edf,
-                p.rho_uncertainty,
+                p.mean,
+                p.second_moment,
+                p.chi_square_df,
+                p.scale,
                 r.bartlett_factor,
                 p.null_dim
             );
         }
         sum_w += r.statistic_lr;
-        sum_wood += if wood.is_finite() { wood } else { 0.0 };
+        sum_mean += p.mean;
+        sum_second += p.second_moment;
+        sum_nu += p.chi_square_df;
+        sum_scale += p.scale;
         sum_edf += p.edf;
-        sum_rho += p.rho_uncertainty;
-        sum_ref += r.ref_df;
         sum_factor += r.bartlett_factor;
         count += 1;
     }
     assert!(count > 0, "no replicate produced a finite LR report");
     let d = count as f64;
     eprintln!(
-        "[zz2672] MEAN over {count} reps: W={:.4}  ref_df={:.4}  wood_edf1={:.4}  edf={:.4}  \
-         rho_unc={:.4}  c={:.6}  (wood_edf1 missing on {wood_missing})",
+        "[zz2672] MEAN over {count} reps: W={:.4}  mean={:.4}  second={:.4}  nu={:.4}  \
+         g={:.4}  edf={:.4}  c={:.6}  (fallback lane on {fallback})",
         sum_w / d,
-        sum_ref / d,
-        sum_wood / d,
+        sum_mean / d,
+        sum_second / d,
+        sum_nu / d,
+        sum_scale / d,
         sum_edf / d,
-        sum_rho / d,
         sum_factor / d,
     );
     eprintln!(
-        "[zz2672] read: mean(W)/mean(wood_edf1) = {:.4}, mean(W)/mean(ref_df) = {:.4}",
-        (sum_w / d) / (sum_wood / d).max(f64::MIN_POSITIVE),
-        (sum_w / d) / (sum_ref / d).max(f64::MIN_POSITIVE),
+        "[zz2672] read: pooled W/mean = {:.4} (NOT expected to be 1 under selected λ̂); \
+         mean g = {:.4} — the factor by which a mean-matched χ² over-states the spread.",
+        (sum_w / d) / (sum_mean / d).max(f64::MIN_POSITIVE),
+        sum_scale / d,
     );
 }
 

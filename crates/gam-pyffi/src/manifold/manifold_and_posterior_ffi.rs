@@ -1689,8 +1689,17 @@ struct SmoothTermLrRow {
     term_idx: usize,
     /// Uncorrected likelihood-ratio statistic `W = 2(ℓ_full − ℓ_null) ≥ 0`.
     statistic_lr: f64,
-    /// Reference d.f. `d` (Wood truncation `tr(F)²/tr(F²)`; same as the Wald row).
+    /// The statistic's first-order null mean `Σ_j w_j = 2·tr(F_jj) − tr(F_jj²)`
+    /// (Wood's `edf1`), which is the `d` the Bartlett factor `c = 1 + Δε/d` is
+    /// denominated in — NOT a chi-square degrees of freedom. See
+    /// `reference_chi_square_df` / `reference_scale` for the reference itself.
     ref_df: f64,
+    /// Shape of the reference the p-values are read from: `ν = (Σw)²/Σw²`.
+    reference_chi_square_df: f64,
+    /// Scale of that reference: `g = Σw²/Σw`, so `p = P(χ²_ν > W/g)`. It is
+    /// exactly `1.0` for an unpenalized block (`w ≡ 1`), which is what makes the
+    /// penalized test degenerate to the classical `χ²_q` rather than resemble it.
+    reference_scale: f64,
     /// Lawley LR Bartlett factor `c = 1 + Δε/d` (1.0 when uncorrected).
     bartlett_factor: f64,
     /// Fixed-λ conditional Lawley factor when the applied factor also includes
@@ -1896,6 +1905,8 @@ fn smooth_term_lr_inference_dataset_json_impl(
             term_idx: r.term_idx,
             statistic_lr: r.statistic_lr,
             ref_df: r.ref_df,
+            reference_chi_square_df: r.ref_df_provenance.chi_square_df,
+            reference_scale: r.ref_df_provenance.scale,
             bartlett_factor: r.bartlett_factor,
             bartlett_factor_conditional: r.bartlett_factor_conditional,
             rho_variation_shift: r.rho_variation_shift,

@@ -6213,63 +6213,69 @@ mod exact_joint_seed_config_tests {
 }
 
 #[cfg(test)]
-mod wood_reference_df_tests {
+mod lr_null_spectrum_moment_tests {
     use super::*;
 
-    // The whole-term LR reference d.f. (#1766). `wood_reference_df` returns
-    // Wood's smoothing-selection-corrected `edf1 = 2·tr(F) − tr(F²)` on the
-    // coefficient-influence block, NOT the earlier Satterthwaite ratio
-    // `tr(F)²/tr(F²)` that collapsed toward 0 for a boundary-shrunk term.
+    // The whole-term LR reference (#1766, #1872, #2672). The first spectral
+    // moment `tr(2F − F²)` IS Wood's `edf1`; what changed under #2672 is that it
+    // is now the MEAN of a reference whose SHAPE comes from the second moment,
+    // instead of being handed to a chi-square as a degrees of freedom.
 
     #[test]
-    fn edf1_equals_two_trace_minus_trace_of_square() {
+    fn the_first_moment_is_wood_edf1() {
         // A symmetric smoother block with eigenvalues {0.9, 0.4}: a partially
         // shrunk penalized term. edf = tr = 1.3; tr(F²) = 0.81 + 0.16 = 0.97;
         // edf1 = 2·1.3 − 0.97 = 1.63. (Diagonal ⇒ block F² trace = Σ λ².)
         let f = ndarray::array![[0.9_f64, 0.0], [0.0, 0.4]];
-        let got = wood_reference_df(Some(&f), &(0..2)).unwrap();
+        let [mean, second] = lr_null_spectral_moments(Some(&f), &(0..2)).unwrap();
         assert!(
-            (got - 1.63).abs() < 1e-12,
-            "edf1 should be 2*tr - tr(F^2) = 1.63, got {got}"
+            (mean - 1.63).abs() < 1e-12,
+            "the first spectral moment is Wood's edf1 = 2*tr - tr(F^2) = 1.63, got {mean}"
         );
-        // And it must dominate the raw edf (edf1 >= edf) — the invariant the LR
-        // reference relies on.
-        let edf = 1.3;
-        assert!(got >= edf - 1e-12, "edf1 {got} must be >= edf {edf}");
+        // And it dominates the raw edf, analytically: w_j = 2f_j − f_j² ≥ f_j on
+        // [0, 1], so no `.max(edf)` guard is needed to make it hold.
+        assert!(mean >= 1.3 - 1e-12, "edf1 {mean} must be >= edf 1.3");
+        // Second moment: w = {0.99, 0.64} ⇒ Σw² = 0.9801 + 0.4096.
+        assert!((second - 1.3897).abs() < 1e-12, "second moment {second}");
     }
 
     #[test]
-    fn edf1_never_collapses_below_edf_when_offdiagonals_blow_up() {
-        // The #1766 degeneracy: a NON-symmetric influence block whose
-        // off-diagonal coupling makes tr(F²) = Σ_ij F_ij F_ji run away, so the
-        // old Satterthwaite ratio tr(F)²/tr(F²) crashed toward 0. Here tr = 1.0
-        // but tr(F²) = 1·1 + 50·(-50) ... take F with large opposite-sign
-        // off-diagonals so tr(F²) is huge: edf1 = 2·tr − tr(F²) would go very
-        // negative, and the `.max(tr)` guard must floor it back at edf = tr.
+    fn a_corrupted_block_degrades_to_the_fallback_rather_than_being_floored() {
+        // A real influence block has eigenvalues in [0, 1], so `tr(F²)` cannot
+        // run away. Numerical corruption can still produce one that does, and
+        // the pre-#2672 code floored `edf1` back at `tr` — silently returning a
+        // reference derived from a block it had just decided was unusable. The
+        // spectral reference does not paper over it: the first moment goes
+        // negative and the assembly degrades to the unit-weight lane, VISIBLY.
         let f = ndarray::array![[0.5_f64, 40.0], [40.0, 0.5]];
-        let tr = 1.0_f64;
-        let got = wood_reference_df(Some(&f), &(0..2)).unwrap();
-        assert!(
-            got >= tr - 1e-12,
-            "edf1 must be floored at edf (=tr={tr}) even when tr(F^2) explodes, got {got}"
-        );
-        assert!(
-            got.is_finite() && got > 0.0,
-            "edf1 must stay finite/positive"
-        );
+        let [mean, _] = lr_null_spectral_moments(Some(&f), &(0..2)).unwrap();
+        assert!(mean < 0.0, "the corrupted block's first moment is {mean}");
+        let reference = lr_null_reference(Some(&f), &(0..2), 1.0, 1);
+        assert_eq!(reference.source, SmoothLrReferenceSource::UnitWeightFallback);
+        assert_eq!(reference.chi_square_df, 1.0);
+        assert_eq!(reference.scale, 1.0);
     }
 
     #[test]
-    fn returns_none_on_nonpositive_or_missing_trace() {
+    fn returns_none_on_a_missing_or_out_of_range_block() {
         // No influence matrix at all → None (caller falls back to the
-        // max(edf, null_dim, 1) floor).
-        assert!(wood_reference_df(None, &(0..2)).is_none());
-        // A fully-shrunk block with a non-positive trace → None.
-        let zero = ndarray::array![[0.0_f64, 0.0], [0.0, 0.0]];
-        assert!(wood_reference_df(Some(&zero), &(0..2)).is_none());
+        // unit-weight `max(edf, null_dim, 1)` shape).
+        assert!(lr_null_spectral_moments(None, &(0..2)).is_none());
         // An out-of-bounds range → None, never a panic.
         let f = ndarray::array![[0.5_f64, 0.0], [0.0, 0.5]];
-        assert!(wood_reference_df(Some(&f), &(0..5)).is_none());
+        assert!(lr_null_spectral_moments(Some(&f), &(0..5)).is_none());
+        // A fully-shrunk block has ZERO moments, which is not a usable
+        // reference either — the caller must see the fallback, not a divide by
+        // zero.
+        let zero = ndarray::array![[0.0_f64, 0.0], [0.0, 0.0]];
+        assert_eq!(
+            lr_null_spectral_moments(Some(&zero), &(0..2)).unwrap(),
+            [0.0, 0.0]
+        );
+        assert_eq!(
+            lr_null_reference(Some(&zero), &(0..2), 0.0, 0).source,
+            SmoothLrReferenceSource::UnitWeightFallback
+        );
     }
 }
 
@@ -8628,39 +8634,121 @@ impl SmoothLrCorrection {
     }
 }
 
-/// The additive assembly behind [`SmoothTermLrInference::ref_df`], reported
-/// component by component (#2672).
+/// Which lane supplied a [`SmoothLrReferenceDf`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothLrReferenceSource {
+    /// The statistic's own null spectrum `w = eig(2·F_jj − F_jj²)`, read off the
+    /// coefficient-influence block. This is the derived lane.
+    NullSpectrum,
+    /// The influence matrix was unavailable (or its block was degenerate), so
+    /// the reference falls back to the classical unit-weight shape
+    /// `χ²_{max(edf, null_dim, 1)}` — every retained direction counted as if it
+    /// were unpenalized. It is the only reference recoverable without `F`, and
+    /// it is conservative for the same reason the whole pre-#2672 assembly was:
+    /// unit weights over-state the statistic's spread.
+    UnitWeightFallback,
+}
+
+/// The reference distribution [`SmoothTermLrInference`] scores its statistic
+/// against, reported as the two spectral moments it is built from (#2672).
 ///
-/// `ref_df` is the χ² reference the whole test is scored against AND — through
-/// `E[W] = d + Δε` in [`gam_terms::inference::lawley::lawley_lr_bartlett_factor`]
-/// — the *leading term of the statistic's own null mean*. A single scalar
-/// cannot say which of its four candidate suppliers produced it, so a
-/// disagreement between the analytic mean and the empirical one is
-/// unattributable from the report alone. That is the shape #2672 spent three
-/// measurement rounds on: `mean(W) = 2.03` against `d = 5.71` with a Bartlett
-/// factor of `1.0027`, and no way to tell an over-counted reference from a
-/// missing cumulant term without instrumenting the driver.
+/// # What the statistic's null law actually is
+///
+/// Expand the log-likelihood quadratically about the unpenalized MLE `β̃` and
+/// write `I = X'WX`, `S` for the penalty, `H = I + S`, `j` for the tested block
+/// and `n` for the retained one. The penalized fit is `β̂ = Fβ̃` with
+/// `F = H⁻¹I`, and the null fit is the retained block's own projection, so
+///
+/// ```text
+/// W = β̃_j' (Ĩ_jj − N) β̃_j ,   β̃_j ~ N(0, Ĩ_jj⁻¹)
+/// ```
+///
+/// with `Ĩ_jj = I_jj − I_jn I_nn⁻¹ I_nj` the Schur complement and
+/// `N = [S H⁻¹ I H⁻¹ S]_jj`. Setting `H̃ = Ĩ_jj + S_jj` and `P = H̃⁻¹S_jj`, that
+/// collapses to `(Ĩ_jj − N)Ĩ_jj⁻¹ = H̃(I − P²)H̃⁻¹`, and — because the block of
+/// the GLOBAL influence matrix equals the Schur-complement influence,
+/// `F_jj = H̃⁻¹Ĩ_jj = I − P` — the eigenvalues are exactly `2F_jj − F_jj²`.
+/// So
+///
+/// ```text
+/// W = Σ_j w_j χ²_1 ,   w = eig(2·F_jj − F_jj²) ∈ (0, 1]^q.
+/// ```
+///
+/// # Consequences, and what this replaced
+///
+/// `Σ w_j = 2 tr(F_jj) − tr(F_jj²)` is Wood's `edf1`. So `edf1` is not a
+/// citation here, it is the statistic's first-order null MEAN, derived. What it
+/// is not is a chi-square degrees of freedom: `Var(W) = 2 Σ w_j²` against the
+/// mean-matched `χ²_{Σw}`'s `2 Σ w_j`, and `w_j ≤ 1`, so a mean-matched chi-square
+/// is over-dispersed for every penalized term and the test is conservative by
+/// construction. Measured on a spectrum shaped like a shrunk smooth
+/// (`0.08, 0.02, 0.005, 0.001, 2e-4`), at `x = 8·Σw` the exact tail is `1.4e-3`
+/// while the mean-matched chi-square reports `3.6e-2` — 26× conservative.
+///
+/// Matching the second moment as well fixes the shape with no free constant:
+/// `W ≈ g·χ²_ν` with `ν = (Σw)²/Σw²` and `g = Σw²/Σw`. That is EXACT whenever the
+/// weights are equal, which includes the classical unpenalized case
+/// `w ≡ 1 ⇒ ν = q, g = 1 ⇒ χ²_q`, so the penalized test degenerates to the
+/// textbook one rather than merely resembling it.
+///
+/// Three things went away with the mean-only reference, and none of them needed
+/// a replacement:
+///
+/// * `+ tr(X'WX · J Var(ρ̂) Jᵀ)/φ`, the Wood–Pya–Säfken smoothing-parameter
+///   inflation added under #1872. That is a *coefficient-covariance* correction
+///   for AIC; it is not a term in this statistic's null law, and it is largest
+///   exactly where the outer criterion is flattest — i.e. where the term has the
+///   LEAST effective d.f. Measured on the #2672 fixture: a replicate with
+///   `edf = 0.070` was handed `rho_uncertainty = 1.79`, twenty-five times the
+///   term's own effective d.f. It was holding the size up by an unrelated
+///   mechanism. λ̂'s sampling variation enters `E[W]` through the estimated-λ
+///   Lawley shift already applied as the Bartlett factor, at the `O(n⁻¹)` order
+///   it belongs to.
+/// * `.max(edf)` and `.max(null_dim)`. Both are automatic: `w_j = 1` exactly on
+///   an unpenalized direction, so `Σ w_j ≥ null_dim` by construction, and `Σ w_j`
+///   dominates `tr(F_jj) = edf` because `w_j = 2f_j − f_j² ≥ f_j` for `f_j ∈ [0,1]`.
+/// * `.max(1.0)`, the #1766 degeneracy floor. It existed because `χ²_d` with
+///   `d → 0` reports any positive `W` as maximally significant. The scaled
+///   reference cannot degenerate that way: as REML shrinks a term the weights and
+///   the statistic collapse *together*, `W/g` stays `O(1)`, and `ν → q`. The floor
+///   was a patch on the wrong shape, not on a missing quantity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmoothLrReferenceDf {
-    /// Wood's smoothing-selection-corrected `edf1 = 2·tr(F_bb) − tr(F_bb²)` on
-    /// the term's coefficient-influence block, or `None` when the influence
-    /// matrix was unavailable or the block trace was non-finite/non-positive (a
-    /// fully collapsed term), in which case the `edf` floor below supplies the
-    /// base.
-    pub wood_edf1: Option<f64>,
-    /// The term's conditional effective degrees of freedom (`per_term_edf`), the
-    /// floor under `wood_edf1` and the fallback base when it is `None`.
+    /// First spectral moment `Σ_j w_j = 2·tr(F_jj) − tr(F_jj²)` — Wood's `edf1`,
+    /// and exactly the statistic's first-order null mean `E[W|λ]`. This is the
+    /// `d` the Lawley Bartlett factor `c = 1 + Δε/d` is denominated in.
+    pub mean: f64,
+    /// Second spectral moment `Σ_j w_j² = tr((2F_jj − F_jj²)²)`, i.e. `Var(W)/2`.
+    pub second_moment: f64,
+    /// Shape of the reference actually used: `ν = mean²/second_moment`.
+    pub chi_square_df: f64,
+    /// Scale of the reference actually used: `g = second_moment/mean`, so the
+    /// tail probability is `P(χ²_ν > W/g)`.
+    pub scale: f64,
+    /// The term's conditional effective degrees of freedom `tr(F_jj)`
+    /// (`per_term_edf`), reported for continuity with the summary table and used
+    /// as the fallback base when the influence matrix is unavailable.
     pub edf: f64,
-    /// The Wood–Pya–Säfken smoothing-parameter-uncertainty inflation
-    /// `tr(X'WX · J Var(ρ̂) Jᵀ)/φ` restricted to the term's coefficient block, or
-    /// `0.0` when the correction artifacts were not computed.
-    pub rho_uncertainty: f64,
     /// The term's joint unpenalized null-space dimension `dim(∩_k null(S_k))`,
-    /// the degenerate-collapse floor.
+    /// reported because it is the analytic lower bound on `mean` and therefore
+    /// the cheapest check that the spectrum was assembled on the right block.
     pub null_dim: usize,
-    /// The resolved reference actually used:
-    /// `max(max(wood_edf1, edf) + rho_uncertainty, null_dim, 1)`.
-    pub resolved: f64,
+    /// Which lane supplied the reference.
+    pub source: SmoothLrReferenceSource,
+}
+
+impl SmoothLrReferenceDf {
+    /// `P(W > statistic)` under this reference, i.e. `P(χ²_ν > statistic/g)`.
+    ///
+    /// A non-finite statistic propagates as `NaN` rather than being scored: the
+    /// LR statistic is `NaN` exactly when the null refit did not produce a finite
+    /// log-likelihood, and there is no p-value for a test that was not run.
+    pub fn tail_probability(&self, statistic: f64) -> f64 {
+        if !statistic.is_finite() {
+            return f64::NAN;
+        }
+        gam_math::probability::chi_square_sf(statistic / self.scale, self.chi_square_df)
+    }
 }
 
 /// The Bartlett-corrected per-term significance report for one penalized smooth
@@ -8677,16 +8765,17 @@ pub struct SmoothTermLrInference {
     /// The uncorrected likelihood-ratio statistic `W = 2(ℓ_full − ℓ_null)`,
     /// floored at zero (a non-negative LR by construction).
     pub statistic_lr: f64,
-    /// Reference degrees of freedom `d`: Wood's smoothing-selection-corrected
-    /// `edf1 = 2·tr(F_bb) − tr(F_bb²)` on the term's influence block, floored at
-    /// the term EDF, inflated by the WPS ρ̂-uncertainty df, and floored again at
-    /// the term's unpenalized null-space dimension and at one. See
-    /// [`Self::ref_df_provenance`] for the component-by-component assembly.
+    /// The statistic's first-order null mean `d = E[W|λ] = Σ_j w_j`, which is
+    /// Wood's `edf1 = 2·tr(F_bb) − tr(F_bb²)` exactly (see
+    /// [`SmoothLrReferenceDf`] for why that is a derivation and not a citation).
+    /// This is the `d` the Lawley Bartlett factor `c = 1 + Δε/d` is denominated
+    /// in. It is **not** a chi-square degrees of freedom — the reference the
+    /// p-values are read from is [`Self::ref_df_provenance`]'s
+    /// `chi_square_df`/`scale` pair, which coincides with `ref_df` only when the
+    /// tested block is unpenalized.
     pub ref_df: f64,
-    /// Which component supplied [`Self::ref_df`] (#2672). Reported rather than
-    /// inferable because `ref_df` doubles as the leading term of the null mean
-    /// `E[W] = d + Δε`, so an error in any one component is indistinguishable
-    /// from a missing Lawley cumulant when only the total is published.
+    /// The reference distribution itself: both spectral moments of the null law,
+    /// the `(ν, g)` pair resolved from them, and which lane supplied it (#2672).
     pub ref_df_provenance: SmoothLrReferenceDf,
     /// Lawley LR Bartlett factor `c = E[W]/d = 1 + Δε/d` when computable, else
     /// `1.0` (no correction).
@@ -8700,10 +8789,13 @@ pub struct SmoothTermLrInference {
     pub rho_variation_shift: Option<f64>,
     /// Bartlett-corrected statistic `W* = W / c`.
     pub statistic_corrected: f64,
-    /// Uncorrected p-value `P(χ²_d > W)`.
+    /// Uncorrected tail probability `P(χ²_ν > W/g)` under the null law's own
+    /// two-moment reference.
     pub p_value_uncorrected: f64,
-    /// Corrected p-value `P(χ²_d > W*)`; equals the uncorrected value when no
-    /// correction was applied.
+    /// Corrected tail probability `P(χ²_ν > W*/g)`; equals the uncorrected value
+    /// when no correction was applied. Dividing the statistic by `c` and scaling
+    /// every spectral weight by `c` are the same operation on this reference, so
+    /// the Bartlett correction composes without a second convention.
     pub p_value_corrected: f64,
     /// Whether the second-order correction is **material** (#939 deliverable 4):
     /// the per-test diagnostic "is `n` too small for first-order inference
@@ -8877,9 +8969,6 @@ pub fn smooth_term_lr_inference_forspec(
     let smooth_start = p_total.saturating_sub(full.design.smooth.total_smooth_cols());
     let fitted_likelihood = resolved_likelihood_for_fit(&full.fit)?;
     let family_disp = lawley_dispersion_for_family(&fitted_likelihood, &full.fit)?;
-    let coefficient_covariance_scale = fitted_likelihood
-        .coefficient_covariance_scale(family_disp)
-        .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
 
     let mut out = Vec::<SmoothTermLrInference>::new();
     for (term_idx, design_term) in full.design.smooth.terms.iter().enumerate() {
@@ -8933,86 +9022,21 @@ pub fn smooth_term_lr_inference_forspec(
         // badly conservative for genuine moderate signals while only accidentally
         // masking the collapse.
         let null_dim = design_term.wald_unpenalized_dim();
-        // χ² reference d.f. for the whole-term LR test. The statistic W tests the
-        // term present vs entirely absent, so the reference d.f. must be at least
-        // the dimension the term spans when present — its joint null-space
-        // dimension (`null_dim`), the effective d.f. it uses in the fit (`edf`),
-        // and never below 1 (you cannot test "is this function present" with
-        // fewer than one degree of freedom). The primary reference is Wood's
-        // smoothing-selection-corrected `edf1 = 2·tr(F) − tr(F²)`
-        // (`wood_reference_df`), which dominates in calibrated and high-power
-        // fits and removes the post-selection left-tail anti-conservatism the raw
-        // `edf` reference leaves behind. The floor guards the DEGENERATE collapse:
-        // as REML shrinks a term fully onto its null space `edf1 → edf → ~0` and
-        // the non-symmetric `F = H⁻¹X'WX` can make the block `tr(F²)` numerically
-        // unreliable, so `wood_reference_df` returns `None` and the floor supplies
-        // `max(edf, null_dim, 1)`. Without a floor, a positive `W` referenced
-        // against `χ²_{~0}` would report a flat, shrunk-to-null term as MAXIMALLY
-        // significant (`p ~ 1e-12`) — a Type-I error decided by a degenerate
-        // reference d.f., not the data (#1766). The floor binds ONLY on that
-        // collapse; `edf` and `null_dim` never exceed `edf1` in a healthy fit.
-        // This mirrors the summary Wald path, which floors its reference at the
-        // statistic's own rank for the same reason.
-        // Read the RETAINED first-order correction, not the fit's PRIMARY one.
-        // `wps_block_uncertainty_df` guards `tr(P X'WX P · P C P) >= 0`, which
-        // holds when both factors are PSD. `X'WX` is PSD by construction, so a
-        // negative trace says `C` is not — and the primary correction may be a
-        // sigma-point CUBATURE upgrade approximating `E[H⁻¹] + Cov(β̂)`, which
-        // carries no PSD guarantee at all. `smoothing_correction_first_order()`
-        // is the exact first-order IFT term `J·Var(ρ)·Jᵀ`, a congruence transform
-        // of a covariance and therefore PSD by construction.
-        //
-        // This is a documented contract, not an inference: `result_types.rs` says
-        // of that accessor that it "is the accessor the #946 WPS corrected-EDF /
-        // AIC channel MUST read from … independent of whether the fit's PRIMARY
-        // correction escalated to sigma-point cubature for some other consumer",
-        // and `model_comparison.rs` — the other consumer of the same quantity on
-        // the same covariance scale — already complies. Only this call site was
-        // left behind, and it refused the whole LR call on
-        // `WPS corrected-EDF trace must be non-negative, got -0.008235329469858778`
-        // — one fit, seen identically from both `smooth_term_lr_size_calibration`
-        // tests (#2672). Note the refusal is not a mis-sized tolerance: `-8.2e-3`
-        // is orders of magnitude above round-off on this scale.
-        let rho_uncertainty_df = match wps_block_uncertainty_df(
-            full.fit.weighted_gram(),
-            full.fit.smoothing_correction_first_order(),
-            &coeff_range,
-            coefficient_covariance_scale,
-        )? {
-            // Missing correction artifacts explicitly mean that this optional
-            // WPS term was not computed; the base Wood reference df remains.
-            Some(extra_df) => extra_df,
-            None => 0.0,
-        };
-        // #1766 also carried a NON-CONVERGED collapse floor here — floor `ref_df`
-        // at the term's full basis dimension when the outer fit had not certified
-        // AND `edf` had fallen below the term's own unpenalized floor (the #1762
-        // flat-valley stall: a large wiggly `β`, so a large `W`, alongside an
-        // influence trace reading ~0). `a6dbd67a7` removed it in a bulk landing
-        // with no measurement, which looked like a silent regression.
-        //
-        // It is deliberately NOT restored, and the reason is structural rather
-        // than statistical: `UnifiedFitResult::try_from_parts` now REFUSES to
-        // assemble a fit at all when the optimizer reports non-convergence
-        // ("optimizer reported non-convergence"), so `outer_converged` is no
-        // longer even a field on the result. The state that guard defended
-        // against can no longer reach this function — it becomes an `Err` from
-        // the fit, one layer up, which is what SPEC asks for. Restoring the floor
-        // would add a branch whose condition is unreachable by construction.
-        let wood_edf1 = wood_reference_df(influence, &coeff_range);
-        let ref_df = (wood_edf1.unwrap_or(0.0).max(edf) + rho_uncertainty_df)
-            .max(null_dim as f64)
-            .max(1.0);
-        if !(ref_df.is_finite() && ref_df > 0.0) {
+        // The reference the whole-term LR statistic is scored against: the first
+        // two moments of its OWN null law, not a chi-square fitted to its mean.
+        // See `lr_null_reference` for the derivation and for what this replaced.
+        let reference = lr_null_reference(influence, &coeff_range, edf, null_dim);
+        let ref_df = reference.mean;
+        if !(ref_df.is_finite()
+            && ref_df > 0.0
+            && reference.chi_square_df.is_finite()
+            && reference.chi_square_df > 0.0
+            && reference.scale.is_finite()
+            && reference.scale > 0.0)
+        {
             continue;
         }
-        let ref_df_provenance = SmoothLrReferenceDf {
-            wood_edf1,
-            edf,
-            rho_uncertainty: rho_uncertainty_df,
-            null_dim,
-            resolved: ref_df,
-        };
+        let ref_df_provenance = reference;
 
         // Null model: drop this smooth term from the spec and refit. The term's
         // name pins which spec entry to remove (design and spec share names).
@@ -9053,11 +9077,7 @@ pub fn smooth_term_lr_inference_forspec(
             _ => (f64::NAN, None),
         };
 
-        let p_uncorrected = if statistic_lr.is_finite() {
-            gam_math::probability::chi_square_sf(statistic_lr, ref_df)
-        } else {
-            f64::NAN
-        };
+        let p_uncorrected = reference.tail_probability(statistic_lr);
 
         // Magic Bartlett correction: only when the LR statistic is finite, the
         // family has closed-form jets, n is in the resolvable regime, and the
@@ -9124,8 +9144,11 @@ pub fn smooth_term_lr_inference_forspec(
                     }
                     bartlett_factor = c_applied;
                     statistic_corrected = statistic_lr / c_applied;
-                    p_corrected =
-                        gam_math::probability::chi_square_sf(statistic_corrected, ref_df);
+                    // `W* = W/c` and "rescale every spectral weight by `c`" are
+                    // the same operation on this reference — the law is exactly
+                    // scale-equivariant — so the correction composes with the
+                    // scaled reference without a second convention.
+                    p_corrected = reference.tail_probability(statistic_corrected);
                 }
             }
         }
@@ -9200,139 +9223,212 @@ fn lawley_dispersion_for_family(
         .map(|dispersion| dispersion.phi())
 }
 
-fn wps_block_uncertainty_df(
-    weighted_gram: Option<&Array2<f64>>,
-    smoothing_correction: Option<&Array2<f64>>,
+/// The reference distribution for the whole-term LR statistic, assembled from
+/// the first two moments of its own null spectrum `w = eig(2·F_jj − F_jj²)`.
+///
+/// The derivation, and everything this replaced, is on [`SmoothLrReferenceDf`].
+/// What is worth stating at the code is that neither moment needs an
+/// eigendecomposition: with `A = 2F − F²` on the block,
+///
+/// ```text
+/// Σ w   = tr A  = 2·tr F − tr F²
+/// Σ w²  = tr A² = 4·tr F² − 4·tr F³ + tr F⁴
+/// ```
+///
+/// so both are traces of powers of one `q × q` block. `F_jj` is not symmetric —
+/// it is `H̃⁻¹Ĩ_jj`, similar to the symmetric `Ĩ^{1/2}H̃⁻¹Ĩ^{1/2}` — so its
+/// eigenvalues are real and in `[0, 1]`, but reading them would need a general
+/// eigensolver for no gain: the reference uses only these two traces.
+///
+/// The fallback lane exists because `F` is not materialised on every fit. It
+/// scores against `χ²_{max(edf, null_dim, 1)}`, the unit-weight shape — the only
+/// reference recoverable from a scalar EDF — and is tagged as such in the
+/// returned provenance so a consumer can tell a derived reference from a
+/// degraded one instead of inferring it from the numbers.
+fn lr_null_reference(
+    influence: Option<&Array2<f64>>,
     coeff_range: &Range<usize>,
-    coefficient_covariance_scale: f64,
-) -> Result<Option<f64>, EstimationError> {
-    let (Some(xwx), Some(corr)) = (weighted_gram, smoothing_correction) else {
-        return Ok(None);
-    };
-    let (start, end) = (coeff_range.start, coeff_range.end);
-    if start >= end {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS coefficient block must be non-empty, got {coeff_range:?}"
-        )));
-    }
-    if xwx.nrows() != xwx.ncols() || corr.nrows() != corr.ncols() {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS matrices must be square, got X'WX={}x{} and correction={}x{}",
-            xwx.nrows(),
-            xwx.ncols(),
-            corr.nrows(),
-            corr.ncols()
-        )));
-    }
-    if xwx.dim() != corr.dim() || end > xwx.nrows() {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS block {coeff_range:?} is incompatible with X'WX={:?} and correction={:?}",
-            xwx.dim(),
-            corr.dim()
-        )));
-    }
-    if !(coefficient_covariance_scale.is_finite() && coefficient_covariance_scale > 0.0) {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS coefficient-covariance scale must be finite and strictly positive, got {coefficient_covariance_scale:?}"
-        )));
-    }
-
-    let mut trace = gam_linalg::utils::KahanSum::default();
-    for i in start..end {
-        for j in start..end {
-            let gram_value = xwx[[i, j]];
-            let correction_value = corr[[j, i]];
-            if !gram_value.is_finite() || !correction_value.is_finite() {
-                return Err(EstimationError::InvalidInput(format!(
-                    "WPS trace has non-finite matrix entry at ({i}, {j}): X'WX={gram_value:?}, correction-transpose={correction_value:?}"
-                )));
-            }
-            let product = gram_value * correction_value;
-            if !product.is_finite() {
-                return Err(EstimationError::InvalidInput(format!(
-                    "WPS trace product is not representable at ({i}, {j}): {gram_value:?} * {correction_value:?}"
-                )));
-            }
-            trace.add(product);
+    edf: f64,
+    null_dim: usize,
+) -> SmoothLrReferenceDf {
+    let fallback = || {
+        let df = edf.max(null_dim as f64).max(1.0);
+        SmoothLrReferenceDf {
+            mean: df,
+            second_moment: df,
+            chi_square_df: df,
+            scale: 1.0,
+            edf,
+            null_dim,
+            source: SmoothLrReferenceSource::UnitWeightFallback,
         }
+    };
+    let Some(moments) = lr_null_spectral_moments(influence, coeff_range) else {
+        return fallback();
+    };
+    let [mean, second_moment] = moments;
+    if !(mean.is_finite() && mean > 0.0 && second_moment.is_finite() && second_moment > 0.0) {
+        return fallback();
     }
-    let trace = trace.sum() / coefficient_covariance_scale;
-    if !trace.is_finite() {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS corrected-EDF trace is not representable after coefficient scale {coefficient_covariance_scale:?}: {trace:?}"
-        )));
+    SmoothLrReferenceDf {
+        mean,
+        second_moment,
+        chi_square_df: mean * mean / second_moment,
+        scale: second_moment / mean,
+        edf,
+        null_dim,
+        source: SmoothLrReferenceSource::NullSpectrum,
     }
-    if trace < 0.0 {
-        return Err(EstimationError::InvalidInput(format!(
-            "WPS corrected-EDF trace must be non-negative, got {trace:?}"
-        )));
-    }
-    Ok(Some(trace))
 }
 
-/// Wood's smoothing-selection-corrected reference d.f. `edf1 = 2·tr(F_jj) −
-/// tr(F_jj²)` on the coefficient-influence block `F = H⁻¹ X'WX` restricted to
-/// `coeff_range` (mgcv's `edf1`). This is the reference degrees of freedom
-/// Wood (2013) recommends for a smooth-component significance test when the
-/// smoothing parameter is *estimated* (as it always is here): it inflates the
-/// raw effective d.f. `edf = tr(F)` by the selection-bias term
-/// `tr(F) − tr(F²) = Σ_i λ_i(1 − λ_i) ≥ 0` (the F-block eigenvalues `λ_i` lie in
-/// `[0, 1]`), which is exactly the excess variance the fit spends locating a
-/// term on noise. Referencing the whole-term LR statistic against this larger
-/// `edf1` instead of the raw `edf` removes the post-selection left-tail
-/// anti-conservatism (a REML fit that turns a smooth *on* against pure noise no
-/// longer over-rejects): with the raw `edf` reference the mean null p-value is a
-/// calibrated ~0.5 but the 5%-level false-positive rate runs ~0.15; the `edf1`
-/// correction pulls it toward the nominal α while leaving the collapsed-term
-/// verdict (`W ≈ 0 ⇒ p ≈ 1`) untouched.
+/// `[tr A, tr A²]` for `A = 2·F_jj − F_jj²` on the tested coefficient block.
 ///
-/// `edf1 ∈ [edf, 2·edf]` analytically, so it never collapses toward 0 the way
-/// the earlier Satterthwaite ratio `tr(F)²/tr(F²)` did when the non-symmetric
-/// block's `tr(F²)` ran away (the #1766 degeneracy). The `.max(tr)` guard keeps
-/// it ≥ `edf` even if a corrupted block drives `tr(F²)` above `2·tr(F)`. Returns
-/// `None` when the influence block is unavailable or its trace is non-finite /
-/// non-positive (a fully shrunk term), in which case the caller falls back to
-/// the `max(edf, null_dim, 1)` floor.
-fn wood_reference_df(influence: Option<&Array2<f64>>, coeff_range: &Range<usize>) -> Option<f64> {
+/// Returns `None` when the influence matrix is absent, the block is outside it,
+/// or either trace is non-finite — the caller then falls back to the unit-weight
+/// shape rather than scoring against a spectrum it could not compute.
+fn lr_null_spectral_moments(
+    influence: Option<&Array2<f64>>,
+    coeff_range: &Range<usize>,
+) -> Option<[f64; 2]> {
     let f = influence?;
     let (start, end) = (coeff_range.start, coeff_range.end);
     if start >= end || end > f.nrows() || end > f.ncols() {
         return None;
     }
-    let block = f.slice(s![start..end, start..end]);
-    let tr = (0..block.nrows()).map(|i| block[[i, i]]).sum::<f64>();
-    let tr2 = block.dot(&block).diag().sum();
-    (tr.is_finite() && tr2.is_finite() && tr > 0.0).then(|| (2.0 * tr - tr2).max(tr).max(1e-12))
+    let block = f.slice(s![start..end, start..end]).to_owned();
+    let squared = block.dot(&block);
+    let cubed = squared.dot(&block);
+    let quartic = squared.dot(&squared);
+    let trace = |m: &Array2<f64>| (0..m.nrows()).map(|i| m[[i, i]]).sum::<f64>();
+    let (t1, t2, t3, t4) = (
+        trace(&block),
+        trace(&squared),
+        trace(&cubed),
+        trace(&quartic),
+    );
+    let mean = 2.0 * t1 - t2;
+    let second_moment = 4.0 * t2 - 4.0 * t3 + t4;
+    (mean.is_finite() && second_moment.is_finite()).then_some([mean, second_moment])
 }
 
 #[cfg(test)]
-mod likelihood_scale_wps_tests {
-    use super::wps_block_uncertainty_df;
-    use ndarray::array;
+mod lr_null_reference_tests {
+    use super::{SmoothLrReferenceSource, lr_null_reference, lr_null_spectral_moments};
+    use ndarray::Array2;
 
+    /// A diagonal influence block has `F_jj` eigenvalues on the diagonal, so the
+    /// spectrum is `2f − f²` term by term and both moments are hand-computable.
+    /// This is the identity the whole reference rests on; it is checked against
+    /// the definition rather than against another implementation of itself.
     #[test]
-    fn wps_trace_uses_coefficient_covariance_scale() {
-        let xwx = array![[1.0, 0.0], [0.0, 1.0]];
-        let correction = array![[1.0, 0.0], [0.0, 1.0]];
-        let extra_df = wps_block_uncertainty_df(Some(&xwx), Some(&correction), &(0..2), 4.0)
-            .expect("valid WPS geometry")
-            .expect("correction artifacts are present");
-        assert_eq!(extra_df, 0.5);
+    fn the_spectral_moments_are_the_weights_of_the_null_law() {
+        let f_diag = [0.9_f64, 0.5, 0.2, 0.05];
+        let mut influence = Array2::<f64>::zeros((6, 6));
+        // Deliberately offset: the block is columns 2..6, and rows/columns
+        // outside it carry values that must not leak into either trace.
+        influence[[0, 0]] = 7.0;
+        influence[[1, 1]] = -3.0;
+        influence[[0, 3]] = 11.0;
+        influence[[5, 1]] = -2.0;
+        for (i, &f) in f_diag.iter().enumerate() {
+            influence[[2 + i, 2 + i]] = f;
+        }
+        let [mean, second] =
+            lr_null_spectral_moments(Some(&influence), &(2..6)).expect("moments available");
+        let weights: Vec<f64> = f_diag.iter().map(|f| 2.0 * f - f * f).collect();
+        let want_mean: f64 = weights.iter().sum();
+        let want_second: f64 = weights.iter().map(|w| w * w).sum();
+        assert!(
+            (mean - want_mean).abs() < 1e-12 && (second - want_second).abs() < 1e-12,
+            "moments ({mean}, {second}) vs weights {weights:?} -> ({want_mean}, {want_second})"
+        );
     }
 
+    /// The identity that makes this a strict generalization rather than a
+    /// replacement: an UNPENALIZED tested block has `F_jj = I`, every weight is
+    /// one, and the reference must be the textbook `χ²_q` — `ν = q`, `g = 1`,
+    /// exactly, not approximately.
     #[test]
-    fn wps_absence_is_distinct_from_invalid_geometry() {
-        let xwx = array![[1.0]];
-        assert_eq!(
-            wps_block_uncertainty_df(Some(&xwx), None, &(0..1), 1.0)
-                .expect("missing optional artifact is not malformed geometry"),
-            None
-        );
+    fn an_unpenalized_block_is_exactly_the_classical_chi_square() {
+        let q = 5;
+        let influence = Array2::<f64>::eye(q);
+        let reference = lr_null_reference(Some(&influence), &(0..q), 0.0, q);
+        assert_eq!(reference.source, SmoothLrReferenceSource::NullSpectrum);
+        assert_eq!(reference.chi_square_df, q as f64);
+        assert_eq!(reference.scale, 1.0);
+        assert_eq!(reference.mean, q as f64);
+        // And the tail probability is the classical one, bit for bit.
+        for statistic in [0.5_f64, 3.0, 11.07, 40.0] {
+            assert_eq!(
+                reference.tail_probability(statistic),
+                gam_math::probability::chi_square_sf(statistic, q as f64)
+            );
+        }
+    }
 
-        let negative_correction = array![[-1.0]];
-        let error = wps_block_uncertainty_df(Some(&xwx), Some(&negative_correction), &(0..1), 1.0)
-            .expect_err("negative corrected EDF must not be silently zeroed");
-        assert!(error.to_string().contains("must be non-negative"));
+    /// Equal shrinkage is the other exact case: `f_j ≡ f` gives `w_j ≡ 2f − f²`,
+    /// so the law is a SCALED `χ²_q` and the two-moment reference reproduces it
+    /// exactly. This is what makes the scale a real parameter rather than a
+    /// fudge — the mean-only reference gets this case wrong by construction.
+    #[test]
+    fn equal_shrinkage_is_the_exact_scaled_chi_square() {
+        let q = 6;
+        let f = 0.4_f64;
+        let influence = Array2::<f64>::eye(q) * f;
+        let reference = lr_null_reference(Some(&influence), &(0..q), f * q as f64, 0);
+        let w = 2.0 * f - f * f;
+        assert!((reference.chi_square_df - q as f64).abs() < 1e-12);
+        assert!((reference.scale - w).abs() < 1e-12);
+        for statistic in [0.2_f64, 2.0, 9.0] {
+            let want = gam_math::probability::chi_square_sf(statistic / w, q as f64);
+            assert!((reference.tail_probability(statistic) - want).abs() < 1e-14);
+        }
+    }
+
+    /// The floors #1766 needed against a collapsing `χ²_d` are structural here:
+    /// as the term shrinks, `W` and the reference scale collapse TOGETHER, so
+    /// the tail probability of a statistic proportional to the weights stays
+    /// put instead of running to zero. Asserted across six orders of shrinkage.
+    #[test]
+    fn a_collapsing_term_does_not_degenerate_the_reference() {
+        let q = 5;
+        let mut previous: Option<f64> = None;
+        for exponent in 0..7 {
+            let f = 10f64.powi(-exponent);
+            let influence = Array2::<f64>::eye(q) * f;
+            let reference = lr_null_reference(Some(&influence), &(0..q), f * q as f64, 0);
+            // A statistic drawn at the reference's own mean.
+            let tail = reference.tail_probability(reference.mean);
+            assert!(
+                tail > 0.3 && tail < 0.6,
+                "f=1e-{exponent}: tail at the mean is {tail}, mean={}",
+                reference.mean
+            );
+            if let Some(prev) = previous {
+                assert!(
+                    (tail - prev).abs() < 1e-9,
+                    "f=1e-{exponent}: the tail at the mean moved {prev} -> {tail} under pure rescaling"
+                );
+            }
+            previous = Some(tail);
+        }
+    }
+
+    /// Without `F` the reference degrades to the unit-weight shape and SAYS so.
+    /// A consumer that cannot tell a derived reference from a fallback cannot
+    /// reason about the number it was handed.
+    #[test]
+    fn a_missing_influence_matrix_degrades_visibly() {
+        let reference = lr_null_reference(None, &(0..4), 2.5, 1);
+        assert_eq!(
+            reference.source,
+            SmoothLrReferenceSource::UnitWeightFallback
+        );
+        assert_eq!(reference.chi_square_df, 2.5);
+        assert_eq!(reference.scale, 1.0);
+        // The `max(edf, null_dim, 1)` shape is retained only on this lane.
+        assert_eq!(lr_null_reference(None, &(0..4), 0.01, 3).chi_square_df, 3.0);
+        assert_eq!(lr_null_reference(None, &(0..4), 0.01, 0).chi_square_df, 1.0);
     }
 }
 

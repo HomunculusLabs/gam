@@ -595,17 +595,33 @@ class Model:
         constrained refit dropping the smooth, then Bartlett-corrects *that*:
         :math:`W^* = W / c`, :math:`c = 1 + \\Delta\\varepsilon / d`.
 
+        The reference :math:`W` is scored against is the statistic's own null
+        law rather than a chi-square fitted to its mean. At fixed
+        :math:`\\lambda` the penalized LR is exactly
+        :math:`W = \\sum_j w_j \\chi^2_1` with
+        :math:`w = \\mathrm{eig}(2F_{jj} - F_{jj}^2)` on the tested block of the
+        influence matrix, so :math:`\\sum_j w_j` is Wood's ``edf1`` *and* the
+        statistic's null mean, while the shape comes from the second moment:
+        :math:`p = P(\\chi^2_\\nu > W/g)` with
+        :math:`\\nu = (\\sum w)^2 / \\sum w^2` and
+        :math:`g = \\sum w^2 / \\sum w`. For an unpenalized block every
+        :math:`w_j = 1` and this is exactly the textbook :math:`\\chi^2_q`.
+
         For each penalized (shape-unconstrained) smooth term it returns
-        ``statistic_lr`` (the raw :math:`W`), ``ref_df`` (the Wood truncation
-        :math:`d`, the same reference the Wald row uses), ``bartlett_factor``
+        ``statistic_lr`` (the raw :math:`W`), ``ref_df`` (the null mean
+        :math:`d = \\sum_j w_j`, which is what the Bartlett factor is
+        denominated in — *not* a chi-square degrees of freedom),
+        ``reference_chi_square_df`` :math:`\\nu` and ``reference_scale``
+        :math:`g` (the reference the p-values are read from),
+        ``bartlett_factor``
         :math:`c`, ``statistic_corrected`` :math:`W^*`, ``p_value_uncorrected``,
         ``p_value_corrected`` (the magic-by-default value), ``material`` (the
         n-too-small-here diagnostic — ``True`` when the correction moves the
         Bartlett factor or the p-value by more than 10%), and
         ``correction_provenance`` — ``"lawley_lr"`` when the family carries
         closed-form cumulant jets (gaussian / poisson / binomial / gamma) and the
-        null refit converged, else ``"none"`` (the uncorrected
-        :math:`\\chi^2_d` stands, never weakened).
+        null refit converged, else ``"none"`` (the uncorrected reference stands,
+        never weakened).
 
         Needs the training ``data`` for the per-term null refits, exactly as
         :meth:`curvature` does. Returns an empty list when the model has no
