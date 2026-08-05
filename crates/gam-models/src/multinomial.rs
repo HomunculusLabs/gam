@@ -2872,6 +2872,10 @@ pub fn fit_penalized_multinomial_formula(
             firth_family =
                 firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
         }
+        log::info!(
+            "multinomial REML: arming the Jeffreys/Firth proper prior — separation evidence: \
+             {evidence}"
+        );
         fit_custom_family_with_rho_prior(
             &firth_family,
             &firth_blocks,
@@ -2931,6 +2935,10 @@ pub fn fit_penalized_multinomial_formula(
             if separation.is_none() {
                 // Fit existence proves both optimization layers certified; no
                 // post-hoc convergence flag is needed.
+                log::info!(
+                    "multinomial REML: unbiased criterion accepted (no separation evidence; \
+                     Jeffreys/Firth prior disarmed)"
+                );
                 probe_fit
             } else {
                 // A certified unbiased optimum can still exhibit separation;
