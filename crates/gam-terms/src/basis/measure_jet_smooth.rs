@@ -810,6 +810,99 @@ pub(crate) fn median_nearest_center_spacing(dist2: &Array2<f64>) -> Result<f64, 
     Ok(median)
 }
 
+/// Make the representer coefficient section a BASIS of its span at the realized
+/// range, not merely a spanning set (gam#2750).
+///
+/// ## What goes wrong without this
+///
+/// A Gaussian kernel's spectrum decays super-exponentially in `ℓ/spacing`, so
+/// the center evaluation map `E = K_cc · Z_rbf` — through which BOTH the design
+/// and every penalty pullback pass — loses conditioning fast as the representer
+/// range grows. The raw section is chosen for head-orthogonality alone and
+/// keeps every direction, so the shipped chart carries directions the criterion
+/// cannot resolve, and the criterion's own Occam term is the first casualty:
+///
+/// ```text
+///   ell     cond(S)     d log|S|+/d ln ell:  analytic       FD        gap
+///   1.21    1.2e10                          -109.843    -109.829    -0.014
+///   1.57    3.0e11                          -107.924    -107.919    -0.005
+///   2.04    3.7e13                           -97.252     -96.331    -0.922
+///   2.65    3.8e13                           -51.836     -64.765   +12.930
+///   3.45    6.5e12  (rank 14 -> 13)          -26.621     -40.633   +14.012
+/// ```
+///
+/// (16 centers on the `measure_jet_perf_parity` geometry, chart frozen so the
+/// finite difference and the analytic jet differentiate the same object; the
+/// jet itself agrees with a central difference of the shipped penalty to
+/// `1e-8` throughout, so the producer is exact and it is `log|S|₊` that stops
+/// being a function.) Once `cond(S)` reaches the rank-classification floor the
+/// kept spectrum bottoms out in roundoff: `log|S|₊` is then a sum over
+/// directions whose logs are noise, `tr(S⁺Ṡ)` divides by them, and the outer
+/// search is handed a direction that is not a descent direction of its own
+/// objective. That is the wall the `ln ℓ` coordinate has been hitting.
+///
+/// ## The section
+///
+/// Whiten and truncate against the section's own center-value Gram
+/// `G = (K_cc Z)ᵀ(K_cc Z)`: keep the directions above `√ε · λ_max(G)` and
+/// rescale each by `λ^{-1/2}`, so the realized section satisfies `EᵀE = I` on
+/// the representer block.
+///
+/// * The rescaling is a pure change of coefficient chart. The profiled
+///   criterion is invariant under an invertible reparameterization (`X → XT`,
+///   `S → TᵀST` moves `log|XᵀWX + λS|` and `log|λS|₊` by the same
+///   `2 ln|det T|`), so it changes no estimate — only the arithmetic.
+/// * The truncation is the honest reading, not a tuning dial: `√ε` is the
+///   half-mantissa bar, the point past which a direction cannot survive being
+///   squared into a Gram and inverted back out with any significant digits.
+///   The energy pullback squares `E`, so anything below it is a direction the
+///   penalty cannot report on.
+///
+/// Realized ONCE per cold build and then frozen with the chart, so a ψ trial
+/// never re-decides it — the replay contract is unchanged.
+fn condition_representer_section(
+    k_cc: &Array2<f64>,
+    z_rbf: &Array2<f64>,
+) -> Result<Array2<f64>, BasisError> {
+    if z_rbf.ncols() == 0 {
+        return Ok(z_rbf.clone());
+    }
+    let evaluation = k_cc.dot(z_rbf);
+    let gram = gam_linalg::faer_ndarray::fast_ata(&evaluation);
+    let (values, vectors) = gam_linalg::faer_ndarray::strict_symmetric_eigh(&gram, Side::Lower)
+        .map_err(BasisError::LinalgError)?;
+    let leading = values.iter().copied().fold(0.0_f64, |acc, v| acc.max(v));
+    if !(leading.is_finite() && leading > 0.0) {
+        return Ok(z_rbf.clone());
+    }
+    let cut = leading * f64::EPSILON.sqrt();
+    let kept: Vec<usize> = (0..values.len()).filter(|&i| values[i] > cut).collect();
+    if kept.is_empty() {
+        // Every representer direction is below the resolvable floor. Keep the
+        // single strongest one rather than emitting an empty block: a term with
+        // no representer columns is a different model, and that decision
+        // belongs to the range screen, not to a conditioning step.
+        let strongest =
+            (0..values.len()).fold(
+                0usize,
+                |best, i| {
+                    if values[i] > values[best] { i } else { best }
+                },
+            );
+        let column = vectors.column(strongest).to_owned();
+        let scale = values[strongest].max(f64::MIN_POSITIVE).sqrt().recip();
+        return Ok(z_rbf.dot(&column).insert_axis(Axis(1)).mapv(|v| v * scale));
+    }
+    let mut transform = Array2::<f64>::zeros((z_rbf.ncols(), kept.len()));
+    for (column, &index) in kept.iter().enumerate() {
+        let inverse_root = values[index].sqrt().recip();
+        for row in 0..z_rbf.ncols() {
+            transform[(row, column)] = vectors[(row, index)] * inverse_root;
+        }
+    }
+    Ok(z_rbf.dot(&transform))
+}
+
 /// Axis-aligned bounding-box diagonal of a point set — the deterministic
 /// diameter proxy the scale band and the range bracket both measure the
 /// configuration's extent with. `O(m·d)` and permutation-invariant, unlike a
@@ -1982,6 +2075,7 @@ pub(crate) fn realize_measure_jet_geometry(
                 let u = householder_sum_to_zero_u(m);
                 householder_sum_to_zero_z(&u)
             };
+            let z_rbf = condition_representer_section(&k_cc, &z_rbf)?;
             let rbf_rank = z_rbf.ncols();
             let mut z_block = Array2::<f64>::zeros((m_aug, rbf_rank + head_width));
             z_block

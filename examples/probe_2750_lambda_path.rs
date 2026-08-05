@@ -34,6 +34,16 @@ use gam::{
 };
 use ndarray::{Array1, Array2};
 
+/// SplitMix64 unit draws for the 3-D perf-parity replica used by `logdets`.
+fn next_unit(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
 /// The sweep fixture's SplitMix64 finalizer, verbatim.
 fn hashed_unit(index: u64) -> f64 {
     let mut z = index.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -558,6 +568,184 @@ fn case3() {
     }
 }
 
+/// Is the analytic `d log|S|+ / d ln ell` right at a LONG representer range?
+///
+/// The #2761 FD gate decomposes the ln-ell outer gradient into REML atoms and
+/// reports `logdet_S` analytic `50.66` against FD `42.76` once the range screen
+/// moves the seed out to `ell = 1.54` on the perf-parity fixture. This isolates
+/// that atom from the outer engine entirely: the shipped basis at one range,
+/// the shipped psi producer's `dS/dln ell`, `tr(S+ Sdot)` by hand, and a central
+/// difference of `log|S|+` on the same objects.
+fn logdet_s_scan() {
+    use gam::basis::{
+        MeasureJetBasisSpec, build_measure_jet_basis, build_measure_jet_basis_psi_derivatives,
+    };
+    // The perf-parity fixture: a 1-D curve in 3-D, n = 1500, 16 centers.
+    let n = 1_500usize;
+    let mut raw = Array2::<f64>::zeros((n, 3));
+    let mut state = 1_039u64;
+    for row in 0..n {
+        let t = next_unit(&mut state);
+        raw[[row, 0]] = t.clamp(1e-6, 1.0 - 1e-6);
+        raw[[row, 1]] = (0.5 + 0.5 * (std::f64::consts::TAU * t).sin()).clamp(1e-6, 1.0 - 1e-6);
+        raw[[row, 2]] = (t * t).clamp(1e-6, 1.0 - 1e-6);
+    }
+    let scale = gam::smooth::input_standardization::estimate_isotropic_scale(raw.view())
+        .expect("scale");
+    let mut x = raw;
+    scale.standardize(&mut x);
+    let base = MeasureJetBasisSpec {
+        center_strategy: gam::basis::CenterStrategy::FarthestPoint { num_centers: 16 },
+        double_penalty: false,
+        learn_length_scale: true,
+        ..MeasureJetBasisSpec::default()
+    };
+    println!(
+        "[2750-logdetS] {:>9} {:>4} {:>4} {:>15} {:>15} {:>10} {:>12}",
+        "ell", "p", "rank", "analytic", "fd", "gap", "cond(S)"
+    );
+    let logdet_positive = |m: &Array2<f64>, cut: f64| -> (f64, usize, f64) {
+        let (vals, _) = gam::linalg::faer_ndarray::strict_symmetric_eigh(m, faer::Side::Lower)
+            .expect("eigh");
+        let hi = vals.iter().copied().fold(0.0_f64, f64::max);
+        let mut sum = 0.0;
+        let mut rank = 0usize;
+        let mut lo = f64::INFINITY;
+        for &v in vals.iter() {
+            if v > cut * hi {
+                sum += v.ln();
+                rank += 1;
+                lo = lo.min(v);
+            }
+        }
+        (sum, rank, hi / lo)
+    };
+    // FREEZE the chart at each base range before differencing. `Z` is realized
+    // from `K_cc(ell)` in a cold build, so a cold FD differences a coefficient
+    // chart that MOVED, while the analytic jet holds the chart fixed by
+    // contract ("rank/gauge realization happens once at fit time, then every
+    // psi trial differentiates the same coefficient chart"). Comparing those
+    // two measures the chart's motion, not the jet.
+    let freeze = |basis: &gam::basis::BasisBuildResult, spec: &MeasureJetBasisSpec| {
+        let gam::basis::BasisMetadata::MeasureJet {
+            centers,
+            eps_band,
+            masses,
+            support_means,
+            penalty_normalization_scales,
+            raw_penalty_normalization_scales,
+            fused_penalty_normalization_scale,
+            constraint_transform,
+            sigma_coord,
+            ..
+        } = &basis.metadata
+        else {
+            panic!("measure-jet metadata")
+        };
+        let mut frozen = spec.clone();
+        frozen.center_strategy = gam::basis::CenterStrategy::UserProvided(centers.clone());
+        frozen.num_scales = eps_band.len();
+        frozen.frozen_quadrature = Some(gam::basis::MeasureJetFrozenQuadrature {
+            masses: masses.clone(),
+            eps_band: eps_band.clone(),
+            support_means: support_means.clone(),
+            penalty_normalization_scales: penalty_normalization_scales.clone(),
+            raw_penalty_normalization_scales: raw_penalty_normalization_scales.clone(),
+            fused_penalty_normalization_scale: *fused_penalty_normalization_scale,
+            sigma_coord: *sigma_coord,
+        });
+        frozen.identifiability = gam::basis::MeasureJetIdentifiability::FrozenTransform {
+            transform: constraint_transform.clone().expect("constraint transform"),
+        };
+        frozen
+    };
+    for k in 0..14 {
+        let ell = 0.25 * 1.3_f64.powi(k);
+        let mut cold = base.clone();
+        cold.length_scale = ell;
+        let Ok(cold_basis) = build_measure_jet_basis(x.view(), &cold) else {
+            println!("[2750-logdetS] {ell:>9.4}   cold build refused");
+            continue;
+        };
+        let spec = freeze(&cold_basis, &cold);
+        let Ok(basis) = build_measure_jet_basis(x.view(), &spec) else {
+            println!("[2750-logdetS] {ell:>9.4}   build refused");
+            continue;
+        };
+        if basis.active_penalties.len() != 1 {
+            println!("[2750-logdetS] {ell:>9.4}   {} penalties", basis.active_penalties.len());
+            continue;
+        }
+        let s = basis.active_penalties[0].matrix.clone();
+        let jets = build_measure_jet_basis_psi_derivatives(x.view(), &spec).expect("jets");
+        let sdot = jets.penalties_first[0][0].clone();
+        // tr(S+ Sdot) over the numerically positive range, the same object the
+        // outer engine differentiates.
+        let (vals, vecs) =
+            gam::linalg::faer_ndarray::strict_symmetric_eigh(&s, faer::Side::Lower).expect("eigh");
+        let hi = vals.iter().copied().fold(0.0_f64, f64::max);
+        let cut = f64::EPSILON * 64.0;
+        let mut analytic = 0.0;
+        for (i, &v) in vals.iter().enumerate() {
+            if v > cut * hi {
+                let u = vecs.column(i);
+                analytic += u.dot(&sdot.dot(&u)) / v;
+            }
+        }
+        let h = 1e-4_f64;
+        let mut up = spec.clone();
+        up.length_scale = ell * (h.exp());
+        let mut down = spec.clone();
+        down.length_scale = ell * ((-h).exp());
+        let fd = match (
+            build_measure_jet_basis(x.view(), &up),
+            build_measure_jet_basis(x.view(), &down),
+        ) {
+            (Ok(a), Ok(b)) if a.active_penalties.len() == 1 && b.active_penalties.len() == 1 => {
+                let (la, _, _) = logdet_positive(&a.active_penalties[0].matrix, cut);
+                let (lb, _, _) = logdet_positive(&b.active_penalties[0].matrix, cut);
+                (la - lb) / (2.0 * h)
+            }
+            _ => f64::NAN,
+        };
+        let (_, rank, cond) = logdet_positive(&s, cut);
+        // Is the PRODUCER's dS/dln(ell) itself right? Compare it entrywise to a
+        // central difference of the shipped penalty. If this is clean, the
+        // logdet gap above is in the trace assembly; if it is not, the jet is.
+        let jet_gap = match (
+            build_measure_jet_basis(x.view(), &up),
+            build_measure_jet_basis(x.view(), &down),
+        ) {
+            (Ok(a), Ok(b)) if a.active_penalties.len() == 1 && b.active_penalties.len() == 1 => {
+                let fd_mat = (&a.active_penalties[0].matrix - &b.active_penalties[0].matrix)
+                    .mapv(|v| v / (2.0 * h));
+                let delta = &sdot - &fd_mat;
+                let num = delta.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                let den = sdot.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1e-300);
+                // Is the discrepancy PROPORTIONAL TO S? That is the shape a
+                // missing/incorrect `-S * dln(c)/dpsi` normalization term has.
+                let ss = s.iter().map(|v| v * v).sum::<f64>().max(1e-300);
+                let alpha = delta.iter().zip(s.iter()).map(|(d, v)| d * v).sum::<f64>() / ss;
+                let residual = delta
+                    .iter()
+                    .zip(s.iter())
+                    .fold(0.0_f64, |m, (d, v)| m.max((d - alpha * v).abs()));
+                eprintln!(
+                    "                 alpha={alpha:+.6} residual_rel={:.3e}",
+                    residual / den
+                );
+                num / den
+            }
+            _ => f64::NAN,
+        };
+        println!(
+            "[2750-logdetS] {ell:>9.4} {:>4} {rank:>4} {analytic:>15.6} {fd:>15.6} {:>10.4} {cond:>12.3e} jet_rel={jet_gap:.3e}",
+            s.nrows(),
+            analytic - fd
+        );
+    }
+}
+
 fn main() {
     init_parallelism();
     let ds = dataset();
@@ -571,6 +759,11 @@ fn main() {
     // frozen-range state and the free-search state are both on one table.
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("path");
+
+    if mode == "logdets" {
+        logdet_s_scan();
+        return;
+    }
 
     if mode == "case3" {
         case3();
