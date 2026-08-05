@@ -1892,7 +1892,16 @@ pub(crate) fn fused_trial_workspace_error_is_not_scalarized() {
         Err(error) => error,
         Ok(_) => panic!("the trust-attempt gate must propagate workspace evaluation errors"),
     };
-    assert_eq!(error.to_string(), "fused-trial-log-likelihood-error");
+    // #2667 made the inner solve carry a TYPED refusal instead of rendering it
+    // to a bare `String`, so the family's own reason is now the payload of
+    // `CustomFamilyError::TrialPoint` rather than the whole rendering. The
+    // assertion is on the reason the family emitted, which is what this test is
+    // about; asserting the un-prefixed rendering would be asserting that the
+    // typing was never done.
+    assert_eq!(
+        error.to_string(),
+        "inner solve refused this trial point: fused-trial-log-likelihood-error"
+    );
 }
 
 #[test]
@@ -2042,7 +2051,12 @@ pub(crate) fn inner_workspace_prevalidation_reuses_cycle0_hessian_without_family
 
     let error = inner_blockwise_fit(&family, &[spec], &[Array1::zeros(0)], &options, None)
         .expect_err("fixture stops immediately after cycle-0 consumes its Hessian source");
-    assert_eq!(error.to_string(), "inner-prelude-workspace-cycle0-reached");
+    // See the #2667 note above: the family's reason is carried inside the typed
+    // trial-point refusal rather than rendered flat.
+    assert_eq!(
+        error.to_string(),
+        "inner solve refused this trial point: inner-prelude-workspace-cycle0-reached"
+    );
     assert_eq!(
         evaluations.load(Ordering::Relaxed),
         0,
