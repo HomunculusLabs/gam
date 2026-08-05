@@ -1,5 +1,58 @@
 ## Unreleased
 
+- **The Jeffreys/Firth-armed outer REML gradient was not the gradient of the
+  criterion it reports (#2612).** On the penguins real-data multinomial arm the
+  fit did not produce a probability at all: the unbiased probe converged to a
+  separated mode (identifiable-span Fisher information `lambda_min = 2.06e-18`
+  against `lambda_max = 1.443`), the Jeffreys gate fired at full weight, and the
+  armed refit then died in the outer smoothing search at
+  `line_search=StepSizeTooSmall` — the solver's own gloss on which is *"the
+  direction descended but no step improved the objective"* — with an indefinite
+  terminal analytic Hessian and no fit assembled.
+
+  **What was wrong.** The IFT mode response `v_k = d beta_hat / d rho_k` is a
+  property of the INNER stationarity system, so it must be solved against
+  `M_true = H + S_lambda + H_Phi + completion`, the exact Hessian of the
+  Phi-augmented objective the inner Newton converged on. It was instead
+  borrowing the LAML logdet's operator `M_DD = H + S_lambda + H_Phi`. The
+  envelope theorem kills `v_k`'s other route into the outer gradient
+  (`grad_beta f = 0` at the mode, whatever `v_k` is), so `v_k` reaches it only
+  through the drift trace `0.5 tr(M_DD^-1 D_beta M_DD[v_k])` — and a `v_k` from
+  the wrong operator makes the analytic gradient the derivative of a different
+  function than the value. Central differences of the production outer criterion
+  against its own analytic gradient, at the refit's own stalling rho: `1.5e-9 ..
+  7.7e-8` with the term disarmed, `5.3e-2 .. 1.5e0` with it armed, the sign
+  wrong on three of eight coordinates, and h-independent between `1e-3` and
+  `1e-2`.
+
+  The half-fix that hid it: `completion_in_operator` folded the completion into
+  the operator on the projected/`Smooth` route, where the projected kernel
+  already owns the value and the traces so the operator is free to carry it.
+  Every family that overrides `pseudo_logdet_mode` away from `Smooth` — the
+  multinomial (`PositiveDefinite`), BMS, the binomial location-scale and wiggle
+  families (`HardPseudo`) — takes the route where the operator IS the value and
+  trace object, so the completion could not go in, and the mode response
+  silently inherited that constraint. Folding it in there instead is not
+  available either: the scalar would then need the completion's own beta-drift
+  (third directional derivatives no family exposes) for the trace to stay
+  consistent with it, which is a measured ~38% gradient bias.
+
+  **The fix.** Stop making one object serve both roles. `InnerSolution` gains an
+  optional `mode_response_op`, read through `mode_response_operator()` by all
+  three `ThetaModeResponseKernel::select` sites (gradient, dense Hessian,
+  Hessian operator), so no two can disagree about which system `beta_hat(theta)`
+  is differentiated through. The custom-family assembly builds it from the same
+  operator assembly with `H_Phi + completion` in place of `H_Phi`, exactly when
+  a completion exists and is not already in `hessian_op`. `None` everywhere
+  else: with no completion, or no Jeffreys term, `M_true == M_DD` and there is
+  nothing to separate, so every other family and every clean fit is
+  byte-identical.
+
+  Rejected on measurement: the seed. The formula path warm-starts the armed
+  refit at the saturated unbiased mode, which the fixed-lambda sibling documents
+  as catastrophic. Warm `|Pg| = 1.759e-2`, cold (`beta = 0`) `1.607e-2`, both
+  against `bound = 2.290e-3`, both `hessian_psd=NO`. Same failure; not the seed.
+
 - **A curvature certificate no longer decides on a direction along which the
   criterion is exactly constant (#2676).** Three `geo_disease_*_matern`
   scenarios refused with `INDEFINITE CURVATURE AT INTERIOR OPTIMUM`
