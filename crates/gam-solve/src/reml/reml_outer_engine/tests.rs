@@ -9133,3 +9133,164 @@ fn barrier_negligibility_is_relative_to_the_rows_own_scale_2705() {
     assert_eq!(cfg_tiny.lower_bounds, cfg_big.lower_bounds);
     assert_eq!(cfg_tiny.lower_bounds, vec![2.0]);
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// #2612: the IFT mode response reads `mode_response_op`, not `hessian_op`.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A drift provider whose correction is LINEAR in the mode response it is
+/// handed: `D_β H[v] = diag(v)`.
+///
+/// Linearity is the whole point. The drift term enters the gradient as
+/// `½ tr(H⁻¹ D_β H[v_k])`, so scaling the operator that produces `v_k` by `c`
+/// scales that term by exactly `1/c` — which turns "is the mode-response
+/// operator actually consulted?" into an exact arithmetic identity rather than
+/// an inequality.
+struct ModeResponseLinearDrift;
+
+impl HessianDerivativeProvider for ModeResponseLinearDrift {
+    fn hessian_derivative_correction(
+        &self,
+        mode_response: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(Array2::from_diag(mode_response)))
+    }
+
+    fn has_corrections(&self) -> bool {
+        true
+    }
+}
+
+/// The same shape with no drift at all, used to subtract everything that does
+/// not depend on the mode response.
+struct NoDrift;
+
+impl HessianDerivativeProvider for NoDrift {
+    fn hessian_derivative_correction(
+        &self,
+        _mode_response: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+
+    fn has_corrections(&self) -> bool {
+        true
+    }
+}
+
+fn spd(diagonal: [f64; 2]) -> Arc<dyn HessianFactorization> {
+    let matrix = array![[diagonal[0], 0.0], [0.0, diagonal[1]]];
+    Arc::new(
+        DenseSpectralOperator::from_symmetric_with_mode(&matrix, PseudoLogdetMode::PositiveDefinite)
+            .expect("SPD fixture factorizes"),
+    )
+}
+
+/// `hessian_op` is always `diag(3, 5)`; only the mode-response operator and the
+/// drift provider vary.
+fn mode_response_solution(
+    mode_response_op: Option<Arc<dyn HessianFactorization>>,
+    deriv_provider: Box<dyn HessianDerivativeProvider + 'static>,
+) -> InnerSolution<'static> {
+    InnerSolution {
+        log_likelihood: 0.0,
+        penalty_quadratic: 0.0,
+        hessian_op: spd([3.0, 5.0]),
+        mode_response_op,
+        beta: array![0.7, -1.3],
+        penalty_coords: vec![PenaltyCoordinate::from_dense_root(array![
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])],
+        penalty_logdet: PenaltyLogdetDerivs {
+            value: 0.0,
+            first: array![0.0],
+            second: None,
+        },
+        deriv_provider,
+        firth: None,
+        hessian_logdet_correction: 0.0,
+        penalty_subspace_trace: None,
+        rho_curvature_scale: 1.0,
+        rho_prior: gam_problem::RhoPrior::Flat,
+        n_observations: 20,
+        nullspace_dim: 0.0,
+        gaussian_weight_log_sum_half: 0.0,
+        dp_floor_scale: 1.0,
+        dispersion: DispersionHandling::Fixed {
+            phi: 1.0,
+            include_logdet_h: true,
+            include_logdet_s: true,
+        },
+        ext_coords: Vec::new(),
+        ext_coord_pair_fn: None,
+        rho_ext_pair_fn: None,
+        fixed_drift_deriv: None,
+        contracted_psi_second_order: None,
+        barrier_config: None,
+        kkt_residual: None,
+        active_constraints: None,
+        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
+    }
+}
+
+fn mode_response_gradient(
+    mode_response_op: Option<Arc<dyn HessianFactorization>>,
+    deriv_provider: Box<dyn HessianDerivativeProvider + 'static>,
+) -> f64 {
+    let solution = mode_response_solution(mode_response_op, deriv_provider);
+    reml_laml_evaluate(&solution, &[0.0], EvalMode::ValueAndGradient, None)
+        .expect("fixture evaluates")
+        .gradient
+        .expect("gradient requested")[0]
+}
+
+/// #2612 (structural, distinct from the criterion-level FD gate in
+/// `gam-models`): the drift trace must be built from
+/// [`InnerSolution::mode_response_op`] when one is installed.
+///
+/// The defect this pins is a lane that prices its `log|·|` on a curvature
+/// surrogate and then silently differentiates `β̂(θ)` through that surrogate
+/// instead of through the inner objective's own Hessian. It is invisible to a
+/// value-only test — the criterion is unchanged — and shows up only as a
+/// gradient that is not the criterion's.
+///
+/// Three readings, one identity:
+///   * installing the SAME operator changes nothing (bitwise), so the field
+///     cannot be leaking into the logdet;
+///   * installing a `c`-scaled operator scales the mode response by `1/c`, and
+///     with a drift LINEAR in that response the drift half of the gradient must
+///     scale by exactly `1/c`;
+///   * with the drift zeroed, the gradient is the same under every operator —
+///     the mode response has nowhere else to enter.
+#[test]
+fn mode_response_operator_is_the_one_the_drift_trace_uses_2612() {
+    let frozen = mode_response_gradient(None, Box::new(NoDrift));
+    let frozen_installed = mode_response_gradient(Some(spd([6.0, 10.0])), Box::new(NoDrift));
+    assert_eq!(
+        frozen.to_bits(),
+        frozen_installed.to_bits(),
+        "with no mode-response-dependent drift, the mode-response operator cannot move the \
+         gradient; it moved from {frozen} to {frozen_installed}"
+    );
+
+    let inherited = mode_response_gradient(None, Box::new(ModeResponseLinearDrift));
+    let same_operator =
+        mode_response_gradient(Some(spd([3.0, 5.0])), Box::new(ModeResponseLinearDrift));
+    assert_eq!(
+        inherited.to_bits(),
+        same_operator.to_bits(),
+        "installing the SAME operator as `hessian_op` must be a no-op; got {inherited} vs \
+         {same_operator}"
+    );
+
+    let doubled = mode_response_gradient(Some(spd([6.0, 10.0])), Box::new(ModeResponseLinearDrift));
+    let drift_inherited = inherited - frozen;
+    let drift_doubled = doubled - frozen;
+    assert!(
+        drift_inherited.abs() > 1e-6,
+        "the fixture's drift term is degenerate ({drift_inherited:.3e}); the scaling identity \
+         below would hold vacuously"
+    );
+    assert_relative_eq!(drift_doubled, 0.5 * drift_inherited, max_relative = 1e-12);
+}
