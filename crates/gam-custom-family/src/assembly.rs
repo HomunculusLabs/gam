@@ -1116,215 +1116,215 @@ pub(crate) fn joint_outer_evaluate(
         Arc<dyn HessianFactorization>,
         CustomFamilyError,
     > {
-    let operator_fingerprint = assembled_operator_fingerprint(
-        rho,
-        beta_flat,
-        &h_joint_unpen,
-        &scaled_s_lambdas,
-        scaled_joint_penalty.as_ref(),
-        jeffreys_for_operator,
-        ranges,
-        total,
-        scaled_joint_trace_diagonal_ridge,
-        rho_curvature_scale,
-        pseudo_logdet_mode,
-    );
-    let cached_operator = assembled_operator_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(operator_fingerprint));
-
-    let assembled: Arc<dyn HessianFactorization> = if let Some(cached) = cached_operator {
-        log::debug!(
-            "[OUTER hessian-route] reusing cached same-ρ assembled operator (fingerprint hit)"
-        );
-        cached
-    } else {
-        let built: Arc<dyn HessianFactorization> = if use_joint_matrix_free_path(
+        let operator_fingerprint = assembled_operator_fingerprint(
+            rho,
+            beta_flat,
+            &h_joint_unpen,
+            &scaled_s_lambdas,
+            scaled_joint_penalty.as_ref(),
+            jeffreys_for_operator,
+            ranges,
             total,
-            joint_observation_count(&inner.block_states),
-        ) {
-            let ranges_vec = ranges.to_vec();
-            let s_lambdas = Arc::new(scaled_s_lambdas.clone());
-            // gam#1587: full-width joint penalty (already scaled by
-            // `rho_curvature_scale`), folded into every operator path below.
-            let joint_penalty_arc: Option<Arc<Array2<f64>>> =
-                scaled_joint_penalty.clone().map(Arc::new);
-            let trace_diagonal_ridge = scaled_joint_trace_diagonal_ridge
-                + rho_curvature_scale * JOINT_TRACE_STABILITY_RIDGE;
-            match &h_joint_unpen {
-                JointHessianSource::Dense(h_joint) => {
-                    let h_joint = Arc::new(h_joint.clone());
-                    let apply_h = Arc::clone(&h_joint);
-                    let apply_ranges = ranges_vec.clone();
-                    let apply_s = Arc::clone(&s_lambdas);
-                    let apply_hphi = jeffreys_for_operator.cloned();
-                    let apply_joint = joint_penalty_arc.clone();
-                    let hphi_scale = rho_curvature_scale;
-                    Arc::new(MatrixFreeSpdOperator::new_with_mode(
-                        total,
-                        move |v| {
-                            let mut out = apply_h.dot(v);
-                            let penalty = apply_joint_block_penalty(
-                                &apply_ranges,
-                                apply_s.as_ref(),
-                                v,
-                                trace_diagonal_ridge,
-                                None,
-                            );
-                            out += &penalty;
-                            if let Some(joint) = apply_joint.as_ref() {
-                                out += &joint.dot(v);
-                            }
-                            if let Some(hphi) = apply_hphi.as_ref() {
-                                let jeffreys = hphi.dot(v);
-                                out.scaled_add(hphi_scale, &jeffreys);
-                            }
-                            out
-                        },
-                        pseudo_logdet_mode,
-                    ))
-                }
-                JointHessianSource::Operator {
-                    apply,
-                    dense_forced,
-                    ..
-                } => {
-                    let apply_h = Arc::clone(apply);
-                    let apply_ranges = ranges_vec.clone();
-                    let apply_s = Arc::clone(&s_lambdas);
-                    let apply_hphi = jeffreys_for_operator.cloned();
-                    let apply_joint = joint_penalty_arc.clone();
-                    let dense_joint = joint_penalty_arc.clone();
-                    let hphi_scale = rho_curvature_scale;
-                    // Single-pass dense assembly of the SAME penalized
-                    // operator `H_unpen + S_λ + scale·H_Φ`. When the
-                    // operator source can structurally build its full dense
-                    // `H_unpen` in one chunked BLAS-3 `XᵀWX` row pass
-                    // (`dense_forced`), the LAML logdet factorization assembles
-                    // it once here and adds the penalty/Jeffreys terms in
-                    // O(p²) — instead of `total` canonical-basis matvecs, each
-                    // a full n-row pass through `apply_h`. The matvec closure
-                    // below is the exact same algebra column-for-column, so the
-                    // materialized dense operator (and its logdet) are
-                    // numerically identical; the direct build is preferred only
-                    // when `dense_forced` actually yields a matrix.
-                    let dense_forced = Arc::clone(dense_forced);
-                    let dense_ranges = ranges_vec.clone();
-                    let dense_s = Arc::clone(&s_lambdas);
-                    let dense_hphi = jeffreys_for_operator.cloned();
-                    let dense_assemble: Arc<dyn Fn() -> Option<Array2<f64>> + Send + Sync> =
-                        Arc::new(move || {
-                            let mut matrix = match dense_forced() {
-                                Ok(Some(matrix)) => matrix,
-                                Ok(None) => return None,
-                                Err(error) => {
-                                    log::warn!(
-                                        "joint exact-newton dense_forced failed during outer logdet materialization: {error}"
-                                    );
+            scaled_joint_trace_diagonal_ridge,
+            rho_curvature_scale,
+            pseudo_logdet_mode,
+        );
+        let cached_operator = assembled_operator_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(operator_fingerprint));
+
+        let assembled: Arc<dyn HessianFactorization> = if let Some(cached) = cached_operator {
+            log::debug!(
+                "[OUTER hessian-route] reusing cached same-ρ assembled operator (fingerprint hit)"
+            );
+            cached
+        } else {
+            let built: Arc<dyn HessianFactorization> = if use_joint_matrix_free_path(
+                total,
+                joint_observation_count(&inner.block_states),
+            ) {
+                let ranges_vec = ranges.to_vec();
+                let s_lambdas = Arc::new(scaled_s_lambdas.clone());
+                // gam#1587: full-width joint penalty (already scaled by
+                // `rho_curvature_scale`), folded into every operator path below.
+                let joint_penalty_arc: Option<Arc<Array2<f64>>> =
+                    scaled_joint_penalty.clone().map(Arc::new);
+                let trace_diagonal_ridge = scaled_joint_trace_diagonal_ridge
+                    + rho_curvature_scale * JOINT_TRACE_STABILITY_RIDGE;
+                match &h_joint_unpen {
+                    JointHessianSource::Dense(h_joint) => {
+                        let h_joint = Arc::new(h_joint.clone());
+                        let apply_h = Arc::clone(&h_joint);
+                        let apply_ranges = ranges_vec.clone();
+                        let apply_s = Arc::clone(&s_lambdas);
+                        let apply_hphi = jeffreys_for_operator.cloned();
+                        let apply_joint = joint_penalty_arc.clone();
+                        let hphi_scale = rho_curvature_scale;
+                        Arc::new(MatrixFreeSpdOperator::new_with_mode(
+                            total,
+                            move |v| {
+                                let mut out = apply_h.dot(v);
+                                let penalty = apply_joint_block_penalty(
+                                    &apply_ranges,
+                                    apply_s.as_ref(),
+                                    v,
+                                    trace_diagonal_ridge,
+                                    None,
+                                );
+                                out += &penalty;
+                                if let Some(joint) = apply_joint.as_ref() {
+                                    out += &joint.dot(v);
+                                }
+                                if let Some(hphi) = apply_hphi.as_ref() {
+                                    let jeffreys = hphi.dot(v);
+                                    out.scaled_add(hphi_scale, &jeffreys);
+                                }
+                                out
+                            },
+                            pseudo_logdet_mode,
+                        ))
+                    }
+                    JointHessianSource::Operator {
+                        apply,
+                        dense_forced,
+                        ..
+                    } => {
+                        let apply_h = Arc::clone(apply);
+                        let apply_ranges = ranges_vec.clone();
+                        let apply_s = Arc::clone(&s_lambdas);
+                        let apply_hphi = jeffreys_for_operator.cloned();
+                        let apply_joint = joint_penalty_arc.clone();
+                        let dense_joint = joint_penalty_arc.clone();
+                        let hphi_scale = rho_curvature_scale;
+                        // Single-pass dense assembly of the SAME penalized
+                        // operator `H_unpen + S_λ + scale·H_Φ`. When the
+                        // operator source can structurally build its full dense
+                        // `H_unpen` in one chunked BLAS-3 `XᵀWX` row pass
+                        // (`dense_forced`), the LAML logdet factorization assembles
+                        // it once here and adds the penalty/Jeffreys terms in
+                        // O(p²) — instead of `total` canonical-basis matvecs, each
+                        // a full n-row pass through `apply_h`. The matvec closure
+                        // below is the exact same algebra column-for-column, so the
+                        // materialized dense operator (and its logdet) are
+                        // numerically identical; the direct build is preferred only
+                        // when `dense_forced` actually yields a matrix.
+                        let dense_forced = Arc::clone(dense_forced);
+                        let dense_ranges = ranges_vec.clone();
+                        let dense_s = Arc::clone(&s_lambdas);
+                        let dense_hphi = jeffreys_for_operator.cloned();
+                        let dense_assemble: Arc<dyn Fn() -> Option<Array2<f64>> + Send + Sync> =
+                            Arc::new(move || {
+                                let mut matrix = match dense_forced() {
+                                    Ok(Some(matrix)) => matrix,
+                                    Ok(None) => return None,
+                                    Err(error) => {
+                                        log::warn!(
+                                            "joint exact-newton dense_forced failed during outer logdet materialization: {error}"
+                                        );
+                                        return None;
+                                    }
+                                };
+                                if matrix.nrows() != total || matrix.ncols() != total {
                                     return None;
                                 }
-                            };
-                            if matrix.nrows() != total || matrix.ncols() != total {
-                                return None;
-                            }
-                            add_joint_penalty_to_matrix(
-                                &mut matrix,
-                                &dense_ranges,
-                                dense_s.as_ref(),
-                                trace_diagonal_ridge,
-                                None,
-                            );
-                            if let Some(joint) = dense_joint.as_ref() {
-                                matrix += joint.as_ref();
-                            }
-                            if let Some(hphi) = dense_hphi.as_ref() {
-                                matrix.scaled_add(hphi_scale, hphi);
-                            }
-                            Some(matrix)
-                        });
-                    Arc::new(MatrixFreeSpdOperator::new_with_mode_and_dense_assemble(
-                        total,
-                        move |v| {
-                            let mut out = match apply_h(v) {
-                                Ok(out) => out,
-                                Err(error) => {
-                                    log::warn!(
-                                        "joint exact-newton operator matvec failed during outer trace construction: {error}"
-                                    );
-                                    Array1::<f64>::from_elem(total, f64::NAN)
+                                add_joint_penalty_to_matrix(
+                                    &mut matrix,
+                                    &dense_ranges,
+                                    dense_s.as_ref(),
+                                    trace_diagonal_ridge,
+                                    None,
+                                );
+                                if let Some(joint) = dense_joint.as_ref() {
+                                    matrix += joint.as_ref();
                                 }
-                            };
-                            let penalty = apply_joint_block_penalty(
-                                &apply_ranges,
-                                apply_s.as_ref(),
-                                v,
-                                trace_diagonal_ridge,
-                                None,
-                            );
-                            out += &penalty;
-                            if let Some(joint) = apply_joint.as_ref() {
-                                out += &joint.dot(v);
-                            }
-                            if let Some(hphi) = apply_hphi.as_ref() {
-                                let jeffreys = hphi.dot(v);
-                                out.scaled_add(hphi_scale, &jeffreys);
-                            }
-                            out
-                        },
-                        pseudo_logdet_mode,
-                        Some(dense_assemble),
-                    ))
+                                if let Some(hphi) = dense_hphi.as_ref() {
+                                    matrix.scaled_add(hphi_scale, hphi);
+                                }
+                                Some(matrix)
+                            });
+                        Arc::new(MatrixFreeSpdOperator::new_with_mode_and_dense_assemble(
+                            total,
+                            move |v| {
+                                let mut out = match apply_h(v) {
+                                    Ok(out) => out,
+                                    Err(error) => {
+                                        log::warn!(
+                                            "joint exact-newton operator matvec failed during outer trace construction: {error}"
+                                        );
+                                        Array1::<f64>::from_elem(total, f64::NAN)
+                                    }
+                                };
+                                let penalty = apply_joint_block_penalty(
+                                    &apply_ranges,
+                                    apply_s.as_ref(),
+                                    v,
+                                    trace_diagonal_ridge,
+                                    None,
+                                );
+                                out += &penalty;
+                                if let Some(joint) = apply_joint.as_ref() {
+                                    out += &joint.dot(v);
+                                }
+                                if let Some(hphi) = apply_hphi.as_ref() {
+                                    let jeffreys = hphi.dot(v);
+                                    out.scaled_add(hphi_scale, &jeffreys);
+                                }
+                                out
+                            },
+                            pseudo_logdet_mode,
+                            Some(dense_assemble),
+                        ))
+                    }
                 }
-            }
-        } else {
-            let mut j_for_traces = materialize_joint_hessian_source(
-                &h_joint_unpen,
-                total,
-                "joint exact-newton Hessian materialization",
-            )?;
-            add_joint_penalty_to_matrix(
-                &mut j_for_traces,
-                ranges,
-                &scaled_s_lambdas,
-                scaled_joint_trace_diagonal_ridge,
-                None,
-            );
-            if let Some(joint) = scaled_joint_penalty.as_ref() {
-                j_for_traces += joint;
-            }
-            if let Some(hphi) = jeffreys_for_operator {
-                j_for_traces.scaled_add(rho_curvature_scale, hphi);
-            }
-            // gam#1395/#1854: `BlockCoupledOperator::from_joint_hessian_with_mode`
-            // eigendecomposes via `eigh(Side::Lower)`, which reads ONLY the lower
-            // triangle and assumes the input is already symmetric. The assembled
-            // `H_unpen + S_λ + scale·H_Φ` is symmetric in exact arithmetic, but
-            // reduction-order f.p. noise desyncs mirror entries — and on the
-            // multinomial Firth/Jeffreys path the divided-difference `H_Φ` (plus
-            // its second-order completion) carries an `O(1e10)` curvature scale in
-            // the near-separation regime, so that asymmetry is large enough that
-            // reading the raw lower triangle yields a materially different spectrum
-            // (and logdet) than the symmetrized matrix. That is exactly the gam#1395
-            // logdet-collapse the ground-truth guard below detects, because the
-            // guard reconstructs the SAME matrix but symmetrizes it first (as does
-            // the matrix-free dense-assemble path). Symmetrize here too so every
-            // route feeds `from_symmetric_with_mode` the identical symmetric matrix
-            // and the operator realizes the penalized joint Hessian consistently.
-            symmetrize_dense_in_place(&mut j_for_traces);
-            Arc::new(
-                BlockCoupledOperator::from_joint_hessian_with_mode(
-                    &j_for_traces,
-                    pseudo_logdet_mode,
+            } else {
+                let mut j_for_traces = materialize_joint_hessian_source(
+                    &h_joint_unpen,
+                    total,
+                    "joint exact-newton Hessian materialization",
+                )?;
+                add_joint_penalty_to_matrix(
+                    &mut j_for_traces,
+                    ranges,
+                    &scaled_s_lambdas,
+                    scaled_joint_trace_diagonal_ridge,
+                    None,
+                );
+                if let Some(joint) = scaled_joint_penalty.as_ref() {
+                    j_for_traces += joint;
+                }
+                if let Some(hphi) = jeffreys_for_operator {
+                    j_for_traces.scaled_add(rho_curvature_scale, hphi);
+                }
+                // gam#1395/#1854: `BlockCoupledOperator::from_joint_hessian_with_mode`
+                // eigendecomposes via `eigh(Side::Lower)`, which reads ONLY the lower
+                // triangle and assumes the input is already symmetric. The assembled
+                // `H_unpen + S_λ + scale·H_Φ` is symmetric in exact arithmetic, but
+                // reduction-order f.p. noise desyncs mirror entries — and on the
+                // multinomial Firth/Jeffreys path the divided-difference `H_Φ` (plus
+                // its second-order completion) carries an `O(1e10)` curvature scale in
+                // the near-separation regime, so that asymmetry is large enough that
+                // reading the raw lower triangle yields a materially different spectrum
+                // (and logdet) than the symmetrized matrix. That is exactly the gam#1395
+                // logdet-collapse the ground-truth guard below detects, because the
+                // guard reconstructs the SAME matrix but symmetrizes it first (as does
+                // the matrix-free dense-assemble path). Symmetrize here too so every
+                // route feeds `from_symmetric_with_mode` the identical symmetric matrix
+                // and the operator realizes the penalized joint Hessian consistently.
+                symmetrize_dense_in_place(&mut j_for_traces);
+                Arc::new(
+                    BlockCoupledOperator::from_joint_hessian_with_mode(
+                        &j_for_traces,
+                        pseudo_logdet_mode,
+                    )
+                    .map_err(|e| CustomFamilyError::trial_point(format!("BlockCoupledOperator from joint Hessian: {e}")))?,
                 )
-                .map_err(|e| CustomFamilyError::trial_point(format!("BlockCoupledOperator from joint Hessian: {e}")))?,
-            )
+            };
+            if let Ok(mut cache) = assembled_operator_cache().lock() {
+                cache.insert(operator_fingerprint, Arc::clone(&built));
+            }
+            built
         };
-        if let Ok(mut cache) = assembled_operator_cache().lock() {
-            cache.insert(operator_fingerprint, Arc::clone(&built));
-        }
-        built
-    };
         Ok(assembled)
     };
 
