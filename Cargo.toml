@@ -450,3 +450,8 @@ path = "examples/probe_2751_bms_logslope_decomposition.rs"
 [[example]]
 name = "probe_2761_ell_profile"
 path = "examples/probe_2761_ell_profile.rs"
+
+[[example]]
+name = "probe_2750_lambda_path"
+path = "examples/probe_2750_lambda_path.rs"
+
