@@ -494,6 +494,70 @@ fn profile_one(
     Some((p, fit.reml_score, fit.edf, rmse(&pred, truth_grid)))
 }
 
+/// Sweep case 3 (n = 240, freq 1.5, noise 0.08), the row whose outer search
+/// refuses. Fit it at a grid of PINNED ranges — which short-circuits the psi
+/// search — and separately with the range free, so a refusal can be attributed
+/// to the range region or to the search.
+fn case3() {
+    let n = 240usize;
+    let freq = 1.5_f64;
+    let phase = 0.7_f64;
+    let noise = 0.08_f64;
+    let seed = 3u64;
+    let sig = |x: f64| (std::f64::consts::TAU * freq * x + phase).sin();
+    let xs: Vec<f64> = (0..n).map(|i| i as f64 / (n as f64 - 1.0)).collect();
+    let headers = ["x", "y"].into_iter().map(str::to_string).collect::<Vec<_>>();
+    let rows = xs
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            let e = 2.0
+                * hashed_unit(
+                    (i as u64)
+                        .wrapping_mul(2_654_435_761)
+                        .wrapping_add(seed.wrapping_mul(0x9E37_79B9)),
+                )
+                - 1.0;
+            StringRecord::from(vec![
+                format!("{x:.17e}"),
+                format!("{:.17e}", sig(x) + noise * e),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode");
+    let gridx: Vec<f64> = (0..300).map(|i| 0.003 + 0.994 * i as f64 / 299.0).collect();
+    let truth: Vec<f64> = gridx.iter().map(|&t| sig(t)).collect();
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    let mut bodies = vec!["s(x, bs=\"mjs\")".to_string()];
+    for k in 0..18 {
+        let ell = 0.004 * 1.4_f64.powi(k);
+        bodies.push(format!("s(x, bs=\"mjs\", length_scale={ell})"));
+    }
+    for body in bodies {
+        match fit_from_formula(&format!("y ~ {body}"), &ds, &cfg) {
+            Ok(FitResult::Standard(fit)) => {
+                let x_grid = dense_design(&fit, &gridx);
+                let pred: Vec<f64> = x_grid.dot(&fit.fit.beta).to_vec();
+                println!(
+                    "[2750-case3] {body}: p={} edf={:.3} reml={:.4} rmse={:.6}",
+                    x_grid.ncols(),
+                    fit.fit.blocks[0].edf,
+                    fit.fit.reml_score().unwrap_or(f64::NAN),
+                    rmse(&pred, &truth)
+                );
+            }
+            Ok(_) => println!("[2750-case3] {body}: non-standard"),
+            Err(e) => println!(
+                "[2750-case3] {body}: REFUSED {}",
+                e.to_string().chars().take(150).collect::<String>()
+            ),
+        }
+    }
+}
+
 fn main() {
     init_parallelism();
     let ds = dataset();
@@ -507,6 +571,11 @@ fn main() {
     // frozen-range state and the free-search state are both on one table.
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("path");
+
+    if mode == "case3" {
+        case3();
+        return;
+    }
 
     if mode == "psd" {
         psd_scan(&ds);

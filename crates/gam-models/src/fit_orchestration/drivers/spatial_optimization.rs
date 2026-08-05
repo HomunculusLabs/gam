@@ -7910,7 +7910,6 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     // eligible spatial basis does not expose derivative information, that is
     // now a hard error.
     let mut resolvedspec = spec.clone();
-    let spatial_terms = spatial_length_scale_term_indices(&resolvedspec);
     let n = data.nrows();
     if !(y.len() == n && weights.len() == n && offset.len() == n) {
         crate::bail_invalid_estim!(
@@ -7921,6 +7920,16 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
             offset.len()
         );
     }
+    // #2750: choose the measure-jet representer range's SEED from the response
+    // rather than from the node spacing alone. The profiled criterion in `ln ℓ`
+    // is not unimodal, so the local descent that follows cannot leave the basin
+    // it starts in; the screen picks the basin and the search still owns the
+    // range inside it. Runs before `spatial_length_scale_term_indices` only for
+    // readability — the enrollment predicate does not read `length_scale`.
+    // Skipped for pinned, frozen and already-standardized terms; see
+    // `seed_measure_jet_auto_ranges`.
+    seed_measure_jet_auto_ranges(data, y.view(), weights.view(), &mut resolvedspec);
+    let spatial_terms = spatial_length_scale_term_indices(&resolvedspec);
     if !kappa_options.enabled || spatial_terms.is_empty() {
         let out = fit_term_collection_forspec(
             data,

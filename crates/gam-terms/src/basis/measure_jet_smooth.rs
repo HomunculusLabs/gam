@@ -810,6 +810,109 @@ pub(crate) fn median_nearest_center_spacing(dist2: &Array2<f64>) -> Result<f64, 
     Ok(median)
 }
 
+/// Axis-aligned bounding-box diagonal of a point set — the deterministic
+/// diameter proxy the scale band and the range bracket both measure the
+/// configuration's extent with. `O(m·d)` and permutation-invariant, unlike a
+/// max-pairwise-distance scan.
+pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
+    let mut diag2 = 0.0_f64;
+    for k in 0..points.ncols() {
+        let col = points.column(k);
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &v in col.iter() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        if lo.is_finite() && hi.is_finite() {
+            diag2 += (hi - lo) * (hi - lo);
+        }
+    }
+    diag2.sqrt()
+}
+
+/// The deterministic bracket the representer range `ℓ` is SCREENED over before
+/// the outer ψ search refines it, in the STANDARDIZED frame the basis is
+/// realized in (gam#2750).
+///
+/// ## Why a bracket exists at all
+///
+/// `ℓ` is a design-moving coordinate: it decides WHICH span the representers
+/// occupy, and the outer search reaches it by local descent from the seed. The
+/// profiled criterion in `ln ℓ` is not unimodal — as `ℓ` grows past a few
+/// center spacings the Gaussian columns become collinear, the rank-revealing
+/// identifiability section drops columns, and the criterion steps. Measured on
+/// `measure_jet_formula_fit_robustness_sweep` seed 1 (n = 200, one sine cycle):
+/// a local minimum at the auto range `ℓ = 0.020` (`V = −234.5`), a barrier at
+/// `ℓ = 0.035` (`V = −231.1`), and the GLOBAL minimum at `ℓ = 0.80`
+/// (`V = −256.3`) — 21.7 log units deeper, with held-out RMSE `0.0084` against
+/// `0.0175`, i.e. the same basis fitting 2.1× better and beating `tp` on both
+/// the criterion and the truth instead of losing on both. A local descent
+/// seeded inside the first basin cannot cross that barrier, and the frozen
+/// coefficient chart the ψ trials rebuild in stops being evaluable ~1.6× past
+/// the seed, so the search terminates essentially where it started. The λ that
+/// comes back is then a faithful readout of a range nothing could move — which
+/// is the "1-D fits select a too-large λ" this bracket exists to end.
+///
+/// ## Why THIS bracket
+///
+/// The nodes are the term's own realized scale band, verbatim. That is not a
+/// coincidence of convenience: the energy's `ε` and the representer range `ℓ`
+/// are the same physical quantity — a length in the chart — and the band is
+/// already derived, not chosen: its floor is the median nearest-node spacing
+/// (below it neighbouring representers stop overlapping and the design is a
+/// bump-per-node indicator with no partition of unity) and its ceiling is half
+/// the node bounding-box diagonal, at the band's own auto-clamped resolution.
+/// So the screen introduces no length, no count and no step of its own.
+///
+/// [`MeasureJetRangeBracket::ceiling`] is the full node bounding-box diagonal:
+/// at `ℓ` that long every pair of representers overlaps at `≥ exp(−1/2)`, so
+/// the block is numerically one function plus the affine head and there is no
+/// distinct model past it. A screen whose argmin lands on the top band node may
+/// walk geometrically toward it at `log_step`; it may not walk past it.
+#[derive(Clone, Debug)]
+pub struct MeasureJetRangeBracket {
+    /// Geometric grid of candidate ranges, ascending. The realized scale band.
+    pub nodes: Vec<f64>,
+    /// The band's own log step, so an endpoint walk keeps its resolution.
+    pub log_step: f64,
+    /// Hard upper end for any walk past the top node (see the type docs).
+    pub ceiling: f64,
+}
+
+/// Realize [`MeasureJetRangeBracket`] for a fresh (unfrozen) measure-jet spec.
+///
+/// `data` must already be in the standardized frame the basis is built in, and
+/// the spec must be the FRESH one (no frozen quadrature): the bracket is a
+/// seeding device and a frozen term has nothing left to seed.
+pub fn measure_jet_range_bracket(
+    data: ArrayView2<'_, f64>,
+    spec: &MeasureJetBasisSpec,
+) -> Result<MeasureJetRangeBracket, BasisError> {
+    if spec.frozen_quadrature.is_some() {
+        crate::bail_invalid_basis!(
+            "measure-jet range bracket is a seeding device; a frozen-quadrature spec has no seed left to choose"
+        );
+    }
+    if data.ncols() == 0 {
+        crate::bail_invalid_basis!("measure-jet range bracket needs at least one feature column");
+    }
+    validate_finite_points(data, "data")?;
+    let seed_centers = select_centers_by_strategy(data, &spec.center_strategy)?;
+    if seed_centers.nrows() < 3 {
+        return Err(BasisError::InsufficientColumnsForConstraint {
+            found: seed_centers.nrows(),
+        });
+    }
+    let (nodes, _masses) = measure_jet_quadrature_nodes(data, seed_centers.view())?;
+    let band = measure_jet_band(nodes.view(), spec.num_scales)?;
+    Ok(MeasureJetRangeBracket {
+        nodes: band.eps,
+        log_step: band.log_step,
+        ceiling: bounding_box_diagonal(nodes.view()),
+    })
+}
+
 /// Build the realized geometric scale band from the center set: floor at the
 /// median nearest-center spacing (below it the quadrature resolves nothing),
 /// ceiling at half the bounding-box diagonal (a deterministic diameter-scale
@@ -825,19 +928,7 @@ pub fn measure_jet_band(
     let dist2 = pairwise_sq_dists(centers, centers);
     let eps_min = median_nearest_center_spacing(&dist2)?;
     // Half the bounding-box diagonal: a cheap, deterministic diameter proxy.
-    let d = centers.ncols();
-    let mut diag2 = 0.0_f64;
-    for k in 0..d {
-        let col = centers.column(k);
-        let mut lo = f64::INFINITY;
-        let mut hi = f64::NEG_INFINITY;
-        for &v in col.iter() {
-            lo = lo.min(v);
-            hi = hi.max(v);
-        }
-        diag2 += (hi - lo) * (hi - lo);
-    }
-    let eps_max = 0.5 * diag2.sqrt();
+    let eps_max = 0.5 * bounding_box_diagonal(centers);
     if !(eps_max.is_finite() && eps_max > eps_min) {
         return Ok(MeasureJetBand {
             eps: vec![eps_min],
@@ -2161,7 +2252,8 @@ pub fn build_measure_jet_basis(
         // the center evaluation map. It is independent of `double_penalty`:
         // statistical selection is a distinct REML component below, never a
         // fixed coefficient toll fused into this estimand.
-        let penalty = constructive_pullback_center_form(&kz, &q_form, "measure-jet primary penalty")?;
+        let penalty =
+            constructive_pullback_center_form(&kz, &q_form, "measure-jet primary penalty")?;
         let c_primary = constructive_frobenius_scale(&penalty);
         fused_penalty_normalization_scale = Some(c_primary);
         // Declare the energy's structural null frame on the shipped Primary
@@ -2169,7 +2261,8 @@ pub fn build_measure_jet_basis(
         // the pullback's NUMERICAL rank falls as the representer range grows, so
         // a rank test on the shipped matrix would let a design-moving ℓ decide
         // the double-penalty topology between outer trials.
-        let mut primary = penalty.scaled(1.0 / c_primary, "normalized measure-jet primary penalty")?;
+        let mut primary =
+            penalty.scaled(1.0 / c_primary, "normalized measure-jet primary penalty")?;
         if let Some(frame) = measure_jet_primary_structural_null_frame(&z, m, head_width)? {
             primary = primary.with_structural_null_frame(
                 frame,
@@ -2223,9 +2316,10 @@ pub fn build_measure_jet_basis(
             .iter()
             .find(|candidate| matches!(candidate.source, PenaltySource::Primary))
             .map(|candidate| {
-                candidate
-                    .matrix
-                    .scaled(candidate.normalization_scale, "physical measure-jet primary")
+                candidate.matrix.scaled(
+                    candidate.normalization_scale,
+                    "physical measure-jet primary",
+                )
             })
             .transpose()?;
         if let Some(primary_physical) = primary_physical {

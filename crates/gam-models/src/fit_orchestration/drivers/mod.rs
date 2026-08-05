@@ -142,6 +142,11 @@ include!("constant_curvature_kappa_jet.rs");
 // coordinates (κ, ln ℓ) — the value path, the ψ jet, the profile that owns both
 // and the bounded solve that mints κ̂. Same reason as the jet above.
 include!("constant_curvature_profile.rs");
+// #2750: the measure-jet representer range is screened against the response
+// before the outer ψ search refines it. Same "bracket cheaply, refine exactly"
+// shape as the κ profile above, and kept out of the driver file for the same
+// reason.
+include!("measure_jet_range_seed.rs");
 
 #[cfg(test)]
 mod test_support {
