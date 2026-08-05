@@ -2,12 +2,12 @@
   "workflow": "Reference Quality Suite",
   "publish_job_status": "failure",
   "publish_job_status_note": "status of the job that PUBLISHED these results, not the conclusion of run_id -- this job is part of that run, so the run has not concluded here",
-  "run_id": "30944825436",
-  "run_number": "436",
+  "run_id": "30972066864",
+  "run_number": "437",
   "run_attempt": "1",
   "event": "schedule",
   "ref": "refs/heads/main",
-  "sha": "fe47ac4f65e49b37aa40bc8050b695d9188a7ebe",
-  "completed_utc": "2026-08-04T21:25:43Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30944825436"
+  "sha": "4a1cf25136b7034425285470b5f168a2441e5dd2",
+  "completed_utc": "2026-08-05T04:58:39Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30972066864"
 }
