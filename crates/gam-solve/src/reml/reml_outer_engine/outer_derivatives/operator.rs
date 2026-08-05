@@ -875,7 +875,7 @@ pub(crate) fn build_outer_hessian_operator(
             let mode_kernel = ThetaModeResponseKernel::select(
                 subspace,
                 solution.active_constraints.as_deref(),
-                &*hop,
+                solution.mode_response_operator(),
             );
             let mut rhs_stack = Array2::<f64>::zeros((hop.dim(), total));
             for idx in 0..k {

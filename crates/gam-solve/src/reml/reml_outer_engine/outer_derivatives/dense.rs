@@ -120,7 +120,7 @@ pub(crate) fn compute_outer_hessian(
             ThetaModeResponseKernel::select(
                 solution.penalty_subspace_trace.as_deref(),
                 solution.active_constraints.as_deref(),
-                hop,
+                solution.mode_response_operator(),
             )
         })
     };

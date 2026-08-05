@@ -665,10 +665,14 @@ pub fn reml_laml_evaluate(
         // verbatim by `compute_outer_hessian` and
         // `build_outer_hessian_operator`. Box-masked ρ coordinates keep
         // their RHS column zero, which both kernel arms map to exact zeros.
+        // #2612: the mode response is differentiated through the INNER
+        // stationarity system, which is not always the object the logdet is
+        // priced on. `mode_response_operator()` is that system's operator and
+        // equals `hop` on every lane that has not installed a distinct one.
         let mode_kernel = ThetaModeResponseKernel::select(
             solution.penalty_subspace_trace.as_deref(),
             solution.active_constraints.as_deref(),
-            hop,
+            solution.mode_response_operator(),
         );
         let mut rhs_stack = Array2::<f64>::zeros((dim, total_cols));
         let mut col_idx = 0;

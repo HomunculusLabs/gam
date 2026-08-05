@@ -1238,6 +1238,10 @@ impl<'a> RemlState<'a> {
             );
         }
         super::assembly::InnerAssembly {
+            // The single-eta GLM lane prices its logdet on the same operator its
+            // inner solve converged against, so the mode response has nothing to
+            // separate from (#2612).
+            mode_response_op: None,
             log_likelihood: ctx.log_likelihood,
             penalty_quadratic: pirls_result.stable_penalty_term,
             beta,

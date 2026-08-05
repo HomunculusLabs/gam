@@ -21,6 +21,10 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
     per_block: &[Array1<f64>],
     beta_flat: &Array1<f64>,
     hessian_op: Arc<dyn HessianFactorization>,
+    // #2612: the operator the IFT mode response `v_k = ∂β̂/∂ρ_k` is solved
+    // against, when that is not `hessian_op`. `None` on every lane whose logdet
+    // is priced on the inner objective's own Hessian.
+    mode_response_op: Option<Arc<dyn HessianFactorization>>,
     ranges: &[(usize, usize)],
     total: usize,
     ridge: f64,
@@ -195,6 +199,7 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         beta: beta_flat.clone(),
         n_observations,
         hessian_op,
+        mode_response_op,
         penalty_coords,
         penalty_logdet,
         dispersion: DispersionHandling::Fixed {
@@ -462,6 +467,8 @@ pub(crate) fn unified_joint_cost_gradient(
     rho: &Array1<f64>,
     beta_flat: &Array1<f64>,
     hessian_op: Arc<dyn HessianFactorization>,
+    // #2612: see `build_custom_family_inner_assembly`.
+    mode_response_op: Option<Arc<dyn HessianFactorization>>,
     ranges: &[(usize, usize)],
     total: usize,
     ridge: f64,
@@ -506,6 +513,7 @@ pub(crate) fn unified_joint_cost_gradient(
         per_block,
         beta_flat,
         hessian_op,
+        mode_response_op,
         ranges,
         total,
         ridge,
@@ -607,6 +615,10 @@ pub(crate) fn unified_joint_efs_eval(
         per_block,
         beta_flat,
         hessian_op,
+        // The EFS screening path evaluates the Φ-less criterion, so its logdet
+        // operator IS its inner objective's Hessian and the mode response has
+        // nothing to separate from (#2612).
+        None,
         ranges,
         total,
         ridge,
@@ -1088,19 +1100,29 @@ pub(crate) fn joint_outer_evaluate(
             Some(matrix)
         });
 
-    // Reuse the assembled outer Hessian operator (and its lazily-built spectral
-    // factorization) when an immediately-prior eval at the SAME ρ/β̂/curvature
-    // assembled the bit-identical operator (the BFGS Value→ValueAndGradient
-    // pair and repeated line-search probes). The fingerprint pins every operator
-    // input, so a hit is bit-identical to a fresh build — cost and analytic
-    // gradient are unchanged. See `AssembledOperatorCache`.
+    // Assemble `H_unpen + S_λ + scale · J` for a caller-chosen Jeffreys curvature
+    // `J`. Everything except `J` is fixed for this evaluation point, so the two
+    // objects the outer criterion needs — the logdet/trace object (`J = H_Φ`) and
+    // the IFT mode-response object (`J = H_Φ + completion`, the TRUE Hessian of
+    // the Φ-augmented inner objective) — differ only in that argument.
+    //
+    // Reuse the assembled operator (and its lazily-built spectral factorization)
+    // when an immediately-prior eval at the SAME ρ/β̂/curvature assembled the
+    // bit-identical operator (the BFGS Value→ValueAndGradient pair and repeated
+    // line-search probes). The fingerprint pins every operator input INCLUDING
+    // `J`, so the two objects never collide in the cache and a hit is
+    // bit-identical to a fresh build. See `AssembledOperatorCache`.
+    let assemble_operator = |jeffreys_for_operator: Option<&Array2<f64>>| -> Result<
+        Arc<dyn HessianFactorization>,
+        CustomFamilyError,
+    > {
     let operator_fingerprint = assembled_operator_fingerprint(
         rho,
         beta_flat,
         &h_joint_unpen,
         &scaled_s_lambdas,
         scaled_joint_penalty.as_ref(),
-        robust_jeffreys_hphi_for_operator.as_ref(),
+        jeffreys_for_operator,
         ranges,
         total,
         scaled_joint_trace_diagonal_ridge,
@@ -1112,7 +1134,7 @@ pub(crate) fn joint_outer_evaluate(
         .ok()
         .and_then(|cache| cache.get(operator_fingerprint));
 
-    let hessian_op: Arc<dyn HessianFactorization> = if let Some(cached) = cached_operator {
+    let assembled: Arc<dyn HessianFactorization> = if let Some(cached) = cached_operator {
         log::debug!(
             "[OUTER hessian-route] reusing cached same-ρ assembled operator (fingerprint hit)"
         );
@@ -1136,7 +1158,7 @@ pub(crate) fn joint_outer_evaluate(
                     let apply_h = Arc::clone(&h_joint);
                     let apply_ranges = ranges_vec.clone();
                     let apply_s = Arc::clone(&s_lambdas);
-                    let apply_hphi = robust_jeffreys_hphi_for_operator.clone();
+                    let apply_hphi = jeffreys_for_operator.cloned();
                     let apply_joint = joint_penalty_arc.clone();
                     let hphi_scale = rho_curvature_scale;
                     Arc::new(MatrixFreeSpdOperator::new_with_mode(
@@ -1171,7 +1193,7 @@ pub(crate) fn joint_outer_evaluate(
                     let apply_h = Arc::clone(apply);
                     let apply_ranges = ranges_vec.clone();
                     let apply_s = Arc::clone(&s_lambdas);
-                    let apply_hphi = robust_jeffreys_hphi_for_operator.clone();
+                    let apply_hphi = jeffreys_for_operator.cloned();
                     let apply_joint = joint_penalty_arc.clone();
                     let dense_joint = joint_penalty_arc.clone();
                     let hphi_scale = rho_curvature_scale;
@@ -1190,7 +1212,7 @@ pub(crate) fn joint_outer_evaluate(
                     let dense_forced = Arc::clone(dense_forced);
                     let dense_ranges = ranges_vec.clone();
                     let dense_s = Arc::clone(&s_lambdas);
-                    let dense_hphi = robust_jeffreys_hphi_for_operator.clone();
+                    let dense_hphi = jeffreys_for_operator.cloned();
                     let dense_assemble: Arc<dyn Fn() -> Option<Array2<f64>> + Send + Sync> =
                         Arc::new(move || {
                             let mut matrix = match dense_forced() {
@@ -1271,7 +1293,7 @@ pub(crate) fn joint_outer_evaluate(
             if let Some(joint) = scaled_joint_penalty.as_ref() {
                 j_for_traces += joint;
             }
-            if let Some(hphi) = robust_jeffreys_hphi_for_operator.as_ref() {
+            if let Some(hphi) = jeffreys_for_operator {
                 j_for_traces.scaled_add(rho_curvature_scale, hphi);
             }
             // gam#1395/#1854: `BlockCoupledOperator::from_joint_hessian_with_mode`
@@ -1302,6 +1324,50 @@ pub(crate) fn joint_outer_evaluate(
             cache.insert(operator_fingerprint, Arc::clone(&built));
         }
         built
+    };
+        Ok(assembled)
+    };
+
+    let hessian_op = assemble_operator(robust_jeffreys_hphi_for_operator.as_ref())?;
+
+    // THE IFT OPERATOR IS NOT THE LOGDET OPERATOR (#2612).
+    //
+    // `v_k = ∂β̂/∂ρ_k` is a property of the inner stationarity system, so it
+    // solves against `M_true = H + S_λ + H_Φ + completion` — the exact Hessian
+    // of the Φ-augmented objective the inner Newton converged on. The logdet
+    // VALUE and its trace kernel must instead share ONE object, and that object
+    // is the divided-difference `M_DD = H + S_λ + H_Φ`: folding the completion
+    // into the scalar would require the completion's own β-drift (third
+    // directional derivatives no family exposes) to keep the trace consistent
+    // with it.
+    //
+    // Under the projected/`Smooth` route those two roles are ALREADY separate —
+    // the projected kernel owns the value and the traces, so `hessian_op` is
+    // free to carry the completion, which is what `completion_in_operator`
+    // arranges. Under every other route (`PseudoLogdetMode::PositiveDefinite`,
+    // which is what the multinomial declares) `hessian_op` is the value/trace
+    // object, so the completion cannot go into it — and before this the mode
+    // response silently borrowed that same object and solved on `M_DD`.
+    //
+    // `v_k` reaches the outer gradient through the drift trace
+    // `½ tr(M_DD⁻¹ D_β M_DD[v_k])`, so a `v_k` from the wrong operator makes the
+    // analytic gradient the derivative of a DIFFERENT function than the value —
+    // measured on the penguins arm as up to 150% relative error with the sign
+    // wrong on three coordinates, which is what dropped the Jeffreys-armed refit
+    // into `line_search=StepSizeTooSmall` and refused the fit.
+    //
+    // So build the second object when, and only when, the completion exists and
+    // is not already in `hessian_op`. `None` everywhere else keeps every other
+    // family and every clean fit byte-identical: no completion (or no Jeffreys
+    // term at all) means `M_true == M_DD` and there is nothing to separate.
+    let mode_response_op: Option<Arc<dyn HessianFactorization>> = match (
+        robust_jeffreys_hphi.as_ref(),
+        robust_jeffreys_completion
+            .as_ref()
+            .filter(|_| !completion_in_operator),
+    ) {
+        (Some(hphi), Some(completion)) => Some(assemble_operator(Some(&(hphi + completion)))?),
+        _ => None,
     };
 
     // Structural guard against the gam#1395 `0.5·log|H|` collapse.
@@ -1469,6 +1535,7 @@ pub(crate) fn joint_outer_evaluate(
             rho,
             beta_flat,
             hessian_op,
+            mode_response_op,
             ranges,
             total,
             ridge,

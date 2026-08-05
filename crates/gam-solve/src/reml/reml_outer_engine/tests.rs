@@ -2179,6 +2179,7 @@ pub(crate) fn build_sentinel_tripwire_solution(
         log_likelihood: -1.25,
         penalty_quadratic: 0.4,
         hessian_op: hop,
+        mode_response_op: None,
         beta: array![0.5, -0.25],
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(Array2::eye(2))],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -2262,6 +2263,7 @@ pub(crate) fn value_gradient_hessian_prefers_family_supplied_outer_operator() {
         log_likelihood: -1.25,
         penalty_quadratic: 0.4,
         hessian_op: hop,
+        mode_response_op: None,
         beta: array![0.5, -0.25],
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(Array2::eye(2))],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -3103,6 +3105,7 @@ pub(crate) fn operator_hessian_matches_dense_with_operator_drifts_and_extended_g
         log_likelihood: -2.3,
         penalty_quadratic: 0.6,
         hessian_op: hop.clone(),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(penalty_root)],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -3305,6 +3308,7 @@ pub(crate) fn operator_hessian_with_contracted_psi_hook_matches_per_pair_dense()
             log_likelihood: -2.3,
             penalty_quadratic: 0.6,
             hessian_op: hop.clone(),
+            mode_response_op: None,
             beta: beta.clone(),
             penalty_coords: vec![PenaltyCoordinate::from_dense_root(penalty_root.clone())],
             penalty_logdet: PenaltyLogdetDerivs {
@@ -3805,6 +3809,7 @@ pub(crate) fn outer_hessian_operator_matvec_matches_dense_subspace_with_null_alp
         log_likelihood: -2.3,
         penalty_quadratic: 0.6,
         hessian_op: hop.clone(),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![
             PenaltyCoordinate::from_dense_root(penalty_root_0),
@@ -3902,6 +3907,7 @@ pub(crate) fn projected_operator_hessian_matches_dense_subspace_trace() {
         log_likelihood: -2.3,
         penalty_quadratic: 0.6,
         hessian_op: hop.clone(),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(penalty_root)],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -4050,6 +4056,7 @@ pub(crate) fn subspace_trace_large_k_routes_to_projected_operator() {
         log_likelihood: -2.3,
         penalty_quadratic: 0.6,
         hessian_op: hop.clone(),
+        mode_response_op: None,
         beta: array![0.4, -0.7],
         penalty_coords: vec![pcoord; k],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -4286,6 +4293,7 @@ pub(crate) fn gaussian_outer_hessian_operator_matches_dense_assembly() {
         log_likelihood: -8.0,
         penalty_quadratic: 0.9,
         hessian_op: hop.clone(),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![
             PenaltyCoordinate::from_dense_root(penalty_root_0),
@@ -4359,6 +4367,7 @@ pub(crate) fn efs_step_is_zero_at_scalar_optimum() {
         log_likelihood: 0.0,
         penalty_quadratic: 0.0,
         hessian_op: Arc::new(op),
+        mode_response_op: None,
         beta: array![beta_hat],
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(penalty_root)],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -4538,6 +4547,7 @@ pub(crate) fn test_reml_laml_evaluate_gaussian_basic() {
         log_likelihood: -5.0, // −0.5 × deviance = −0.5 × 10
         penalty_quadratic: 2.0,
         hessian_op: Arc::new(op),
+        mode_response_op: None,
         beta: array![1.0, 0.5],
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(
             Array2::eye(2), // S₁ = I (penalty root for param 1)
@@ -4604,6 +4614,7 @@ pub(crate) fn fixed_dispersion_firth_cost_subtracts_jeffreys_term() {
         log_likelihood: 0.0,
         penalty_quadratic: 0.0,
         hessian_op: Arc::new(DenseSpectralOperator::from_symmetric(&Array2::eye(2)).unwrap()),
+        mode_response_op: None,
         beta: Array1::zeros(2),
         penalty_coords: Vec::new(),
         penalty_logdet: PenaltyLogdetDerivs {
@@ -4719,6 +4730,7 @@ pub(crate) fn family_outer_hessian_operator_short_circuits_dense_pairwise_assemb
         log_likelihood: 0.0,
         penalty_quadratic: 0.4,
         hessian_op: Arc::new(DenseSpectralOperator::from_symmetric(&array![[3.0]]).unwrap()),
+        mode_response_op: None,
         beta: array![0.2],
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(array![[1.0]])],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -4795,6 +4807,7 @@ pub(crate) fn build_projected_rho_gradient_solution(rho: f64) -> InnerSolution<'
             DenseSpectralOperator::from_symmetric_with_mode(&h, PseudoLogdetMode::HardPseudo)
                 .unwrap(),
         ),
+        mode_response_op: None,
         beta: Array1::zeros(2),
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(array![[0.0, 1.0]])],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -5023,6 +5036,7 @@ pub(crate) fn build_gaussian_test_solution(rho: &[f64]) -> InnerSolution<'_> {
         log_likelihood,
         penalty_quadratic: penalty_quad,
         hessian_op: Arc::new(op),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![
             PenaltyCoordinate::from_dense_root(r1),
@@ -5077,6 +5091,7 @@ pub(crate) fn build_large_dense_spectral_gaussian_solution(rho: f64) -> InnerSol
         log_likelihood,
         penalty_quadratic: penalty_quad,
         hessian_op: Arc::new(op),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![PenaltyCoordinate::from_dense_root(Array2::<f64>::eye(p))],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -7201,6 +7216,7 @@ pub(crate) fn build_leak_proof_solution(
         log_likelihood: log_lik,
         penalty_quadratic: penalty_quad,
         hessian_op: Arc::new(hop),
+        mode_response_op: None,
         beta,
         penalty_coords: vec![
             PenaltyCoordinate::from_dense_root(r1),
@@ -7463,6 +7479,7 @@ pub(crate) fn build_gaussian_solution_at_beta(
         log_likelihood,
         penalty_quadratic: penalty_quad,
         hessian_op: Arc::new(op),
+        mode_response_op: None,
         beta: beta_hat,
         penalty_coords: vec![
             PenaltyCoordinate::from_dense_root(r1),
@@ -8140,6 +8157,7 @@ pub(crate) fn build_scaled_curvature_solution(rho: &[f64], s: f64) -> InnerSolut
         log_likelihood: 0.0,
         penalty_quadratic: 0.0,
         hessian_op: hop,
+        mode_response_op: None,
         beta: array![0.0_f64, 0.0],
         penalty_coords: vec![penalty_coord],
         penalty_logdet: PenaltyLogdetDerivs {
@@ -8817,6 +8835,7 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
             log_likelihood: -0.5 * residual.dot(&residual),
             penalty_quadratic,
             hessian_op: Arc::new(hessian_op),
+            mode_response_op: None,
             beta,
             penalty_coords,
             penalty_logdet,

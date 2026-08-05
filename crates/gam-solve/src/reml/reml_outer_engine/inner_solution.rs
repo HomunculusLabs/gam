@@ -49,6 +49,30 @@ pub struct InnerSolution<'dp> {
     /// See response.md Section 3 for the mathematical justification.
     pub hessian_op: Arc<dyn HessianFactorization>,
 
+    /// OPTIONAL distinct operator for the IFT mode response `v_k = ∂β̂/∂θ_k`.
+    ///
+    /// `v_k` is a property of the INNER STATIONARITY SYSTEM, so it must be
+    /// solved against the exact Hessian of the objective the inner solve
+    /// converged on. That is normally [`Self::hessian_op`], and `None` — the
+    /// default — says exactly that.
+    ///
+    /// The two part company when the criterion's `log|·|` is deliberately taken
+    /// on a curvature surrogate rather than on the inner objective's true
+    /// Hessian. The Jeffreys/Firth path is the live case (#2612): the LAML
+    /// logdet and its trace kernel share the divided-difference
+    /// `M_DD = H + S_λ + H_Φ`, because folding the second-order completion into
+    /// the scalar would need the completion's own β-drift (third directional
+    /// derivatives no family exposes) to keep the trace consistent with it —
+    /// while the inner mode genuinely solves `M_true = M_DD + completion`.
+    /// Borrowing `hessian_op` for `v_k` there makes the analytic outer gradient
+    /// the derivative of a different function than the criterion's value,
+    /// because `v_k` enters the gradient through the drift trace
+    /// `½ tr(M_DD⁻¹ D_β M_DD[v_k])`.
+    ///
+    /// Set this ONLY to a genuinely different operator; leaving it `None` keeps
+    /// every existing lane byte-identical.
+    pub mode_response_op: Option<Arc<dyn HessianFactorization>>,
+
     // === Coefficients and penalty structure ===
     /// β̂ — coefficients at the converged mode (in the operator's native basis).
     pub beta: Array1<f64>,
@@ -257,6 +281,7 @@ pub struct InnerSolutionBuilder<'dp> {
     pub(crate) log_likelihood: f64,
     pub(crate) penalty_quadratic: f64,
     pub(crate) hessian_op: Arc<dyn HessianFactorization>,
+    pub(crate) mode_response_op: Option<Arc<dyn HessianFactorization>>,
     pub(crate) beta: Array1<f64>,
     pub(crate) penalty_coords: Vec<PenaltyCoordinate>,
     pub(crate) penalty_logdet: PenaltyLogdetDerivs,
@@ -283,6 +308,20 @@ pub struct InnerSolutionBuilder<'dp> {
     pub(crate) dp_floor_scale: f64,
 }
 
+impl InnerSolution<'_> {
+    /// The operator the IFT mode response `v_k = ∂β̂/∂θ_k` must be solved
+    /// against: [`Self::mode_response_op`] when a lane installed a distinct one,
+    /// otherwise [`Self::hessian_op`]. Every mode-response site reads this
+    /// rather than `hessian_op` directly, so the two can never disagree about
+    /// which system `β̂(θ)` is differentiated through.
+    pub fn mode_response_operator(&self) -> &dyn HessianFactorization {
+        match self.mode_response_op.as_deref() {
+            Some(op) => op,
+            None => &*self.hessian_op,
+        }
+    }
+}
+
 impl<'dp> InnerSolutionBuilder<'dp> {
     /// Create a builder with the required core fields.
     pub fn new(
@@ -299,6 +338,7 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             log_likelihood,
             penalty_quadratic,
             hessian_op,
+            mode_response_op: None,
             beta,
             penalty_coords,
             penalty_logdet,
@@ -322,6 +362,14 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             gaussian_weight_log_sum_half: 0.0,
             dp_floor_scale: 1.0,
         }
+    }
+
+    /// Install a distinct operator for the IFT mode response; see
+    /// [`InnerSolution::mode_response_op`]. `None` (the default) keeps the mode
+    /// response on `hessian_op`.
+    pub fn mode_response_op(mut self, op: Option<Arc<dyn HessianFactorization>>) -> Self {
+        self.mode_response_op = op;
+        self
     }
 
     pub fn deriv_provider(mut self, p: Box<dyn HessianDerivativeProvider + 'dp>) -> Self {
@@ -527,6 +575,7 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             log_likelihood: self.log_likelihood,
             penalty_quadratic: self.penalty_quadratic,
             hessian_op: self.hessian_op,
+            mode_response_op: self.mode_response_op,
             beta: self.beta,
             penalty_coords: self.penalty_coords,
             penalty_logdet: self.penalty_logdet,

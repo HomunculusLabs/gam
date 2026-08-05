@@ -300,6 +300,11 @@ pub struct InnerAssembly<'dp> {
     pub beta: Array1<f64>,
     pub n_observations: usize,
     pub hessian_op: std::sync::Arc<dyn HessianFactorization>,
+    /// Distinct operator for the IFT mode response `v_k = ∂β̂/∂θ_k`; see
+    /// [`InnerSolution::mode_response_op`]. `None` — the default every caller
+    /// wants unless the criterion's `log|·|` is deliberately taken on a
+    /// curvature surrogate — keeps the mode response on `hessian_op`.
+    pub mode_response_op: Option<std::sync::Arc<dyn HessianFactorization>>,
     pub penalty_coords: Vec<PenaltyCoordinate>,
     pub penalty_logdet: PenaltyLogdetDerivs,
     pub dispersion: DispersionHandling,
@@ -349,6 +354,7 @@ impl<'dp> InnerAssembly<'dp> {
             self.penalty_logdet,
             self.dispersion,
         );
+        builder = builder.mode_response_op(self.mode_response_op);
         builder = builder.rho_curvature_scale(self.rho_curvature_scale);
         builder = builder.rho_prior(self.rho_prior);
         builder = builder.hessian_logdet_correction(self.hessian_logdet_correction);

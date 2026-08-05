@@ -1141,6 +1141,7 @@ pub(crate) fn try_tangent_projected_evaluate(
                 log_likelihood: solution.log_likelihood,
                 penalty_quadratic: solution.penalty_quadratic,
                 hessian_op: Arc::clone(&solution.hessian_op),
+                mode_response_op: solution.mode_response_op.clone(),
                 beta: solution.beta.clone(),
                 penalty_coords: solution.penalty_coords.clone(),
                 penalty_logdet: solution.penalty_logdet.clone(),
@@ -1269,6 +1270,10 @@ pub(crate) fn try_tangent_projected_evaluate(
         log_likelihood: solution.log_likelihood,
         penalty_quadratic: solution.penalty_quadratic,
         hessian_op: Arc::new(wrapper),
+        // The projection wraps the SCALAR/trace operator only; the inner
+        // stationarity system `β̂(θ)` is differentiated through is unchanged, so
+        // the mode-response operator carries over verbatim (#2612).
+        mode_response_op: solution.mode_response_op.clone(),
         beta: solution.beta.clone(),
         penalty_coords: solution.penalty_coords.clone(),
         penalty_logdet: projected_logdet,
