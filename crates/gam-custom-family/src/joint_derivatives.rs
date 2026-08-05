@@ -795,3 +795,114 @@ impl ExtCoordBundle {
         }
     }
 }
+
+#[cfg(test)]
+mod jeffreys_drift_composition_tests {
+    //! #2612: the Jeffreys wrapper must fold `H_Φ`'s drift into BOTH orders of
+    //! the trace correction, and along the direction each order is actually
+    //! evaluated at.
+    //!
+    //! The sign convention is the trap. `HessianDerivativeProvider` hands the
+    //! first-order hook the raw mode response `v_k`, and the perturbation
+    //! direction is `δβ = −v_k`; but the second-order hook's third argument
+    //! `u_kl` is ALREADY the perturbation (the inner provider passes it to
+    //! `compute_dh` unnegated, while it negates `v_k`/`v_l`). Routing `u_kl`
+    //! through the first-order helper would silently price `−u_kl` — a term of
+    //! the right magnitude and the wrong sign, which is worse than the omission
+    //! it replaced.
+
+    use super::*;
+    use ndarray::array;
+
+    /// An inner provider that contributes nothing, so the composed result IS the
+    /// Jeffreys drift and the test reads it directly rather than by subtraction.
+    struct SilentInner;
+
+    impl HessianDerivativeProvider for SilentInner {
+        fn hessian_derivative_correction(
+            &self,
+            mode_response: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert!(mode_response.iter().all(|v| v.is_finite()));
+            Ok(None)
+        }
+
+        fn hessian_second_derivative_correction(
+            &self,
+            v_k: &Array1<f64>,
+            v_l: &Array1<f64>,
+            u_kl: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert!(v_k.len() == v_l.len() && v_l.len() == u_kl.len());
+            Ok(None)
+        }
+
+        fn has_corrections(&self) -> bool {
+            true
+        }
+    }
+
+    /// `D_β H_Φ[δ] = diag(δ)`: linear, so the direction it was evaluated at is
+    /// readable straight off the returned matrix.
+    fn identity_drift() -> JeffreysHphiDriftBatchFn {
+        Arc::new(|deltas: &[Array1<f64>]| {
+            Ok(deltas
+                .iter()
+                .map(|delta| Some(Array2::from_diag(delta)))
+                .collect())
+        })
+    }
+
+    fn wrapper() -> JeffreysHphiAwareJointDerivatives<'static> {
+        JeffreysHphiAwareJointDerivatives::new(Box::new(SilentInner), identity_drift(), 2)
+    }
+
+    #[test]
+    fn first_order_correction_prices_the_negated_mode_response_2612() {
+        let v_k = array![0.25, -1.5];
+        let correction = wrapper()
+            .hessian_derivative_correction(&v_k)
+            .expect("the composed correction evaluates")
+            .expect("the drift contributes");
+        assert_eq!(correction, Array2::from_diag(&array![-0.25, 1.5]));
+    }
+
+    #[test]
+    fn second_order_correction_prices_the_second_mode_response_unnegated_2612() {
+        let (v_k, v_l, u_kl) = (array![0.25, -1.5], array![-0.75, 0.5], array![2.0, -3.0]);
+        let correction = wrapper()
+            .hessian_second_derivative_correction(&v_k, &v_l, &u_kl)
+            .expect("the composed correction evaluates")
+            .expect("the drift contributes");
+        assert_eq!(
+            correction,
+            Array2::from_diag(&u_kl),
+            "the second-order Jeffreys drift must be taken along `u_kl` itself; \
+             `-u_kl` would be the same magnitude with the wrong sign"
+        );
+    }
+
+    #[test]
+    fn batched_second_order_corrections_match_the_singular_ones_2612() {
+        let triples = vec![
+            (array![0.25, -1.5], array![-0.75, 0.5], array![2.0, -3.0]),
+            (array![1.0, 0.0], array![0.0, 1.0], array![-0.5, 0.125]),
+        ];
+        let wrapper = wrapper();
+        let batched = wrapper
+            .hessian_second_derivative_corrections_result(&triples)
+            .expect("the batched walk evaluates");
+        assert_eq!(batched.len(), triples.len());
+        for (result, (v_k, v_l, u_kl)) in batched.into_iter().zip(triples.iter()) {
+            let singular = wrapper
+                .hessian_second_derivative_correction(v_k, v_l, u_kl)
+                .expect("the singular walk evaluates")
+                .expect("the drift contributes");
+            let batched_dense = result
+                .expect("the drift contributes")
+                .into_operator()
+                .to_dense();
+            assert_eq!(batched_dense, singular);
+        }
+    }
+}
