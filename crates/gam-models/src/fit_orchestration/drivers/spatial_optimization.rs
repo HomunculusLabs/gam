@@ -5636,6 +5636,75 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 format!("incremental realizer missing full penalty range for term {term_idx}")
             })?
             .clone();
+        // TOPOLOGY IS FROZEN WITH THE CHART (#2750). A ψ trial may move penalty
+        // VALUES; it may not move the penalty SET. The cached topology is the
+        // COLLECTION's — it was decided after the global parametric
+        // orthogonalization — while this rebuild is TERM-LOCAL and cannot see
+        // that gauge, so a candidate the collection dropped as vacuous can
+        // reappear here. Measured on `measure_jet_formula_fit_robustness_sweep`
+        // seed 4: the cold collection drops `DoublePenaltyNullspace` with
+        // reason `ZeroMatrix` (the parametric block had already absorbed the
+        // affine head) and a trial rebuild at a different representer range
+        // emits it again, aborting the outer search mid-flight.
+        //
+        // Align by `original_index`, which is exactly what that field is for:
+        // keep the candidates the cached topology kept, in cached order, and
+        // record the rest as dropped. Anything the cache holds that the rebuild
+        // did NOT produce is a real inconsistency — a ρ coordinate with no
+        // matrix behind it — and still refuses.
+        let cached_originals: Vec<usize> = self
+            .design
+            .smooth
+            .terms
+            .get(term_idx)
+            .map(|term| {
+                term.active_penalties
+                    .iter()
+                    .map(|active| active.info.original_index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (active_penalties, dropped_penalties) = if cached_originals.len()
+            == smooth_penalty_range.len()
+            && active_penalties.len() != smooth_penalty_range.len()
+        {
+            let mut slots: Vec<Option<gam_terms::basis::ActivePenalty>> =
+                active_penalties.into_iter().map(Some).collect();
+            let mut kept = Vec::with_capacity(cached_originals.len());
+            for original in &cached_originals {
+                let Some(found) = slots
+                    .iter_mut()
+                    .find(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|active| active.info.original_index == *original)
+                    })
+                    .and_then(Option::take)
+                else {
+                    return Err(SmoothError::dimension_mismatch(format!(
+                        "incremental realizer lost cached penalty {original} for term '{name}':                          the rebuild produced {:?}",
+                        slots
+                            .iter()
+                            .flatten()
+                            .map(|active| active.info.original_index)
+                            .collect::<Vec<_>>()
+                    ))
+                    .into());
+                };
+                kept.push(found);
+            }
+            let mut dropped = dropped_penalties;
+            dropped.extend(slots.into_iter().flatten().map(|active| {
+                gam_terms::basis::DroppedPenaltyInfo {
+                    source: active.info.source.clone(),
+                    original_index: active.info.original_index,
+                    reason: gam_terms::basis::PenaltyDropReason::ZeroMatrix,
+                    normalization_scale: active.info.normalization_scale,
+                }
+            }));
+            (kept, dropped)
+        } else {
+            (active_penalties, dropped_penalties)
+        };
         if active_penalties.len() != smooth_penalty_range.len() {
             return Err(SmoothError::dimension_mismatch(format!(
                 "incremental realizer topology changed for term '{}': active_penalties={}, cached_penalties={}",

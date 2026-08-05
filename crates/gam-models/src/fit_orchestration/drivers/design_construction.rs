@@ -8020,9 +8020,34 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
     let smooth_start = p_total.saturating_sub(design.smooth.total_smooth_cols());
     let global_range = (smooth_start + smooth_term.coeff_range.start)
         ..(smooth_start + smooth_term.coeff_range.end);
-    let num_penalties = aniso_result.penalties_first[0].len();
-    let penalty_indices: Vec<usize> = (0..num_penalties).map(|j| penalty_start + j).collect();
+    // CANDIDATE → FITTED alignment (#2750). The ψ producer emits one derivative
+    // block per EMITTED penalty candidate, in the builder's original order; the
+    // realized design keeps only the survivors of `filter_penalty_candidates`,
+    // and `ActivePenaltyInfo::original_index` is the map between them. Zipping
+    // the emitted blocks positionally against `penalty_start + j` was correct
+    // only while nothing was ever dropped — a measure-jet term genuinely loses
+    // its null-component candidate at a long representer range, and the fit
+    // then aborted with `penalty_index for dir 0 out of bounds: 1 >= 1`.
+    // Selecting the survivors here, once, keeps every downstream zip positional.
+    let emitted = aniso_result.penalties_first[0].len();
+    let keep: Vec<usize> = smooth_term
+        .active_penalties
+        .iter()
+        .map(|active| active.info.original_index)
+        .collect();
+    if keep.is_empty() || keep.iter().any(|&index| index >= emitted) {
+        return Ok(None);
+    }
+    let penalty_indices: Vec<usize> = (0..keep.len()).map(|j| penalty_start + j).collect();
     let penalties_cross_provider = aniso_result.penalties_cross_provider.clone();
+    /// Take the emitted per-candidate blocks and keep only the fitted ones, in
+    /// fitted order. Consumes the source so no `(n × p)` block is cloned.
+    fn select_fitted(blocks: Vec<Array2<f64>>, keep: &[usize]) -> Vec<Array2<f64>> {
+        let mut slots: Vec<Option<Array2<f64>>> = blocks.into_iter().map(Some).collect();
+        keep.iter()
+            .filter_map(|&index| slots.get_mut(index).and_then(Option::take))
+            .collect()
+    }
 
     // Dense first/diagonal-second matrices may be present even when the shared
     // operator is available. The operator remains the canonical source for
@@ -8054,8 +8079,12 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             }
             (x_first, x_second)
         };
-        let s_psi_components = std::mem::take(&mut aniso_result.penalties_first[a]);
-        let s_psi_psi_components = std::mem::take(&mut aniso_result.penalties_second_diag[a]);
+        let s_psi_components =
+            select_fitted(std::mem::take(&mut aniso_result.penalties_first[a]), &keep);
+        let s_psi_psi_components = select_fitted(
+            std::mem::take(&mut aniso_result.penalties_second_diag[a]),
+            &keep,
+        );
         // Build cross-design entries for other axes b != a in this group.
         // These will be indexed by (b, cross_matrix) where b is the axis
         // offset within the d-entry block.
@@ -8086,6 +8115,7 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
         };
         let cross_penalty_provider = if d > 1 {
             let penalties_cross_provider = penalties_cross_provider.clone();
+            let keep_cross = keep.clone();
             Some(std::sync::Arc::new(
                 move |b_axis: usize| -> Result<Vec<Array2<f64>>, EstimationError> {
                     if b_axis == a {
@@ -8093,9 +8123,13 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
                     }
                     let (axis_lo, axis_hi) = if a < b_axis { (a, b_axis) } else { (b_axis, a) };
                     if let Some(provider) = penalties_cross_provider.as_ref() {
+                        // Same candidate → fitted selection as the diagonal
+                        // blocks above; the provider also answers in the
+                        // builder's emitted order.
                         provider
                             .evaluate(axis_lo, axis_hi)
                             .map_err(EstimationError::from)
+                            .map(|blocks| select_fitted(blocks, &keep_cross))
                     } else {
                         // No provider: either the pair is unregistered, or it
                         // was registered without data (early-return raw-operator
