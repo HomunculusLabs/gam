@@ -368,6 +368,224 @@ pub fn chi_square_sf(statistic: f64, degrees_of_freedom: f64) -> f64 {
     gamma_ur(half_df, 0.5 * statistic)
 }
 
+/// Survival probability `P(Σ_j w_j Z_j² > statistic)` for independent standard
+/// normals `Z_j` and non-negative weights `w`.
+///
+/// This is the exact null law of every quadratic form `u'Au` in a standard
+/// normal vector — `w` being the eigenvalues of the symmetric part of `A` — and
+/// it is the reference distribution a *penalized* likelihood-ratio statistic is
+/// actually drawn from. Only the degenerate all-weights-equal case reduces to a
+/// (scaled) χ²; matching a χ² to the mean `Σ w_j` alone leaves the reference
+/// over-dispersed whenever the weights differ, because `Var = 2Σ w_j²` while the
+/// mean-matched χ² carries `2 Σ w_j`, and `Σ w_j² ≤ (max_j w_j)·Σ w_j`.
+///
+/// # Method
+///
+/// Imhof's (1961) exact inversion of the characteristic function, in the central
+/// one-degree-of-freedom-per-weight form:
+///
+/// ```text
+/// P(Q > x) = 1/2 + (1/π) ∫_0^∞ sin θ(u) / (u ρ(u)) du,
+/// θ(u) = ½ Σ_j arctan(w_j u) − ½ x u,
+/// ρ(u) = Π_j (1 + w_j² u²)^{1/4}.
+/// ```
+///
+/// The integrand is bounded (`sin θ(u)/u → (Σ w_j − x)/2` as `u → 0`) and is
+/// integrated on panels of one full oscillation of the `−xu/2` phase with a
+/// fixed 16-node Gauss–Legendre rule, which is exact for the amplitude to well
+/// past the resolution of the phase.
+///
+/// # Truncation, and why the bound is the oscillatory one
+///
+/// The naive tail bound `∫_U^∞ du/(u ρ(u))` decays only like `U^{-m/2}` in the
+/// number `m` of weights that are *active* at `U` (i.e. `w_j U ≳ 1`), which is
+/// useless when one weight dominates. The integrand is an oscillation, though:
+/// once `φ'(u) = ½ Σ_j w_j/(1 + w_j²u²)` has fallen below `x/4`, the phase
+/// `θ` is strictly decreasing with `|θ'| ≥ x/4`, so substituting the phase as
+/// the integration variable turns the tail into `∫ G(t) sin(θ(U) − t) dt` with
+/// `G` positive and decreasing from `G(0) ≤ 4/(x U ρ(U))`. The alternating
+/// half-period sum of such an integral is bounded by `4 G(0)`, giving
+///
+/// ```text
+/// |tail(U)| ≤ 16 / (x · U · ρ(U)),
+/// ```
+///
+/// which is the stopping rule. This is a bound on the answer, not a guess about
+/// it: the loop runs until the bound is under [`WEIGHTED_CHI_SQUARE_TOLERANCE`],
+/// and `ρ` is non-decreasing so it always terminates.
+///
+/// # Exact special cases
+///
+/// * no positive weight — `Q ≡ 0`;
+/// * all positive weights bit-identical — `Q = w χ²_q` exactly, so the
+///   incomplete-gamma path is both faster and more accurate than any quadrature
+///   (this also covers the single-weight and the classical unpenalized
+///   `w ≡ 1 ⇒ χ²_q` cases).
+///
+/// Returns `NaN` if any weight is negative or non-finite, or if `statistic` is
+/// `NaN`.
+pub fn weighted_chi_square_sf(weights: &[f64], statistic: f64) -> f64 {
+    weighted_chi_square_sf_with_bound(weights, statistic).0
+}
+
+/// [`weighted_chi_square_sf`] together with the certified absolute bound on its
+/// own truncation error, so a consumer (or a test) can see the accuracy rather
+/// than trust it.
+///
+/// The bound is `0.0` on the exact closed-form branches. On the Imhof branch it
+/// is `16/(x·U·ρ(U))` at the truncation point `U` actually reached, which is at
+/// or below [`WEIGHTED_CHI_SQUARE_TOLERANCE`] unless the panel backstop
+/// [`IMHOF_MAX_PANELS`] bound first.
+pub fn weighted_chi_square_sf_with_bound(weights: &[f64], statistic: f64) -> (f64, f64) {
+    if statistic.is_nan() {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut positive = Vec::with_capacity(weights.len());
+    for &w in weights {
+        if !w.is_finite() || w < 0.0 {
+            return (f64::NAN, f64::NAN);
+        }
+        if w > 0.0 {
+            positive.push(w);
+        }
+    }
+    if positive.is_empty() {
+        // `Q` is identically zero: it exceeds a negative threshold with
+        // certainty and a non-negative one never.
+        return (if statistic < 0.0 { 1.0 } else { 0.0 }, 0.0);
+    }
+    if statistic <= 0.0 {
+        // `Q > 0` almost surely once one weight is positive.
+        return (1.0, 0.0);
+    }
+    let first = positive[0];
+    if positive.iter().all(|&w| w == first) {
+        return (chi_square_sf(statistic / first, positive.len() as f64), 0.0);
+    }
+    imhof_survival(&positive, statistic)
+}
+
+/// Absolute accuracy [`weighted_chi_square_sf`] certifies on its Imhof
+/// truncation. It is four orders below the smallest probability any consumer
+/// of a survival function resolves in practice and eleven below one, so the
+/// truncation is never the term that limits a reported tail.
+pub const WEIGHTED_CHI_SQUARE_TOLERANCE: f64 = 1e-11;
+
+/// Gauss-Legendre nodes and weights on `[-1, 1]`, 16 points. A 16-node rule is
+/// exact through degree 31, which is far beyond the smooth amplitude
+/// `1/(u ρ(u))` over one phase period; the panel width, not the node count, is
+/// what resolves the oscillation.
+const GAUSS_LEGENDRE_16: [(f64, f64); 8] = [
+    (0.095_012_509_837_637_44, 0.189_450_610_455_068_64),
+    (0.281_603_550_779_258_9, 0.182_603_415_044_923_64),
+    (0.458_016_777_657_227_37, 0.169_156_519_395_002_65),
+    (0.617_876_244_402_643_8, 0.149_595_988_816_576_7),
+    (0.755_404_408_355_003, 0.124_628_971_255_534_07),
+    (0.865_631_202_387_831_8, 0.095_158_511_682_492_6),
+    (0.944_575_023_073_232_6, 0.062_253_523_938_647_456),
+    (0.989_400_934_991_649_9, 0.027_152_459_411_754_176),
+];
+
+/// Imhof's integrand `sin θ(u) / (u ρ(u))` with the `u → 0` limit folded in.
+#[inline]
+fn imhof_integrand(weights: &[f64], statistic: f64, u: f64) -> f64 {
+    if u == 0.0 {
+        return 0.5 * (weights.iter().sum::<f64>() - statistic);
+    }
+    let mut phase = -0.5 * statistic * u;
+    let mut log_rho = 0.0;
+    for &w in weights {
+        let wu = w * u;
+        phase += 0.5 * wu.atan();
+        log_rho += 0.25 * wu.mul_add(wu, 1.0).ln();
+    }
+    phase.sin() / (u * log_rho.exp())
+}
+
+/// `ln ρ(u)`, the Imhof amplitude exponent.
+#[inline]
+fn imhof_log_rho(weights: &[f64], u: f64) -> f64 {
+    weights
+        .iter()
+        .map(|&w| {
+            let wu = w * u;
+            0.25 * wu.mul_add(wu, 1.0).ln()
+        })
+        .sum()
+}
+
+/// `φ'(u) = ½ Σ_j w_j/(1 + w_j²u²)`, the non-linear part of the phase's own
+/// derivative. The oscillatory truncation bound is valid only past the point
+/// where this has fallen below `x/4`, so that `θ` is monotone with
+/// `|θ'| ≥ x/4`.
+#[inline]
+fn imhof_phase_slack(weights: &[f64], u: f64) -> f64 {
+    weights
+        .iter()
+        .map(|&w| {
+            let wu = w * u;
+            0.5 * w / wu.mul_add(wu, 1.0)
+        })
+        .sum()
+}
+
+/// Cost backstop on the Imhof panel sweep.
+///
+/// The truncation point `U` needed for a given bound scales as
+/// `(16/(x·tol·C))^{2/(2+m)}` in the number `m` of weights that are *active*
+/// (`w_j U ≳ 1`) there, and the panel count as `U·x/4π`. With three or more
+/// comparable weights that count stays in the thousands for any statistic a
+/// likelihood-ratio consumer produces, so this backstop is unreachable — it
+/// exists for the one degenerate corner where it is not: two weights spread
+/// over several orders of magnitude, with a large statistic, where the sweep
+/// would otherwise run for tens of millions of panels to buy digits far below
+/// the modelling error of any statistic being referenced against it. The
+/// achieved bound is returned rather than discarded, so a caller that lands in
+/// that corner can see it instead of inferring it.
+pub const IMHOF_MAX_PANELS: usize = 1 << 21;
+
+fn imhof_survival(weights: &[f64], statistic: f64) -> (f64, f64) {
+    // A panel has to resolve the WHOLE phase, not just the `−xu/2` half. The
+    // total phase rate is bounded by `|θ'(u)| = |φ'(u) − x/2| ≤ (Σ w_j + x)/2`
+    // — `φ'` is largest at the origin, where it is `½ Σ w_j` — so a panel of
+    // `4π/(x + Σ w_j)` sweeps at most one full oscillation anywhere on the
+    // half-line. Sizing on `4π/x` alone is correct only in the tail: at a small
+    // statistic that panel is enormous while the arctan part of the phase still
+    // turns over on the scale `1/w_j`, and the 16-node rule then aliases it
+    // (measured: a monotonicity violation of ~1e-5 at `x ≈ 4e-4`).
+    let weight_sum: f64 = weights.iter().sum();
+    let panel = 4.0 * std::f64::consts::PI / (statistic + weight_sum);
+    let mut integral = 0.0_f64;
+    let mut lower = 0.0_f64;
+    let mut bound = f64::INFINITY;
+    for _ in 0..IMHOF_MAX_PANELS {
+        let upper = lower + panel;
+        let half = 0.5 * (upper - lower);
+        let mid = 0.5 * (upper + lower);
+        let mut panel_value = 0.0;
+        for &(node, weight) in &GAUSS_LEGENDRE_16 {
+            let offset = half * node;
+            panel_value += weight
+                * (imhof_integrand(weights, statistic, mid + offset)
+                    + imhof_integrand(weights, statistic, mid - offset));
+        }
+        integral += half * panel_value;
+        lower = upper;
+        // The bound is only a bound once the phase is monotone; before that the
+        // loop simply keeps integrating.
+        if imhof_phase_slack(weights, lower) <= 0.25 * statistic {
+            bound = 16.0 / (statistic * lower * imhof_log_rho(weights, lower).exp());
+            if bound <= WEIGHTED_CHI_SQUARE_TOLERANCE {
+                break;
+            }
+        }
+    }
+    (
+        (0.5 + integral / std::f64::consts::PI).clamp(0.0, 1.0),
+        bound,
+    )
+}
+
 /// Fisher-Snedecor survival probability `P(F_{d1,d2} > statistic)`.
 ///
 /// The complementary regularized-beta identity is evaluated directly:
@@ -2971,5 +3189,212 @@ mod tests {
                 "roundtrip failed at p={p}: q={q} p_back={p_back}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod weighted_chi_square_tests {
+    use super::*;
+
+    /// The all-equal branch is an identity, not an approximation: `Σ w Z_j²`
+    /// IS `w·χ²_q`. Pinning it here keeps the fast path honest — a future
+    /// "optimization" that routes equal weights through the quadrature would
+    /// change the answer in the last digits and this catches it.
+    #[test]
+    fn equal_weights_are_the_scaled_chi_square_exactly() {
+        for &q in &[1usize, 2, 5, 13] {
+            for &w in &[0.25_f64, 1.0, 7.5] {
+                let weights = vec![w; q];
+                for &x in &[1e-3_f64, 0.5, 3.84, 25.0, 400.0] {
+                    let (got, bound) = weighted_chi_square_sf_with_bound(&weights, x);
+                    let want = chi_square_sf(x / w, q as f64);
+                    assert_eq!(got, want, "q={q} w={w} x={x}");
+                    assert_eq!(bound, 0.0, "the closed form has no truncation");
+                }
+            }
+        }
+    }
+
+    /// Unequal weights against the same quantity computed a completely
+    /// different way: the exact convolution of two scaled `χ²_1` densities,
+    /// evaluated by high-order quadrature on the *density* rather than by
+    /// inverting the characteristic function.
+    ///
+    /// `P(w₁Z₁² + w₂Z₂² > x) = ∫₀^∞ f_{w₁χ²₁}(s) · P(w₂χ²₁ > x − s) ds`,
+    /// with `f_{wχ²₁}(s) = exp(−s/(2w)) / sqrt(2π w s)`. The `1/√s` endpoint
+    /// singularity is removed by substituting `s = t²`.
+    #[test]
+    fn two_unequal_weights_match_an_independent_convolution() {
+        fn convolution(w1: f64, w2: f64, x: f64) -> f64 {
+            // Condition on the SMALLER weight's normal and leave the larger
+            // weight in the tail factor: `S_a(x − b y)` then varies on the
+            // scale `a/b ≥ 1` in `y`, so the integrand is smooth even when the
+            // two weights are orders apart. Conditioning the other way puts a
+            // near-step of width `b` inside the quadrature and is what makes a
+            // naive convolution disagree with Imhof in the seventh digit.
+            let a = w1.max(w2);
+            let b = w1.min(w2);
+            // y = t² removes the 1/√y endpoint singularity of the χ²₁ density;
+            // the kink at y = x/b becomes a panel boundary.
+            let kink = (x / b).sqrt();
+            let mut total = 0.0;
+            for (lo, hi) in [(0.0, kink), (kink, kink + 15.0)] {
+                let panels = 4_000;
+                let step = (hi - lo) / panels as f64;
+                for panel in 0..panels {
+                    let half = 0.5 * step;
+                    let mid = lo + panel as f64 * step + half;
+                    for &(node, weight) in &GAUSS_LEGENDRE_16 {
+                        for signed in [half * node, -half * node] {
+                            let t = mid + signed;
+                            let y = t * t;
+                            let density =
+                                2.0 * (-0.5 * y).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                            let remaining = x - b * y;
+                            let tail = if remaining <= 0.0 {
+                                1.0
+                            } else {
+                                chi_square_sf(remaining / a, 1.0)
+                            };
+                            total += weight * half * density * tail;
+                        }
+                    }
+                }
+            }
+            total
+        }
+        for &(w1, w2) in &[(1.0_f64, 0.25_f64), (2.0, 0.1), (1.0, 0.001)] {
+            for &x in &[0.05_f64, 0.5, 3.0, 9.0] {
+                let (got, bound) = weighted_chi_square_sf_with_bound(&[w1, w2], x);
+                let want = convolution(w1, w2, x);
+                assert!(
+                    (got - want).abs() <= 1e-8 + 5e-7 * want,
+                    "w=({w1},{w2}) x={x}: imhof {got} vs convolution {want} (bound {bound:.3e})"
+                );
+            }
+        }
+    }
+
+    /// The property that makes this the right reference for a penalized LR: the
+    /// mean-matched χ² is systematically CONSERVATIVE in the upper tail when the
+    /// weights differ, because it carries variance `2Σw` against the true
+    /// `2Σw²`. Asserted as a strict inequality at the α the test is used at, on
+    /// a spectrum shaped like a real smooth block.
+    #[test]
+    fn the_mean_matched_chi_square_is_conservative_against_the_exact_law() {
+        let weights = [0.95_f64, 0.62, 0.31, 0.14, 0.05, 0.01];
+        let mean: f64 = weights.iter().sum();
+        // Upper 5% point of the mean-matched reference.
+        let mut lo = 0.0_f64;
+        let mut hi = 200.0_f64;
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if chi_square_sf(mid, mean) > 0.05 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let critical = 0.5 * (lo + hi);
+        let exact_size = weighted_chi_square_sf(&weights, critical);
+        assert!(
+            exact_size < 0.05,
+            "the mean-matched χ²_{mean} critical value {critical} carries exact tail \
+             mass {exact_size}, which must be strictly under the nominal 0.05"
+        );
+        // And the gap is material rather than a rounding artifact.
+        assert!(
+            exact_size < 0.045,
+            "exact tail mass at the mean-matched critical value is {exact_size}"
+        );
+    }
+
+    /// A survival function has to be a survival function: monotone
+    /// non-increasing, in `[0, 1]`, one at the origin.
+    #[test]
+    fn the_survival_function_is_monotone_and_bounded() {
+        let weights = [1.0_f64, 0.4, 0.4, 0.05, 0.002];
+        assert_eq!(weighted_chi_square_sf(&weights, 0.0), 1.0);
+        let mut previous = 1.0;
+        let mut x = 1e-4;
+        while x < 60.0 {
+            let value = weighted_chi_square_sf(&weights, x);
+            assert!((0.0..=1.0).contains(&value), "x={x} value={value}");
+            assert!(
+                value <= previous + 1e-10,
+                "not monotone at x={x}: {value} > {previous}"
+            );
+            previous = value;
+            x *= 1.35;
+        }
+    }
+
+    /// Zero weights are structural (a direction the statistic cannot see), not
+    /// numerical noise: they must drop out exactly rather than perturb the law.
+    #[test]
+    fn zero_weights_drop_out_and_an_all_zero_spectrum_is_the_point_mass_at_zero() {
+        let padded = [0.7_f64, 0.0, 0.2, 0.0, 0.0];
+        let bare = [0.7_f64, 0.2];
+        for &x in &[0.1_f64, 1.0, 4.0] {
+            assert_eq!(
+                weighted_chi_square_sf(&padded, x),
+                weighted_chi_square_sf(&bare, x)
+            );
+        }
+        assert_eq!(weighted_chi_square_sf(&[0.0, 0.0], 0.0), 0.0);
+        assert_eq!(weighted_chi_square_sf(&[0.0, 0.0], -1.0), 1.0);
+    }
+
+    /// The scale is carried exactly: `P(Σ c·w Z² > c·x) = P(Σ w Z² > x)`. This
+    /// is the identity that lets a Bartlett factor be applied either as a
+    /// rescaling of the statistic or as a rescaling of the whole spectrum, and
+    /// the LR consumer relies on the two being the same operation.
+    #[test]
+    fn the_law_is_exactly_scale_equivariant() {
+        let weights = [0.9_f64, 0.35, 0.08];
+        for &c in &[0.37_f64, 1.0, 4.25] {
+            let scaled: Vec<f64> = weights.iter().map(|w| c * w).collect();
+            for &x in &[0.2_f64, 2.0, 11.0] {
+                let a = weighted_chi_square_sf(&scaled, c * x);
+                let b = weighted_chi_square_sf(&weights, x);
+                assert!((a - b).abs() <= 1e-9, "c={c} x={x}: {a} vs {b}");
+            }
+        }
+    }
+
+    /// The truncation backstop must not bind on any spectrum a smooth block can
+    /// produce. "Smooth block" here means at least three positive weights in
+    /// `(0, 1]` — the shape `2F − F²` always has, since a rank-`r` penalty
+    /// leaves `r` directions to shrink and the basis carries more than two
+    /// columns. The bound returned is the evidence.
+    #[test]
+    fn the_certified_bound_is_met_on_realistic_smooth_spectra() {
+        let spectra: [&[f64]; 5] = [
+            &[1.0, 0.5, 0.25, 0.125, 0.0625],
+            &[0.999, 0.31, 0.02, 1e-3, 1e-4, 1e-5],
+            &[0.4, 0.4, 0.4, 0.39, 0.01],
+            &[1.0, 1e-2, 1e-4, 1e-6, 1e-8],
+            &[0.05, 0.02, 0.01, 5e-3, 1e-3],
+        ];
+        for spectrum in spectra {
+            let mean: f64 = spectrum.iter().sum();
+            for scale in [0.1_f64, 1.0, 6.0, 30.0] {
+                let x = scale * mean;
+                let (_, bound) = weighted_chi_square_sf_with_bound(spectrum, x);
+                assert!(
+                    bound <= WEIGHTED_CHI_SQUARE_TOLERANCE,
+                    "spectrum {spectrum:?} at x={x} truncated at bound {bound:.3e}"
+                );
+            }
+        }
+    }
+
+    /// Domain errors are `NaN`, not a silently plausible probability.
+    #[test]
+    fn invalid_inputs_are_not_answered() {
+        assert!(weighted_chi_square_sf(&[1.0, -1e-16], 1.0).is_nan());
+        assert!(weighted_chi_square_sf(&[1.0, f64::NAN], 1.0).is_nan());
+        assert!(weighted_chi_square_sf(&[1.0, f64::INFINITY], 1.0).is_nan());
+        assert!(weighted_chi_square_sf(&[1.0, 0.5], f64::NAN).is_nan());
     }
 }
