@@ -5104,6 +5104,369 @@ mod reference_class_invariance_tests {
         }
     }
 
+    /// #2612 diagnostic (zz_measure): what the Jeffreys/Firth arm is handed, and
+    /// what it does with it, on the real penguins stride-3 train split.
+    ///
+    /// The production formula path runs a capped UNBIASED probe, certifies
+    /// separation from that probe's mode, and then warm-starts the Firth refit
+    /// AT that mode. The fixed-lambda sibling path documents the opposite
+    /// choice in `handle_multinomial_fixed_lambda_stall` — start the Firth
+    /// Newton from `beta = 0`, never from a saturated iterate, because at the
+    /// simplex boundary `I -> 0` and the Firth objective's own reward can no
+    /// longer be climbed back from. This probe measures both arms on the same
+    /// data so the disagreement is a number rather than an argument.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2612_penguins_firth_warm_vs_cold() {
+        let td = tempdir().expect("tempdir");
+        let Some(train) = penguins_stride3_train(&td) else {
+            eprintln!("#2612 penguins Firth probe SKIPPED: dataset unavailable");
+            return;
+        };
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 100,
+            tol: 1e-8,
+            ..MultinomialFitRequest::new(
+                &train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+                &config,
+            )
+        };
+        let parts = penalized_multinomial_formula_parts(&request)
+            .expect("production formula parts must build");
+
+        // Exactly the production capped unbiased probe.
+        let mut probe_options = parts.options.clone();
+        probe_options.outer_max_iter = parts
+            .options
+            .outer_max_iter
+            .min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER);
+        let probe = crate::custom_family::fit_custom_family_with_rho_prior(
+            &parts.family,
+            &parts.blocks,
+            &probe_options,
+            gam_problem::RhoPrior::Flat,
+        );
+        let probe = match probe {
+            Ok(fit) => fit,
+            Err(err) => {
+                eprintln!("#2612 unbiased probe FAILED: {err}");
+                return;
+            }
+        };
+        let max_eta = probe
+            .block_states
+            .iter()
+            .flat_map(|s| s.eta.iter())
+            .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let span = probe
+            .geometry
+            .as_ref()
+            .expect("probe geometry")
+            .coefficient_gauge
+            .t_full
+            .clone();
+        let evidence = multinomial_formula_fisher_separation_evidence(
+            &parts.family,
+            &parts.blocks,
+            &probe.block_states,
+            span.view(),
+        );
+        eprintln!(
+            "#2612 unbiased probe: max|eta|={max_eta:.4e} evidence={:?}",
+            evidence.as_ref().map(|e| e.as_ref().map(|s| s.as_str()))
+        );
+
+        let joint_log_lambdas = probe
+            .artifacts
+            .joint_log_lambdas
+            .clone()
+            .expect("probe joint log lambdas");
+
+        // Arm A: production — warm-started at the saturated unbiased mode.
+        let mut warm_family = parts.family.clone().with_joint_jeffreys_term(true);
+        let mut warm_blocks = parts.blocks.clone();
+        for (block, state) in warm_blocks.iter_mut().zip(probe.block_states.iter()) {
+            block.initial_beta = Some(state.beta.clone());
+        }
+        warm_family = warm_family.with_joint_initial_log_lambdas(joint_log_lambdas.to_vec());
+        let warm = crate::custom_family::fit_custom_family_with_rho_prior(
+            &warm_family,
+            &warm_blocks,
+            &parts.options,
+            gam_problem::RhoPrior::Flat,
+        );
+        match &warm {
+            Ok(fit) => {
+                let max_eta = fit
+                    .block_states
+                    .iter()
+                    .flat_map(|s| s.eta.iter())
+                    .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+                eprintln!(
+                    "#2612 Firth WARM (production): CONVERGED  max|eta|={max_eta:.4e} \
+                     outer_iters={}",
+                    fit.outer_iterations
+                );
+            }
+            Err(err) => eprintln!(
+                "#2612 Firth WARM (production): FAILED: {}",
+                format!("{err}").chars().take(400).collect::<String>()
+            ),
+        }
+
+        // Arm B: cold — the origin `beta = 0` and the caller's own init lambda,
+        // which is what the fixed-lambda sibling path insists on.
+        let cold_family = parts.family.clone().with_joint_jeffreys_term(true);
+        let cold = crate::custom_family::fit_custom_family_with_rho_prior(
+            &cold_family,
+            &parts.blocks,
+            &parts.options,
+            gam_problem::RhoPrior::Flat,
+        );
+        match &cold {
+            Ok(fit) => {
+                let max_eta = fit
+                    .block_states
+                    .iter()
+                    .flat_map(|s| s.eta.iter())
+                    .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+                eprintln!(
+                    "#2612 Firth COLD (beta=0, init rho): CONVERGED  max|eta|={max_eta:.4e} \
+                     outer_iters={}",
+                    fit.outer_iterations
+                );
+            }
+            Err(err) => eprintln!(
+                "#2612 Firth COLD (beta=0, init rho): FAILED: {}",
+                format!("{err}").chars().take(400).collect::<String>()
+            ),
+        }
+    }
+
+    /// #2612 discriminator (zz_measure): does the outer REML criterion's ANALYTIC
+    /// gradient agree with the criterion it reports, once the Jeffreys/Firth term
+    /// is armed?
+    ///
+    /// The armed refit fails with `line_search=StepSizeTooSmall` — "the direction
+    /// descended but no step improved the objective" — at a point whose analytic
+    /// outer Hessian is indefinite. A correct gradient makes that impossible: a
+    /// short enough step along `−g` must decrease a differentiable objective. So
+    /// either the criterion is not differentiable there or the gradient is not
+    /// its gradient, and central finite differences separate the two.
+    ///
+    /// Both criteria are profiled at the SAME rho so the comparison is
+    /// unbiased-vs-armed rather than point-vs-point.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2612_penguins_firth_outer_gradient_fd() {
+        let td = tempdir().expect("tempdir");
+        let Some(train) = penguins_stride3_train(&td) else {
+            eprintln!("#2612 penguins outer-gradient FD SKIPPED: dataset unavailable");
+            return;
+        };
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 100,
+            tol: 1e-8,
+            ..MultinomialFitRequest::new(
+                &train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+                &config,
+            )
+        };
+        let parts = penalized_multinomial_formula_parts(&request)
+            .expect("production formula parts must build");
+        let mut probe_options = parts.options.clone();
+        probe_options.compute_covariance = false;
+
+        // The rho the Jeffreys-armed refit stalls at (its own reported
+        // `last_evaluated_rho`), so the FD is taken where the line search failed.
+        const STALL_RHO: [f64; 24] = [
+            -0.03913583685376737,
+            4.944294591230679,
+            8.498719656305731,
+            -2.802688029911322,
+            -2.802688029911322,
+            -2.802688029911322,
+            8.909882365327132,
+            8.909882365327132,
+            8.909882365327132,
+            -1.0331096452357313,
+            0.0313034971834482,
+            -8.433811582477187,
+            8.69436831319073,
+            8.69436831319073,
+            8.69436831319073,
+            -0.6515139527220641,
+            -0.6515139527220641,
+            -0.6515139527220641,
+            8.897044748938537,
+            6.638496386409038,
+            6.954188147738595,
+            -0.5549484578569235,
+            -8.433811582477187,
+            -0.9368158566294944,
+        ];
+
+        for armed in [false, true] {
+            let rho = ndarray::Array1::from(STALL_RHO.to_vec());
+            let build = |rho: &ndarray::Array1<f64>| {
+                let mut fam = parts
+                    .family
+                    .clone()
+                    .with_joint_initial_log_lambdas(rho.to_vec());
+                if armed {
+                    fam = fam.with_joint_jeffreys_term(true);
+                }
+                fam
+            };
+            let evaluate = |rho: &ndarray::Array1<f64>, mode| {
+                crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                    &build(rho),
+                    &parts.blocks,
+                    &probe_options,
+                    rho,
+                    mode,
+                )
+            };
+            let base = match evaluate(&rho, gam_problem::EvalMode::ValueAndGradient) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!(
+                        "#2612 FD (jeffreys={armed}) base REFUSED: {}",
+                        format!("{e}").chars().take(300).collect::<String>()
+                    );
+                    continue;
+                }
+            };
+            eprintln!(
+                "#2612 FD (jeffreys={armed}) V={:.12e} inner_conv={} |g|inf={:.3e}",
+                base.objective,
+                base.inner_converged,
+                base.gradient.iter().fold(0.0_f64, |a, v| a.max(v.abs())),
+            );
+            // Coordinates the stall report named as carrying the residual
+            // gradient, plus one wiggliness coordinate as a control.
+            for k in [0usize, 1, 4, 9, 10, 11, 20, 23] {
+                let mut worst = String::new();
+                for h in [1e-3_f64, 1e-2] {
+                    let mut plus = rho.clone();
+                    plus[k] += h;
+                    let mut minus = rho.clone();
+                    minus[k] -= h;
+                    let (vp, vm) = (
+                        evaluate(&plus, gam_problem::EvalMode::ValueOnly),
+                        evaluate(&minus, gam_problem::EvalMode::ValueOnly),
+                    );
+                    match (vp, vm) {
+                        (Ok(p), Ok(m)) => {
+                            let fd = (p.objective - m.objective) / (2.0 * h);
+                            let g = base.gradient[k];
+                            let denom = g.abs().max(fd.abs()).max(1e-12);
+                            write!(
+                                worst,
+                                "  h={h:.0e}: fd={fd:+.6e} analytic={g:+.6e} \
+                                 rel={:.2e} inner=({},{})",
+                                (fd - g).abs() / denom,
+                                p.inner_converged,
+                                m.inner_converged
+                            )
+                            .unwrap();
+                        }
+                        (p, m) => {
+                            write!(
+                                worst,
+                                "  h={h:.0e}: REFUSED (plus_ok={}, minus_ok={})",
+                                p.is_ok(),
+                                m.is_ok()
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+                eprintln!("#2612 FD (jeffreys={armed}) coord {k:2}:{worst}");
+            }
+        }
+    }
+
+    /// The quality arm's stride-3 penguins TRAIN split, materialized through the
+    /// production dataset loader. `None` when the checked-in CSV is unavailable.
+    fn penguins_stride3_train(td: &tempfile::TempDir) -> Option<gam_data::EncodedDataset> {
+        const PENGUINS_CSV: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../bench/datasets/penguins.csv"
+        );
+        let raw = match fs::read_to_string(PENGUINS_CSV) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("penguins CSV unavailable: {PENGUINS_CSV}: {err}");
+                return None;
+            }
+        };
+        let mut lines = raw.lines();
+        let header: Vec<&str> = lines
+            .next()
+            .expect("penguins header")
+            .trim()
+            .split(',')
+            .collect();
+        let idx = |name: &str| header.iter().position(|c| *c == name).expect("column");
+        let (i_species, i_bl, i_bd, i_fl, i_bm) = (
+            idx("species"),
+            idx("bill_length_mm"),
+            idx("bill_depth_mm"),
+            idx("flipper_length_mm"),
+            idx("body_mass_g"),
+        );
+        let mut kept = 0usize;
+        let mut csv =
+            String::from("bill_length_mm,bill_depth_mm,flipper_length_mm,body_mass_g,species\n");
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split(',').collect();
+            let num = |i: usize| f.get(i).and_then(|v| v.trim().parse::<f64>().ok());
+            let (Some(bl), Some(bd), Some(fl), Some(bm)) =
+                (num(i_bl), num(i_bd), num(i_fl), num(i_bm))
+            else {
+                continue;
+            };
+            let species = f[i_species].trim().trim_matches('"');
+            if species.is_empty() || species == "NA" {
+                continue;
+            }
+            if kept % 3 == 0 {
+                kept += 1;
+                continue; // held out by the quality test
+            }
+            kept += 1;
+            writeln!(csv, "{bl},{bd},{fl},{bm},{species}").unwrap();
+        }
+        let path = td.path().join("penguins_train.csv");
+        fs::write(&path, csv).expect("write penguins train csv");
+        let cols: Vec<String> = [
+            "bill_length_mm",
+            "bill_depth_mm",
+            "flipper_length_mm",
+            "body_mass_g",
+            "species",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        Some(load_dataset_projected(&path, &cols).expect("load penguins train"))
+    }
+
     /// #2615 diagnostic (zz_measure): does the outer REML criterion SEE the
     /// rank-1 null-space smoothing coordinate at all?
     ///
