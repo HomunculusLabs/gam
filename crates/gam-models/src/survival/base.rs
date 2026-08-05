@@ -6845,9 +6845,6 @@ mod tests {
                 beta: reparam_inner.beta_transformed,
                 n_observations: rail_model.nrows(),
                 hessian_op: std::sync::Arc::new(hop),
-            // The survival lane prices its logdet on the operator its inner
-            // solve converged against (#2612).
-            mode_response_op: None,
                 // The survival lane prices its logdet on the operator its inner
                 // solve converged against (#2612).
                 mode_response_op: None,

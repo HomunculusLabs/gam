@@ -33,6 +33,32 @@ pub(crate) fn joint_second_derivative_correction_result(
     Ok(Some(DriftDerivResult::Operator(Arc::new(op))))
 }
 
+/// Fold an optional dense Jeffreys drift into an optional inner drift result,
+/// preserving the inner result's shape (dense stays dense, operator gains a
+/// dense companion instead of being materialized).
+fn compose_drift(
+    inner: Option<DriftDerivResult>,
+    drift: Option<Array2<f64>>,
+    dim_hint: usize,
+) -> Option<DriftDerivResult> {
+    match (inner, drift) {
+        (Some(DriftDerivResult::Dense(mut dense)), Some(d)) => {
+            dense += &d;
+            Some(DriftDerivResult::Dense(dense))
+        }
+        (Some(DriftDerivResult::Operator(operator)), Some(d)) => {
+            Some(DriftDerivResult::Operator(Arc::new(CompositeHyperOperator {
+                dense: Some(d),
+                operators: vec![operator],
+                dim_hint,
+            })))
+        }
+        (Some(other), None) => Some(other),
+        (None, Some(d)) => Some(DriftDerivResult::Dense(d)),
+        (None, None) => None,
+    }
+}
+
 impl HessianDerivativeProvider for BorrowedJointDerivProvider<'_> {
     fn hessian_derivative_correction(
         &self,
@@ -376,7 +402,21 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
     /// [`Self::hphi_drifts`] where the base is amortized across all `k` directions.
     pub(crate) fn hphi_drift(&self, v_k: &Array1<f64>) -> Result<Option<Array2<f64>>, CustomFamilyError> {
         let delta = v_k.mapv(|value| -value);
-        let mut out = (self.drift)(std::slice::from_ref(&delta))?;
+        self.hphi_drift_along(&delta)
+    }
+
+    /// `D_β H_Φ[δ]` along a direction the caller has ALREADY put in `δβ`
+    /// convention, with no sign flip applied here.
+    ///
+    /// The second-order correction needs this: `joint_second_derivative_correction_result`
+    /// consumes the second mode response `u_kl` UNNEGATED (only the first-order
+    /// `v_k`, `v_l` are flipped), so routing `u_kl` through [`Self::hphi_drift`]
+    /// would silently price `−u_kl`.
+    pub(crate) fn hphi_drift_along(
+        &self,
+        delta: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, CustomFamilyError> {
+        let mut out = (self.drift)(std::slice::from_ref(delta))?;
         Ok(out.pop().flatten())
     }
 }
@@ -473,23 +513,39 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         self.inner.has_batched_hessian_derivative_corrections()
     }
 
-    // SECOND-ORDER (outer Hessian) RESIDUAL GAP. The full second-order Jeffreys
-    // drift `D²_β H_Φ[v_k, v_l]` (the analogue of Tier-A's
-    // `−D(Hφ)[B_{kl}] − D²(Hφ)[B_k, B_l]`) is NOT yet folded in here: the
-    // second-derivative methods delegate to the inner likelihood drift only. This
-    // leaves the OUTER HESSIAN's Jeffreys contribution first-order-incomplete, but
-    // the FIRST-ORDER outer GRADIENT — the term the line search and KKT
-    // certification actually consume — is now exact. ARC/Newton on the outer
-    // problem still gets a consistent gradient; the Hessian is a (PD) curvature
-    // surrogate as before.
+    // SECOND-ORDER (outer Hessian) JEFFREYS DRIFT (#2612).
+    //
+    // The inner provider's second-order correction is
+    //   `D_β H[u_kl] + D²_β H[−v_l, −v_k]`,
+    // and `H` here is the criterion's `H + S_λ + H_Φ`, so BOTH terms owe a
+    // Jeffreys contribution. The first — `D_β H_Φ[u_kl]`, the drift along the
+    // SECOND mode response — is exactly the object the first-order wrapper
+    // already builds, evaluated along a different direction, so it is folded in
+    // below and costs one more direction through the same amortized base.
+    //
+    // The second, `D²_β H_Φ[−v_l, −v_k]`, is NOT available and this is a
+    // statement about the family interface rather than an omission: `H_Φ` is a
+    // divided-difference object built from `H` and its FIRST directional
+    // derivatives, so its own first β-derivative already consumes the family's
+    // SECOND directional derivatives (`H²dot[δ, e_a]`, which
+    // `custom_family_outer_jeffreys_hphi_drift_batched` streams). A second
+    // β-derivative of `H_Φ` would need THIRD directional derivatives of `H`,
+    // which no family exposes. What is folded in here is therefore everything
+    // that is exactly computable, and the residual is one named term rather than
+    // the whole Jeffreys contribution it used to be.
+    //
+    // SIGN. `u_kl` arrives in `δβ` convention already (the inner provider passes
+    // it to `compute_dh` unnegated, unlike `v_k`/`v_l`), so it goes through
+    // `hphi_drift_along`, not `hphi_drift`.
     fn hessian_second_derivative_correction(
         &self,
         v_k: &Array1<f64>,
         v_l: &Array1<f64>,
         u_kl: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        self.inner
-            .hessian_second_derivative_correction(v_k, v_l, u_kl)
+        Ok(self
+            .hessian_second_derivative_correction_result(v_k, v_l, u_kl)?
+            .map(|result| result.into_operator().to_dense()))
     }
 
     fn hessian_second_derivative_correction_result(
@@ -498,21 +554,52 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         v_l: &Array1<f64>,
         u_kl: &Array1<f64>,
     ) -> Result<Option<DriftDerivResult>, String> {
-        self.inner
-            .hessian_second_derivative_correction_result(v_k, v_l, u_kl)
+        let inner = self
+            .inner
+            .hessian_second_derivative_correction_result(v_k, v_l, u_kl)?;
+        // Display boundary: `HessianDerivativeProvider` is `String`-erroring (gam#2689).
+        let drift = self
+            .hphi_drift_along(u_kl)
+            .map_err(|error| error.to_string())?;
+        Ok(compose_drift(inner, drift, self.p))
     }
 
     fn hessian_second_derivative_corrections_result(
         &self,
         triples: &[(Array1<f64>, Array1<f64>, Array1<f64>)],
     ) -> Result<Vec<Option<DriftDerivResult>>, String> {
-        self.inner
-            .hessian_second_derivative_corrections_result(triples)
+        let inner = self
+            .inner
+            .hessian_second_derivative_corrections_result(triples)?;
+        // ONE batched call over every triple's `u_kl`, so the β-fixed base (the
+        // reduced eigendecomposition and the `p` per-axis `Hdot[e_a]` row-streams)
+        // is prepared once for the whole outer-Hessian assembly rather than once
+        // per pair — the same amortization the first-order path relies on.
+        let deltas: Vec<Array1<f64>> = triples
+            .iter()
+            .map(|(_, _, u_kl)| u_kl.clone())
+            .collect();
+        let drifts = (self.drift)(&deltas).map_err(|error| error.to_string())?;
+        if drifts.len() != inner.len() {
+            return Err(format!(
+                "JeffreysHphiAwareJointDerivatives: batched second-order H_Φ drift returned {} \
+                 results for {} triples",
+                drifts.len(),
+                inner.len()
+            ));
+        }
+        Ok(inner
+            .into_iter()
+            .zip(drifts)
+            .map(|(inner_result, drift)| compose_drift(inner_result, drift, self.p))
+            .collect())
     }
 
     fn has_batched_hessian_second_derivative_corrections(&self) -> bool {
-        self.inner
-            .has_batched_hessian_second_derivative_corrections()
+        // The batched arm above is always available: it drives the inner
+        // provider's own (batched or per-triple) walk and folds one batched H_Φ
+        // sweep on top, so it is correct whatever the inner provider supports.
+        true
     }
 
     fn has_corrections(&self) -> bool {

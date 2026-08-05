@@ -94,6 +94,7 @@ fn options() -> BlockwiseFitOptions {
 struct Reading {
     value: f64,
     gradient: Array1<f64>,
+    hessian: Option<Array2<f64>>,
 }
 
 fn evaluate(armed: bool, rho: &Array1<f64>, mode: EvalMode) -> Reading {
@@ -121,6 +122,7 @@ fn evaluate(armed: bool, rho: &Array1<f64>, mode: EvalMode) -> Reading {
     Reading {
         value: diagnostics.objective,
         gradient: diagnostics.gradient,
+        hessian: diagnostics.outer_hessian,
     }
 }
 
@@ -232,4 +234,73 @@ fn the_jeffreys_term_is_live_on_this_fixture_2612() {
         "#2612 fixture liveness: unbiased V={:.9e} armed V={:.9e} (gap {separation:.3e})",
         unbiased.value, armed.value
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The same question one order up: is the analytic outer HESSIAN the Jacobian
+// of the (now exact) analytic outer gradient?
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Central finite difference of the analytic GRADIENT in coordinate `k`, i.e.
+/// one column of the criterion's true Hessian.
+///
+/// Differencing the gradient rather than the value is the right instrument here:
+/// the gradient is exact (the tests above are what says so), so its Jacobian IS
+/// the Hessian, and a first-difference of an exact quantity is two orders more
+/// accurate than a second-difference of the value.
+fn hessian_column_by_difference(armed: bool, rho: &Array1<f64>, k: usize, h: f64) -> Array1<f64> {
+    let mut plus = rho.clone();
+    plus[k] += h;
+    let mut minus = rho.clone();
+    minus[k] -= h;
+    let up = evaluate(armed, &plus, EvalMode::ValueAndGradient).gradient;
+    let down = evaluate(armed, &minus, EvalMode::ValueAndGradient).gradient;
+    (&up - &down) / (2.0 * h)
+}
+
+fn assert_hessian_is_the_gradients_jacobian(armed: bool) {
+    let dim = rho_dim();
+    let rho = base_rho(dim);
+    let analytic = evaluate(armed, &rho, EvalMode::ValueGradientHessian);
+    let hessian = analytic
+        .hessian
+        .expect("the outer criterion declares an analytic Hessian");
+    let mut worst = (0usize, 0usize, 0.0_f64, 0.0_f64, 0.0_f64);
+    for k in 0..dim {
+        let column = hessian_column_by_difference(armed, &rho, k, 1e-3);
+        for j in 0..dim {
+            let (fd, h_jk) = (column[j], hessian[[j, k]]);
+            let relative = (fd - h_jk).abs() / h_jk.abs().max(fd.abs()).max(1e-8);
+            eprintln!(
+                "#2612 outer-Hessian FD (jeffreys={armed}) [{j:2},{k:2}]: \
+                 fd={fd:+.9e} analytic={h_jk:+.9e} relative={relative:.3e}"
+            );
+            if relative > worst.2 {
+                worst = (j, k, relative, fd, h_jk);
+            }
+        }
+    }
+    let (j, k, relative, fd, h_jk) = worst;
+    assert!(
+        relative <= RELATIVE_TOLERANCE,
+        "outer criterion Hessian disagrees with the Jacobian of its own gradient \
+         (jeffreys armed={armed}): worst entry [{j},{k}] has difference {fd:+.9e} against \
+         analytic {h_jk:+.9e} (relative {relative:.3e} > {RELATIVE_TOLERANCE:.1e}). The \
+         terminal certification asks this matrix for a positive-semidefinite verdict, so a \
+         matrix that is not the criterion's curvature refuses fits at genuine minima."
+    );
+}
+
+/// CONTROL, one order up.
+#[test]
+fn unbiased_outer_hessian_matches_the_gradient_jacobian_2612() {
+    assert_hessian_is_the_gradients_jacobian(false);
+}
+
+/// The armed arm. `hessian_psd=NO` at a point whose projected gradient has
+/// already cleared its stationarity bound is a claim about curvature that only
+/// means anything if the matrix making it is the criterion's.
+#[test]
+fn jeffreys_armed_outer_hessian_matches_the_gradient_jacobian_2612() {
+    assert_hessian_is_the_gradients_jacobian(true);
 }
