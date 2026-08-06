@@ -529,7 +529,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
     const OLD_RADIUS: f64 = 1.0;
     const STEP_NORM: f64 = 1.423511e-6;
     const OBJECTIVE_SCALE: f64 = 41.56290748;
-    const OBJECTIVE_TOL: f64 = 1.0e-6 * (1.0 + OBJECTIVE_SCALE);
     const MEASURED_ACTUAL: f64 = 2.090494888e-9;
     const MEASURED_PREDICTED: f64 = 2.944376434e-13;
 
@@ -552,7 +551,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         MEASURED_ACTUAL,
         MEASURED_PREDICTED,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
     assert_eq!(
         update.decision.label(),
@@ -576,7 +574,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         MEASURED_ACTUAL,
         -1.0,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
     assert!(
         !ascent.accepted,
@@ -596,7 +593,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         -1.0e-3,
         MEASURED_PREDICTED,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
     assert!(
         !no_gain.accepted,
@@ -611,7 +607,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         1.0e-3,
         1.0e-3,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
     assert!(
         resolvable.accepted,
@@ -5116,20 +5111,20 @@ pub(crate) fn rowwise_kronecker_psi_row_chunks_are_window_consistent() {
 
 #[test]
 pub(crate) fn joint_trust_region_radius_update_accept_reject_logic() {
-    let accepted = update_joint_trust_region_radius(1.0, 1.0, 2.0, 2.0, 1.0, 1.0e-6);
+    let accepted = update_joint_trust_region_radius(1.0, 1.0, 2.0, 2.0, 1.0);
     assert!(accepted.accepted);
     assert!((accepted.rho - 1.0).abs() < 1.0e-12);
     assert!((accepted.radius - 2.0).abs() < 1.0e-12);
     assert_eq!(accepted.decision.label(), "grow_at_boundary");
 
-    let rejected = update_joint_trust_region_radius(1.0, 0.5, -0.1, 2.0, 1.0, 1.0e-6);
+    let rejected = update_joint_trust_region_radius(1.0, 0.5, -0.1, 2.0, 1.0);
     assert!(!rejected.accepted);
     assert!(rejected.rho < 0.0);
     assert!((rejected.radius - 0.25).abs() < 1.0e-12);
     assert_eq!(rejected.decision.label(), "shrink_reject");
 
     let rejected_inside_radius =
-        update_joint_trust_region_radius(1.0, 1.0e-3, -0.1, 2.0, 1.0, 1.0e-6);
+        update_joint_trust_region_radius(1.0, 1.0e-3, -0.1, 2.0, 1.0);
     assert!(!rejected_inside_radius.accepted);
     assert!(
         rejected_inside_radius.radius < 1.0e-3,
@@ -5138,7 +5133,7 @@ pub(crate) fn joint_trust_region_radius_update_accept_reject_logic() {
     assert!((rejected_inside_radius.radius - 5.0e-4).abs() < 1.0e-12);
     assert_eq!(rejected_inside_radius.decision.label(), "shrink_reject");
 
-    let poor = update_joint_trust_region_radius(1.0, 0.5, 0.1, 1.0, 1.0, 1.0e-6);
+    let poor = update_joint_trust_region_radius(1.0, 0.5, 0.1, 1.0, 1.0);
     assert!(poor.accepted);
     assert!((poor.rho - 0.1).abs() < 1.0e-12);
     assert!((poor.radius - 0.25).abs() < 1.0e-12);
@@ -5146,58 +5141,126 @@ pub(crate) fn joint_trust_region_radius_update_accept_reject_logic() {
 }
 
 /// gam#2600: geometric boundary contact only warrants a larger trust region
-/// when the local model resolves useful decrease there. A chord whose entire
-/// predicted decrease is below the objective tolerance carries no evidence
-/// that the radius constrained progress, even when its gain ratio is excellent.
+/// when the step produced a decrease the solver can actually MEASURE.
+///
+/// The floor that decision has to clear is ROUND-OFF, not convergence. The
+/// controller reports a perfect gain ratio `rho = 1` for a step whose realized
+/// change is inside `|f|*1e-14` precisely BECAUSE it cannot tell whether the
+/// step helped; pairing that with a boundary hit doubles the radius on a step
+/// that changed nothing, which is this issue's original runaway (a radius
+/// walking `4.484e1 -> 1.385e3` while consecutive cycles were bit-identical).
+///
+/// The previous repair excluded that with `predicted_reduction >
+/// objective_tol`, eight orders too high: every endgame step of every
+/// converging solve predicts less than its own convergence tolerance, so the
+/// radius froze exactly where the trust region should release its grip, and
+/// the wine arm degraded from Newton to a fixed-step method converging
+/// linearly at `1.0209x/cycle`.
 #[test]
-pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_objective_tol_2600() {
+pub(crate) fn joint_trust_region_growth_requires_a_measurable_decrease_not_a_neutral_one_2600() {
     const OLD_RADIUS: f64 = 1.0;
     const OBJECTIVE_SCALE: f64 = 1.0;
-    const OBJECTIVE_TOL: f64 = 1.0e-3;
+    let noise_floor = OBJECTIVE_SCALE.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
 
-    let below_tolerance = update_joint_trust_region_radius(
+    // THE RUNAWAY. A bit-identical cycle: the realized change is exactly zero,
+    // so the controller's neutrality convention hands back `rho = 1` and the
+    // step is accepted. It must NOT be read as evidence that the region was
+    // too small.
+    let neutral = update_joint_trust_region_radius(
         OLD_RADIUS,
         OLD_RADIUS,
-        1.0e-2,
-        0.5 * OBJECTIVE_TOL,
+        0.0,
+        1.0,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
-    assert!(below_tolerance.accepted);
-    assert_eq!(below_tolerance.decision.label(), "hold_inside");
-    assert_eq!(below_tolerance.radius, OLD_RADIUS);
+    assert!(
+        neutral.accepted,
+        "a numerically neutral step is still taken; only the GROWTH is refused"
+    );
+    assert!((neutral.rho - 1.0).abs() < 1.0e-12);
+    assert_eq!(neutral.decision.label(), "hold_inside");
+    assert_eq!(neutral.radius, OLD_RADIUS);
 
-    let above_tolerance = update_joint_trust_region_radius(
+    // Same, one round-off unit either side of the floor, so the discriminator
+    // is pinned at its own boundary rather than at a convenient distance.
+    let at_floor = update_joint_trust_region_radius(
         OLD_RADIUS,
         OLD_RADIUS,
-        2.0 * OBJECTIVE_TOL,
-        2.0 * OBJECTIVE_TOL,
+        noise_floor,
+        1.0,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
-    assert!(above_tolerance.accepted);
-    assert_eq!(above_tolerance.decision.label(), "grow_at_boundary");
-    assert_eq!(above_tolerance.radius, 2.0 * OLD_RADIUS);
+    assert_eq!(
+        at_floor.decision.label(),
+        "hold_inside",
+        "a realized decrease AT the round-off floor is not a measurement"
+    );
+    let above_floor = update_joint_trust_region_radius(
+        OLD_RADIUS,
+        OLD_RADIUS,
+        2.0 * noise_floor,
+        2.0 * noise_floor,
+        OBJECTIVE_SCALE,
+    );
+    assert_eq!(
+        above_floor.decision.label(),
+        "grow_at_boundary",
+        "a realized decrease above the round-off floor IS a measurement"
+    );
+    assert_eq!(above_floor.radius, 2.0 * OLD_RADIUS);
 
-    let rejected_below_tolerance = update_joint_trust_region_radius(
+    // THE ENDGAME this replaces. A converging solve's boundary step predicts
+    // and realizes far less than its own convergence tolerance while sitting
+    // six orders above round-off. The old `predicted_reduction >
+    // objective_tol` test held the radius here, capping the step forever; the
+    // realized-decrease test grows it, which is what restores Newton's rate.
+    const ENDGAME_OBJECTIVE_SCALE: f64 = 1.410739e2;
+    const ENDGAME_CONVERGENCE_TOL: f64 = 1.421e-4;
+    const ENDGAME_REDUCTION: f64 = 7.438e-6;
+    let endgame_noise_floor =
+        ENDGAME_OBJECTIVE_SCALE.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
+    assert!(
+        ENDGAME_REDUCTION < ENDGAME_CONVERGENCE_TOL,
+        "the measured wine endgame reduction is below its convergence tolerance"
+    );
+    assert!(
+        ENDGAME_REDUCTION > 1.0e5 * endgame_noise_floor,
+        "and it is orders ABOVE round-off: {ENDGAME_REDUCTION:.6e} vs {endgame_noise_floor:.6e}"
+    );
+    let endgame = update_joint_trust_region_radius(
+        OLD_RADIUS,
+        OLD_RADIUS,
+        ENDGAME_REDUCTION,
+        ENDGAME_REDUCTION,
+        ENDGAME_OBJECTIVE_SCALE,
+    );
+    assert!(endgame.accepted);
+    assert_eq!(
+        endgame.decision.label(),
+        "grow_at_boundary",
+        "a converging boundary step must still be allowed to enlarge the region"
+    );
+    assert_eq!(endgame.radius, 2.0 * OLD_RADIUS);
+
+    // Unchanged: model disagreement rejects and shrinks, and a step strictly
+    // inside the region holds however good its gain ratio is.
+    let rejected = update_joint_trust_region_radius(
         OLD_RADIUS,
         OLD_RADIUS,
         -0.1,
-        0.5 * OBJECTIVE_TOL,
+        1.0e-3,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
-    assert!(!rejected_below_tolerance.accepted);
-    assert_eq!(rejected_below_tolerance.decision.label(), "shrink_reject");
-    assert!(rejected_below_tolerance.radius < OLD_RADIUS);
+    assert!(!rejected.accepted);
+    assert_eq!(rejected.decision.label(), "shrink_reject");
+    assert!(rejected.radius < OLD_RADIUS);
 
     let non_boundary = update_joint_trust_region_radius(
         OLD_RADIUS,
         0.5 * OLD_RADIUS,
-        2.0 * OBJECTIVE_TOL,
-        2.0 * OBJECTIVE_TOL,
+        1.0e-2,
+        1.0e-2,
         OBJECTIVE_SCALE,
-        OBJECTIVE_TOL,
     );
     assert!(non_boundary.accepted);
     assert_eq!(non_boundary.decision.label(), "hold_inside");
@@ -5231,7 +5294,7 @@ pub(crate) fn joint_newton_collapsed_trust_region_all_reject_exits_before_grindi
     let mut radius = 1.0_f64;
     for _ in 0..200 {
         let rejected =
-            update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6);
+            update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0);
         assert!(
             !rejected.accepted,
             "a genuine objective increase must reject"
@@ -5243,7 +5306,7 @@ pub(crate) fn joint_newton_collapsed_trust_region_all_reject_exits_before_grindi
         "sustained rejection must collapse the radius to its absolute 1e-12 floor"
     );
     assert_eq!(
-        update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6)
+        update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0)
             .decision
             .label(),
         "reject_floor",
@@ -5338,14 +5401,12 @@ pub(crate) fn joint_trust_region_noise_floor_accepts_round_off_negative_actual()
     let noise_floor = objective_scale * 1e-14;
     let predicted = noise_floor * 0.1;
     let actual = -noise_floor * 0.5;
-    let objective_tol = 1.0e-6 * (1.0 + objective_scale.abs());
     let update = update_joint_trust_region_radius(
         1.0,
         0.05,
         actual,
         predicted,
         objective_scale,
-        objective_tol,
     );
     assert!(
         update.accepted,
@@ -5363,14 +5424,12 @@ pub(crate) fn joint_trust_region_noise_floor_rejects_genuine_increase() {
     let noise_floor = objective_scale * 1e-14;
     let predicted = noise_floor * 0.1;
     let actual = -1.0;
-    let objective_tol = 1.0e-6 * (1.0 + objective_scale.abs());
     let update = update_joint_trust_region_radius(
         1.0,
         0.5,
         actual,
         predicted,
         objective_scale,
-        objective_tol,
     );
     assert!(
         !update.accepted,
@@ -5782,14 +5841,12 @@ pub(crate) fn joint_trust_region_rosenbrock_like_quadratic_is_armijo_safe() {
     assert!(predicted > 0.0);
     assert!((predicted - actual).abs() < 1.0e-10);
 
-    let objective_tol = 1.0e-6 * (1.0 + old_objective.abs());
     let update = update_joint_trust_region_radius(
         0.25,
         step_norm,
         actual,
         predicted,
         old_objective,
-        objective_tol,
     );
     assert!(update.accepted);
     assert!(trial_objective < old_objective);

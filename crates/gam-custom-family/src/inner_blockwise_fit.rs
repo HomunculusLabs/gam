@@ -3424,7 +3424,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 actual_reduction,
                 predicted_reduction,
                 obj_before_block,
-                inner_tol * (1.0 + obj_before_block.abs()),
             );
             block_max_step[b] = trust_update.radius;
             if !accepted {

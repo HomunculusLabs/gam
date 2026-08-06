@@ -1927,7 +1927,6 @@ pub(crate) fn update_joint_trust_region_radius(
     actual_reduction: f64,
     predicted_reduction: f64,
     objective_scale: f64,
-    objective_tol: f64,
 ) -> JointTrustRegionUpdate {
     // Round-off-aware trust-region radius control, delegated to the shared
     // `opt::TrustRegionPolicy::noise_aware` controller. The
@@ -1938,15 +1937,44 @@ pub(crate) fn update_joint_trust_region_radius(
     // test above that floor, the `×0.25` shrink capped at `0.5·step_norm` on
     // rejection, the `×2` grow at a boundary that constrains a model-resolvable
     // decrease, the `[1e-12, 1e6]` clamp, and the `RejectFloor` promotion at the
-    // floor are all reproduced by that controller. Geometry alone is not
-    // evidence for growth: when `predicted_reduction <= objective_tol`, the
-    // quadratic model says the entire constrained step is beneath the solver's
-    // own objective resolution. Treating that chord as a useful boundary hit
-    // doubled the next chord and made transformation-normal walk away from its
-    // best iterate (gam#2600). The gam#2637 override below is the other deliberate
-    // specialization, and it only ever converts a rejection the controller could
-    // not justify into an accept.
-    let hit_boundary = step_norm >= 0.99 * old_radius && predicted_reduction > objective_tol;
+    // floor are all reproduced by that controller.
+    //
+    // GEOMETRY ALONE IS NOT EVIDENCE FOR GROWTH — but the evidence that IS
+    // wanted is a decrease the solver can actually MEASURE, and the floor it
+    // has to clear is round-off, not convergence (gam#2600).
+    //
+    // The controller's own `rho = 1` neutrality convention is the case to
+    // exclude: when `|actual_reduction| <= noise_floor` it reports a perfect
+    // gain ratio precisely BECAUSE it cannot tell whether the step helped.
+    // Pairing that with a boundary hit doubles the radius on a step that
+    // changed nothing, which is the runaway this issue first measured — a
+    // radius walking `4.484e1 -> 1.385e3` while consecutive cycles were
+    // bit-identical and the residual sat frozen at `6.9e2`.
+    //
+    // The previous repair excluded it with `predicted_reduction >
+    // objective_tol` instead, and that threshold is eight orders too high.
+    // `objective_tol` is a CONVERGENCE tolerance (`inner_tol·(1+|f|)`, here
+    // `1.42e-4`); the resolution floor is `|f|·1e-14`, here `1.41e-12`. Every
+    // endgame step of every converging solve has a predicted reduction under
+    // `objective_tol` — that is what converging means — so the radius froze
+    // exactly when the trust region should have been releasing its grip.
+    // Measured on this issue's own wine arm: from cycle 34 the reduced-face
+    // step is on the trust boundary every single cycle (`path=regularized-
+    // newton`), the radius never grows, and the solve degrades from Newton to
+    // a fixed-step method converging LINEARLY at `1.0209x/cycle` — 138 more
+    // cycles to reach tol against a 76-cycle budget, which the slow-geometric
+    // -rate guard then correctly refuses at cycle 52.
+    //
+    // So the test is on the REALIZED decrease against the ROUND-OFF floor: it
+    // excludes exactly the neutral steps (`actual == 0` on a bit-identical
+    // cycle fails it outright) and admits exactly the resolvable ones
+    // (`7.4e-6` against `1.41e-12` passes it by six orders). No new constant:
+    // it is the same floor the controller and the gam#2637 override below both
+    // already use. Acceptance, rejection and shrink remain the controller's.
+    let growth_noise_floor = objective_scale.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
+    let hit_boundary = step_norm >= 0.99 * old_radius
+        && actual_reduction.is_finite()
+        && actual_reduction > growth_noise_floor;
     let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, JOINT_TRUST_NOISE_FLOOR_REL)
         .update(
             old_radius,
