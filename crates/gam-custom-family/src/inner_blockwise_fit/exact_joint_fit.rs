@@ -3193,56 +3193,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 trial_penalty -=
                     custom_family_joint_jeffreys_value(family, &states, specs, &ranges, z_joint);
             }
-            // TEMPORARY gam#2695 probe: the surviving objective rejection is a
-            // JUMP in the Jeffreys value, not a first-order gradient error —
-            // `actual` stays pinned across four quarterings of the step while
-            // `d_ll` scales exactly. Print Phi and the spectrum its gate reads,
-            // at the same trial point the accept test uses.
-            {
-                let phi_trial = if jeffreys_skippable_this_cycle {
-                    0.0
-                } else {
-                    joint_jeffreys_subspace
-                        .as_ref()
-                        .map(|z| {
-                            custom_family_joint_jeffreys_value(family, &states, specs, &ranges, z)
-                        })
-                        .unwrap_or(0.0)
-                };
-                let quad = total_quadratic_penalty(
-                    &states,
-                    &s_lambdas,
-                    ridge,
-                    options.ridge_policy,
-                    joint_bundle,
-                    Some(specs),
-                );
-                let mut lmin = f64::NAN;
-                let mut lmax = f64::NAN;
-                let mut gate = f64::NAN;
-                if let Some(z) = joint_jeffreys_subspace.as_ref()
-                    && let Ok(Some(h)) = family.joint_jeffreys_information_with_specs(&states, specs)
-                    && let Ok(plan) =
-                        gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
-                            h.view(),
-                            z.view(),
-                        )
-                {
-                    let extrema = plan.information_extrema();
-                    lmin = extrema.0;
-                    lmax = extrema.1;
-                    gate = plan.conditioning_gate_weight();
-                }
-                let bw = states
-                    .last()
-                    .map_or(0.0, |s| s.beta.iter().map(|v| v.abs()).fold(0.0, f64::max));
-                eprintln!(
-                    "[P2] cycle={cycle} att={trust_attempt} step={:.6e} phi={phi_trial:.9e} \
-                     old_phi={old_phi:.9e} quad={quad:.9e} lmin={lmin:.6e} lmax={lmax:.6e} \
-                     gate={gate:.6e} bw_inf={bw:.6e}",
-                    trial_delta.dot(&trial_delta).sqrt(),
-                );
-            }
             // Cheap-LL line-search path: rejected backtracking attempts
             // discard the exact-Newton workspace they build, so we evaluate
             // just the scalar full-data log-likelihood for the accept/reject
