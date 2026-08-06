@@ -9216,3 +9216,166 @@ fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_2695() {
     );
     }
 }
+
+/// gam#2695 — the same oracle at a warp that is actually ON.
+///
+/// `survival_ls_link_wiggle_block_gradient_matches_finite_difference_2695` runs
+/// at `betaw_j = 0.002 + 0.001·j`, i.e. `m1 = 1 + Σ_j βw_j·B'_j(q0)` within a
+/// few percent of 1, because at larger amplitudes THAT fixture's row 1 drives
+/// `dη/dt` negative and the family refuses before any derivative is compared.
+/// A warp that is off is exactly the state in which a dropped warp chain-rule
+/// term is invisible, and that is why the oracle is green while the production
+/// witness is not: measured on
+/// `survival_location_scale_saved_fit_preserves_linkwiggle_metadata`, the
+/// coordinates whose analytic `∂ℓ/∂β` disagrees with a central difference of
+/// the solver's own objective are exactly the ones evaluated at `βw = O(1)`,
+/// and the ones at `βw ≈ 1e-6` agree to nine digits.
+///
+/// The refusal is avoidable rather than intrinsic. `qdot = m1·r` with
+/// `r = inv_sigma·(η_t·η_ls' − η_t')`, so on the layout the production witness
+/// actually uses — a time-INVARIANT threshold and log-sigma, i.e.
+/// `x_threshold_deriv = x_log_sigma_deriv = None` — `r ≡ 0`, the warp cannot
+/// touch the event Jacobian at all, and `βw` is free to be O(1). This test
+/// therefore reproduces the witness's own channel layout AND its warp
+/// magnitude, which is the pair the existing oracle cannot hold at once.
+#[test]
+fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_at_a_real_warp_2695() {
+    let primaries: Vec<[f64; SLS_ROW_K]> = vec![
+        [0.2, 0.9, 1.3, 0.6, 0.4, 0.25, 0.3, 0.1, -0.2],
+        [-0.4, 0.5, 0.9, -0.8, -0.5, 0.4, -0.25, 0.35, 0.3],
+        [1.4, 2.1, 0.8, -1.1, -0.9, 0.2, 0.45, 0.55, 0.35],
+        [0.1, 0.6, 1.0, 0.3, 0.2, -0.3, -0.2, 0.15, 0.25],
+    ];
+    let event = [1.0, 0.0, 1.0, 1.0];
+    let weight = [1.0, 0.8, 1.2, 1.1];
+    let n = primaries.len();
+    let q0_exit = Array1::from_shape_fn(n, |i| -primaries[i][3] * (-primaries[i][6]).exp());
+    let knots = Array1::from_vec(vec![
+        -3.0, -3.0, -3.0, -3.0, -1.5, 0.0, 1.5, 3.0, 3.0, 3.0, 3.0,
+    ]);
+    let degree = 3usize;
+    let xwiggle =
+        survival_wiggle_basis_with_options(q0_exit.view(), &knots, degree, BasisOptions::value())
+            .expect("link wiggle design");
+    let pw = xwiggle.ncols();
+    assert!(pw >= 2, "the fixture must install a real wiggle block, got pw={pw}");
+
+    let inverse_link = residual_distribution_inverse_link(ResidualDistribution::Gaussian);
+    let mut family = survival_ls_joint_oracle_family(&inverse_link, &primaries, &event, &weight);
+    // The witness's layout: time-invariant threshold and log-sigma. This is the
+    // `None` arm of `evaluate_log_likelihood_and_block_gradients`, and it is
+    // what makes `r ≡ 0` so a real warp is admissible.
+    family.x_threshold_entry = None;
+    family.x_threshold_deriv = None;
+    family.x_log_sigma_entry = None;
+    family.x_log_sigma_deriv = None;
+    family.x_link_wiggle = Some(DesignMatrix::Dense(
+        gam_linalg::matrix::DenseDesignMatrix::from(xwiggle.clone()),
+    ));
+    family.wiggle_knots = Some(knots.clone());
+    family.wiggle_degree = Some(degree);
+
+    let beta_w0 = Array1::from_shape_fn(pw, |j| 0.30 + 0.10 * (j as f64));
+    let build = |betas: [f64; 3], beta_w: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
+            let mut eta = Array1::<f64>::zeros(3 * n);
+            for i in 0..n {
+                eta[i] = primaries[i][first] * scale;
+                eta[n + i] = primaries[i][second] * scale;
+                eta[2 * n + i] = primaries[i][deriv] * scale;
+            }
+            eta
+        };
+        let flat =
+            |channel: usize, scale: f64| Array1::from_shape_fn(n, |i| primaries[i][channel] * scale);
+        vec![
+            ParameterBlockState {
+                beta: array![betas[0]],
+                eta: stacked(0, 1, 2, betas[0]),
+            },
+            ParameterBlockState {
+                beta: array![betas[1]],
+                eta: flat(3, betas[1]),
+            },
+            ParameterBlockState {
+                beta: array![betas[2]],
+                eta: flat(6, betas[2]),
+            },
+            ParameterBlockState {
+                beta: beta_w.clone(),
+                eta: xwiggle.dot(beta_w),
+            },
+        ]
+    };
+
+    let betas0 = [1.0_f64, 1.0, 1.0];
+    let states = build(betas0, &beta_w0);
+    let (ll0, block_gradients) = family
+        .evaluate_log_likelihood_and_block_gradients(&states)
+        .expect("wiggle block gradients at a real warp");
+    assert!(ll0.is_finite(), "fixture log-likelihood must be finite");
+
+    // Non-vacuity: the warp must actually be ON. `m1 = 1 + Σ_j βw_j·B'_j(q0)`
+    // is the factor every threshold / log-sigma channel is scaled by, so if it
+    // is 1 to a few percent this test measures the same thing the existing
+    // oracle already does.
+    let warp = family
+        .wiggle_geometry(q0_exit.view(), beta_w0.view())
+        .expect("wiggle geometry")
+        .expect("the fixture installs knots and a degree");
+    let max_warp = warp
+        .dq_dq0
+        .iter()
+        .map(|value| (value - 1.0).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_warp > 0.2,
+        "the warp must be materially on for this test to differ from the small-amplitude \
+         oracle; max |m1 - 1| = {max_warp:.3e}"
+    );
+
+    let analytic: Vec<f64> = block_gradients
+        .iter()
+        .flat_map(|block| block.iter().copied())
+        .collect();
+    assert_eq!(analytic.len(), 3 + pw);
+
+    let ll_at = |betas: [f64; 3], beta_w: &Array1<f64>| -> f64 {
+        family
+            .evaluate_log_likelihood_and_block_gradients(&build(betas, beta_w))
+            .expect("perturbed log-likelihood")
+            .0
+    };
+
+    let cbrt_eps = f64::EPSILON.cbrt();
+    let bound_scale = 64.0 * cbrt_eps * cbrt_eps;
+    for index in 0..analytic.len() {
+        let base = if index < 3 {
+            betas0[index]
+        } else {
+            beta_w0[index - 3]
+        };
+        let h = cbrt_eps * (1.0 + base.abs());
+        let shift = |delta: f64| -> f64 {
+            let mut betas = betas0;
+            let mut beta_w = beta_w0.clone();
+            if index < 3 {
+                betas[index] = base + delta;
+            } else {
+                beta_w[index - 3] = base + delta;
+            }
+            ll_at(betas, &beta_w)
+        };
+        let fd = (shift(h) - shift(-h)) / (2.0 * h);
+        let tol = bound_scale * (1.0 + analytic[index].abs());
+        assert!(
+            (fd - analytic[index]).abs() <= tol,
+            "coefficient {index} (block {}) at a REAL warp (max |m1-1| = {max_warp:.3e}): \
+             analytic ∂ℓ/∂β = {:.9e} but the central difference of the SAME call's ℓ is \
+             {fd:.9e} (drift {:.3e} > {tol:.3e})",
+            if index < 3 { index } else { 3 },
+            analytic[index],
+            (fd - analytic[index]).abs(),
+        );
+    }
+}
