@@ -494,6 +494,20 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
     )?;
     print_inference_summary(&inference_notes);
 
+    // `--logslope-time-k` names a margin on a block only the marginal-slope
+    // likelihood has. Ignoring it elsewhere would report a fit that is not the
+    // one asked for; mirrors the library-side refusal in
+    // `fit_orchestration::materialize::survival`.
+    if effective_config.logslope_time_k.is_some()
+        && likelihood_mode != SurvivalLikelihoodMode::MarginalSlope
+    {
+        return Err(
+            "--logslope-time-k applies to --survival-likelihood marginal-slope; the log-slope \
+             block does not exist in the other survival modes"
+                .to_string(),
+        );
+    }
+
     if likelihood_mode == SurvivalLikelihoodMode::LocationScale {
         let threshold_template = if let Some(tk) = effective_config.threshold_time_k {
             cli_err!(
@@ -819,6 +833,28 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
     }
 
     if likelihood_mode == SurvivalLikelihoodMode::MarginalSlope {
+        // The log-slope time margin (gam#2765 / gam#2767): how much the latent
+        // score's effect is allowed to move along the follow-up axis. Built
+        // from the same primitive the threshold and sigma margins above use, so
+        // the three blocks share one knot rule and one degree admission check.
+        // `None` keeps the pre-#2767 behaviour — a slope constant within a
+        // person — which is what `SurvivalCovariateTermBlockTemplate::Static`
+        // means.
+        let logslope_template = if let Some(lk) = effective_config.logslope_time_k {
+            cli_err!(
+                "[survival marginal-slope] building time-varying log-slope: k={lk}, degree={}",
+                effective_config.logslope_time_degree
+            );
+            build_time_varying_survival_covariate_template(
+                &age_entry,
+                &age_exit,
+                lk,
+                effective_config.logslope_time_degree,
+                "logslope",
+            )?
+        } else {
+            SurvivalCovariateTermBlockTemplate::Static
+        };
         let survival_marginal_slope_base_link = resolve_bernoulli_marginal_slope_base_link(
             parsed.linkspec.as_ref(),
             "survival marginal-slope",
@@ -977,6 +1013,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             timewiggle_block: prepared.timewiggle_block.clone(),
             logslopespec: logslopespec.clone(),
             logslopespecs: None,
+            logslope_template: logslope_template.clone(),
             logslope_offset: log_sigma_offset.clone(),
             score_warp: routed_score_warp.clone(),
             link_dev: routed_link_dev.clone(),
