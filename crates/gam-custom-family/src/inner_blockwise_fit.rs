@@ -613,15 +613,17 @@ fn log_removed_whitened_rank_refusal_2600(
         .iter()
         .copied()
         .fold(f64::INFINITY, f64::min);
+    let face_rows = face_a.nrows();
+    let removed_refusal_would_fire = whitened_min <= whitened_floor;
+    let metric_condition = metric_max / metric_min;
     log::debug!(
-        "[gam#2600 probe] face_rows={} ambient_dim={p} \
+        "[gam#2600 probe] face_rows={face_rows} ambient_dim={p} \
          unwhitened rank={rank} sigma_max={singular_max:.6e} \
          sigma_min_retained={singular_min_retained:.6e} | \
          whitened sigma_min={whitened_min:.6e} rank_floor={whitened_floor:.6e} \
-         removed_refusal_would_fire={} | metric_max={metric_max:.6e} \
-         metric_min={metric_min:.6e} metric_condition={:.6e}",
-        whitened_min <= whitened_floor,
-        metric_max / metric_min,
+         removed_refusal_would_fire={removed_refusal_would_fire} | \
+         metric_max={metric_max:.6e} metric_min={metric_min:.6e} \
+         metric_condition={metric_condition:.6e}"
     );
 }
 
