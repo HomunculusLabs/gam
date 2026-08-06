@@ -2036,67 +2036,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         {
             rhs += grad_phi;
         }
-        // ── gam#2695 probe (temporary; removed with the fix) ────────────────
-        //
-        // The accept test measures `F = −ℓ + ½βᵀSβ − Φ` at β and at β+δ; the
-        // model measures `rhs·δ` with `rhs = ∇ℓ − Sβ + ∇Φ`. If those are two
-        // different functions the trust ratio can never approach 1 under
-        // refinement, which is exactly what #2695 measures. Score each of the
-        // three terms coordinate-wise against a central difference of the SAME
-        // evaluator the accept test uses, so the disagreement is attributed to
-        // one term rather than inferred from the sum.
-        {
-            let mut probe = states.clone();
-            let probe_terms = |st: &mut Vec<ParameterBlockState>| -> (f64, f64, f64) {
-                refresh_all_block_etas(family, specs, st).expect("probe eta refresh");
-                let ll = family.log_likelihood_only(st).unwrap_or(f64::NAN);
-                let pen = total_quadratic_penalty(
-                    st,
-                    &s_lambdas,
-                    ridge,
-                    options.ridge_policy,
-                    joint_bundle,
-                    Some(specs),
-                );
-                let phi = if jeffreys_skippable_this_cycle {
-                    0.0
-                } else {
-                    joint_jeffreys_subspace
-                        .as_ref()
-                        .map(|z| custom_family_joint_jeffreys_value(family, st, specs, &ranges, z))
-                        .unwrap_or(0.0)
-                };
-                (ll, pen, phi)
-            };
-            for j in 0..total_p {
-                let Some((b, range)) = ranges
-                    .iter()
-                    .enumerate()
-                    .find(|(_, range)| j >= range.0 && j < range.1)
-                else {
-                    continue;
-                };
-                let local = j - range.0;
-                let base = beta_joint[j];
-                let h = 1.0e-6 * (1.0 + base.abs());
-                probe[b].beta[local] = base + h;
-                let (ll_p, pen_p, phi_p) = probe_terms(&mut probe);
-                probe[b].beta[local] = base - h;
-                let (ll_m, pen_m, phi_m) = probe_terms(&mut probe);
-                probe[b].beta[local] = base;
-                refresh_all_block_etas(family, specs, &mut probe).expect("probe eta refresh");
-                eprintln!(
-                    "[PROBE2695-fd] cycle={cycle} j={j} block={b} local={local} beta={base:.6e} \
-                     ll_fd={:.9e} ll_an={:.9e} pen_fd={:.9e} pen_an={:.9e} phi_fd={:.9e} phi_an={:.9e}",
-                    (ll_p - ll_m) / (2.0 * h),
-                    grad_joint[j],
-                    (pen_p - pen_m) / (2.0 * h),
-                    penalty_beta[j],
-                    (phi_p - phi_m) / (2.0 * h),
-                    head_jeffreys_term.as_ref().map_or(0.0, |(g, _)| g[j]),
-                );
-            }
-        }
         let beta_inf = states
             .iter()
             .flat_map(|s| s.beta.iter().copied())
@@ -3449,30 +3388,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 )));
             }
             let actual_reduction = old_objective - trialobjective;
-            // gam#2695 probe (opt-in). Split both sides of ρ into their terms at
-            // the SAME δ so a first-order disagreement is attributable.
-            {
-                let g_dot = grad_joint.dot(&trial_delta);
-                let s_dot = penalty_beta.dot(&trial_delta);
-                let phi_dot = head_jeffreys_term
-                    .as_ref()
-                    .map_or(0.0, |(g, _)| g.dot(&trial_delta));
-                eprintln!(
-                    "[PROBE2695-tr] cycle={cycle} att={trust_attempt} step={:.6e} \
-                     rhs_d={:.9e} half_dHd={:.9e} pred={predicted_reduction:.9e} \
-                     actual={actual_reduction:.9e} rho={:.6e} \
-                     g_d={g_dot:.9e} d_ll={:.9e} S_d={s_dot:.9e} d_pen={:.9e} \
-                     phi_d={phi_dot:.9e} old_phi={old_phi:.9e} \
-                     trial_ll={trial_ll:.9e} cur_ll={current_log_likelihood:.9e} \
-                     trial_pen={trial_penalty:.9e} old_obj={old_objective:.9e}",
-                    trial_delta.dot(&trial_delta).sqrt(),
-                    rhs.dot(&trial_delta),
-                    0.5 * trial_delta.dot(&hpen_delta),
-                    actual_reduction / predicted_reduction,
-                    trial_ll - current_log_likelihood,
-                    trial_penalty - (old_objective + current_log_likelihood),
-                );
-            }
             let trust_update = update_joint_trust_region_radius(
                 joint_trust_radius,
                 step_norm,
