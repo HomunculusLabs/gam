@@ -621,56 +621,51 @@ pub enum ActiveConstraintTangentGeometry {
     Tangent(Array2<f64>),
 }
 
-/// Compute the coefficient geometry of a non-empty active constraint face.
+/// Row-normalize a non-empty active constraint block, returning the normalized
+/// rows alongside the norms that were divided out.
 ///
-/// This is shared by the terminal inner determinant and the outer evaluator so
-/// the value cannot classify curvature in one coefficient space while its
-/// derivatives use another. A non-empty row block with zero numerical rank is
-/// invalid active-set evidence, not an unconstrained fallback.
-pub fn active_constraint_tangent_geometry(
-    a_act: &Array2<f64>,
-) -> Result<ActiveConstraintTangentGeometry, String> {
-    if a_act.nrows() == 0 {
-        return Err("active constraint tangent geometry requires at least one row".to_string());
-    }
-    let p = a_act.ncols();
-    if p == 0 {
-        return Ok(ActiveConstraintTangentGeometry::FullyPinned);
-    }
-    // Normalize each row before factoring. Constraint feasibility, working-face
-    // membership, and every active-set KKT gate are defined in scaled slack
-    // `(a·beta-b)/‖a‖`; tangent rank must be invariant to multiplying an
-    // inequality by an arbitrary positive constant as well. Factoring raw
-    // Khatri–Rao rows lets large-norm rows numerically erase independent
-    // small-norm rows, producing a direction that is tangent only in an
-    // unscaled least-squares aggregate and leaves the solver's actual face.
+/// Constraint feasibility, working-face membership, and every active-set KKT
+/// gate are defined in scaled slack `(a·beta-b)/‖a‖`; rank, tangent and affine
+/// solutions must be invariant to multiplying an inequality by an arbitrary
+/// positive constant as well. Factoring raw Khatri–Rao rows lets large-norm
+/// rows numerically erase independent small-norm rows, producing a direction
+/// that is tangent only in an unscaled least-squares aggregate and leaves the
+/// solver's actual face. A zero or non-finite row is left alone with a unit
+/// norm so the caller's own row validity check — not this scaling — is what
+/// reports it.
+fn normalize_active_face_rows(a_act: &Array2<f64>) -> (Array2<f64>, Array1<f64>) {
     let mut normalized = a_act.clone();
-    for mut row in normalized.rows_mut() {
+    let mut row_norms = Array1::<f64>::ones(a_act.nrows());
+    for (index, mut row) in normalized.rows_mut().into_iter().enumerate() {
         let norm = row.dot(&row).sqrt();
         if norm.is_finite() && norm > 0.0 {
             row /= norm;
+            row_norms[index] = norm;
         }
     }
+    (normalized, row_norms)
+}
 
-    // Factor the rectangular normalized row block directly. Forming `A_actᵀ A_act`
-    // squares its condition number and can erase independent active rows near
-    // machine precision. That produces a tangent which leaks in a constraint-
-    // normal direction: the next accepted point then falls off the working
-    // face and discards the entire warm active set. The thin SVD gives the row
-    // rank without normal equations; complete its right-singular row basis to
-    // an orthonormal null basis using twice-reorthogonalized coordinate axes.
-    let (_u, singular, vt) = normalized
-        .svd(false, true)
-        .map_err(|error| format!("active constraint tangent SVD failed: {error}"))?;
-    let vt = vt.ok_or_else(|| "active constraint tangent SVD omitted Vᵀ".to_string())?;
+/// Numerical row rank and tangent geometry of an already-normalized active
+/// block, read off a factorization the caller already paid for.
+///
+/// Splitting this out is what lets the tangent, the rank and the affine
+/// particular solution of one face be answered from ONE factorization instead
+/// of from three that can disagree (gam#2600).
+fn tangent_from_row_factorization(
+    normalized: &Array2<f64>,
+    singular: &Array1<f64>,
+    vt: &Array2<f64>,
+) -> Result<(usize, ActiveConstraintTangentGeometry), String> {
+    let p = normalized.ncols();
     let smax = singular.iter().fold(0.0_f64, |largest, &s| largest.max(s));
-    let rank_threshold = 100.0 * f64::EPSILON * (a_act.nrows().max(p) as f64) * smax;
+    let rank_threshold = 100.0 * f64::EPSILON * (normalized.nrows().max(p) as f64) * smax;
     let rank = singular.iter().filter(|&&s| s > rank_threshold).count();
     if rank == 0 {
         return Err("non-empty active constraint block has zero numerical row rank".to_string());
     }
     if rank == p {
-        return Ok(ActiveConstraintTangentGeometry::FullyPinned);
+        return Ok((rank, ActiveConstraintTangentGeometry::FullyPinned));
     }
 
     let null_count = p - rank;
@@ -723,7 +718,216 @@ pub fn active_constraint_tangent_geometry(
             }
         }
     }
-    Ok(ActiveConstraintTangentGeometry::Tangent(z))
+    Ok((rank, ActiveConstraintTangentGeometry::Tangent(z)))
+}
+
+/// Compute the coefficient geometry of a non-empty active constraint face.
+///
+/// This is shared by the terminal inner determinant and the outer evaluator so
+/// the value cannot classify curvature in one coefficient space while its
+/// derivatives use another. A non-empty row block with zero numerical rank is
+/// invalid active-set evidence, not an unconstrained fallback.
+pub fn active_constraint_tangent_geometry(
+    a_act: &Array2<f64>,
+) -> Result<ActiveConstraintTangentGeometry, String> {
+    if a_act.nrows() == 0 {
+        return Err("active constraint tangent geometry requires at least one row".to_string());
+    }
+    let p = a_act.ncols();
+    if p == 0 {
+        return Ok(ActiveConstraintTangentGeometry::FullyPinned);
+    }
+    let (normalized, _row_norms) = normalize_active_face_rows(a_act);
+
+    // Factor the rectangular normalized row block directly. Forming `A_actᵀ A_act`
+    // squares its condition number and can erase independent active rows near
+    // machine precision. That produces a tangent which leaks in a constraint-
+    // normal direction: the next accepted point then falls off the working
+    // face and discards the entire warm active set. The thin SVD gives the row
+    // rank without normal equations; complete its right-singular row basis to
+    // an orthonormal null basis using twice-reorthogonalized coordinate axes.
+    //
+    // Left singular vectors are NOT requested here: this entry point answers
+    // only the tangent question, and the callers that also need the affine
+    // particular solution go through `active_constraint_face_geometry`, which
+    // pays for `U` once and shares this exact rank rule.
+    let (_u, singular, vt) = normalized
+        .svd(false, true)
+        .map_err(|error| format!("active constraint tangent SVD failed: {error}"))?;
+    let vt = vt.ok_or_else(|| "active constraint tangent SVD omitted Vᵀ".to_string())?;
+    tangent_from_row_factorization(&normalized, &singular, &vt).map(|(_rank, geometry)| geometry)
+}
+
+/// Minimum-norm particular solution of an active face's affine system,
+/// together with the residual the numerically null directions leave behind.
+pub struct ParticularFaceSolution {
+    /// The step `δ` of least Euclidean norm over the numerically identified
+    /// row space, satisfying `A δ = rhs` up to `residual_inf`.
+    pub delta: Array1<f64>,
+    /// `‖A δ − rhs‖∞`, in scaled-slack units — the same units feasibility,
+    /// working-face membership and every active-set gate are stated in.
+    pub residual_inf: f64,
+    /// Largest residual a *consistent* face can leave at this scale. Anything
+    /// above it means the equalities cannot be met simultaneously: the face is
+    /// wrong, not the arithmetic.
+    pub residual_tolerance: f64,
+}
+
+/// Rank-revealing affine geometry of a non-empty active constraint face.
+///
+/// A reduced-face solve needs three things from one face: its numerical row
+/// rank, an orthonormal basis of `null(A)`, and a particular solution of the
+/// affine system `A δ = rhs`. Deciding those from three different
+/// factorizations — which is what the physical reduced face used to do, taking
+/// the rank from a Gram–Schmidt scan of `A`, the tangent from an SVD of `A`,
+/// and the particular solution from an SVD of the trust-whitened `A D^{-1/2}`
+/// — lets one face be simultaneously full rank and singular. That is exactly
+/// how gam#2600 refused: `A` was accepted as 39 independent rows while the
+/// whitened block reported `σ_min = 4.8e-18` against a `1.1e-13` floor, and
+/// the trust metric's dynamic range, not the geometry, decided it.
+///
+/// This type carries ONE factorization of the row-normalized block and answers
+/// all three from it. The trust metric is not involved: it selects *which*
+/// solution of an underdetermined face is smallest, which is a separate
+/// projection the caller applies afterwards, and it must not be allowed to
+/// decide whether the face has a solution at all.
+pub struct ActiveConstraintFaceGeometry {
+    rank: usize,
+    tangent: ActiveConstraintTangentGeometry,
+    normalized: Array2<f64>,
+    row_norms: Array1<f64>,
+    left: Array2<f64>,
+    singular: Array1<f64>,
+    right_transposed: Array2<f64>,
+}
+
+impl ActiveConstraintFaceGeometry {
+    /// Numerical row rank of the row-normalized face.
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Largest singular value of the row-normalized face.
+    pub fn largest_singular_value(&self) -> f64 {
+        self.singular.iter().fold(0.0_f64, |largest, &s| largest.max(s))
+    }
+
+    /// Smallest singular value retained by the rank decision. `0.0` for an
+    /// empty rank, which `active_constraint_face_geometry` already refuses.
+    pub fn smallest_retained_singular_value(&self) -> f64 {
+        if self.rank == 0 {
+            0.0
+        } else {
+            self.singular[self.rank - 1]
+        }
+    }
+
+    /// Tangent geometry of the face, decided by the same rank rule.
+    pub fn tangent(&self) -> &ActiveConstraintTangentGeometry {
+        &self.tangent
+    }
+
+    /// Consume the geometry for its tangent basis.
+    pub fn into_tangent(self) -> ActiveConstraintTangentGeometry {
+        self.tangent
+    }
+
+    /// Minimum-Euclidean-norm solution of `A δ = rhs` over the numerically
+    /// identified row space.
+    ///
+    /// `rhs` is stated against the ORIGINAL (unnormalized) rows and is scaled
+    /// here by the same row norms the factorization used, so a face and its
+    /// positively rescaled twin produce the identical `δ`.
+    ///
+    /// Truncating the directions below the rank floor is what makes this
+    /// total: those directions cannot be resolved by any step of bounded norm,
+    /// so the honest answer is the solution that ignores them plus the
+    /// residual they leave — reported, not swallowed.
+    pub fn minimum_norm_particular(
+        &self,
+        rhs: &Array1<f64>,
+    ) -> Result<ParticularFaceSolution, String> {
+        let rows = self.normalized.nrows();
+        let cols = self.normalized.ncols();
+        if rhs.len() != rows {
+            return Err(format!(
+                "active constraint face affine system needs one right-hand side per face row \
+                 (rows={rows}, rhs={})",
+                rhs.len()
+            ));
+        }
+        let scaled_rhs: Array1<f64> = rhs
+            .iter()
+            .zip(self.row_norms.iter())
+            .map(|(value, norm)| value / norm)
+            .collect();
+        if scaled_rhs.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "active constraint face right-hand side is non-finite in scaled-slack units"
+                    .to_string(),
+            );
+        }
+        let mut delta = Array1::<f64>::zeros(cols);
+        for mode in 0..self.rank {
+            let coefficient = self.left.column(mode).dot(&scaled_rhs) / self.singular[mode];
+            delta.scaled_add(coefficient, &self.right_transposed.row(mode));
+        }
+        if delta.iter().any(|value| !value.is_finite()) {
+            return Err("active constraint face particular solution is non-finite".to_string());
+        }
+        let residual = self.normalized.dot(&delta) - &scaled_rhs;
+        let residual_inf = residual
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let delta_norm = delta.dot(&delta).sqrt();
+        let rhs_norm = scaled_rhs.dot(&scaled_rhs).sqrt();
+        // Backward-error bound for a truncated-SVD least-squares solve. The
+        // rows are unit-normalized, so `‖A‖₂ ≤ √rows`, and a CONSISTENT face
+        // leaves at most `O(eps)·(‖A‖‖δ‖ + ‖rhs‖)`. Same `100·eps·max(k,p)`
+        // factor the rank floor above uses, and — like it — scale-covariant
+        // with no absolute floor, so a face stated in tiny units is not
+        // declared inconsistent for being small.
+        let residual_tolerance = 100.0
+            * f64::EPSILON
+            * (rows.max(cols).max(1) as f64)
+            * ((rows as f64).sqrt() * delta_norm + rhs_norm);
+        Ok(ParticularFaceSolution {
+            delta,
+            residual_inf,
+            residual_tolerance,
+        })
+    }
+}
+
+/// Factor a non-empty active constraint face once, for every affine question
+/// a reduced-face solve asks of it. See [`ActiveConstraintFaceGeometry`].
+pub fn active_constraint_face_geometry(
+    a_act: &Array2<f64>,
+) -> Result<ActiveConstraintFaceGeometry, String> {
+    if a_act.nrows() == 0 {
+        return Err("active constraint face geometry requires at least one row".to_string());
+    }
+    let p = a_act.ncols();
+    if p == 0 {
+        return Err("active constraint face geometry requires at least one coefficient".to_string());
+    }
+    let (normalized, row_norms) = normalize_active_face_rows(a_act);
+    let (u, singular, vt) = normalized
+        .svd(true, true)
+        .map_err(|error| format!("active constraint face SVD failed: {error}"))?;
+    let left = u.ok_or_else(|| "active constraint face SVD omitted U".to_string())?;
+    let right_transposed = vt.ok_or_else(|| "active constraint face SVD omitted Vᵀ".to_string())?;
+    let (rank, tangent) = tangent_from_row_factorization(&normalized, &singular, &right_transposed)?;
+    Ok(ActiveConstraintFaceGeometry {
+        rank,
+        tangent,
+        normalized,
+        row_norms,
+        left,
+        singular,
+        right_transposed,
+    })
 }
 
 #[cfg(test)]
@@ -778,6 +982,101 @@ mod active_constraint_tangent_geometry_tests {
         assert_eq!(z.dim(), (3, 1));
         for row in a.rows() {
             assert!(row.dot(&z.column(0)).abs() / row.dot(&row).sqrt() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn face_geometry_and_tangent_geometry_cannot_disagree_about_rank_2600() {
+        // Two rows whose normalized independence is O(1e-8) and a third
+        // coordinate nobody touches. Both entry points must report the same
+        // rank and the same tangent dimension, because they now read the same
+        // rule off the same factorization.
+        let a = ndarray::array![[1.0, 1.0, 0.0], [1.0, 1.0 + 1e-8, 0.0]];
+        let geometry = active_constraint_face_geometry(&a).expect("face geometry");
+        assert_eq!(geometry.rank(), 2);
+        let ActiveConstraintTangentGeometry::Tangent(direct) =
+            active_constraint_tangent_geometry(&a).expect("tangent geometry")
+        else {
+            panic!("rank-two face in three dimensions must have a tangent");
+        };
+        let ActiveConstraintTangentGeometry::Tangent(shared) = geometry.into_tangent() else {
+            panic!("face geometry must agree that the face has a tangent");
+        };
+        assert_eq!(direct.dim(), shared.dim());
+        // Both bases are built by the same twice-reorthogonalized completion
+        // from the same rank, so they span the same line; assert the span
+        // rather than the bits, since only one of the two SVD calls also asks
+        // for `U` and the factorization is free to differ in the last digits.
+        for row in a.rows() {
+            for column in shared.columns() {
+                assert!(row.dot(&column).abs() / row.dot(&row).sqrt() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn minimum_norm_particular_solves_a_consistent_face_and_reports_its_residual_2600() {
+        // Rank-one face in three dimensions: `x = 2` with a redundant restated
+        // copy at ten times the scale. The minimum-norm solution is the axis
+        // point, and it must not depend on the redundancy or the row scaling.
+        let a = ndarray::array![[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
+        let rhs = ndarray::array![2.0, 20.0];
+        let geometry = active_constraint_face_geometry(&a).expect("face geometry");
+        assert_eq!(geometry.rank(), 1);
+        let particular = geometry
+            .minimum_norm_particular(&rhs)
+            .expect("consistent rank-one face");
+        assert!((particular.delta[0] - 2.0).abs() < 1e-12);
+        assert!(particular.delta[1].abs() < 1e-12);
+        assert!(particular.delta[2].abs() < 1e-12);
+        assert!(
+            particular.residual_inf <= particular.residual_tolerance,
+            "a consistent face must not be reported inconsistent \
+             (residual={:.6e}, tolerance={:.6e})",
+            particular.residual_inf,
+            particular.residual_tolerance
+        );
+    }
+
+    #[test]
+    fn minimum_norm_particular_names_an_inconsistent_face_instead_of_solving_it_2600() {
+        // The same two parallel rows now demand contradictory offsets. No step
+        // satisfies both, and that has to surface as a residual above the
+        // backward-error bound rather than as a plausible-looking `delta`.
+        let a = ndarray::array![[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
+        let rhs = ndarray::array![2.0, 30.0];
+        let geometry = active_constraint_face_geometry(&a).expect("face geometry");
+        let particular = geometry
+            .minimum_norm_particular(&rhs)
+            .expect("least-squares answer still exists");
+        assert!(
+            particular.residual_inf > particular.residual_tolerance,
+            "a contradictory face must exceed its own consistency bound \
+             (residual={:.6e}, tolerance={:.6e})",
+            particular.residual_inf,
+            particular.residual_tolerance
+        );
+    }
+
+    #[test]
+    fn minimum_norm_particular_is_invariant_to_positive_row_rescaling_2600() {
+        let a = ndarray::array![[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]];
+        let rhs = ndarray::array![3.0, 5.0];
+        let scale = ndarray::array![[1e9, 1e9, 0.0], [0.0, 1e-9, 1e-9]];
+        let scaled_rhs = ndarray::array![3.0e9, 5.0e-9];
+        let plain = active_constraint_face_geometry(&a)
+            .expect("plain geometry")
+            .minimum_norm_particular(&rhs)
+            .expect("plain particular");
+        let rescaled = active_constraint_face_geometry(&scale)
+            .expect("rescaled geometry")
+            .minimum_norm_particular(&scaled_rhs)
+            .expect("rescaled particular");
+        for (left, right) in plain.delta.iter().zip(rescaled.delta.iter()) {
+            assert!(
+                (left - right).abs() <= 1e-9 * left.abs().max(1.0),
+                "row rescaling moved the particular solution: {left:.17e} vs {right:.17e}"
+            );
         }
     }
 }

@@ -5,7 +5,6 @@
 
 use super::blockwise_solve::BlockWorkingSetUpdaterExt;
 use super::*;
-use gam_linalg::faer_ndarray::FaerSvd;
 use gam_solve::row_measure::RowSubsampleMaskExt;
 
 mod exact_joint_fit;
@@ -564,6 +563,68 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// contract violation, so a revisited face returns `Ok(None)` — no certified
 /// reduced-face candidate — exactly like an empty warm face, and the caller's
 /// general constrained QP owns the subproblem (gam#2600).
+///
+/// The same applies to a warm face whose equalities are mutually inconsistent:
+/// the affine system has no solution, so there is nothing here to certify, and
+/// the subproblem is handed over rather than ending the fit. What is NOT
+/// handled that way is a face that is merely rank-deficient — redundant rows
+/// are solved through, on the minimum-D-norm solution their common row space
+/// determines, because a redundant equality is still an equality.
+/// Paired probe for gam#2600: report, on the SAME iterate the shipped path is
+/// about to solve, what the removed trust-whitened rank refusal would have
+/// decided and why.
+///
+/// The removed gate factored `A D^{-1/2}` and refused when any singular value
+/// fell to or below `100·eps·max(k,p)·σ_max`. Printing that spectrum next to
+/// the unwhitened one and the metric's dynamic range is what distinguishes the
+/// two candidate causes of the refusal — a genuinely rank-deficient face, or a
+/// preconditioner whose spread manufactured the deficiency — without a second
+/// build. Gated on `Debug` so it costs nothing on a production fit.
+fn log_removed_whitened_rank_refusal_2600(
+    face_a: &Array2<f64>,
+    trust_metric_diag: &Array1<f64>,
+    rank: usize,
+    singular_max: f64,
+    singular_min_retained: f64,
+) {
+    let p = face_a.ncols();
+    let mut whitened = face_a.clone();
+    for coefficient in 0..p {
+        let scale = trust_metric_diag[coefficient].sqrt();
+        for row in 0..whitened.nrows() {
+            whitened[[row, coefficient]] /= scale;
+        }
+    }
+    let Ok((_u, whitened_singular, _vt)) =
+        gam_linalg::faer_ndarray::FaerSvd::svd(&whitened, false, false)
+    else {
+        log::debug!("[gam#2600 probe] whitened face SVD did not converge");
+        return;
+    };
+    let whitened_max = whitened_singular.iter().copied().fold(0.0_f64, f64::max);
+    let whitened_min = whitened_singular
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let whitened_floor =
+        100.0 * f64::EPSILON * (face_a.nrows().max(p).max(1) as f64) * whitened_max;
+    let metric_max = trust_metric_diag.iter().copied().fold(0.0_f64, f64::max);
+    let metric_min = trust_metric_diag
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    log::debug!(
+        "[gam#2600 probe] face_rows={} ambient_dim={p} \
+         unwhitened rank={rank} sigma_max={singular_max:.6e} \
+         sigma_min_retained={singular_min_retained:.6e} | \
+         whitened sigma_min={whitened_min:.6e} rank_floor={whitened_floor:.6e} \
+         removed_refusal_would_fire={} | metric_max={metric_max:.6e} \
+         metric_min={metric_min:.6e} metric_condition={:.6e}",
+        whitened_min <= whitened_floor,
+        metric_max / metric_min,
+    );
+}
+
 fn certified_reduced_face_candidate(
     exact_hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -738,59 +799,105 @@ fn certified_reduced_face_candidate(
         let (delta_particular, tangent) = if working_active.is_empty() {
             (Array1::<f64>::zeros(p), Some(Array2::<f64>::eye(p)))
         } else {
-            let mut whitened_face = face_a.clone();
-            for coefficient in 0..p {
-                for row in 0..face_a.nrows() {
-                    whitened_face[[row, coefficient]] /= trust_metric_diag[coefficient].sqrt();
-                }
-            }
-            let (u, singular, vt) = whitened_face.svd(true, true).map_err(|error| {
+            // ONE factorization decides the whole face. The rank, the tangent
+            // and the affine particular solution all come off the SAME
+            // row-normalized block, in the coefficient metric the constraints
+            // are themselves stated in.
+            //
+            // This used to factor the TRUST-WHITENED face `A D^{-1/2}` and
+            // refuse whenever any of its singular values fell under a rank
+            // floor. Whitening multiplies the face's condition number by
+            // `sqrt(kappa(D))`, so a face whose equalities determine `delta`
+            // perfectly well is reported singular purely because the
+            // preconditioner has a wide dynamic range — and the rank it was
+            // refusing on was not the rank `reduce_face` had just certified,
+            // nor the one `active_constraint_tangent_geometry` reads below.
+            // Three rank decisions on one face, in three different metrics,
+            // one of which could kill the entire fit (gam#2600).
+            //
+            // The trust metric has exactly one job here and it is not deciding
+            // solvability: it picks WHICH solution of an underdetermined face
+            // is smallest. That is the D-orthogonal re-anchoring below, and it
+            // is the only place `D` appears.
+            let geometry = active_constraint_face_geometry(&face_a).map_err(|error| {
                 format!(
-                    "physical reduced-face affine SVD failed \
+                    "physical reduced-face affine geometry failed \
                      (active_rows={}, ambient_dim={p}): {error}",
                     working_active.len(),
                 )
             })?;
-            let u = u.ok_or_else(|| {
-                "physical reduced-face affine SVD omitted left singular vectors".to_string()
-            })?;
-            let vt = vt.ok_or_else(|| {
-                "physical reduced-face affine SVD omitted right singular vectors".to_string()
-            })?;
-            let singular_max = singular.iter().copied().fold(0.0_f64, f64::max);
-            let singular_floor =
-                100.0 * f64::EPSILON * (face_a.nrows().max(p).max(1) as f64) * singular_max;
-            if singular
-                .iter()
-                .any(|value| !value.is_finite() || *value <= singular_floor)
-            {
-                return Err(CustomFamilyError::trial_point(format!(
-                    "physical reduced-face rank reduction left a singular affine system \
-                     (active_rows={}, singular_min={:.6e}, rank_floor={singular_floor:.6e})",
-                    working_active.len(),
-                    singular.iter().copied().fold(f64::INFINITY, f64::min),
-                )));
+            if log::log_enabled!(log::Level::Debug) {
+                log_removed_whitened_rank_refusal_2600(
+                    &face_a,
+                    trust_metric_diag,
+                    geometry.rank(),
+                    geometry.largest_singular_value(),
+                    geometry.smallest_retained_singular_value(),
+                );
             }
             let affine_rhs = &face_b - &face_a.dot(beta);
-            let spectral_rhs = u.t().dot(&affine_rhs);
-            let mut whitened_particular = Array1::<f64>::zeros(p);
-            for mode in 0..singular.len() {
-                let coefficient = spectral_rhs[mode] / singular[mode];
-                for coordinate in 0..p {
-                    whitened_particular[coordinate] += coefficient * vt[[mode, coordinate]];
-                }
+            let particular = geometry.minimum_norm_particular(&affine_rhs).map_err(|error| {
+                format!(
+                    "physical reduced-face affine particular failed \
+                     (active_rows={}, ambient_dim={p}): {error}",
+                    working_active.len(),
+                )
+            })?;
+            if particular.residual_inf > particular.residual_tolerance {
+                // The working face asks for equalities that no step satisfies
+                // simultaneously. That is a failure of the warm face, not a
+                // violated contract, so decline exactly as a cycled exchange
+                // does and let the caller's general constrained QP own the
+                // subproblem instead of ending the fit on this trial point.
+                log::warn!(
+                    "[gam#2600 reduced-face] declining an inconsistent equality face \
+                     (face_rows={}, rank={}, residual_inf={:.6e}, tolerance={:.6e}); \
+                     the general constrained QP owns this subproblem",
+                    working_active.len(),
+                    geometry.rank(),
+                    particular.residual_inf,
+                    particular.residual_tolerance,
+                );
+                return Ok(None);
             }
-            let particular = Array1::from_iter(
-                whitened_particular
-                    .iter()
-                    .zip(trust_metric_diag.iter())
-                    .map(|(value, weight)| value / weight.sqrt()),
-            );
-            let tangent = match active_constraint_tangent_geometry(&face_a)? {
+            let tangent = match geometry.into_tangent() {
                 ActiveConstraintTangentGeometry::FullyPinned => None,
                 ActiveConstraintTangentGeometry::Tangent(basis) => Some(basis),
             };
-            (particular, tangent)
+            // Re-anchor the particular solution D-orthogonally to the tangent.
+            // `delta_p = delta_0 - Z (Z'DZ)^{-1} Z'D delta_0` leaves `A
+            // delta_p = A delta_0` (because `A Z = 0`) while forcing `Z'D
+            // delta_p = 0`, which is exactly the minimum-D-norm point of the
+            // face and exactly what makes the physical trust ball split as
+            // `||delta_p||_D^2 + ||z||_(Z'DZ)^2 <= r^2` below. A fully pinned
+            // face has no freedom left to spend, so the metric never enters.
+            let delta_particular = match tangent.as_ref() {
+                None => particular.delta,
+                Some(basis) => {
+                    let mut weighted = basis.clone();
+                    for (mut row, weight) in
+                        weighted.rows_mut().into_iter().zip(trust_metric_diag.iter())
+                    {
+                        row *= *weight;
+                    }
+                    let mut reduced_metric = basis.t().dot(&weighted);
+                    symmetrize_dense_in_place(&mut reduced_metric);
+                    let projection = weighted.t().dot(&particular.delta);
+                    let factor = reduced_metric
+                        .cholesky(faer::Side::Lower)
+                        .map_err(|error| {
+                            format!(
+                                "physical reduced-face tangent metric is not positive definite \
+                                 (active_rows={}, tangent_dim={}): {error:?}",
+                                working_active.len(),
+                                basis.ncols(),
+                            )
+                        })?;
+                    let shift = factor.solvevec(&projection);
+                    &particular.delta - &basis.dot(&shift)
+                }
+            };
+            (delta_particular, tangent)
         };
         if delta_particular.iter().any(|value| !value.is_finite()) {
             return Err(CustomFamilyError::trial_point("physical reduced-face affine particular is non-finite".to_string()));
@@ -1092,6 +1199,112 @@ fn canonical_accepted_active_rows(
 mod exact_face_newton_tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn a_face_the_trust_metric_makes_singular_is_still_solved_2600() {
+        // Two active rows that are independent in the coefficient metric the
+        // constraints are stated in: normalized, their smallest singular value
+        // is 7.07e-6 against a 6.3e-14 rank floor, and `reduce_face` keeps
+        // both. Whitening by a metric whose second coordinate is 1e18 divides
+        // their separation by 1e9, which drops the whitened smallest singular
+        // value to 7.07e-15 — BELOW the same floor. The face is not singular;
+        // the preconditioner is wide.
+        //
+        // The removed gate factored the whitened block and returned `Err` on
+        // exactly this, which ends the entire fit at the trial point that
+        // produced it (gam#2600, pit arm: `active_rows=39,
+        // singular_min=4.838920e-18, rank_floor=1.067916e-13`). Both rows are
+        // tight at beta, the face pins the step to zero, and the shifted
+        // gradient sits exactly in the normal cone with unit multipliers on
+        // both rows — so there is a certified answer here and it must be
+        // returned.
+        let separation = 1.0e-5_f64;
+        let constraints = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(
+                array![[1.0_f64, 0.0], [1.0_f64, separation]],
+                array![0.0_f64, 0.0],
+            )
+            .expect("two nearly parallel half-spaces"),
+        );
+        let hessian = Array2::<f64>::eye(2);
+        // -rhs = 1*(1,0) + 1*(1,separation): both multipliers strictly positive.
+        let rhs = array![-2.0_f64, -separation];
+        let beta = array![0.0_f64, 0.0];
+        let metric = array![1.0_f64, 1.0e18];
+
+        let (candidate, active, kind) = certified_reduced_face_candidate(
+            &hessian,
+            &rhs,
+            &beta,
+            &constraints,
+            &[0, 1],
+            &metric,
+            1.0,
+        )
+        .expect("a face that is full rank in coefficient coordinates has an affine solution")
+        .expect("the pinned face certifies its own zero step");
+        assert_eq!(active, vec![0, 1]);
+        assert_eq!(kind, ReducedFaceCandidateKind::ExactNewton);
+        for (value, expected) in candidate.iter().zip(beta.iter()) {
+            assert!(
+                (value - expected).abs() < 1e-12,
+                "the pinned face's certified step is zero, got {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_affine_particular_is_the_minimum_trust_metric_norm_point_2600() {
+        // One active row `x + y >= 0` with the base one unit inside the
+        // infeasible side, so the face's affine system is `x + y = 1` and has
+        // a whole line of solutions. The trust metric decides which one: the
+        // minimum-D-norm point of `x + y = a` is `(a*d2, a*d1)/(d1 + d2)`,
+        // NOT the minimum-Euclidean-norm point `(a/2, a/2)`.
+        //
+        // This is the property the removed whitened factorization delivered
+        // and the replacement has to keep: the metric selects among solutions,
+        // which is the only job it has on this face. `H = diag(d1, d2)` and a
+        // right-hand side aligned with the constraint normal leave the tangent
+        // coordinate at zero, so the returned step IS the particular solution.
+        let (d1, d2) = (1.0e6_f64, 1.0_f64);
+        let constraints = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(array![[1.0_f64, 1.0]], array![0.0])
+                .expect("x+y>=0 half-space"),
+        );
+        let hessian = array![[d1, 0.0], [0.0, d2]];
+        let beta = array![-1.0_f64, 0.0];
+        let metric = array![d1, d2];
+        // `rhs = H*delta_p - mu*(1,1)` with `mu = 0.5`: the tangent gradient
+        // vanishes and row 0 keeps a strictly positive multiplier.
+        let harmonic = d1 * d2 / (d1 + d2);
+        let rhs = array![harmonic - 0.5, harmonic - 0.5];
+
+        let (candidate, active, _kind) = certified_reduced_face_candidate(
+            &hessian,
+            &rhs,
+            &beta,
+            &constraints,
+            &[0],
+            &metric,
+            10.0,
+        )
+        .expect("underdetermined face with a repaired base")
+        .expect("the face certifies a candidate");
+        assert_eq!(active, vec![0]);
+        let expected_y = d1 / (d1 + d2);
+        assert!(
+            (candidate[1] - expected_y).abs() < 1e-9,
+            "the affine step must be the minimum-D-norm point of x+y=1 \
+             (expected y={expected_y:.12e}, got {:.12e}); the minimum-EUCLIDEAN-norm \
+             point would put y at 0.5",
+            candidate[1]
+        );
+        let closure = candidate[0] + candidate[1];
+        assert!(
+            closure.abs() < 1e-9,
+            "the certified candidate must sit on its own equality face, got x+y={closure:.6e}"
+        );
+    }
 
     #[test]
     fn reduced_face_contract_violation_is_an_error_not_a_fallback() {
