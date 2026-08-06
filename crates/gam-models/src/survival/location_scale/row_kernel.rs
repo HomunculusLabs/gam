@@ -4963,6 +4963,16 @@ impl SurvivalLocationScaleFamily {
         if g <= 0.0 && g >= -cancellation_floor {
             g = guard;
         }
+        // gam#2695 probe (opt-in, `GAM_PROBE_2695`): report every row whose
+        // event Jacobian was floored, because on such a row `log g` is
+        // CONSTANT in beta while `d_log_g = 1/guard` asserts a slope.
+        if g != state.g && std::env::var_os("GAM_PROBE_2695").is_some() {
+            eprintln!(
+                "[PROBE2695-clamp] row={row} g_raw={:.9e} g_used={g:.9e} guard={guard:.3e} \
+                 slack={roundoff_slack:.3e} h0={:.6e} h1={:.6e} q0={:.6e} q1={:.6e}",
+                state.g, state.h0, state.h1, state.q0, state.q1
+            );
+        }
         if g <= 0.0 {
             return Err(SurvivalLocationScaleError::ConstraintViolation {
                 reason: format!(
