@@ -4674,6 +4674,76 @@ impl SurvivalLocationScaleFamily {
         )
     }
 
+    /// `log g` continued below the modelling floor by its own Taylor series.
+    ///
+    /// The event Jacobian `g = dη/dt` must be positive for the model to be a
+    /// model at all, and `log g` is neither bounded nor resolved as `g → 0`:
+    /// `g` is reconstructed by a compensated difference `d_raw + qdot` whose
+    /// own resolution is `roundoff_slack`. `derivative_guard` is the declared
+    /// modelling floor for that quantity — the same constant
+    /// `build_time_derivative_guard_constraints` uses as the right-hand side of
+    /// the time block's linear feasibility cone — so it is the natural knot.
+    ///
+    /// Before gam#2695 the floor was applied to `g` and the whole derivative
+    /// tower was then read at the FLOORED value, so on a floored row `log g`
+    /// was constant in β while `d_log_g = 1/guard` reported a slope of `1e6`
+    /// and `d2_log_g = -1/guard²` a curvature of `-1e12`. That is a value on
+    /// one surface and a derivative on another: a trust-region model built on
+    /// it cannot have `actual/(rhs·δ) → 1` at any step size, which is the
+    /// fault class gam#2714 established and gam#2695 measures. The sibling
+    /// Royston–Parmar arm states the same contract explicitly —
+    /// `survival/base.rs`'s `stabilized_structural_derivative` returns the
+    /// clamp's own slope and says "every consumer that differentiates through
+    /// the structural derivative MUST scale its derivative-channel terms by
+    /// `slope`" — and resolves it with a zero-slope clamp.
+    ///
+    /// A continuation is that same contract with a differentiable branch:
+    ///
+    /// ```text
+    ///     Λ(g) = ln g                                          for g ≥ guard
+    ///     Λ(g) = ln(guard) + x − x²/2 + x³/3 − x⁴/4            for g < guard
+    ///     x    = (g − guard)/guard   (so x ≤ 0 on that branch)
+    /// ```
+    ///
+    /// with the returned tower being that polynomial's own derivatives. Four
+    /// properties make it the right object here, and none of them needs a
+    /// tolerance:
+    ///
+    /// * **Exact on the modelled feasible set.** `Λ ≡ ln` for `g ≥ guard`,
+    ///   bit-identical, so no fit that never reaches the floor changes at all.
+    /// * **Continuous to fourth order at the knot.** The polynomial is the
+    ///   degree-4 Taylor expansion of `ln` about `guard`, so all five returned
+    ///   quantities agree with `logwith_derivatives_positive(guard)` exactly.
+    /// * **Strictly increasing and strictly concave below it.**
+    ///   `Λ' = (1/guard)(1 − x + x² − x³) ≥ 1/guard > 0` and
+    ///   `Λ'' = (1/guard²)(−1 + 2x − 3x²) ≤ −1/guard² < 0` for every `x ≤ 0`
+    ///   (the quadratic has no real roots), so the Newton model stays a
+    ///   descent model on a concave branch.
+    /// * **It keeps pushing back.** A flat clamp makes the likelihood at
+    ///   `g = 0` equal to its value at the guard, i.e. it PAYS the fit to sit
+    ///   outside the feasible region; the continuation falls away from the knot
+    ///   and the gradient there is the barrier's own.
+    pub(crate) fn log_with_derivatives_guarded(
+        g: f64,
+        guard: f64,
+    ) -> (f64, f64, f64, f64, f64) {
+        if g >= guard {
+            return Self::logwith_derivatives_positive(g);
+        }
+        let inv = 1.0 / guard;
+        let x = (g - guard) * inv;
+        let x2 = x * x;
+        let x3 = x2 * x;
+        let inv2 = inv * inv;
+        (
+            guard.ln() + x - 0.5 * x2 + x3 / 3.0 - 0.25 * x3 * x,
+            inv * (1.0 - x + x2 - x3),
+            inv2 * (-1.0 + 2.0 * x - 3.0 * x2),
+            inv2 * inv * (2.0 - 6.0 * x),
+            inv2 * inv2 * (-6.0),
+        )
+    }
+
     /// Build the row predictor state with possibly distinct entry/exit
     /// evaluations of threshold and sigma.
     ///
@@ -4905,8 +4975,10 @@ impl SurvivalLocationScaleFamily {
         let guard = derivative_guard;
         let mut g = state.g;
         // Layer 4: NaN is a hard error (genuinely bad data or upstream logic
-        // bug).  ±inf is clamped to finite extremes so downstream log(g) is
-        // well-defined; the monotonicity guard will then floor g if needed.
+        // bug).  ±inf is clamped to finite extremes so the guarded logarithm
+        // below has a finite argument; `-MAX` then trips the monotonicity
+        // refusal, which is the right verdict for an infinitely decreasing
+        // event Jacobian.
         if g.is_nan() {
             return Err(SurvivalLocationScaleError::NumericalFailure { reason: format!(
                 "survival location-scale time derivative is non-finite at row {row}: d_eta/dt={g}"
@@ -4933,47 +5005,22 @@ impl SurvivalLocationScaleFamily {
                     .max(state.q0.abs())
                     .max(state.q1.abs()));
         let roundoff_slack = state.g_roundoff_slack.max(legacy_slack);
-        if g < guard && g >= guard - roundoff_slack {
-            g = guard;
-        }
-        // `d_raw` is structurally constrained, but the full event Jacobian is
-        // `g = d_raw + qdot`. The threshold/log-sigma contribution can nudge an
-        // otherwise valid monotone state below the numeric guard while still
-        // remaining strictly positive. The row kernel only needs `log(g)` on the
-        // positive domain, so clamp positive near-boundary values to the guard
-        // and reserve hard failure for true non-monotone states.
-        if g > 0.0 && g < guard {
-            g = guard;
-        }
-        // Boundary cancellation floor. The constrained Newton solve bounds only
-        // the structural `d_raw` channel; the additive `qdot = dq/dt` term from
-        // the threshold/log-σ time-transform is unconstrained and, when it is of
-        // comparable magnitude and opposite sign to `d_raw`, the difference
-        // `g = d_raw + qdot` is a near-cancellation. At a feasible boundary
-        // (`g → guard⁺`) the residual upstream error of that cancellation can
-        // tip the reconstructed `g` a hair below zero (observed ~ -2e-7 with a
-        // guard of 1e-6). Such a violation is strictly smaller than the modeling
-        // guard itself and lives inside the cancellation resolution
-        // `operand_scale`, so it cannot be distinguished from the feasible
-        // boundary state the optimizer converged to — floor it to the guard,
-        // exactly as the positive near-boundary branch above does. A genuinely
-        // non-monotone fit produces `g` negative by far more than the guard,
-        // which still hard-errors below.
+        // Monotonicity refusal. `d_raw` is structurally constrained, but the
+        // full event Jacobian is `g = d_raw + qdot` and the additive `qdot`
+        // channel from the threshold/log-σ time transform is unconstrained, so
+        // `g` is a near-cancellation whose own resolution is `roundoff_slack`.
+        // A `g` more negative than the modelling guard PLUS that resolution is
+        // a genuinely non-monotone state and cannot be confused with the
+        // feasible boundary the optimizer converged to; anything inside it is
+        // handled by the guarded logarithm below rather than by a substitution.
+        //
+        // The predicate is exactly the one in force before gam#2695: the three
+        // floors this replaces ran first and lifted every `g` above
+        // `-(guard + roundoff_slack)` to `guard`, so `g <= 0` fired here iff
+        // `g < -(guard + roundoff_slack)`. No state that was accepted becomes a
+        // refusal, and none that was refused becomes accepted.
         let cancellation_floor = guard + roundoff_slack;
-        if g <= 0.0 && g >= -cancellation_floor {
-            g = guard;
-        }
-        // gam#2695 probe (temporary): report every row whose
-        // event Jacobian was floored, because on such a row `log g` is
-        // CONSTANT in beta while `d_log_g = 1/guard` asserts a slope.
-        if g != state.g {
-            eprintln!(
-                "[PROBE2695-clamp] row={row} g_raw={:.9e} g_used={g:.9e} guard={guard:.3e} \
-                 slack={roundoff_slack:.3e} h0={:.6e} h1={:.6e} q0={:.6e} q1={:.6e}",
-                state.g, state.h0, state.h1, state.q0, state.q1
-            );
-        }
-        if g <= 0.0 {
+        if g < -cancellation_floor {
             return Err(SurvivalLocationScaleError::ConstraintViolation {
                 reason: format!(
                     "survival location-scale monotonicity violated at row {row}: \
@@ -4984,7 +5031,8 @@ impl SurvivalLocationScaleFamily {
             }
             .into());
         }
-        let (log_g, d_log_g, d2_log_g, d3_log_g, d4_log_g) = Self::logwith_derivatives_positive(g);
+        let (log_g, d_log_g, d2_log_g, d3_log_g, d4_log_g) =
+            Self::log_with_derivatives_guarded(g, guard);
 
         // δu from the channel differences, not from the rounded u's: identical
         // entry/exit channels (a truncation-instant event) give an exact zero
@@ -6787,6 +6835,97 @@ mod event_jacobian_floor_consistency_2695_tests {
              got {low} at 0.05·guard and {high} at 0.95·guard \
              (bitwise equal = {})",
             low.to_bits() == high.to_bits()
+        );
+    }
+}
+
+/// gam#2695 — the guarded logarithm's own contract.
+///
+/// [`SurvivalLocationScaleFamily::log_with_derivatives_guarded`] is the single
+/// source for the event-Jacobian log channel: the row value
+/// (`kernel.log_likelihood`), the block gradients
+/// (`evaluate_log_likelihood_and_block_gradients`) and the joint Hessian
+/// (`sls_row_nll_wiggle`, which composes the same five-entry stack) all read
+/// this one tower, so a defect here cannot be repaired at any one of them.
+/// These tests pin the four properties the derivation rests on.
+#[cfg(test)]
+mod guarded_log_channel_2695_tests {
+    use super::*;
+
+    const GUARD: f64 = 1.0e-6;
+
+    fn guarded(g: f64) -> (f64, f64, f64, f64, f64) {
+        SurvivalLocationScaleFamily::log_with_derivatives_guarded(g, GUARD)
+    }
+
+    /// Exact on the modelled feasible set: no fit that never reaches the floor
+    /// changes by a single bit.
+    #[test]
+    fn above_the_guard_the_channel_is_the_plain_logarithm() {
+        for g in [GUARD, 1.0e-5, 1.0e-3, 0.5, 1.0, 4.7, 1.0e6] {
+            let plain = SurvivalLocationScaleFamily::logwith_derivatives_positive(g);
+            let guarded = guarded(g);
+            assert_eq!(plain.0.to_bits(), guarded.0.to_bits(), "value at g={g}");
+            assert_eq!(plain.1.to_bits(), guarded.1.to_bits(), "d1 at g={g}");
+            assert_eq!(plain.2.to_bits(), guarded.2.to_bits(), "d2 at g={g}");
+            assert_eq!(plain.3.to_bits(), guarded.3.to_bits(), "d3 at g={g}");
+            assert_eq!(plain.4.to_bits(), guarded.4.to_bits(), "d4 at g={g}");
+        }
+    }
+
+    /// Every entry of the tower is the derivative of the entry above it, on
+    /// the continued branch. This is the property whose absence IS #2695.
+    #[test]
+    fn the_tower_differentiates_itself_below_the_guard() {
+        let h = 1.0e-4 * GUARD;
+        for g in [0.9 * GUARD, 0.5 * GUARD, 0.1 * GUARD, 0.0, -0.5 * GUARD] {
+            let plus = guarded(g + h);
+            let minus = guarded(g - h);
+            let here = guarded(g);
+            let entries = [
+                ((plus.0 - minus.0) / (2.0 * h), here.1, "d/dg of value"),
+                ((plus.1 - minus.1) / (2.0 * h), here.2, "d/dg of d1"),
+                ((plus.2 - minus.2) / (2.0 * h), here.3, "d/dg of d2"),
+                ((plus.3 - minus.3) / (2.0 * h), here.4, "d/dg of d3"),
+            ];
+            for (fd, analytic, what) in entries {
+                assert!(
+                    (fd - analytic).abs() <= 1.0e-6 * (1.0 + analytic.abs()),
+                    "g={g:.3e}: {what} is {analytic:.9e} but a central difference gives \
+                     {fd:.9e}"
+                );
+            }
+        }
+    }
+
+    /// Strictly increasing and strictly concave below the knot, so the Newton
+    /// model on that branch is still a concave-descent model.
+    #[test]
+    fn the_continued_branch_is_increasing_and_concave() {
+        let mut previous = f64::NEG_INFINITY;
+        for step in 0..=40 {
+            let g = GUARD * (1.0 - 0.05 * f64::from(step));
+            let (value, d1, d2, _, _) = guarded(g);
+            assert!(
+                value > previous,
+                "the channel must increase with g; g={g:.3e} gave {value} after {previous}"
+            );
+            previous = value;
+            assert!(d1 > 0.0, "d1 must be positive at g={g:.3e}, got {d1:.6e}");
+            assert!(d2 < 0.0, "d2 must be negative at g={g:.3e}, got {d2:.6e}");
+        }
+    }
+
+    /// It keeps pushing back: a flat clamp would pay the fit `ln(guard)` at
+    /// `g = 0`, i.e. exactly what it gets at the feasible boundary. The
+    /// continuation charges for leaving.
+    #[test]
+    fn leaving_the_feasible_region_costs_something() {
+        let at_guard = guarded(GUARD).0;
+        let at_zero = guarded(0.0).0;
+        assert!(
+            at_zero < at_guard - 1.0,
+            "g=0 must be materially worse than g=guard: {at_zero} vs {at_guard}"
         );
     }
 }

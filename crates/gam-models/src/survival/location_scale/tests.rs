@@ -9240,6 +9240,26 @@ fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_2695() {
 /// magnitude, which is the pair the existing oracle cannot hold at once.
 #[test]
 fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_at_a_real_warp_2695() {
+    survival_ls_link_wiggle_real_warp_oracle_2695(3.0);
+}
+
+/// gam#2695 — the same real warp, with the knot domain DELIBERATELY narrower
+/// than the range of `q0` the rows sit at.
+///
+/// The wiggle knots are frozen at fit setup from the seed `q0`, and `q0`
+/// depends on the threshold and log-sigma coefficients
+/// (`q0 = −η_t·e^{−η_ls}`), which move by orders of magnitude during the outer
+/// search. So a production fit spends most of its iterates with rows OUTSIDE
+/// the warp's own knot domain, and that is where `create_ispline_dense`'s
+/// saturating convention and `create_ispline_derivative_dense`'s
+/// linear-extension convention disagree. Every arm with the rows inside the
+/// span — including the wide-span arm above — is blind to it.
+#[test]
+fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_outside_the_knot_domain_2695() {
+    survival_ls_link_wiggle_real_warp_oracle_2695(0.5);
+}
+
+fn survival_ls_link_wiggle_real_warp_oracle_2695(knot_half_span: f64) {
     let primaries: Vec<[f64; SLS_ROW_K]> = vec![
         [0.2, 0.9, 1.3, 0.6, 0.4, 0.25, 0.3, 0.1, -0.2],
         [-0.4, 0.5, 0.9, -0.8, -0.5, 0.4, -0.25, 0.35, 0.3],
@@ -9250,9 +9270,39 @@ fn survival_ls_link_wiggle_block_gradient_matches_finite_difference_at_a_real_wa
     let weight = [1.0, 0.8, 1.2, 1.1];
     let n = primaries.len();
     let q0_exit = Array1::from_shape_fn(n, |i| -primaries[i][3] * (-primaries[i][6]).exp());
+    let half = knot_half_span;
     let knots = Array1::from_vec(vec![
-        -3.0, -3.0, -3.0, -3.0, -1.5, 0.0, 1.5, 3.0, 3.0, 3.0, 3.0,
+        -half,
+        -half,
+        -half,
+        -half,
+        -0.5 * half,
+        0.0,
+        0.5 * half,
+        half,
+        half,
+        half,
+        half,
     ]);
+    // State which regime this arm is in, so neither can silently become the
+    // other: `[-half, half]` is the modelling interval the I-spline is
+    // saturating outside of.
+    let outside = q0_exit.iter().filter(|q| q.abs() > half).count();
+    if half < 1.0 {
+        assert!(
+            outside > 0 && outside < n,
+            "the narrow-span arm must STRADDLE the knot domain [{:.3}, {:.3}] — rows outside \
+             it exercise the saturating branch and rows inside it keep the warp multiplier \
+             materially away from 1; got {outside} of {n} outside, q0 = {q0_exit:?}",
+            -half,
+            half
+        );
+    } else {
+        assert_eq!(
+            outside, 0,
+            "the wide-span arm must keep every row inside the knot domain"
+        );
+    }
     let degree = 3usize;
     let xwiggle =
         survival_wiggle_basis_with_options(q0_exit.view(), &knots, degree, BasisOptions::value())
