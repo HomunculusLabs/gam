@@ -18,7 +18,7 @@ use gam_data::encode_recordswith_inferred_schema;
 use gam_models::fit_orchestration::FitConfig;
 use gam_models::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
-    predict_multinomial_formula_plugin,
+    predict_multinomial_formula_plugin, predict_multinomial_formula_with_se,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
 use std::fs::File;
@@ -222,21 +222,134 @@ fn zz_probe_2612_penguins_posterior_width() {
     );
 
     let cov = model.coefficient_covariance().expect("covariance");
-    let (evals, _) = cov.eigh(faer::Side::Lower).expect("covariance eigh");
-    let mut sds: Vec<f64> = evals.iter().map(|v| v.max(0.0).sqrt()).collect();
-    sds.sort_by(|a, b| b.partial_cmp(a).expect("finite"));
+    let (evals, evecs) = cov.eigh(faer::Side::Lower).expect("covariance eigh");
+    let mut order: Vec<usize> = (0..evals.len()).collect();
+    order.sort_by(|a, b| evals[*b].partial_cmp(&evals[*a]).expect("finite"));
+    let sds: Vec<f64> = order
+        .iter()
+        .map(|&i| evals[i].max(0.0).sqrt())
+        .collect();
     eprintln!(
         "#2612 probe: posterior sd spectrum (top 8 of {}): {:?}",
         sds.len(),
-        sds.iter().take(8).map(|v| format!("{v:.4e}")).collect::<Vec<_>>()
+        sds.iter()
+            .take(8)
+            .map(|v| format!("{v:.4e}"))
+            .collect::<Vec<_>>()
     );
     eprintln!(
-        "#2612 probe: lambdas={:?}\n#2612 probe: edf_per_class={:?}",
+        "#2612 probe: lambdas={:?}\n#2612 probe: edf_per_class={:?}\n#2612 probe: edf_per_penalty={:?}\n#2612 probe: lambda_labels={:?}",
         model
             .lambdas
             .iter()
             .map(|v| format!("{v:.3e}"))
             .collect::<Vec<_>>(),
         model.edf_per_class,
+        model
+            .edf_per_penalty
+            .as_ref()
+            .map(|v| v.iter().map(|e| format!("{e:.4e}")).collect::<Vec<_>>()),
+        model.lambda_labels,
     );
+
+    // Where the width comes from, on the three flattest posterior directions:
+    // `H v = (1/sigma^2) v` for an eigenpair of `Sigma = H^-1`, and the saved
+    // influence matrix `F = H^-1 X'WX` splits that curvature exactly into the
+    // data's share `v'Fv` and the penalty's `1 - v'Fv` (both nonnegative, both
+    // measured, no reconstruction of `S` needed).
+    if let Some(influence) = model.coefficient_influence() {
+        for rank in 0..order.len().min(3) {
+            let index = order[rank];
+            let v = evecs.column(index).to_owned();
+            let curvature = 1.0 / evals[index].max(f64::MIN_POSITIVE);
+            let data_share = v.dot(&influence.dot(&v));
+            eprintln!(
+                "#2612 probe: posterior direction #{rank}: sd={:.4e} curvature={:.6e} \
+                 data_share(v'Fv)={:.6} data={:.6e} penalty={:.6e}",
+                evals[index].max(0.0).sqrt(),
+                curvature,
+                data_share,
+                curvature * data_share,
+                curvature * (1.0 - data_share),
+            );
+        }
+    }
+
+    // The quantity that actually flattens the published probabilities: the
+    // integrated posterior spread of each held-out row's class probabilities.
+    let (_, probability_se) =
+        predict_multinomial_formula_with_se(&model, &test_ds).expect("posterior se");
+    let mut spreads: Vec<f64> = probability_se.iter().copied().collect();
+    spreads.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    let quantile = |q: f64| spreads[((spreads.len() - 1) as f64 * q).round() as usize];
+    eprintln!(
+        "#2612 probe: held-out probability posterior sd: min={:.4} q25={:.4} median={:.4} q75={:.4} max={:.4}",
+        spreads[0],
+        quantile(0.25),
+        quantile(0.50),
+        quantile(0.75),
+        spreads[spreads.len() - 1],
+    );
+
+    // ── Is the Gaussian the posterior actually IS a Gaussian? ───────────────
+    //
+    // The published width is `Sigma = H^-1` with `H` the curvature of the
+    // penalized log-posterior AT THE MODE. That is only the posterior's width if
+    // the log-posterior is quadratic over the mass the Gaussian assigns. Walk the
+    // widest direction out to `t` standard deviations of the Gaussian's own
+    // claim and read the TRAINING log-likelihood there. The Gaussian's quadratic
+    // model of the likelihood's own share of the drop is `0.5 * t^2 * share`,
+    // `share = v'(H - S_lambda)v / v'Hv` (the saved `F`), so the ratio of the
+    // measured drop to that number is a direct, assumption-free statement about
+    // whether the reported width is the posterior's width. Nothing here is a
+    // refit: the coefficients are overwritten in a clone and scored by the
+    // plug-in predictor on the TRAIN rows, so this is the exact likelihood the
+    // fit maximized.
+    let train_labels: Vec<usize> = train_idx
+        .iter()
+        .map(|&i| {
+            class_levels
+                .iter()
+                .position(|c| *c == rows[i].species)
+                .expect("species in levels")
+        })
+        .collect();
+    let train_log_likelihood = |coefficients: &[f64]| -> f64 {
+        let mut walked = model.clone();
+        walked.coefficients_flat = coefficients.to_vec();
+        let probabilities =
+            predict_multinomial_formula_plugin(&walked, &train_ds).expect("plug-in on train");
+        let mut total = 0.0;
+        for (i, &y) in train_labels.iter().enumerate() {
+            total += probabilities[[i, y]].max(1e-300).ln();
+        }
+        total
+    };
+    let at_mode = train_log_likelihood(&model.coefficients_flat);
+    let p_per_class = model.p_per_class;
+    let n_active = model.n_active_classes;
+    for rank in 0..order.len().min(2) {
+        let index = order[rank];
+        let sd = evals[index].max(0.0).sqrt();
+        let v = evecs.column(index).to_owned();
+        let likelihood_share = model
+            .coefficient_influence()
+            .map(|f| v.dot(&f.dot(&v)))
+            .unwrap_or(1.0);
+        for t in [0.25_f64, 0.5, 1.0, 2.0] {
+            let mut walked = model.coefficients_flat.clone();
+            for i in 0..p_per_class {
+                for a in 0..n_active {
+                    walked[i * n_active + a] += t * sd * v[a * p_per_class + i];
+                }
+            }
+            let drop = at_mode - train_log_likelihood(&walked);
+            let quadratic = 0.5 * t * t * likelihood_share;
+            eprintln!(
+                "#2612 probe: quadratic check dir #{rank} t={t}: measured loglik drop={drop:.4e} \
+                 Gaussian predicts={quadratic:.4e} ratio={:.4e}",
+                drop / quadratic.max(f64::MIN_POSITIVE),
+            );
+        }
+    }
 }
