@@ -1,5 +1,65 @@
 ## Unreleased
 
+- **An I-spline and its own derivative described two different functions
+  outside the knot domain (#2695).** `create_ispline_dense` SATURATES there —
+  the value is the all-zero row below `knots[degree+1]` and a constant row above
+  `knots[n_bspline]` — and says so, with the reason: a linear extension would
+  produce negative I-spline entries below the left boundary and entries above
+  one past the right, breaking the non-negativity and the `[0, 1]` range the
+  basis exists to guarantee. `create_ispline_derivative_dense` differentiated
+  through a *clamped* B-spline, whose exterior convention is linear extension,
+  and so returned the boundary SLOPE where the I-spline value is flat. Orders 1,
+  3 and 4 were affected; order 2 was already zeroed there.
+
+  **How it surfaced.** The survival link warp is
+  `q = q0 + Σ_j βw_j·I_j(q0)`. The link-wiggle block reaches `q` through the
+  VALUE (`∂q/∂βw_j = I_j(q0)`) and its gradient was always right; the threshold
+  and log-sigma blocks reach `q` only through `q0`, so every one of their
+  chain-rule channels carries `m1 = 1 + Σ_j βw_j·I'_j(q0)`. Outside the knot
+  domain the warp is flat and `m1` was not, so the joint-Newton RHS asserted a
+  first-order change the objective does not make — at any step size. That is
+  gam#2695's headline: on `survival_location_scale_saved_fit_preserves_linkwiggle_metadata`,
+  zero of the linear-dominated trust attempts have `actual/(rhs·δ)` within 50%
+  of 1, and all six outer seeds refuse with
+  `rejects [model, likelihood, objective, feasibility] = [0, 0, 2, 0]` at trust
+  radius `1e-12`.
+
+  **Why it stayed hidden.** The error is proportional to the warp amplitude, and
+  the wiggle knots are frozen at fit setup from the SEED `q0` with no margin
+  (`initializewiggle_knots_from_seed` spans exactly `[min, max]` of the seed),
+  while `q0 = −η_t·e^{−η_ls}` moves by orders of magnitude during the outer
+  search. So the seed iterate is inside the domain and essentially every later
+  one is not — and every gradient oracle in the tree ran at the seed, at
+  `βw ≈ 0`, or both.
+
+  The same file already applies exactly this argument to an OPEN knot vector
+  (gam#1348: "A constant function has zero derivative, so BOTH the first and
+  second derivative must be zero in the exterior spans"). The case never covered
+  is that an I-spline is constant-extended on a CLAMPED vector too. Endpoints
+  keep the interior one-sided slope, because `right` is routinely the largest
+  observed value and the transformation-normal shape derivative `h'(y)` must
+  stay positive there.
+
+- **The survival location-scale event Jacobian was floored in the value and not
+  in the derivative tower (#2695).** `exact_row_kernel_from_parts` clamped
+  `g = dη/dt` to `derivative_guard` on three branches and then read
+  `(log g, d log g, …)` at the FLOORED value, so inside the band the row
+  log-likelihood is bitwise constant in `qdot` while the tower reports a slope
+  of `1/guard = 1e6` and a curvature of `−1/guard² = −1e12`. The three branches
+  are replaced by one derived object: `ln` exactly on the modelled feasible set
+  `g ≥ guard` (bit-identical, so no fit that never reaches the floor changes),
+  and below it the degree-4 Taylor continuation of `ln` about `guard`, with the
+  returned tower being that polynomial's own derivatives. It is C⁴ at the knot,
+  strictly increasing and strictly concave on the continued branch, and unlike a
+  flat clamp it charges for leaving the feasible region instead of paying
+  `ln(guard)` at `g = 0`. The monotonicity refusal predicate is unchanged by
+  construction — the floors ran before the `g ≤ 0` test and lifted every `g`
+  above `−(guard + roundoff_slack)`, which is now written directly — so no state
+  that was accepted becomes a refusal and none that was refused becomes
+  accepted. Cf. `survival/base.rs`'s `stabilized_structural_derivative`, which
+  states the same contract for the Royston–Parmar arm and resolves it with a
+  zero-slope clamp.
+
 - **The Jeffreys/Firth-armed outer REML gradient was not the gradient of the
   criterion it reports (#2612).** On the penguins real-data multinomial arm the
   fit did not produce a probability at all: the unbiased probe converged to a
