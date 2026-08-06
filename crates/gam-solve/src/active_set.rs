@@ -2096,9 +2096,37 @@ pub fn rank_reduce_rows_pivoted_qr_with_dependence(
     let mut dropped_orig: Vec<usize> = Vec::new();
     for r in 0..k {
         let mut resid = a.row(r).to_owned();
-        for q in &ortho_basis {
-            let proj = resid.dot(q);
-            resid.scaled_add(-proj, q);
+        // TWO passes, and the second one is the rank decision (gam#2600).
+        //
+        // A single modified-Gram-Schmidt sweep leaves the computed residual
+        // contaminated by the accumulated loss of orthogonality in
+        // `ortho_basis`, which is `O(eps * cond(A_kept))` — NOT `O(eps)`. On an
+        // ill-conditioned face that contamination is larger than `tol`, so a
+        // row that is genuinely in the span of the kept rows reports a residual
+        // above the floor and is kept as "independent". The face then carries a
+        // numerically redundant row, and every consumer that factors it
+        // afterwards disagrees with this scan about the rank.
+        //
+        // Measured on #2600's `transformation_normal_held_out_pit_is_uniform`
+        // fixture: 90 reduced-face solves where the block this scan returned had
+        // `nrows = svd_rank + 1`, EVERY time — `face_rows=39, rank=38` with the
+        // retained singular values down to `3.86e-5` and the 39th at `~1e-15`,
+        // against this scan's `tol = 1.07e-12`. `cond(A_kept) ~ 6e4` puts the
+        // single-pass contamination at `~1.3e-11`, an order above `tol`, which
+        // is exactly the observed miss. The physical reduced face then handed
+        // that block to an SVD that refused it as a singular affine system and
+        // ended the whole fit.
+        //
+        // Reorthogonalizing once ("twice is enough", Kahan) drops the residual
+        // error back to `O(eps)*||a_r||`, so this scan's rank and a
+        // rank-revealing factorization of the same block agree. It is the same
+        // deliberate second pass `active_constraint_tangent_geometry` already
+        // runs when it completes a null basis, for the same reason.
+        for _ in 0..2 {
+            for q in &ortho_basis {
+                let proj = resid.dot(q);
+                resid.scaled_add(-proj, q);
+            }
         }
         let resid_norm = resid.dot(&resid).sqrt();
         if resid_norm > tol {
@@ -4147,6 +4175,86 @@ mod tests {
         assert_relative_eq!(direction[0], 1.0, epsilon = 1e-12);
         assert!(gradient.dot(&direction) < 0.0);
         assert!(active.is_empty(), "descent moves strictly into the cone");
+    }
+
+    #[test]
+    fn rank_reduce_agrees_with_a_rank_revealing_factorization_on_an_ill_conditioned_face_2600() {
+        // Six unit rows sampled from a smooth basis at closely spaced nodes —
+        // the shape a spline/Khatri-Rao constraint face actually has — plus one
+        // row that is EXACTLY their fourth finite difference. The block's rank
+        // is six and the seventh row is redundant by construction, not by
+        // tolerance: it is a linear combination of rows already present.
+        //
+        // What makes it a gate is the SIZE of that combination's coefficients.
+        // The kept six run `sigma` from `2.8` down to `3.6e-7`, and a fourth
+        // difference of near-collinear rows cancels down to `2e-3`, so
+        // Gram-Schmidt subtracts O(1) projections to leave an O(1e-3) residual
+        // and then has to see that the rest is zero. A single modified sweep
+        // leaves contamination above this scan's own
+        // `tol = 100*eps*8 = 1.78e-13`, so the row clears the floor and the
+        // scan reports rank SEVEN. Reorthogonalizing once brings it back to
+        // `O(eps)` and the scan reports six.
+        //
+        // That is #2600's pit arm in miniature: `face_rows = rank + 1` on 90
+        // consecutive reduced-face solves, handed to a factorization that
+        // refused the block as a singular affine system and ended the fit.
+        //
+        // The assertion is deliberately NOT a hardcoded six. It is that this
+        // scan and a rank-revealing factorization of the same block, at the
+        // same floor, agree — which is the invariant the physical reduced face
+        // needs and the one that was violated.
+        use gam_linalg::faer_ndarray::FaerSvd;
+
+        const NODE_SPACING: f64 = 0.05;
+        let p = 8usize;
+        let independent = 6usize;
+        let mut rows = Array2::<f64>::zeros((independent + 1, p));
+        for index in 0..independent {
+            let node = 1.0 + NODE_SPACING * index as f64;
+            let mut power = 1.0_f64;
+            for column in 0..p {
+                rows[[index, column]] = power;
+                power *= node;
+            }
+            let norm = rows.row(index).dot(&rows.row(index)).sqrt();
+            let normalized = &rows.row(index).to_owned() / norm;
+            rows.row_mut(index).assign(&normalized);
+        }
+        // Fourth finite difference of the first five rows: coefficients
+        // 1, -4, 6, -4, 1 — exactly in the span, with an O(1e-3) norm.
+        let difference_weights = [1.0_f64, -4.0, 6.0, -4.0, 1.0];
+        let mut combination = Array1::<f64>::zeros(p);
+        for (index, weight) in difference_weights.iter().enumerate() {
+            combination.scaled_add(*weight, &rows.row(index));
+        }
+        let combination_norm = combination.dot(&combination).sqrt();
+        rows.row_mut(independent)
+            .assign(&(&combination / combination_norm));
+
+        let (_u, singular, _vt) = rows.svd(false, false).expect("face SVD");
+        let singular_max = singular.iter().copied().fold(0.0_f64, f64::max);
+        let svd_floor = 100.0 * f64::EPSILON * (rows.nrows().max(p) as f64) * singular_max;
+        let svd_rank = singular.iter().filter(|&&s| s > svd_floor).count();
+        assert_eq!(
+            svd_rank, independent,
+            "the fixture must be rank-deficient by construction, not by tolerance \
+             (singular values {singular:?})"
+        );
+
+        let b = Array1::<f64>::zeros(independent + 1);
+        let groups: Vec<Vec<usize>> = (0..=independent).map(|row| vec![row]).collect();
+        let (reduced, _b_out, groups_out, _dependence) =
+            rank_reduce_rows_pivoted_qr_with_dependence(rows, b, groups);
+
+        assert_eq!(
+            reduced.nrows(),
+            svd_rank,
+            "the independence scan kept {} rows where a rank-revealing factorization \
+             of the same block at the same floor finds {svd_rank}; a face carrying a \
+             redundant row is what #2600's affine solve then refused",
+            reduced.nrows()
+        );
+        assert_eq!(groups_out.len(), svd_rank);
     }
 
     #[test]

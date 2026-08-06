@@ -570,63 +570,6 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
 /// handled that way is a face that is merely rank-deficient — redundant rows
 /// are solved through, on the minimum-D-norm solution their common row space
 /// determines, because a redundant equality is still an equality.
-/// Paired probe for gam#2600: report, on the SAME iterate the shipped path is
-/// about to solve, what the removed trust-whitened rank refusal would have
-/// decided and why.
-///
-/// The removed gate factored `A D^{-1/2}` and refused when any singular value
-/// fell to or below `100·eps·max(k,p)·σ_max`. Printing that spectrum next to
-/// the unwhitened one and the metric's dynamic range is what distinguishes the
-/// two candidate causes of the refusal — a genuinely rank-deficient face, or a
-/// preconditioner whose spread manufactured the deficiency — without a second
-/// build. Gated on `Debug` so it costs nothing on a production fit.
-fn log_removed_whitened_rank_refusal_2600(
-    face_a: &Array2<f64>,
-    trust_metric_diag: &Array1<f64>,
-    rank: usize,
-    singular_max: f64,
-    singular_min_retained: f64,
-) {
-    let p = face_a.ncols();
-    let mut whitened = face_a.clone();
-    for coefficient in 0..p {
-        let scale = trust_metric_diag[coefficient].sqrt();
-        for row in 0..whitened.nrows() {
-            whitened[[row, coefficient]] /= scale;
-        }
-    }
-    let Ok((_u, whitened_singular, _vt)) =
-        gam_linalg::faer_ndarray::FaerSvd::svd(&whitened, false, false)
-    else {
-        log::debug!("[gam#2600 probe] whitened face SVD did not converge");
-        return;
-    };
-    let whitened_max = whitened_singular.iter().copied().fold(0.0_f64, f64::max);
-    let whitened_min = whitened_singular
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let whitened_floor =
-        100.0 * f64::EPSILON * (face_a.nrows().max(p).max(1) as f64) * whitened_max;
-    let metric_max = trust_metric_diag.iter().copied().fold(0.0_f64, f64::max);
-    let metric_min = trust_metric_diag
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let face_rows = face_a.nrows();
-    let removed_refusal_would_fire = whitened_min <= whitened_floor;
-    let metric_condition = metric_max / metric_min;
-    log::debug!(
-        "[gam#2600 probe] face_rows={face_rows} ambient_dim={p} \
-         unwhitened rank={rank} sigma_max={singular_max:.6e} \
-         sigma_min_retained={singular_min_retained:.6e} | \
-         whitened sigma_min={whitened_min:.6e} rank_floor={whitened_floor:.6e} \
-         removed_refusal_would_fire={removed_refusal_would_fire} | \
-         metric_max={metric_max:.6e} metric_min={metric_min:.6e} \
-         metric_condition={metric_condition:.6e}"
-    );
-}
-
 fn certified_reduced_face_candidate(
     exact_hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -806,21 +749,39 @@ fn certified_reduced_face_candidate(
             // row-normalized block, in the coefficient metric the constraints
             // are themselves stated in.
             //
-            // This used to factor the TRUST-WHITENED face `A D^{-1/2}` and
-            // refuse whenever any of its singular values fell under a rank
-            // floor. Whitening multiplies the face's condition number by
-            // `sqrt(kappa(D))`, so a face whose equalities determine `delta`
-            // perfectly well is reported singular purely because the
-            // preconditioner has a wide dynamic range — and the rank it was
-            // refusing on was not the rank `reduce_face` had just certified,
-            // nor the one `active_constraint_tangent_geometry` reads below.
-            // Three rank decisions on one face, in three different metrics,
-            // one of which could kill the entire fit (gam#2600).
+            // This used to factor the trust-whitened face `A D^{-1/2}` and
+            // return `Err` whenever any of its singular values fell under a
+            // rank floor — which ends the entire fit at the trial point that
+            // produced it. Measured on #2600's pit arm, that refusal fired 90
+            // times, and in EVERY one of them the block `reduce_face` had just
+            // returned carried exactly one more row than its numerical rank
+            // (`face_rows = rank + 1`, e.g. 39 rows at rank 38 with the
+            // retained singular values down to `3.86e-5` and the redundant one
+            // at `~1e-15`).
             //
-            // The trust metric has exactly one job here and it is not deciding
-            // solvability: it picks WHICH solution of an underdetermined face
-            // is smallest. That is the D-orthogonal re-anchoring below, and it
-            // is the only place `D` appears.
+            // So the face really was rank-deficient, and the defect is what was
+            // done about it: a REDUNDANT EQUALITY IS STILL AN EQUALITY. Its row
+            // space determines `delta` exactly as well as a full-rank block
+            // would; there is nothing here that cannot be solved. Refusing was
+            // the mistake, and refusing FATALLY — from a heuristic accelerator
+            // the caller has a general constrained QP to fall back on — was the
+            // expensive part.
+            //
+            // (The redundancy itself is now also gone at its source: the scan
+            // in `rank_reduce_rows_pivoted_qr_with_dependence` reorthogonalizes,
+            // so it no longer keeps a row whose independence is an artifact of
+            // its own accumulated loss of orthogonality. This path does not
+            // depend on that — it is total over rank-deficient faces either
+            // way, which is what makes it the right place for the guarantee.)
+            //
+            // Whitening is not the mechanism and should not be read as one: on
+            // that fixture `kappa(D)` stayed between 3.1 and 27.2, so `A
+            // D^{-1/2}` was at most 5x worse conditioned than `A`. It is still
+            // the wrong matrix to ask, because the trust metric has exactly one
+            // job on this face and it is not deciding solvability: it picks
+            // WHICH solution of an underdetermined face is smallest. That is
+            // the D-orthogonal re-anchoring below, and it is the only place `D`
+            // now appears.
             let geometry = active_constraint_face_geometry(&face_a).map_err(|error| {
                 format!(
                     "physical reduced-face affine geometry failed \
@@ -828,10 +789,19 @@ fn certified_reduced_face_candidate(
                     working_active.len(),
                 )
             })?;
-            if log::log_enabled!(log::Level::Debug) {
-                log_removed_whitened_rank_refusal_2600(
-                    &face_a,
-                    trust_metric_diag,
+            if geometry.rank() < face_a.nrows() {
+                // `reduce_face` is supposed to hand this solve one
+                // representative per independent direction, so a block that
+                // still factors rank-deficient means the two disagree about
+                // the same face. That is survivable here — the row space is
+                // what the affine solve uses — but it is the signature that
+                // located gam#2600, so say it rather than absorb it.
+                log::debug!(
+                    "[gam#2600 reduced-face] the reduced face carries {} redundant row(s) \
+                     (face_rows={}, rank={}, sigma_max={:.6e}, sigma_min_retained={:.6e}); \
+                     solving on its row space",
+                    face_a.nrows() - geometry.rank(),
+                    face_a.nrows(),
                     geometry.rank(),
                     geometry.largest_singular_value(),
                     geometry.smallest_retained_singular_value(),
