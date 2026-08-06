@@ -6804,11 +6804,20 @@ mod event_jacobian_floor_consistency_2695_tests {
     #[test]
     fn inside_the_floored_band_the_row_gradient_differentiates_the_row_value() {
         let g = 0.4 * GUARD;
-        let h = 0.05 * GUARD;
+        // The step is `eps^(1/3)` of the BAND's own scale (`guard`), not of a
+        // unit scale. The channel's third derivative there is `O(1/guard^3)`,
+        // so a unit-scaled step carries `h^2/6 * f'''` of pure truncation —
+        // measured at 0.1% of the derivative under test, which reads as a
+        // defect and is not one.
+        let cbrt_eps = f64::EPSILON.cbrt();
+        let h = cbrt_eps * GUARD;
         let analytic = analytic_dll_dg(g);
         let fd = central_difference_dll_dg(g, h);
+        // The matching central-difference floor: truncation plus roundoff at
+        // that step, scaled by the analytic magnitude.
+        let tol = 64.0 * cbrt_eps * cbrt_eps * (1.0 + analytic.abs());
         assert!(
-            (fd - analytic).abs() <= 1.0e-6 * (1.0 + analytic.abs()),
+            (fd - analytic).abs() <= tol,
             "floored row: the value moves by {fd:.9e} per unit qdot1 while the \
              derivative tower asserts {analytic:.9e} — a first-order \
              disagreement of {:.3e}x that no step size can refine away",
@@ -6903,7 +6912,9 @@ mod guarded_log_channel_2695_tests {
     #[test]
     fn the_continued_branch_is_increasing_and_concave() {
         let mut previous = f64::NEG_INFINITY;
-        for step in 0..=40 {
+        // Walk `g` UPWARD, from well below zero to the knot, so "increasing"
+        // is asserted in the direction it is claimed in.
+        for step in (0..=40).rev() {
             let g = GUARD * (1.0 - 0.05 * f64::from(step));
             let (value, d1, d2, _, _) = guarded(g);
             assert!(
