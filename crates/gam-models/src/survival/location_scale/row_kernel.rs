@@ -6676,3 +6676,117 @@ mod simd_batch_bit_identity_tests {
         }
     }
 }
+
+/// gam#2695 — the event Jacobian's floor and its derivative tower must be ONE
+/// function of `g = dη/dt`.
+///
+/// `exact_row_kernel_from_parts` floors `g` to `derivative_guard` on three
+/// branches and then reads `(log_g, d_log_g, d2_log_g, …)` from
+/// [`SurvivalLocationScaleFamily::logwith_derivatives_positive`] at the FLOORED
+/// `g`. Inside the floored band the row's log-likelihood is therefore CONSTANT
+/// in `qdot1` while the tower reports a slope of `1/guard` — a value on one
+/// surface and a derivative on another, of exactly the class #2714 established.
+///
+/// The consequence is #2695's headline: the joint-Newton RHS carries that slope
+/// into `predicted_reduction`, the accept test measures the flat value, and
+/// `actual/(rhs·δ)` cannot approach 1 under refinement no matter how small the
+/// step is (0 of 75 linear-dominated attempts within 50% of 1). The refutation
+/// this thread needed is a finite difference of the row's own value against the
+/// row's own analytic derivative at a state INSIDE the band — which no
+/// synthetic fixture built away from the boundary can reach.
+#[cfg(test)]
+mod event_jacobian_floor_consistency_tests_2695 {
+    use super::*;
+
+    /// The production floor on this fixture's family (`gam-cli survival
+    /// --survival-likelihood location-scale` prints
+    /// "derivative floor 1.000e-6").
+    const GUARD: f64 = 1.0e-6;
+
+    /// One event row (`d = 1`), so the `log g` Jacobian term is live, with
+    /// `d_raw = 0` so `g` IS the `qdot1` coordinate and the finite difference
+    /// moves exactly the channel whose derivative is under test.
+    fn kernel_at(g: f64) -> SurvivalExactRowKernel {
+        let state = survival_predictor_state(-0.4, 0.3, 0.0, -0.2, 0.15, g);
+        SurvivalLocationScaleFamily::exact_row_kernel_from_parts(
+            &InverseLink::Standard(StandardLink::Probit),
+            GUARD,
+            1.0,
+            1.0,
+            0,
+            state,
+            0.0,
+        )
+        .expect("probit row kernel builds at a finite interior state")
+        .expect("a positive-weight row yields a kernel")
+    }
+
+    /// `∂ℓ/∂qdot1` as the solver reads it: the third gradient channel of the
+    /// lowered row program, sign-flipped out of the NLL convention exactly as
+    /// [`SurvivalLocationScaleFamily::row_derivatives_rescaled`] does.
+    fn analytic_dll_dg(g: f64) -> f64 {
+        let kernel = kernel_at(g);
+        -sls_outer_plan::<5>(&kernel)
+            .lower_index_derivative_channels()
+            .gradient[2]
+    }
+
+    fn central_difference_dll_dg(g: f64, h: f64) -> f64 {
+        (kernel_at(g + h).log_likelihood() - kernel_at(g - h).log_likelihood()) / (2.0 * h)
+    }
+
+    /// Positive control: well above the floor the two agree, so the harness
+    /// measures what it claims to.
+    #[test]
+    fn above_the_floor_the_row_gradient_differentiates_the_row_value() {
+        let g = 0.75;
+        let h = 1.0e-5;
+        let analytic = analytic_dll_dg(g);
+        let fd = central_difference_dll_dg(g, h);
+        assert!(
+            (fd - analytic).abs() <= 1.0e-6 * (1.0 + analytic.abs()),
+            "unfloored row: fd={fd:.9e} vs analytic={analytic:.9e}"
+        );
+    }
+
+    /// The defect. `g = 0.4·guard` is strictly inside the second floor branch
+    /// (`0 < g < guard`), five orders above the compensated-difference
+    /// roundoff slack, so the band is entered on its own terms rather than on
+    /// a rounding accident.
+    #[test]
+    fn inside_the_floored_band_the_row_gradient_differentiates_the_row_value() {
+        let g = 0.4 * GUARD;
+        let h = 0.05 * GUARD;
+        let analytic = analytic_dll_dg(g);
+        let fd = central_difference_dll_dg(g, h);
+        assert!(
+            (fd - analytic).abs() <= 1.0e-6 * (1.0 + analytic.abs()),
+            "floored row: the value moves by {fd:.9e} per unit qdot1 while the \
+             derivative tower asserts {analytic:.9e} — a first-order \
+             disagreement of {:.3e}x that no step size can refine away",
+            if fd == 0.0 {
+                f64::INFINITY
+            } else {
+                analytic / fd
+            }
+        );
+    }
+
+    /// The band is not a measure-zero curiosity, which is why the
+    /// disagreement above is an O(1) error rather than a rounding one: it is
+    /// `guard` wide in `qdot1`, and today the row value is BITWISE identical
+    /// across the whole of it. A likelihood that cannot tell `g = 0.05·guard`
+    /// from `g = 0.95·guard` is not the function its derivative describes.
+    #[test]
+    fn the_row_value_responds_to_the_event_jacobian_across_the_guard_band() {
+        let low = kernel_at(0.05 * GUARD).log_likelihood();
+        let high = kernel_at(0.95 * GUARD).log_likelihood();
+        assert!(
+            high > low,
+            "a larger event Jacobian must raise the row log-likelihood; \
+             got {low} at 0.05·guard and {high} at 0.95·guard \
+             (bitwise equal = {})",
+            low.to_bits() == high.to_bits()
+        );
+    }
+}
