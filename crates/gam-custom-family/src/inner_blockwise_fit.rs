@@ -706,6 +706,38 @@ fn certified_reduced_face_candidate(
 
     let mut working_active = active_rows.to_vec();
     let mut seen_faces = std::collections::HashSet::<Vec<usize>>::new();
+    // COST BOUND FOR THE EXCHANGE (gam#2600).
+    //
+    // Detecting a repeated FACE is the loop's only termination argument, and
+    // it is a pigeonhole one: the bound it gives is the number of subsets of
+    // the constraint rows. That is not a cost bound, and the difference is
+    // measured rather than theoretical. On this issue's pit arm the exchange
+    // declined on 273 of 284 cycles, visiting a MEDIAN of 87 faces and a
+    // maximum of 270 before the repeat surfaced — 27,731 face solves, each an
+    // SVD of the face plus a Moré--Sorensen solve plus a feasibility scan, all
+    // of them discarded, with the general constrained QP doing every solve
+    // (`path=linear` on all 284 cycles).
+    //
+    // The bound is `p + |warm face|`, and it is what the exchange's own moves
+    // are worth: its only legitimate corrections are adding one blocking row
+    // and adopting the operator NNLS support, so REBUILDING the warm face
+    // completely — releasing every row it was handed and pinning every ambient
+    // direction — takes `|warm face| + p` single-row corrections. Past that it
+    // is no longer correcting the warm face; it is searching the face lattice,
+    // where branch (2) has no monotone measure and therefore no termination
+    // argument at all.
+    //
+    // The measurement says the same thing with a wide margin. Over 100
+    // exchanges that DID certify (wine arm, `p = 6`), the visited-face count
+    // was min 1, median 1, max 4 — against a budget of 7 there. An exchange
+    // that has not certified within a complete rebuild of its warm face does
+    // not certify at all.
+    //
+    // Exhausting the budget is the same verdict a detected cycle already
+    // produces: no certified reduced-face candidate, `Ok(None)`, and the
+    // caller's general constrained QP owns the subproblem. Nothing is
+    // certified on a budget and no tolerance moves.
+    let exchange_budget = p.saturating_add(active_rows.len());
     loop {
         let (face_a, face_b, canonical_active) = reduce_face(&working_active)?;
         working_active = canonical_active;
@@ -730,6 +762,18 @@ fn certified_reduced_face_candidate(
                  owns this subproblem",
                 working_active.len(),
                 seen_faces.len(),
+            );
+            return Ok(None);
+        }
+        if seen_faces.len() > exchange_budget {
+            log::warn!(
+                "[gam#2600 reduced-face] declining an exchange that outran its own \
+                 rebuild budget (face_rows={}, visited_faces={}, budget={exchange_budget} \
+                 = ambient_dim {p} + warm_rows {}); the general constrained QP owns \
+                 this subproblem",
+                working_active.len(),
+                seen_faces.len(),
+                active_rows.len(),
             );
             return Ok(None);
         }
@@ -1129,6 +1173,16 @@ fn certified_reduced_face_candidate(
         } else {
             ReducedFaceCandidateKind::RegularizedNewton
         };
+        // How many faces this exchange had to visit before it certified. The
+        // decline path already reports its own count; without the same number
+        // on the SUCCESS path the two cannot be compared, and a cost bound for
+        // the exchange cannot be sized from anything but a guess (gam#2600).
+        log::debug!(
+            "[gam#2600 reduced-face] certified after {} visited face(s) \
+             (face_rows={}, ambient_dim={p}, kind={kind:?})",
+            seen_faces.len(),
+            working_active.len(),
+        );
         return Ok(Some((candidate, working_active, kind)));
     }
 }
