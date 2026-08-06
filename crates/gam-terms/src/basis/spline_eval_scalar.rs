@@ -742,10 +742,56 @@ pub fn create_ispline_derivative_dense(
     if num_ispline_cols == 0 {
         return Ok(Array2::zeros((data.len(), 0)));
     }
+    // The exterior of the modelling interval, on the I-spline's OWN convention
+    // (gam#2695).
+    //
+    // `create_ispline_dense` saturates: `I_j(x) = 0` for `x < left` and
+    // `I_j(x) = 1 − offset_j` for `x >= right`, both CONSTANT in `x`. Its
+    // comment states that outright and justifies it — a linear extension would
+    // make I-spline entries negative below `left` and greater than one above
+    // `right`, breaking non-negativity and the [0, 1] range the basis exists to
+    // guarantee. A constant function has zero derivative, so every order of the
+    // exterior derivative of an I-spline is exactly zero.
+    //
+    // The B-spline machinery this function differentiates through obeys the
+    // opposite convention. `apply_dense_bspline_extrapolation` already zeroes
+    // the exterior for an OPEN knot vector on exactly this argument (gam#1348,
+    // "A constant function has zero derivative, so BOTH the first and second
+    // derivative must be zero in the exterior spans"), but on a CLAMPED vector
+    // — which is what an I-spline knot vector always is — it evaluates the
+    // derivative AT the clamped endpoint and returns the boundary slope,
+    // because a clamped *B*-spline's value extends linearly. So before this,
+    // `create_ispline_dense` and `create_ispline_derivative_dense` described two
+    // different functions outside `[left, right]`, and only the value's
+    // convention was written down.
+    //
+    // Measured consequence (gam#2695): the survival link warp is
+    // `q = q0 + Σ_j βw_j·I_j(q0)`, so the threshold and log-sigma blocks reach
+    // `q` only through `m1 = 1 + Σ_j βw_j·I'_j(q0)`. Outside the knot domain the
+    // warp value is flat while `m1` picked up a slope it does not have, every
+    // chain-rule channel through `q0` was scaled by it, and the joint-Newton RHS
+    // asserted a first-order change the objective does not make — at any step
+    // size. The wiggle block's own gradient (`∂q/∂βw_j = I_j(q0)`, the VALUE)
+    // was correct throughout, which is why the disagreement looked
+    // state-dependent rather than structural.
+    let left = knot_vector[bs_degree];
+    let right = knot_vector[num_bspline_cols];
+    let interval_is_usable = left.is_finite() && right.is_finite() && left < right;
+
     // Right-cumulative sum: I-spline derivative column j = sum_{m=j+1..end} dB_m.
     // In our indexing: output column j (0-based) = sum of dB columns j+1..num_bspline_cols.
     let mut out = Array2::<f64>::zeros((data.len(), num_ispline_cols));
     for i in 0..data.len() {
+        // Strictly outside, matching `apply_dense_bspline_extrapolation`'s own
+        // open-knot branch (`x < left || x > right`). The endpoints keep the
+        // interior one-sided slope on purpose: `right` is routinely the largest
+        // observed value (knot vectors are built from the data range), and the
+        // transformation-normal shape derivative `h'(y)` must stay positive
+        // there. The written form is `!(in range)` so a NaN evaluation point
+        // zeroes the row instead of propagating through the cumulative sum.
+        if interval_is_usable && !(data[i] >= left && data[i] <= right) {
+            continue;
+        }
         let mut running = 0.0_f64;
         for j in (1..num_bspline_cols).rev() {
             let term = db[[i, j]];
@@ -1314,4 +1360,143 @@ pub fn evaluate_bspline_fourth_derivative_scalar(
 ) -> Result<(), BasisError> {
     let mut workspace = BsplineDerivativeWorkspace::new();
     evaluate_bspline_derivative_recurrence_into(4, x, knot_vector, degree, out, &mut workspace, 0)
+}
+
+/// gam#2695 — an I-spline and its own derivative tower must be ONE function.
+///
+/// `create_ispline_dense` saturates outside the modelling interval
+/// `[knots[bs_degree], knots[num_bspline_basis]]`: the value is the all-zero row
+/// below `left` and a constant row at and above `right`. That convention is
+/// deliberate — a linear extension would produce negative I-spline entries below
+/// `left` and entries above one past `right` — and it is written down at the
+/// value site. Nothing enforced it on the derivative, which is built from a
+/// CLAMPED B-spline whose own exterior convention is linear extension, so
+/// `apply_dense_bspline_extrapolation` returned the boundary slope there.
+///
+/// The consequence #2695 measures: the survival link warp is
+/// `q = q0 + Σ_j βw_j·I_j(q0)`, so every block that reaches `q` only through
+/// `q0` carries `m1 = 1 + Σ_j βw_j·I'_j(q0)`. Outside the knot domain the warp
+/// value is flat and `m1` was not, so the joint-Newton RHS asserted a
+/// first-order change the objective does not make — invisible at `βw ≈ 0`,
+/// which is the amplitude every existing oracle ran at.
+#[cfg(test)]
+mod ispline_exterior_derivative_2695_tests {
+    use super::*;
+
+    /// A clamped cubic knot vector: `has_clamped_bspline_boundaries` is TRUE,
+    /// which is precisely the branch that extended linearly.
+    fn clamped_knots() -> Array1<f64> {
+        Array1::from_vec(vec![
+            -3.0, -3.0, -3.0, -3.0, -1.5, 0.0, 1.5, 3.0, 3.0, 3.0, 3.0,
+        ])
+    }
+
+    /// I-spline degree; the internal B-spline runs at `DEGREE + 1`.
+    const DEGREE: usize = 2;
+
+    fn value_row(x: f64) -> Vec<f64> {
+        let knots = clamped_knots();
+        let data = Array1::from_vec(vec![x]);
+        create_ispline_dense(data.view(), knots.view(), DEGREE)
+            .expect("i-spline value")
+            .row(0)
+            .to_vec()
+    }
+
+    fn derivative_row(x: f64, order: usize) -> Vec<f64> {
+        let knots = clamped_knots();
+        let data = Array1::from_vec(vec![x]);
+        create_ispline_derivative_dense(data.view(), &knots, DEGREE, order)
+            .expect("i-spline derivative")
+            .row(0)
+            .to_vec()
+    }
+
+    /// The premise, stated as a measurement rather than assumed: the value
+    /// really is constant out there, so its derivative really is zero.
+    #[test]
+    fn the_ispline_value_is_constant_outside_the_modelling_interval() {
+        for (a, b) in [(-4.0, -8.0), (4.0, 9.0)] {
+            let left = value_row(a);
+            let right = value_row(b);
+            assert_eq!(
+                left.len(),
+                right.len(),
+                "the basis width must not depend on the evaluation point"
+            );
+            for (j, (lo, hi)) in left.iter().zip(right.iter()).enumerate() {
+                assert_eq!(
+                    lo.to_bits(),
+                    hi.to_bits(),
+                    "I_{j}({a}) = {lo} but I_{j}({b}) = {hi}; the I-spline value is \
+                     documented as saturating outside the knot domain"
+                );
+            }
+        }
+    }
+
+    /// Positive control: INSIDE the interval the derivative is the derivative,
+    /// so the assertion below is about the exterior and not about the routine
+    /// being zero everywhere.
+    #[test]
+    fn the_ispline_derivative_matches_a_finite_difference_inside_the_interval() {
+        let x = 0.4_f64;
+        let h = 1.0e-5;
+        let plus = value_row(x + h);
+        let minus = value_row(x - h);
+        let analytic = derivative_row(x, 1);
+        let mut any_nonzero = false;
+        for (j, value) in analytic.iter().enumerate() {
+            let fd = (plus[j] - minus[j]) / (2.0 * h);
+            assert!(
+                (fd - value).abs() <= 1.0e-6 * (1.0 + value.abs()),
+                "interior column {j}: analytic I'_{j}({x}) = {value:.9e} but the central \
+                 difference of the value is {fd:.9e}"
+            );
+            any_nonzero |= value.abs() > 1.0e-6;
+        }
+        assert!(
+            any_nonzero,
+            "the interior control must exercise a non-zero derivative"
+        );
+    }
+
+    /// The defect. Every order, both sides.
+    #[test]
+    fn the_ispline_derivative_is_zero_where_its_value_saturates() {
+        for x in [-4.0_f64, -3.5, 3.5, 4.0, 12.0] {
+            for order in 1..=4 {
+                for (j, value) in derivative_row(x, order).iter().enumerate() {
+                    assert_eq!(
+                        *value, 0.0,
+                        "order-{order} I-spline derivative at x={x} (outside the knot domain \
+                         [-3, 3], where the value is constant) reports {value:.9e} in column \
+                         {j}; a constant function has zero derivative"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The warp factor #2695 is about, stated in its own terms: with
+    /// non-negative coefficients the monotone warp multiplier
+    /// `m1 = 1 + Σ_j βw_j·I'_j(q0)` must be EXACTLY 1 wherever the warp itself
+    /// is flat, or the chain rule through `q0` invents a slope.
+    #[test]
+    fn the_monotone_warp_multiplier_is_one_where_the_warp_is_flat() {
+        let beta_w = [0.30_f64, 0.40, 0.50, 0.60, 0.70, 0.80];
+        for x in [-5.0_f64, 5.0] {
+            let d1 = derivative_row(x, 1);
+            assert_eq!(
+                d1.len(),
+                beta_w.len(),
+                "fixture coefficient width must match the basis"
+            );
+            let m1: f64 = 1.0 + d1.iter().zip(beta_w.iter()).map(|(b, c)| b * c).sum::<f64>();
+            assert_eq!(
+                m1, 1.0,
+                "at x={x} the warp value is constant, so its multiplier must be exactly 1"
+            );
+        }
+    }
 }
