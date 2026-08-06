@@ -60,6 +60,38 @@
   states the same contract for the Royston–Parmar arm and resolves it with a
   zero-slope clamp.
 
+  **What the two repairs above do and do not close on #2695.** Measured on that
+  issue's own witness (`gam-cli`
+  `survival_location_scale_saved_fit_preserves_linkwiggle_metadata`), the
+  first-order gradient/objective disagreement the issue is titled for is gone:
+  `d ℓ / (∇ℓ·δ)` lands within 10% of 1 on **96 of 96** resolvable small-step
+  trust attempts, against **40 of 77** before, with a median relative residual of
+  `1.5e-5`; the quadratic penalty gradient was already exact to `2.9e-10`.
+
+  The fit still does not mint, and what remains is a different mechanism —
+  a **discontinuity in the Jeffreys value Φ**, not a derivative error. Along ONE
+  ray from ONE base point, with the trial direction bit-identical across all five
+  attempts and the cone projection inactive:
+
+  ```
+   t = 2.003e-4  Φ = -11.48618      λ_min = -8.870e-1   λ_max = 1.9435e1   gate 1.000000
+   t = 5.008e-5  Φ = -11.48601      λ_min = -8.869e-1   λ_max = 1.9435e1   gate 1.000000
+   t = 1.252e-5  Φ = -11.48597      λ_min = -8.868e-1   λ_max = 1.9435e1   gate 1.000000
+   t = 3.130e-6  Φ = -11.48596      λ_min = -8.868e-1   λ_max = 1.9435e1   gate 1.000000
+   t = 7.826e-7  Φ = -10.93381      λ_min = -6.922e-1   λ_max = 1.9645e1   gate 1.000000
+  ```
+
+  Φ steps by `-0.5522` between `t = 7.8e-7` and `t = 3.1e-6`, and the extreme
+  eigenvalues of `Z_Jᵀ H Z_J` step with it, so the discontinuity is in the
+  observed information rather than in the Jeffreys machinery reading it — the
+  conditioning gate is saturated at `1.000000` on both sides, so it is not the
+  gate's smooth band, and the floor regime does not move. `actual` is therefore
+  constant across the backtracking ladder while `pred` quarters, `ρ` runs
+  `-784, -3137, -12548, -50192`, and every attempt is refused: the
+  `rejects [model, likelihood, objective, feasibility] = [0, 0, 2, 0]` signature.
+  The direction is dominated by the threshold coordinate
+  (`u ≈ (-0.9753, +0.2207, ~0, ~0, 0, 0)`).
+
 - **The Jeffreys/Firth-armed outer REML gradient was not the gradient of the
   criterion it reports (#2612).** On the penguins real-data multinomial arm the
   fit did not produce a probability at all: the unbiased probe converged to a
