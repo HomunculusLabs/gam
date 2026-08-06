@@ -1002,10 +1002,25 @@ fn survival_ls_monotonicity_floors_near_cancellation_negative_velocity() {
         .exact_row_kernel(0, state)
         .expect("near-cancellation negative velocity must be floored, not rejected")
         .expect("positive-weight row");
-    // Floored to the guard ⇒ log(g) = log(guard), finite.
+    // The #1396 property is that the row is ACCEPTED with a finite `log g`.
+    // Since gam#2695 the guarded branch is the continued logarithm rather than
+    // a substitution of `guard` for `g`, so the value is finite and BELOW
+    // `log(guard)` — the whole point of the continuation is that leaving the
+    // feasible region costs something instead of being free — and it is the
+    // guarded channel's own value at this `g`, not at a different one.
+    let expected =
+        SurvivalLocationScaleFamily::log_with_derivatives_guarded(state.g, guard).0;
     assert!(
-        (kernel.log_g - guard.ln()).abs() <= 1e-12,
-        "velocity must be floored to the guard: log_g={}, expected log(guard)={}",
+        kernel.log_g.is_finite() && (kernel.log_g - expected).abs() <= 1e-12,
+        "a near-cancellation negative velocity must be admitted with the guarded \
+         channel's own value: log_g={}, expected {expected}",
+        kernel.log_g,
+    );
+    assert!(
+        kernel.log_g < guard.ln(),
+        "the continued branch must charge for g={} being below guard={guard}: \
+         log_g={} is not below log(guard)={}",
+        state.g,
         kernel.log_g,
         guard.ln(),
     );
