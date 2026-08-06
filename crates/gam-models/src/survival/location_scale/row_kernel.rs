@@ -4963,10 +4963,10 @@ impl SurvivalLocationScaleFamily {
         if g <= 0.0 && g >= -cancellation_floor {
             g = guard;
         }
-        // gam#2695 probe (opt-in, `GAM_PROBE_2695`): report every row whose
+        // gam#2695 probe (temporary): report every row whose
         // event Jacobian was floored, because on such a row `log g` is
         // CONSTANT in beta while `d_log_g = 1/guard` asserts a slope.
-        if g != state.g && std::env::var_os("GAM_PROBE_2695").is_some() {
+        if g != state.g {
             eprintln!(
                 "[PROBE2695-clamp] row={row} g_raw={:.9e} g_used={g:.9e} guard={guard:.3e} \
                  slack={roundoff_slack:.3e} h0={:.6e} h1={:.6e} q0={:.6e} q1={:.6e}",
@@ -6695,7 +6695,7 @@ mod simd_batch_bit_identity_tests {
 /// row's own analytic derivative at a state INSIDE the band — which no
 /// synthetic fixture built away from the boundary can reach.
 #[cfg(test)]
-mod event_jacobian_floor_consistency_tests_2695 {
+mod event_jacobian_floor_consistency_2695_tests {
     use super::*;
 
     /// The production floor on this fixture's family (`gam-cli survival

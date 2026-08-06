@@ -2036,7 +2036,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         {
             rhs += grad_phi;
         }
-        // ── gam#2695 probe (opt-in, `GAM_PROBE_2695`; no production effect) ──
+        // ── gam#2695 probe (temporary; removed with the fix) ────────────────
         //
         // The accept test measures `F = −ℓ + ½βᵀSβ − Φ` at β and at β+δ; the
         // model measures `rhs·δ` with `rhs = ∇ℓ − Sβ + ∇Φ`. If those are two
@@ -2045,10 +2045,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // three terms coordinate-wise against a central difference of the SAME
         // evaluator the accept test uses, so the disagreement is attributed to
         // one term rather than inferred from the sum.
-        if std::env::var_os("GAM_PROBE_2695").is_some() {
+        {
             let mut probe = states.clone();
-            let mut probe_terms = |st: &mut Vec<ParameterBlockState>| -> (f64, f64, f64) {
-                let _ = refresh_all_block_etas(family, specs, st);
+            let probe_terms = |st: &mut Vec<ParameterBlockState>| -> (f64, f64, f64) {
+                refresh_all_block_etas(family, specs, st).expect("probe eta refresh");
                 let ll = family.log_likelihood_only(st).unwrap_or(f64::NAN);
                 let pen = total_quadratic_penalty(
                     st,
@@ -2069,14 +2069,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 (ll, pen, phi)
             };
             for j in 0..total_p {
-                let Some((b, &(start, _))) = ranges
+                let Some((b, range)) = ranges
                     .iter()
                     .enumerate()
-                    .find(|(_, &(s, e))| j >= s && j < e)
+                    .find(|(_, range)| j >= range.0 && j < range.1)
                 else {
                     continue;
                 };
-                let local = j - start;
+                let local = j - range.0;
                 let base = beta_joint[j];
                 let h = 1.0e-6 * (1.0 + base.abs());
                 probe[b].beta[local] = base + h;
@@ -2084,7 +2084,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 probe[b].beta[local] = base - h;
                 let (ll_m, pen_m, phi_m) = probe_terms(&mut probe);
                 probe[b].beta[local] = base;
-                let _ = refresh_all_block_etas(family, specs, &mut probe);
+                refresh_all_block_etas(family, specs, &mut probe).expect("probe eta refresh");
                 eprintln!(
                     "[PROBE2695-fd] cycle={cycle} j={j} block={b} local={local} beta={base:.6e} \
                      ll_fd={:.9e} ll_an={:.9e} pen_fd={:.9e} pen_an={:.9e} phi_fd={:.9e} phi_an={:.9e}",
@@ -3451,7 +3451,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let actual_reduction = old_objective - trialobjective;
             // gam#2695 probe (opt-in). Split both sides of ρ into their terms at
             // the SAME δ so a first-order disagreement is attributable.
-            if std::env::var_os("GAM_PROBE_2695").is_some() {
+            {
                 let g_dot = grad_joint.dot(&trial_delta);
                 let s_dot = penalty_beta.dot(&trial_delta);
                 let phi_dot = head_jeffreys_term
