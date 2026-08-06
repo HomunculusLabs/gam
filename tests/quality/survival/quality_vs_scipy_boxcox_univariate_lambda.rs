@@ -56,6 +56,7 @@ fn standardize(x: &[f64]) -> Vec<f64> {
 #[test]
 fn gam_transformation_normal_normalizes_wine_price_at_least_as_well_as_boxcox() {
     init_parallelism();
+    gam::progress_log::init_logging_at(log::LevelFilter::Debug); // TEMP #2600 probe
 
     // ---- load wine.csv and keep the rows with an observed, positive price ----
     // The dataset's later vintages carry `price = NA` (price not yet realized);

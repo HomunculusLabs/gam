@@ -215,6 +215,7 @@ fn reconstruct_transform(
 #[test]
 fn transformation_normal_held_out_pit_is_uniform() {
     init_parallelism();
+    gam::progress_log::init_logging_at(log::LevelFilter::Debug); // TEMP #2600 probe
 
     // ---- synthetic bounded heteroscedastic data ---------------------------
     // y ~ Beta(α(x), β(x)), α(x) = 1 + sin(2πx), β(x) = 2 + cos(2πx), x ~ U(0,1).
