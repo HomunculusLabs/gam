@@ -1204,35 +1204,38 @@ mod exact_face_newton_tests {
 
     #[test]
     fn a_face_the_trust_metric_makes_singular_is_still_solved_2600() {
-        // Two active rows that are independent in the coefficient metric the
-        // constraints are stated in: normalized, their smallest singular value
-        // is 7.07e-6 against a 6.3e-14 rank floor, and `reduce_face` keeps
-        // both. Whitening by a metric whose second coordinate is 1e18 divides
-        // their separation by 1e9, which drops the whitened smallest singular
-        // value to 7.07e-15 — BELOW the same floor. The face is not singular;
-        // the preconditioner is wide.
+        // `x >= 0` and `z >= 0`: two active rows that are unit-norm and
+        // EXACTLY ORTHOGONAL. Their face has singular values `{1, 1}` — there
+        // is no degeneracy here in any sense, and no rank decision taken on
+        // the constraints themselves can call it singular.
         //
-        // The removed gate factored the whitened block and returned `Err` on
-        // exactly this, which ends the entire fit at the trial point that
-        // produced it (gam#2600, pit arm: `active_rows=39,
-        // singular_min=4.838920e-18, rank_floor=1.067916e-13`). Both rows are
-        // tight at beta, the face pins the step to zero, and the shifted
-        // gradient sits exactly in the normal cone with unit multipliers on
-        // both rows — so there is a certified answer here and it must be
-        // returned.
-        let separation = 1.0e-5_f64;
+        // The removed gate did not take its rank decision on the constraints.
+        // It factored `A D^{-1/2}`, and with `D = diag(1e-18, 1, 1e18)` those
+        // same two rows become `(1e9, 0, 0)` and `(0, 0, 1e-9)`: singular
+        // values `{1e9, 1e-9}` against a floor of `100·eps·3·1e9 = 6.66e-5`,
+        // so the smaller one is under the floor by a factor of 6.7e4 and the
+        // whole fit ends on this trial point with
+        // `physical reduced-face rank reduction left a singular affine system`.
+        // That is #2600's pit-arm refusal (`active_rows=39,
+        // singular_min=4.838920e-18, rank_floor=1.067916e-13`) in three
+        // dimensions: the trust metric's dynamic range, not the geometry.
+        //
+        // Both rows are tight at beta, the face pins the step to zero, and the
+        // shifted gradient sits exactly in the normal cone with unit
+        // multipliers on both rows — so there IS a certified answer here.
         let constraints = ConstraintSet::Dense(
             LinearInequalityConstraints::new(
-                array![[1.0_f64, 0.0], [1.0_f64, separation]],
+                array![[1.0_f64, 0.0, 0.0], [0.0_f64, 0.0, 1.0]],
                 array![0.0_f64, 0.0],
             )
-            .expect("two nearly parallel half-spaces"),
+            .expect("two orthogonal half-spaces"),
         );
-        let hessian = Array2::<f64>::eye(2);
-        // -rhs = 1*(1,0) + 1*(1,separation): both multipliers strictly positive.
-        let rhs = array![-2.0_f64, -separation];
-        let beta = array![0.0_f64, 0.0];
-        let metric = array![1.0_f64, 1.0e18];
+        let hessian = Array2::<f64>::eye(3);
+        // -rhs = 1*(1,0,0) + 1*(0,0,1): both multipliers strictly positive, so
+        // the operator KKT projection reproduces exactly this working face.
+        let rhs = array![-1.0_f64, 0.0, -1.0];
+        let beta = array![0.0_f64, 5.0, 0.0];
+        let metric = array![1.0e-18_f64, 1.0, 1.0e18];
 
         let (candidate, active, kind) = certified_reduced_face_candidate(
             &hessian,
@@ -1243,43 +1246,47 @@ mod exact_face_newton_tests {
             &metric,
             1.0,
         )
-        .expect("a face that is full rank in coefficient coordinates has an affine solution")
+        .expect("orthogonal unit rows are not a singular affine system")
         .expect("the pinned face certifies its own zero step");
         assert_eq!(active, vec![0, 1]);
         assert_eq!(kind, ReducedFaceCandidateKind::ExactNewton);
         for (value, expected) in candidate.iter().zip(beta.iter()) {
             assert!(
                 (value - expected).abs() < 1e-12,
-                "the pinned face's certified step is zero, got {candidate:?}"
+                "the certified step on this face is zero, got {candidate:?}"
             );
         }
     }
 
     #[test]
     fn the_affine_particular_is_the_minimum_trust_metric_norm_point_2600() {
-        // One active row `x + y >= 0` with the base one unit inside the
-        // infeasible side, so the face's affine system is `x + y = 1` and has
-        // a whole line of solutions. The trust metric decides which one: the
-        // minimum-D-norm point of `x + y = a` is `(a*d2, a*d1)/(d1 + d2)`,
-        // NOT the minimum-Euclidean-norm point `(a/2, a/2)`.
+        // One warm-active row `x + y >= 0` at a base that is FEASIBLE with
+        // slack 1, so the face's affine system is `x + y = -1` and has a whole
+        // line of solutions. The trust metric decides which one: the
+        // minimum-D-norm point of `x + y = a` is `(a*d2, a*d1)/(d1 + d2)`, NOT
+        // the minimum-Euclidean-norm point `(a/2, a/2)`.
         //
-        // This is the property the removed whitened factorization delivered
-        // and the replacement has to keep: the metric selects among solutions,
-        // which is the only job it has on this face. `H = diag(d1, d2)` and a
-        // right-hand side aligned with the constraint normal leave the tangent
-        // coordinate at zero, so the returned step IS the particular solution.
-        let (d1, d2) = (1.0e6_f64, 1.0_f64);
+        // This is the property the removed whitened factorization DID deliver,
+        // and the replacement has to keep it — the metric selects among
+        // solutions, which is the only job it has left on this face. `d1 = 3`
+        // and `d2 = 1` make the answer `(-1/4, -3/4)` exactly representable,
+        // so the candidate lands on `x + y = 0` to the last bit and the
+        // certificate is not reading a rounding repair. `H = D` with a
+        // right-hand side offset along the constraint normal leaves the
+        // tangent coordinate at zero, so the returned step IS the particular
+        // solution.
+        let (d1, d2) = (3.0_f64, 1.0_f64);
         let constraints = ConstraintSet::Dense(
             LinearInequalityConstraints::new(array![[1.0_f64, 1.0]], array![0.0])
                 .expect("x+y>=0 half-space"),
         );
         let hessian = array![[d1, 0.0], [0.0, d2]];
-        let beta = array![-1.0_f64, 0.0];
+        let beta = array![1.0_f64, 0.0];
         let metric = array![d1, d2];
-        // `rhs = H*delta_p - mu*(1,1)` with `mu = 0.5`: the tangent gradient
-        // vanishes and row 0 keeps a strictly positive multiplier.
-        let harmonic = d1 * d2 / (d1 + d2);
-        let rhs = array![harmonic - 0.5, harmonic - 0.5];
+        // `rhs = H*delta_p - 1*(1,1)`: the tangent gradient vanishes and row 0
+        // keeps a strictly positive multiplier, so the operator KKT projection
+        // reproduces exactly this working face.
+        let rhs = array![-1.75_f64, -1.75];
 
         let (candidate, active, _kind) = certified_reduced_face_candidate(
             &hessian,
@@ -1290,20 +1297,20 @@ mod exact_face_newton_tests {
             &metric,
             10.0,
         )
-        .expect("underdetermined face with a repaired base")
+        .expect("an underdetermined face has a minimum-D-norm solution")
         .expect("the face certifies a candidate");
         assert_eq!(active, vec![0]);
-        let expected_y = d1 / (d1 + d2);
+        let expected_y = -d1 / (d1 + d2);
         assert!(
-            (candidate[1] - expected_y).abs() < 1e-9,
-            "the affine step must be the minimum-D-norm point of x+y=1 \
+            (candidate[1] - expected_y).abs() < 1e-12,
+            "the affine step must be the minimum-D-norm point of x+y=-1 \
              (expected y={expected_y:.12e}, got {:.12e}); the minimum-EUCLIDEAN-norm \
-             point would put y at 0.5",
+             point would put y at -0.5",
             candidate[1]
         );
         let closure = candidate[0] + candidate[1];
         assert!(
-            closure.abs() < 1e-9,
+            closure.abs() < 1e-12,
             "the certified candidate must sit on its own equality face, got x+y={closure:.6e}"
         );
     }
