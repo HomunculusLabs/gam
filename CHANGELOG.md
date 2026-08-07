@@ -1,5 +1,115 @@
 ## Unreleased
 
+- **The measure-jet representer chart spent the same half-mantissa twice, and
+  paid for it in span (#2761, #2754, #2751).** `condition_representer_section`
+  whitened the chart against the SQUARED operator `G = EᵀE` and cut at
+  `√ε·λ_max(G)`. Since `λ = σ²` that is a bar of `ε^{1/4}` on `E`'s own singular
+  values, i.e. it admitted only `cond(E) ≤ 8·10³` and deleted everything else
+  from the design. At the ranges REML actively selects that is most of the
+  basis. Measured on the #2761 fixture (1-D curve in 3-D, 16 centers), *span
+  floor* = least-squares residual RMSE of the NOISELESS truth on the realized
+  design's own column span — the bound no `λ` can beat, because `λ` shrinks
+  inside a span and never moves one:
+
+  ```text
+    ℓ/ℓ_seed  cond(E)   ε^{1/4} cut: p  span floor    repaired: p  span floor
+       1      3.0e+01        12          6.11e-2          16       6.11e-2
+       2      2.8e+04        11          2.43e-2          16       1.94e-2
+       4      4.2e+07         8          1.50e-2          16       2.10e-3
+       8      9.1e+09         6          1.67e-2          16       1.81e-4
+      16      2.7e+11         4          8.92e-2          16       3.54e-5
+  ```
+
+  Note the old column going back UP past `4×`: the truncated chart was worse
+  than the seed range it was introduced to improve on. The repaired column at
+  `8×` reproduces an 80-digit projection of the same span to every printed
+  digit, so nothing being kept is below what binary64 can see.
+
+  **The justification did not survive its own remedy.** The cut's stated reason
+  was "the energy pullback squares `E`". That is true of an *unwhitened* section
+  only: once `EᵀE = I`, `S = UᵀQU` with `U` orthonormal, and `Q` is `ℓ`-INVARIANT
+  (a form on center VALUES), so `cond(S)` stops being a function of the range at
+  all — measured `cond(E) = 1.0`, `cond(S₊) = 21.1`, `log|S|₊ = 0.800` at every
+  `ℓ` from `1×` to `16×` the seed.
+
+  The chart now reads `E`'s own SVD, and carries three bars in place of one,
+  all anchored on `‖K_cc‖₂` — the norm of the operator whose product formed `E`,
+  never `E`'s own `σ_max`. That distinction is load-bearing: `σ_max(E)`
+  COLLAPSES with `ℓ` (the constraint that makes `Z` head-orthogonal is exactly
+  what annihilates the flat limit `K_cc → 𝟙𝟙ᵀ`) while `σ_min(E)` sits flat at the
+  roundoff floor, so a *relative* bar sinks below that floor and starts admitting
+  it as signal — at `ℓ = 11` on the 1-D sweep fixture the bar is `1.5e-17`
+  against entries of `1.7e-17`, and the chart handed the fit **48 columns of pure
+  rounding noise**. Columns of noise fit anything, so the criterion had a
+  spurious minimum out there: profiled Gaussian REML on the shipped design gives
+  `V = −447.8` at `ℓ = 6.16` against `≈ −44` in the honest region, and the
+  failing fit's own checkpoint was `ψ = 1.81`, i.e. `ℓ = 6.1`.
+
+  * **existence** `σ > ε·‖K_cc‖·max(dim)` — the backward-error bar of forming
+    `E = K_cc·Z`. Below it there is no direction, only roundoff.
+  * **amplification** — the scaling, not the membership, is floored at
+    `√ε·‖K_cc‖`. `1/σ` is the factor by which a direction lifts the design's own
+    roundoff and the criterion squares the design into `XᵀWX`, so the lift keeps
+    significant digits exactly when `ε·(‖K_cc‖/σ)² < 1`. A direction below the
+    floor is DAMPED, not deleted: a span is unchanged by any invertible
+    rescaling, so it contributes the same column space and enters at a small
+    norm, carrying its roundoff in at that same small norm.
+  * **visibility** `(σ/floor)² > dim · SPECTRAL_RANK_RELATIVE_TOLERANCE` — a
+    damped direction whose squared weight falls under the canonical
+    penalty-spectrum rank cutoff is classified UNPENALIZED, i.e. an accidentally
+    free design direction, and it makes `log|S|₊` a step function of `ℓ`.
+    Measured: the primary's nullity flapping by one moved the profiled criterion
+    by **8.5** at fixed `λ`, which is a barrier no `ln ℓ` line search can cross
+    (`line_search=StepSizeTooSmall` on both 1-D `s(x, bs="mjs")` fixtures). The
+    chart and the penalty classifier now reach the same constant and can no
+    longer disagree about which directions are penalized.
+
+  As a consequence the arithmetic reproduces `MeasureJetRangeBracket::ceiling`'s
+  own physics instead of merely asserting it beside them: past the node diameter
+  `σ_max(E)` falls under the amplification floor and the whole representer block
+  damps smoothly toward zero, leaving the affine head — "the block is numerically
+  one function plus the affine head and there is no distinct model past it".
+
+- **A Gram that cannot be indefinite was coming out indefinite, because it was
+  formed by squaring first (#2761).** `rebuild_metric_consistent_ridge` computed
+  the restricted null-function metric as `M = Nᵀ(G_c N)` — materialize the
+  metric, then contract. With `G_c = A_Gᵀ A_G` that is identically
+  `(A_G N)ᵀ(A_G N)`, and the two differ sharply in floating point: the first
+  squares `A_G`'s condition number and leaves a SIGNED `O(ε‖G_c‖)` error on `M`'s
+  entries, unbounded *relative to `M`* wherever `N` sits where `G_c` is small. So
+  the caller — correctly reasoning that a Gram restricted to a subspace cannot be
+  indefinite — refused, at `eigenvalue −3.31e-5 below tolerance −1.30e-11`, on
+  four of four measure-jet sweep cases. The eigenpairs now come from an SVD of
+  `B = A_G N` and `M` is never formed, so the indefiniteness branch is gone
+  because indefiniteness is impossible rather than unlikely. This is the #2318
+  rule — *rank revelation acts on `A`, not on `AᵀA`* — which the sibling
+  `null(S_c)` computation twenty lines above already followed.
+
+- **The measure-jet interval band omitted the third variance term its own file
+  declares (#2761, #2752).** `measure_jet_web_quality_contracts` was failing at
+  coverage `0.3648` against `[0.85, 1.0]`, and it is not the basis, not `λ`, and
+  not the covariance. The fitted design's span floor on the noiseless truth is
+  `0.0024` against a held-out bias of `0.0301` — `12.5×`, so the basis can
+  represent this target. Refitting the same design at scaled `λ` over six
+  decades leaves the bias between `0.0221` (essentially unpenalized, `edf` 23.9)
+  and `0.0301`, so no `λ` makes the band honest and over-smoothing is refuted.
+  And the control settles it: refitting on training rows whose coordinates are
+  CLEAN — same latents, same `y` draw, everything else identical — the SHIPPED
+  two-term band covers at `0.9843`.
+
+  What remains is errors-in-variables, and it is the confound the fixture's own
+  header identifies — but the header fixed only the QUERY half. It moved the
+  query rows to clean on-web locations (correct) and left the TRAINING rows at
+  `embed(z) + ε`, so the fit is a consistent estimator of `E[y | x_observed]`,
+  displaced from `f` at an exactly-known location by
+  `σ_coord·‖∇f‖ = 0.02 × 1.5 = 0.030` — the measured `0.0301` to two digits.
+  That term is contract 6 of the same file, with `σ_coord` estimated at fit and
+  frozen and its `∇f̂` FD-gated against the fit's own `η`; contract 5 simply never
+  consumed it. Both contracts now read one producer and contract 6 asserts the
+  band's number IS its own reconstruction, so they cannot drift into two
+  definitions of `Var_input`. Coverage `0.3648 → 0.8871` with the window
+  unchanged.
+
 - **`Σ` in the marginal-slope identity is `Var(z | a)`, and the fit was
   supplying one global matrix (#2766).** `bms/gradient_paths.rs` writes the
   identity the whole marginal-slope family is defined by as
