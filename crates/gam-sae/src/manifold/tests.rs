@@ -4237,7 +4237,9 @@ fn laplace_value_and_gradient_are_route_invariant_2515() {
             &loss,
             &cache,
             &solver,
-            Some(BundleEvidenceGeometry::Majorizer {
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &cache,
                 probes: &probes,
                 sinv: &sinv,
             }),
@@ -4441,7 +4443,9 @@ fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
             &loss,
             &cache,
             &solver,
-            Some(BundleEvidenceGeometry::Majorizer {
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &cache,
                 probes: &probes,
                 sinv: &sinv,
             }),
@@ -5288,7 +5292,9 @@ fn zz_measure_smoothness_dof_bundle_vs_deflated_2499() {
             &loss,
             &cache,
             &solver,
-            Some(BundleEvidenceGeometry::Majorizer {
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &cache,
                 probes: &probes,
                 sinv: &sinv,
             }),

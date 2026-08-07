@@ -912,7 +912,9 @@ fn complete_matrix_free_outer_gradient_matches_dense_softmax() {
             &loss,
             &cache,
             &plain_solver,
-            Some(BundleEvidenceGeometry::Majorizer {
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &cache,
                 probes: &probes,
                 sinv: &inverse_probes,
             }),

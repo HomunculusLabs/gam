@@ -682,7 +682,9 @@ fn complete_outer_gradient_deflation_contribution_is_route_independent_2712() {
                 &loss,
                 cache,
                 &solver,
-                Some(BundleEvidenceGeometry::Majorizer {
+                Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache,
                 probes: &probes,
                 sinv: &sinv,
             }),

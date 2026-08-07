@@ -1243,7 +1243,8 @@ impl SaeManifoldOuterObjective {
                     // scale that `solve_exact_stationarity_matrix_free` rebuilds
                     // `A = B + ΔC` on top of, and promoting it would double-count
                     // `ΔC`.
-                    Some(BundleEvidenceGeometry::ExactObservedInformation {
+                    Some(BundleEvidenceGeometry {
+                        operator: EvidenceOperator::ExactObservedInformation,
                         cache: &matrix_free.exact_a_cache,
                         probes: derivative_vectors,
                         sinv: derivative_vectors,

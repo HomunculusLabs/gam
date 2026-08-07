@@ -261,88 +261,53 @@ impl EvidenceOperator {
 }
 
 /// #2515 — the selected-inverse evidence a bundle-routed outer ρ-gradient
-/// contracts, as a type whose VARIANT names the operator.
+/// contracts, and there is exactly ONE: the exact observed information
+/// `A = B + ΔC = ∇²_θθ L`.
 ///
 /// The from-probes channels reconstruct the arrow inverse blocks as
 /// `(H⁻¹)_tt = A_i⁻¹ + G_i S⁻¹ G_iᵀ` and `(H⁻¹)_tβ = −G_i S⁻¹`: the row factors
 /// `A_i` and cross blocks come from a factor CACHE, and `S⁻¹` comes from the
-/// probe bundle. Those two must be factorizations of the same operator. Before
-/// this type existed the production streaming lane paired a bundle built on
-/// `exact_a_evidence_system`'s reduced Schur with the `B` row-factor cache from
-/// `converge_inner_for_undamped_logdet` — reconstructing an inverse that belongs
-/// to neither operator.
+/// probe bundle. Those two must factor the SAME operator. Before this type
+/// existed the streaming lane paired a bundle built on `exact_a_evidence_system`'s
+/// reduced Schur with the `B` row-factor cache from
+/// `converge_inner_for_undamped_logdet`, reconstructing an inverse belonging to
+/// neither.
 ///
-/// [`Self::ExactObservedInformation`] therefore carries its OWN cache. The
-/// `cache` argument passed alongside it stays the `B` stationarity geometry that
+/// Carrying the cache HERE, rather than reading it off the assembler's `cache`
+/// argument, is what makes that mixture unrepresentable. `cache` stays the `B`
+/// stationarity geometry that
 /// [`SaeManifoldTerm::solve_exact_stationarity_matrix_free`] reassembles
-/// `A = B + ΔC` on top of; promoting that one to `A` would double-count `ΔC`.
-/// Making the cache part of the variant is what makes the mixed state
-/// unrepresentable rather than merely discouraged.
-pub(crate) enum BundleEvidenceGeometry<'a> {
-    /// The Arrow--Schur majorizer `B`. Its row factors ARE the `cache` argument
-    /// already passed alongside, so this variant carries only the bundle.
-    ///
-    /// **`#[cfg(test)]` on purpose.** Since the streaming lane was wired to
-    /// `matrix_free_arrow_evidence_evaluation`, no production route mints a
-    /// `B`-rooted bundle for this assembler: the criterion it feeds ranks
-    /// `½log|S_A|`, so a `B`-rooted derivative would differentiate an operator the
-    /// value never ranked. Gating the variant on `cfg(test)` is what makes that a
-    /// compile-time fact rather than a convention — a future route that wants a
-    /// `B` gradient has to delete this attribute and argue for it. The regression
-    /// gates that pin the from-probes reconstruction against its dense sibling on
-    /// the majorizer (#2712, #2080) keep using it, because THAT contract is about
-    /// the reconstruction machinery and is operator-agnostic.
-    #[cfg(test)]
-    Majorizer {
-        probes: &'a [Array1<f64>],
-        sinv: &'a [Array1<f64>],
-    },
-    /// The exact observed information `A = B + ΔC`, with the factor cache of the
-    /// arrow system whose reduced Schur produced `sinv`.
-    ExactObservedInformation {
-        cache: &'a ArrowFactorCache,
-        probes: &'a [Array1<f64>],
-        sinv: &'a [Array1<f64>],
-    },
-}
-
-impl<'a> BundleEvidenceGeometry<'a> {
-    #[must_use]
-    pub(crate) fn operator(&self) -> EvidenceOperator {
-        match self {
-            #[cfg(test)]
-            Self::Majorizer { .. } => EvidenceOperator::Majorizer,
-            Self::ExactObservedInformation { .. } => EvidenceOperator::ExactObservedInformation,
-        }
-    }
-
-    /// `(probes, S⁻¹·probes)` — for the rational lane these are the identical
-    /// weighted vectors emitted by `RationalLogdetPlan::into_directional_-
-    /// derivative_bundle`, so every contraction is the derivative of the SAME
-    /// shifted rational value rather than a separately sampled `S⁻¹`.
-    #[must_use]
-    pub(crate) fn probes(&self) -> (&'a [Array1<f64>], &'a [Array1<f64>]) {
-        match *self {
-            #[cfg(test)]
-            Self::Majorizer { probes, sinv } => (probes, sinv),
-            Self::ExactObservedInformation { probes, sinv, .. } => (probes, sinv),
-        }
-    }
-
-    /// The factor cache whose row geometry the from-probes channels reconstruct
-    /// the arrow inverse blocks from. `Majorizer` has no cache of its own — its
-    /// row factors are the caller's `B` cache — so it returns that one.
-    #[must_use]
-    pub(crate) fn evidence_cache<'b>(
-        &'b self,
-        #[cfg_attr(not(test), allow(unused_variables))] majorizer: &'b ArrowFactorCache,
-    ) -> &'b ArrowFactorCache {
-        match *self {
-            #[cfg(test)]
-            Self::Majorizer { .. } => majorizer,
-            Self::ExactObservedInformation { cache, .. } => cache,
-        }
-    }
+/// `A = B + ΔC` on top of; promoting it to `A` would double-count `ΔC`.
+///
+/// PRODUCTION ALWAYS MINTS `ExactObservedInformation`, from one place: the
+/// `StreamingEvidenceArtifacts` of a single gradient-bearing evidence
+/// evaluation, where the cache and the bundle were produced by one
+/// factorization of one system and cannot be paired across evaluations. The
+/// criterion that route feeds ranks `½log|S_A|` —
+/// `rank_adjusted_quasi_laplace_complexity` takes `½(log_det − log_det_tt)` and
+/// both come off `exact_a_evidence_system`, so the per-row t-block
+/// log-determinants cancel and the reduced Schur of `A` is the whole operator
+/// exposure — so a `B`-rooted derivative here would differentiate an operator
+/// the value never ranked. That was #2515.
+///
+/// `Majorizer` is kept reachable for the regression gates that pin the
+/// from-probes RECONSTRUCTION against its dense sibling (#2712, #2080): that
+/// contract is about the reconstruction machinery and holds for either operator,
+/// so forcing those fixtures onto an exact-`A` geometry their states may not even
+/// admit would test less, not more.
+pub(crate) struct BundleEvidenceGeometry<'a> {
+    /// Which operator `cache` and `sinv` BOTH factor.
+    pub(crate) operator: EvidenceOperator,
+    /// Factor cache of the arrow system whose reduced Schur produced `sinv`.
+    /// Distinct from the assembler's `cache`, which stays `B` on every route.
+    pub(crate) cache: &'a ArrowFactorCache,
+    /// `(probes, S_A⁻¹·probes)`. For the rational lane these are the identical
+    /// weighted vectors emitted by
+    /// `RationalLogdetPlan::into_directional_derivative_bundle`, so every
+    /// contraction is the derivative of the SAME shifted rational value rather
+    /// than a separately sampled `S⁻¹`.
+    pub(crate) probes: &'a [Array1<f64>],
+    pub(crate) sinv: &'a [Array1<f64>],
 }
 
 /// Certified exact-stationarity solve for a genuinely matrix-free operator.
@@ -1929,6 +1894,56 @@ impl SaeManifoldTerm {
     /// `l` the number of LOGIT derivatives among `{a,w}`, on the coord axes of the
     /// rest; nonzero only when `a,w` both touch `kβ`. `l≥1` uses the ordered-BB
     /// logistic-gate derivatives; skipped for other modes (softmax follow-on).
+    /// #2330 Patch D — one row's `error_metric = √w·M·r` in OUTPUT space, the
+    /// object `apply_exact_hessian_minus_b` contracts `ΔC` against.
+    ///
+    /// Built exactly as that assembler builds it: the fitted row is the
+    /// assignment-weighted decode over this row's ACTIVE atoms, the residual is
+    /// scaled by `√w` before the metric, and the whitening metric is applied only
+    /// where the row jets are whitened — so a plain dot of this against a jet
+    /// reconstitutes the same `w`-weighted `M`-inner product the assembly uses.
+    ///
+    /// #2515 — extracted so the dense θ-adjoint, its from-probes sibling, and the
+    /// coordinate-block leg all build it ONCE rather than three times. A route
+    /// that reconstructed the residual with a different weighting would produce a
+    /// Patch-D leg that silently disagreed with the operator it is supposed to
+    /// differentiate, which is the failure this whole front is about.
+    pub(crate) fn patchd_row_error_metric(
+        &self,
+        row: usize,
+        w_row: f64,
+        target: ArrayView2<'_, f64>,
+        assignments: &Array1<f64>,
+        whiten_row_jets: bool,
+    ) -> Vec<f64> {
+        let p_out = self.output_dim();
+        let sqrt_w = w_row.sqrt();
+        let active_atoms = self
+            .last_row_layout
+            .as_ref()
+            .map(|layout| layout.active_atoms[row].as_slice());
+        let mut fitted = vec![0.0_f64; p_out];
+        let mut decoded = vec![0.0_f64; p_out];
+        for k in 0..self.k_atoms() {
+            if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
+                continue;
+            }
+            self.atoms[k].fill_decoded_row(row, &mut decoded);
+            let a_k = assignments[k];
+            for out in 0..p_out {
+                fitted[out] += a_k * decoded[out];
+            }
+        }
+        let mut err = Array1::<f64>::zeros(p_out);
+        for out in 0..p_out {
+            err[out] = sqrt_w * (fitted[out] - target[[row, out]]);
+        }
+        match self.row_metric.as_ref() {
+            Some(metric) if whiten_row_jets => metric.apply_metric_row(row, err.view()),
+            _ => err.to_vec(),
+        }
+    }
+
     fn patchd_residual_third_leg_beta(
         &self,
         ctx: &PatchDResidualCtx<'_>,
@@ -2202,7 +2217,6 @@ impl SaeManifoldTerm {
             AssignmentMode::OrderedBetaBernoulli { temperature, .. } => 1.0 / temperature,
             _ => 0.0,
         };
-        let p_out = self.output_dim();
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
             std::collections::VecDeque::new();
         let mut jet_window_next = 0usize;
@@ -2236,31 +2250,7 @@ impl SaeManifoldTerm {
             // built EXACTLY as `apply_exact_hessian_minus_b` builds the object it
             // contracts ΔC against (√w residual, then whitening metric applied).
             let patchd_error_metric: Option<Vec<f64>> = patchd_residual.map(|tgt| {
-                let sqrt_w = w_row.sqrt();
-                let active_atoms = self
-                    .last_row_layout
-                    .as_ref()
-                    .map(|layout| layout.active_atoms[row].as_slice());
-                let mut fitted = vec![0.0_f64; p_out];
-                let mut decoded = vec![0.0_f64; p_out];
-                for k in 0..k_atoms {
-                    if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
-                        continue;
-                    }
-                    self.atoms[k].fill_decoded_row(row, &mut decoded);
-                    let a_k = assignments[k];
-                    for out in 0..p_out {
-                        fitted[out] += a_k * decoded[out];
-                    }
-                }
-                let mut err = Array1::<f64>::zeros(p_out);
-                for out in 0..p_out {
-                    err[out] = sqrt_w * (fitted[out] - tgt[[row, out]]);
-                }
-                match self.row_metric.as_ref() {
-                    Some(metric) if whiten_row_jets => metric.apply_metric_row(row, err.view()),
-                    _ => err.to_vec(),
-                }
+                self.patchd_row_error_metric(row, w_row, tgt, &assignments, whiten_row_jets)
             });
             let patchd_sqrt_w = w_row.sqrt();
             let patchd_ctx: Option<PatchDResidualCtx<'_>> =
@@ -3006,14 +2996,17 @@ impl SaeManifoldTerm {
         // arrow inverse from; `evidence_operator` is which operator's ρ/θ
         // derivative the curvature channels differentiate. All three come from
         // one value, so they cannot name different operators.
-        let logdet_derivative_bundle = evidence.as_ref().map(BundleEvidenceGeometry::probes);
-        let evidence_cache = match evidence.as_ref() {
-            Some(geometry) => geometry.evidence_cache(cache),
-            None => cache,
-        };
+        //
+        // No bundle ⇒ the dense `DeflatedArrowSolver` selected inverse on the
+        // caller's `cache`, which is `B`. A bundle ⇒ the exact observed
+        // information, carried with its own cache.
+        let logdet_derivative_bundle = evidence
+            .as_ref()
+            .map(|geometry| (geometry.probes, geometry.sinv));
+        let evidence_cache = evidence.as_ref().map_or(cache, |geometry| geometry.cache);
         let evidence_operator = evidence
             .as_ref()
-            .map_or(EvidenceOperator::Majorizer, BundleEvidenceGeometry::operator);
+            .map_or(EvidenceOperator::Majorizer, |geometry| geometry.operator);
         let n_params = rho.to_flat().len();
         let mut explicit = Array1::<f64>::zeros(n_params);
         let mut logdet_trace = Array1::<f64>::zeros(n_params);

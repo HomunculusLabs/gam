@@ -456,14 +456,17 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
     for (label, geometry) in [
         (
             "Majorizer",
-            BundleEvidenceGeometry::Majorizer {
+            BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &b_cache,
                 probes: &b_probes,
                 sinv: &b_sinv,
             },
         ),
         (
             "ExactObservedInformation",
-            BundleEvidenceGeometry::ExactObservedInformation {
+            BundleEvidenceGeometry {
+                operator: EvidenceOperator::ExactObservedInformation,
                 cache: &a_cache,
                 probes: &a_probes,
                 sinv: &a_sinv,
