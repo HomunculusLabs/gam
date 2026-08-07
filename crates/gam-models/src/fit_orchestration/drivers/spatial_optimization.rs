@@ -2321,21 +2321,54 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // is this rule for a special case; state the rule instead. The narrower
     // joint box stays the DEFAULT search region — it is a good prior on where a
     // joint [ρ, ψ] search stays well conditioned — and is widened per
-    // coordinate, never narrowed, only as far as the incumbent, and never past
-    // the engine's own `RHO_BOUND`.
+    // coordinate, never narrowed, and never past the engine's own `RHO_BOUND`.
+    //
+    // WIDENED TO THE ENGINE'S BOX, NOT TO THE INCUMBENT (gam#2760). The first
+    // version of this rule widened `only as far as the incumbent`:
+    // `(-JOINT_RHO_BOUND).min(seed)`. That makes the compared point a member of
+    // the closed feasible set and puts it exactly ON the boundary, which is a
+    // different and much worse thing: the coordinate is an ACTIVE constraint
+    // from iteration zero, its outward gradient is KKT-projected to zero, and it
+    // can never descend — even when the joint criterion, at the ψ the search is
+    // about to move to, wants it strictly lower. Containment is not the property
+    // this route needs; the property is that the graded point is INTERIOR, so
+    // the joint search may go wherever the joint criterion takes it.
+    //
+    // MEASURED (gam#2760, `probe_2760_pg_and_bound_at_every_rung`, noiseless
+    // 1-D Duchon `y = sin(t)`, 12 centers, 5 penalties). REML drives λ̂ down as
+    // `n` grows, so the incumbents cross −`JOINT_RHO_BOUND` one at a time:
+    // 4 of 5 coordinates are pasted onto the wall at n = 1 000 … 8 000, and all
+    // 5 at n = 16 000, where coordinate 0's incumbent reaches −12.347. There the
+    // joint gradient at the wall is `∂V/∂ρ₀ = +1.484` — larger than the entire
+    // stationarity bound 1.030 — so 78 % of `|g|` is a direction the box clips
+    // to zero. The BFGS direction is dominated by it, no step reproduces the
+    // predicted decrease, and the line search dies (`StepSizeTooSmall`, 50
+    // attempts, 6 outer iterations) leaving the LENGTH SCALE non-stationary:
+    // `|Pg| = |∂V/∂ψ| = 1.190` against bound 1.030. The refusal reads as an
+    // iso-κ search failure and is a feasible-set failure one coordinate away.
+    //
+    // The rule below: a coordinate whose incumbent is not strictly inside the
+    // joint prior has had that prior FALSIFIED by the data, so it falls back to
+    // the box the incumbent was actually found in — the engine's ±`RHO_BOUND`,
+    // the scalar-ρ route's own search region. Every coordinate whose incumbent
+    // is strictly inside ±`JOINT_RHO_BOUND` keeps the historical box
+    // byte-for-byte, which is every ρ coordinate of every fit that was not
+    // already being pinned by the old rule. A coordinate whose incumbent sits AT
+    // ±`RHO_BOUND` stays on that bound — but that is the scalar route's own
+    // certified rail, shared by both routes, not one this route manufactured.
     let rho_seed = best.fit.lambdas.mapv(f64::ln);
     let rho_lower = Array1::<f64>::from_shape_fn(rho_dim, |k| {
         let seed = rho_seed[k];
-        if seed.is_finite() {
-            (-JOINT_RHO_BOUND).min(seed).max(-gam_solve::estimate::RHO_BOUND)
+        if seed.is_finite() && seed <= -JOINT_RHO_BOUND {
+            -gam_solve::estimate::RHO_BOUND
         } else {
             -JOINT_RHO_BOUND
         }
     });
     let rho_upper = Array1::<f64>::from_shape_fn(rho_dim, |k| {
         let seed = rho_seed[k];
-        if seed.is_finite() {
-            rho_upper_bound.max(seed).min(gam_solve::estimate::RHO_BOUND)
+        if seed.is_finite() && seed >= rho_upper_bound {
+            gam_solve::estimate::RHO_BOUND
         } else {
             rho_upper_bound
         }
@@ -2345,8 +2378,11 @@ fn try_exact_joint_spatial_length_scale_optimization(
         .collect();
     if !widened.is_empty() {
         log::info!(
-            "[spatial-kappa] joint rho box widened to contain the incumbent on \
-             coordinate(s) {widened:?}: seed={:?} box=[{:?}, {:?}]",
+            "[spatial-kappa] joint rho box fell back to the engine's own +/-RHO_BOUND on \
+             coordinate(s) {widened:?}: their incumbent is not strictly inside the joint \
+             +/-{JOINT_RHO_BOUND} prior, so the prior is falsified there and the search \
+             region becomes the one the incumbent was found in (gam#2760). \
+             seed={:?} box=[{:?}, {:?}]",
             rho_seed.to_vec(),
             rho_lower.to_vec(),
             rho_upper.to_vec(),
