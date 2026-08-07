@@ -229,36 +229,16 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // covariance does not move. One robust Rao score test per score PAIR, on the
     // SAME conditioning span the gam#2768 gate just used and at the same level,
     // decides that; when it fires the fit consumes a materialised `Σ(a_i)` per
-    // row instead. The gate needs the calibrated score, which is why it is
-    // sequenced after the latent-measure gate and not beside it.
-    let score_covariance = match latent_calibration.conditioning.as_ref() {
-        Some(conditioning) => {
-            match crate::bms::ConditionalScoreCovariance::fit(
-                spec.z.view(),
-                spec.weights.view(),
-                conditioning.view(),
-            )? {
-                Some(model) => {
-                    log::info!(
-                        "[survival-marginal-slope] conditional score covariance ENGAGED on K={} \
-                         scores: pair Rao p-values {:?}",
-                        model.score_dim,
-                        model.pair_pvalues,
-                    );
-                    ScoreCovarianceField::conditional(
-                        pooled_score_covariance.clone(),
-                        model,
-                        conditioning.view(),
-                    )?
-                }
-                None => ScoreCovarianceField::pooled(pooled_score_covariance.clone()),
-            }
-        }
-        // No conditioning block (the #461 absorber suppressed it), so there is
-        // no span to condition `Σ` on and the pooled object is the only defined
-        // answer.
-        None => ScoreCovarianceField::pooled(pooled_score_covariance.clone()),
-    };
+    // row instead. It is sequenced here, after the latent-measure gate, because
+    // it must see the calibrated score the kernel will see.
+    let score_covariance = resolve_score_covariance_field(
+        spec.z.view(),
+        spec.weights.view(),
+        latent_calibration
+            .conditioning
+            .as_ref()
+            .map(|design| design.view()),
+    )?;
     let z_primary = spec.z.column(0).to_owned();
     let baseline_started = std::time::Instant::now();
     let baseline_slope = pooled_survival_baseline(

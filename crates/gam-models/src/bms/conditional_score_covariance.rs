@@ -95,6 +95,22 @@
 //! outside the training hull could return an arbitrarily large `Σ(a)` from a
 //! model that had no evidence there.
 //!
+//! # What `Σ(a)` is a moment OF, and why the ordering with gam#2768 matters
+//!
+//! The estimated object is the conditional SECOND CENTRAL MOMENT about the
+//! weighted GLOBAL score mean, `E[(z − z̄)(z − z̄)ᵀ | a]` — which is what makes
+//! the no-escalation limit of this model exactly the pooled
+//! `marginal_slope_covariance_from_scores` object it refines, rather than
+//! something merely close to it.
+//!
+//! That equals `Var(z | a)` precisely when `E[z | a]` is constant. It is, by the
+//! time this runs: the gam#2768 per-coordinate gate is sequenced FIRST, and it
+//! either removes a detected conditional mean (`ζ = (z − m(a))/√v(a)`) or
+//! certifies at the same `α` that there is none to remove. Running the two in
+//! the other order would be wrong in both directions — this model would absorb
+//! mean structure into a "covariance", and the mean gate would then be
+//! correcting an axis whose scale had already moved.
+//!
 //! # `K = 1` is deliberately out of scope
 //!
 //! At `K = 1` there is no off-diagonal, and `Var(z|a)` is gam#2768's
@@ -108,7 +124,6 @@ use super::{
     AUTO_Z_CONDITIONAL_RAO_ALPHA, AUTO_Z_CONDITIONAL_RIDGE_REL, MarginalSlopeCovariance,
     build_intercept_basis, robust_conditional_score_pvalue,
 };
-use gam_linalg::faer_ndarray::FaerCholesky;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
@@ -660,6 +675,11 @@ fn fit_autoregression(
 /// exact loop rather than the log-of-squares linear regression (Harvey's
 /// two-step), whose intercept carries the `E[log χ²₁] = −1.2704` bias and whose
 /// slopes are inefficient.
+///
+/// The step is literally a weighted least-squares fit of `u_i = ε_i²/d_i − 1` on
+/// `A`, so it is taken with the same regularised primitive the coupling stage
+/// uses; the two then degrade identically on a rank-deficient span instead of
+/// one of them having its own hand-rolled normal equations.
 fn fit_log_innovation(
     residual: &[f64],
     basis: ArrayView2<'_, f64>,
@@ -697,60 +717,49 @@ fn fit_log_innovation(
     let width = basis.ncols();
     let mut gamma = vec![0.0_f64; width];
     gamma[0] = homoskedastic.ln();
-    let mut information = Array2::<f64>::zeros((width, width));
-    for row in 0..n {
-        let weight = weights[row];
-        if !(weight > 0.0) {
-            continue;
-        }
-        for left in 0..width {
-            let scaled = weight * basis[[row, left]];
-            for right in 0..width {
-                information[[left, right]] += scaled * basis[[row, right]];
-            }
-        }
-    }
-    // The same relative ridge the conditional location-scale stages use, for
-    // the same reason: a penalised-spline marginal index is routinely
-    // rank-deficient and the scoring step must still factorise.
-    for column in 0..width {
-        let diagonal = information[[column, column]].max(f64::MIN_POSITIVE);
-        information[[column, column]] = diagonal * (1.0 + AUTO_Z_CONDITIONAL_RIDGE_REL);
-    }
-    let information_factor = information.cholesky(faer::Side::Lower).map_err(|error| {
-        format!(
-            "conditional score covariance log-variance information is not factorisable: {error}"
-        )
-    })?;
+    // Fisher scoring. The step `Δγ = (AᵀWA)⁻¹ AᵀW u` with `u_i = ε_i²/d_i − 1` IS
+    // a weighted least-squares fit of `u` on `A`, so it is taken with the same
+    // regularised primitive every other stage of this module uses rather than a
+    // hand-rolled normal-equation solve: a penalised-spline conditioning span is
+    // routinely rank-deficient, and the two must degrade identically.
+    let mut deviation = Array1::<f64>::zeros(n);
     let mut converged = false;
+    let mut previous_step = f64::INFINITY;
     for _ in 0..LOG_INNOVATION_MAX_ITERATIONS {
-        let mut score = Array1::<f64>::zeros(width);
+        let mut largest_linear = 0.0_f64;
         for row in 0..n {
-            let weight = weights[row];
-            if !(weight > 0.0) {
-                continue;
-            }
-            let mut linear = 0.0;
+            let mut value = 0.0;
             for column in 0..width {
-                linear += gamma[column] * basis[[row, column]];
+                value += gamma[column] * basis[[row, column]];
             }
-            let variance = linear.exp();
+            let variance = value.exp();
             if !(variance.is_finite() && variance > 0.0) {
                 return Err(format!(
                     "conditional score covariance log-variance iterate left the representable \
-                     range at row {row}: log d = {linear}"
+                     range at row {row}: log d = {value}"
                 ));
             }
-            let deviation = residual[row] * residual[row] / variance - 1.0;
-            for column in 0..width {
-                score[column] += weight * basis[[row, column]] * deviation;
-            }
+            largest_linear = largest_linear.max(value.abs());
+            deviation[row] = residual[row] * residual[row] / variance - 1.0;
         }
-        let step = information_factor.solvevec(&score);
-        let mut largest = 0.0_f64;
+        let (step, _) = weighted_ridge_columns(
+            basis,
+            deviation.as_slice().expect("deviation is standard layout"),
+            weights,
+        )?;
+        let mut largest_move = 0.0_f64;
+        for row in 0..n {
+            if !(weights[row] > 0.0) {
+                continue;
+            }
+            let mut moved = 0.0;
+            for column in 0..width {
+                moved += step[column] * basis[[row, column]];
+            }
+            largest_move = largest_move.max(moved.abs());
+        }
         for column in 0..width {
             gamma[column] += step[column];
-            largest = largest.max(step[column].abs());
         }
         if !gamma.iter().all(|value| value.is_finite()) {
             return Err(
@@ -759,13 +768,18 @@ fn fit_log_innovation(
                     .to_string(),
             );
         }
-        // The criterion is the score's own scale: the step is exact Newton on a
-        // strictly concave objective, so a step below the working precision of
-        // the coefficient it moves cannot change the fitted variance.
-        if largest <= 1.0e-10 * (1.0 + gamma.iter().fold(0.0_f64, |m, v| m.max(v.abs()))) {
+        // Two derived stopping rules, no chosen tolerance. The first: the step no
+        // longer moves the fitted `log d` by as much as a floating-point unit in
+        // its own last place, so it cannot change the variance the row program
+        // reads. The second: the step stopped shrinking, which on a strictly
+        // concave objective with a quadratically convergent iteration means the
+        // round-off floor was reached and further steps are noise.
+        let resolution = f64::EPSILON * (1.0 + largest_linear);
+        if largest_move <= resolution || largest_move >= previous_step {
             converged = true;
             break;
         }
+        previous_step = largest_move;
     }
     if !converged {
         return Err(format!(
@@ -973,22 +987,63 @@ mod tests {
         );
     }
 
-    /// A constant conditional covariance must NOT escalate. A trigger-happy
-    /// gate would install a fitted covariance field on every multi-score fit,
-    /// which is a worse failure than the one it exists to prevent: the pooled
-    /// object is exactly right when the covariance really is constant.
+    /// The escalation gate must hold its SIZE. A trigger-happy gate would
+    /// install a fitted covariance field on every multi-score fit, replacing an
+    /// exactly-correct pooled object with an estimated one — a worse trade than
+    /// the defect it exists to fix.
+    ///
+    /// Size, not one sample. The gate is a level-`AUTO_Z_CONDITIONAL_RAO_ALPHA`
+    /// hypothesis test, so "it did not fire on this null sample" is an assertion
+    /// about a `1 − α` event and a single unlucky draw would make it red for a
+    /// reason that is not a defect. (It does happen: at `n = 40000` the first
+    /// seed tried here drew `|Z| = 3.31`, `p = 9.2e-4`, just inside `α = 1e-3`.)
+    /// What is actually claimed is the escalation RATE over a bank of null
+    /// replicates, and the bound is derived rather than chosen: with
+    /// `R = REPLICATES` draws at level `α`, the escalation count is
+    /// `Binomial(R, α)`, and `MAX_NULL_ESCALATIONS` is the smallest `k` for
+    /// which `P(Binomial(R, α) > k) < α` — i.e. the smallest bound that makes
+    /// THIS test's own false-alarm rate no worse than the gate's. At `R = 32`,
+    /// `α = 1e-3`: `P(X ≥ 1) = 3.2e-2` (too loose), `P(X ≥ 2) = 4.9e-4 < α`, so
+    /// `k = 1`.
     #[test]
-    fn stays_quiet_on_a_constant_conditional_covariance() {
-        let n = 40_000;
-        let (scores, weights, a_block) =
-            in_class_fixture(n, [0.4, 0.0], [(0.75_f64).ln(), 0.0], 0.0);
-        let decision =
-            ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
-                .expect("fit");
+    fn the_escalation_gate_holds_its_size_on_null_replicates() {
+        const REPLICATES: usize = 32;
+        const MAX_NULL_ESCALATIONS: usize = 1;
+        let n = 4_000;
+        let mut escalations = Vec::new();
+        for replicate in 0..REPLICATES {
+            let (scores, weights, a_block) = null_fixture(n, replicate as u64);
+            if ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+                .expect("fit")
+                .is_some()
+            {
+                escalations.push(replicate);
+            }
+        }
         assert!(
-            decision.is_none(),
-            "a constant Cov(z_j, z_k | a) must leave the pooled Σ in place"
+            escalations.len() <= MAX_NULL_ESCALATIONS,
+            "the pair gate escalated on {} of {REPLICATES} null replicates (bound \
+             {MAX_NULL_ESCALATIONS}): {escalations:?}",
+            escalations.len()
         );
+    }
+
+    /// The same fixture shape as [`in_class_fixture`] with every `a`-varying
+    /// coefficient set to zero, so `Cov(z₀, z₁ | a)` is constant by
+    /// construction, seeded per replicate.
+    fn null_fixture(n: usize, replicate: u64) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+        let base = 0x2766_0000_u64 + replicate * 3;
+        let x = standardized(gaussians(n, base));
+        let e0 = standardized(gaussians(n, base + 1));
+        let e1 = standardized(gaussians(n, base + 2));
+        let mut scores = Array2::<f64>::zeros((n, 2));
+        let mut a_block = Array2::<f64>::zeros((n, 1));
+        for row in 0..n {
+            a_block[[row, 0]] = x[row];
+            scores[[row, 0]] = e0[row];
+            scores[[row, 1]] = 0.4 * e0[row] + (0.75_f64).sqrt() * e1[row];
+        }
+        (scores, Array1::<f64>::ones(n), a_block)
     }
 
     /// `K = 1` has no off-diagonal, and its conditional variance is gam#2768's

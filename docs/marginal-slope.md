@@ -245,6 +245,59 @@ for the first stage's estimation error, or is withheld with a typed reason
 if the fit's shape cannot supply the correction. It is never published
 uncorrected.
 
+### Several scores at once, and the covariance between them
+
+The survival family accepts more than one latent score — one `z(...)`
+surface per score in `logslope_formula=`, each with its own log-slope
+surface. With `K` scores the row index is
+
+```text
+η = c(a)·q(t, a) + Σ_k r_k(a)·z_k ,
+```
+
+and the identity above generalises to
+
+```text
+E_z[Φ(−η) | a] = Φ(−q(t, a))     ⟺     c(a) = √(1 + r(a)ᵀ Σ(a) r(a)) ,
+```
+
+with `Σ(a) = Var(z | a)` the **conditional** covariance of the score
+vector. Only the diagonal of that is reachable by the per-coordinate gate
+above: it standardises each `z_k` given `C`, which forces
+`Var(z_k | a) = 1`, and leaves `Cov(z_j, z_k | a)` untouched. Two scores
+can each be conditionally standard normal while their correlation moves
+across the covariate space — different ancestries, different genotyping
+arrays, different assay batches all do this — and then one pooled `Σ̄`
+gives the wrong `c` at every row. The consequence is not subtle: the
+realised marginal index becomes `q·c̄/c(a)`, so every marginal coefficient
+is multiplied by a covariate-dependent factor. Measured on a two-score
+sample whose conditional correlation moves over `±0.8`, that factor
+reaches **1.46**.
+
+So the fit tests for it. One robust Rao score test per score pair, on the
+same conditioning span and at the same level as the gate above, asks
+whether `Cov(z_j, z_k | a)` is constant. If no pair says otherwise, the
+pooled covariance is used unchanged. If one does, the fit estimates
+`Σ(a)` and every row gets its own `c(a)`.
+
+The estimated object is a **modified Cholesky** regression —
+`T(a)Σ(a)T(a)ᵀ = D(a)`, with `T` unit lower triangular and `log D(a)`
+linear in the conditioning span. That parameterisation is unconstrained,
+so `Σ(a)` is positive definite at every `a` including rows far outside
+the training data; each fitted linear predictor is additionally held to
+the range it took over the training rows, because a linear predictor is
+only identified on the range the sample explored.
+
+Two limits are worth stating plainly:
+
+- **`K = 1` is unaffected.** There is no off-diagonal, and `Var(z | a)` is
+  already the per-coordinate gate's business. A single-score fit is
+  bit-for-bit what it was.
+- **A fit that used a conditional `Σ(a)` cannot be saved yet.** It needs
+  `K ≥ 2`, and the saved-model contract carries one score column and one
+  score covariance. Saving is refused at the point of loss with the reason
+  attached, rather than failing later as a shape mismatch on load.
+
 ## Frailty in marginal-slope survival
 
 Survival marginal-slope supports no frailty, or

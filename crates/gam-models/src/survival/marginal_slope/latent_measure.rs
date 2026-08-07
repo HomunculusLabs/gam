@@ -213,6 +213,46 @@ pub(crate) fn resolve_latent_score_calibration_from_parts(
     })
 }
 
+/// Decide the score-covariance field the fit will consume (gam#2766).
+///
+/// Split out from [`fit_survival_marginal_slope_terms_impl`] for the same reason
+/// [`resolve_latent_score_calibration_from_parts`] is: the decision is about the
+/// calibrated scores, the weights and the conditioning block, and nothing else
+/// about a survival term spec bears on it — so it should be exercisable without
+/// standing up a whole fit.
+///
+/// `scores` must be the axis the row kernel will see, i.e. AFTER
+/// [`resolve_survival_latent_score_calibration`]. `Σ` is the covariance of the
+/// score the likelihood integrates over, so running this on the raw axis would
+/// model a different object than the one `c(a)` has to correct for.
+///
+/// Returns the pooled field when there is no conditioning block (the #461
+/// absorber suppressed it — there is then no span to condition on and the
+/// pooled matrix is the only defined answer), and when the pair-wise Rao gate
+/// does not fire.
+pub(crate) fn resolve_score_covariance_field(
+    scores: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    conditioning: Option<ArrayView2<'_, f64>>,
+) -> Result<ScoreCovarianceField, String> {
+    let pooled = marginal_slope_covariance_from_scores(scores, &weights.to_owned())?;
+    let Some(conditioning) = conditioning else {
+        return Ok(ScoreCovarianceField::pooled(pooled));
+    };
+    match crate::bms::ConditionalScoreCovariance::fit(scores, weights, conditioning)? {
+        Some(model) => {
+            log::info!(
+                "[survival-marginal-slope] conditional score covariance ENGAGED on K={} scores: \
+                 pair Rao p-values {:?}",
+                model.score_dim,
+                model.pair_pvalues,
+            );
+            ScoreCovarianceField::conditional(pooled, model, conditioning)
+        }
+        None => Ok(ScoreCovarianceField::pooled(pooled)),
+    }
+}
+
 fn calibration_label(calibration: &LatentMeasureCalibration) -> &'static str {
     match calibration {
         LatentMeasureCalibration::None => "identity",
@@ -386,6 +426,107 @@ mod tests {
             resolved.calibrated_scores, clean,
             "an unfired gate must leave the score untouched, byte for byte"
         );
+    }
+
+    /// `K = 2` scores whose conditional CORRELATION is `amplitude·x/√(1+x²)` and
+    /// whose conditional marginals are exactly `N(0,1)`. At `amplitude = 0` the
+    /// conditional covariance is constant. This is the gam#2766 shape: nothing
+    /// for the per-coordinate gate above to correct, everything in the
+    /// off-diagonal.
+    fn varying_correlation_fixture(
+        n: usize,
+        amplitude: f64,
+    ) -> (Array2<f64>, Array1<f64>, DesignMatrix) {
+        let x = standardized(gaussians(n, 0x2766_11));
+        let e0 = standardized(gaussians(n, 0x2766_22));
+        let e1 = standardized(gaussians(n, 0x2766_33));
+        let mut scores = Array2::<f64>::zeros((n, 2));
+        let mut design = Array2::<f64>::ones((n, 2));
+        for row in 0..n {
+            design[[row, 1]] = x[row];
+            let phi = amplitude * x[row] / (1.0 + x[row] * x[row]).sqrt();
+            scores[[row, 0]] = e0[row];
+            scores[[row, 1]] = phi * e0[row] + (1.0 - phi * phi).max(0.0).sqrt() * e1[row];
+        }
+        (
+            scores,
+            Array1::<f64>::ones(n),
+            DesignMatrix::Dense(DenseDesignMatrix::from(design)),
+        )
+    }
+
+    /// The fit installs a per-row `Σ(a_i)` when the pair gate fires, and the
+    /// rows genuinely differ. Without this the model and the row program could
+    /// both be right while the entry point never wires them together.
+    #[test]
+    fn the_fit_installs_a_conditional_field_when_the_pair_gate_fires() {
+        let n = 20_000;
+        let (scores, weights, design) = varying_correlation_fixture(n, 0.8);
+        let conditioning = design
+            .try_to_dense_arc("test conditioning")
+            .expect("dense conditioning");
+        let field = resolve_score_covariance_field(
+            scores.view(),
+            weights.view(),
+            Some(conditioning.view()),
+        )
+        .expect("field");
+        assert!(field.is_conditional(), "a varying Cov(z₀,z₁|a) must escalate");
+        assert_eq!(field.materialised_rows(), Some(n));
+        assert_eq!(field.dim(), 2);
+        // The correlation must track the planted sign across the covariate.
+        let correlation = |row: usize| {
+            let sigma = field.at_row(row).to_dense();
+            sigma[[0, 1]] / (sigma[[0, 0]] * sigma[[1, 1]]).sqrt()
+        };
+        let mut lowest = f64::INFINITY;
+        let mut highest = f64::NEG_INFINITY;
+        for row in 0..n {
+            let value = correlation(row);
+            lowest = lowest.min(value);
+            highest = highest.max(value);
+        }
+        assert!(
+            lowest < -0.4 && highest > 0.4,
+            "the installed field must span the planted correlation range; got [{lowest:.3}, {highest:.3}]"
+        );
+    }
+
+    /// A constant conditional covariance leaves the pooled object in place, and
+    /// so does a suppressed conditioning block: with no span to condition on the
+    /// pooled matrix is the only defined answer, which is the #461 absorber
+    /// seam one level up.
+    #[test]
+    fn the_fit_keeps_the_pooled_field_without_a_trigger_or_a_span() {
+        let n = 8_000;
+        let (scores, weights, design) = varying_correlation_fixture(n, 0.0);
+        let conditioning = design
+            .try_to_dense_arc("test conditioning")
+            .expect("dense conditioning");
+        let constant = resolve_score_covariance_field(
+            scores.view(),
+            weights.view(),
+            Some(conditioning.view()),
+        )
+        .expect("field");
+        assert!(
+            !constant.is_conditional(),
+            "a constant Cov(z₀,z₁|a) must leave the pooled Σ in place"
+        );
+
+        // Same scores, no conditioning block at all.
+        let (varying, weights, _) = varying_correlation_fixture(n, 0.8);
+        let suppressed =
+            resolve_score_covariance_field(varying.view(), weights.view(), None).expect("field");
+        assert!(
+            !suppressed.is_conditional(),
+            "with no conditioning span there is nothing to condition Σ on"
+        );
+        // And the pooled object it keeps is the one the fit would have built.
+        let expected = marginal_slope_covariance_from_scores(varying.view(), &weights)
+            .expect("pooled Σ")
+            .to_dense();
+        assert_eq!(suppressed.pooled_covariance().to_dense(), expected);
     }
 
     /// The #461 absorber seam: with a CTN Stage-1 influence absorber active the
