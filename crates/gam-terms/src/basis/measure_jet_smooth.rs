@@ -846,19 +846,21 @@ pub(crate) fn median_nearest_center_spacing(dist2: &Array2<f64>) -> Result<f64, 
 /// ## The section
 ///
 /// Whiten against the section's own center evaluation map,
-/// `E = K_cc Z = U Σ Vᵀ`: take `Z ← Z · V · diag(1/max(σ, √ε·σ_max))`, so the
+/// `E = K_cc Z = U Σ Vᵀ`: take `Z ← Z · V · diag(1/max(σ, √ε·‖K_cc‖))`, so the
 /// realized section satisfies `EᵀE = I` wherever `E` is resolvable and is
 /// *damped rather than deleted* below that. Two questions, two bars, and they
-/// are not the same question:
+/// are not the same question — but they share one anchor, and the anchor is
+/// `‖K_cc‖₂`, the norm of the operator whose product formed `E`, never `E`'s
+/// own largest singular value (which collapses; see the table at the bars):
 ///
-/// * **Does the direction exist?** `σ > ε·σ_max·max(dim)` — the standard
-///   numerical-rank bar of the decomposition. Below it there is nothing to
-///   carry.
+/// * **Does the direction exist?** `σ > ε·‖K_cc‖·max(dim)` — the backward-error
+///   bar of forming `E = K_cc·Z`. Below it there is no direction, only the
+///   roundoff of that product.
 /// * **How far may it be amplified?** `1/σ` is also the factor by which
 ///   direction `i` amplifies the design's own roundoff, and the criterion
 ///   squares the design into `XᵀWX`, so the amplification survives that Gram
-///   with significant digits exactly when `ε·(σ_max/σ_i)² < 1`. Hence the
-///   scaling — not the membership — is floored at `√ε·σ_max`.
+///   with significant digits exactly when `ε·(‖K_cc‖/σ_i)² < 1`. Hence the
+///   scaling — not the membership — is floored at `√ε·‖K_cc‖`.
 ///
 /// **Damping instead of deleting is what makes the width `ℓ`-invariant.** A
 /// span is invariant under ANY invertible diagonal rescaling, so a damped
@@ -934,18 +936,57 @@ fn condition_representer_section(
             context: "measure-jet representer section: right singular vectors were not returned",
         })
     })?;
-    // Membership: the standard numerical-rank bar of the decomposition. A
-    // direction below it is not a direction `E` has.
+    // Both bars are anchored on `‖K_cc‖₂`, NOT on `σ_max(E)`. `E = K_cc·Z` with
+    // orthonormal `Z`, so the computed `E` carries a backward error
+    // `O(ε·‖K_cc‖₂)` whatever `E`'s own size turns out to be — and `σ_max(E)`
+    // is not a fixed fraction of `‖K_cc‖₂`: it COLLAPSES as `ℓ` grows, because
+    // the constraint that makes `Z` head-orthogonal is exactly what annihilates
+    // the flat limit `K_cc → 𝟙𝟙ᵀ`. Measured on the 1-D sweep fixture (50
+    // centers, standardized `x`):
+    //
+    // ```text
+    //   ℓ      ‖K_cc‖₂  σ_max(E)  σ_max/‖K‖  σ_min(E)
+    //   0.05     2.4     2.29e+0   9.6e-1     5.5e-2
+    //   0.55    17.2     8.79e+0   5.1e-1     3.2e-16   <- σ_min is the roundoff
+    //   6.09    48.4     1.49e-2   3.1e-4     4.5e-17      floor, and it is FLAT
+    //  49.73    50.0     3.48e-6   7.0e-8     3.5e-17
+    // ```
+    //
+    // A bar relative to `σ_max(E)` therefore falls BELOW that flat roundoff
+    // floor once the range is long, and admits the floor itself as signal: at
+    // `ℓ = 11` a `ε·σ_max·dim` bar is `1.5e-17` against entries of `1.7e-17`,
+    // so all 48 directions "pass" and the chart hands the fit 48 columns of
+    // pure rounding noise. Those columns fit anything, so the criterion has a
+    // spurious minimum out there — measured at `V = −447.8` on this fixture's
+    // sweep case 1 against `≈ −44` in the honest region, which is precisely
+    // where its outer search was terminating.
     let dimension_factor = evaluation.nrows().max(evaluation.ncols()) as f64;
-    let existence = leading * f64::EPSILON * dimension_factor;
-    // Amplification: ONE half-mantissa, on `σ(E)`, spent ONCE. `1/σ_i` is the
-    // factor by which direction `i` lifts the design's own roundoff, and the
-    // criterion squares the design into `XᵀWX`, so the lift survives that Gram
-    // with significant digits exactly when `ε·(σ_max/σ_i)² < 1`. Below
-    // `√ε·σ_max` the direction is DAMPED to that scaling rather than dropped —
-    // the span is unchanged (any invertible rescaling spans the same columns)
-    // and the roundoff comes in at the damped norm instead of an amplified one.
-    let amplification_floor = leading * f64::EPSILON.sqrt();
+    let (_, kernel_singular, _) = k_cc.svd(false, false).map_err(BasisError::LinalgError)?;
+    let anchor = kernel_singular
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(leading);
+    // Membership: the backward-error bar of the product that formed `E`. Below
+    // it there is no direction, only the roundoff of `K_cc·Z`.
+    let existence = anchor * f64::EPSILON * dimension_factor;
+    // Amplification: ONE half-mantissa, spent ONCE. `1/σ_i` is the factor by
+    // which direction `i` lifts the design's own roundoff — which is set by
+    // `‖K_xc‖ ∼ ‖K_cc‖`, not by `σ_max(E)` — and the criterion squares the
+    // design into `XᵀWX`, so the lift survives that Gram with significant
+    // digits exactly when `ε·(‖K_cc‖/σ_i)² < 1`. Below `√ε·‖K_cc‖` the
+    // direction is DAMPED to that scaling rather than dropped: the span is
+    // unchanged (any invertible rescaling spans the same columns) and the
+    // roundoff comes in at the damped norm instead of an amplified one.
+    //
+    // This also reproduces the range bracket's own physics for free. As `ℓ`
+    // passes the node diameter, `σ_max(E)` falls under the floor and the WHOLE
+    // representer block damps smoothly toward zero, leaving the affine head —
+    // which is exactly `MeasureJetRangeBracket::ceiling`'s statement that past
+    // there "the block is numerically one function plus the affine head and
+    // there is no distinct model past it", now realized by the arithmetic
+    // rather than asserted next to it.
+    let amplification_floor = anchor * f64::EPSILON.sqrt();
     let kept: Vec<usize> = (0..singular.len())
         .filter(|&i| singular[i] > existence)
         .collect();
