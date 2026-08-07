@@ -63,9 +63,10 @@ fn scaled_channel_major_rows(
 }
 
 impl SurvivalMarginalSlopeFamilyScalars {
-    /// Construct the exact current primary geometry. The score covariance is
-    /// part of the construction contract, so `c_i` cannot drift away from the
-    /// vector likelihood's `g_iᵀΣg_i` scale.
+    /// Construct the exact current primary geometry. The score covariance FIELD
+    /// is part of the construction contract, so `c_i` cannot drift away from the
+    /// vector likelihood's `g_iᵀΣ(a_i)g_i` scale — including when that `Σ` is
+    /// the row's own conditional covariance (gam#2766).
     pub fn new(
         q0_i: Vec<f64>,
         q1_i: Vec<f64>,
@@ -73,7 +74,7 @@ impl SurvivalMarginalSlopeFamilyScalars {
         slopes: Array2<f64>,
         timewiggle_primary_rows: Option<(Array2<f64>, Array2<f64>)>,
         s: f64,
-        covariance: &MarginalSlopeCovariance,
+        covariance: &ScoreCovarianceField,
     ) -> Result<Self, String> {
         if !(s.is_finite() && s > 0.0) {
             return Err(format!(
@@ -128,10 +129,12 @@ impl SurvivalMarginalSlopeFamilyScalars {
             }
         }
         let mut c_i = Vec::with_capacity(n);
-        for row in slopes.rows() {
-            let variance = covariance.quadratic_form(row.as_slice().ok_or_else(|| {
-                "survival marginal-slope slope row is not contiguous".to_string()
-            })?)?;
+        for (index, row) in slopes.rows().into_iter().enumerate() {
+            let variance = covariance
+                .at_row(index)
+                .quadratic_form(row.as_slice().ok_or_else(|| {
+                    "survival marginal-slope slope row is not contiguous".to_string()
+                })?)?;
             c_i.push((1.0 + s * s * variance).sqrt());
         }
         Ok(Self {
@@ -153,14 +156,14 @@ impl SurvivalMarginalSlopeFamilyScalars {
 pub struct LogslopeBlockJacobian {
     pub(crate) layout: LogslopeLayout,
     pub(crate) z: Arc<Array2<f64>>,
-    pub(crate) covariance: MarginalSlopeCovariance,
+    pub(crate) covariance: ScoreCovarianceField,
 }
 
 impl LogslopeBlockJacobian {
     pub(crate) fn new(
         layout: LogslopeLayout,
         z: Arc<Array2<f64>>,
-        covariance: MarginalSlopeCovariance,
+        covariance: ScoreCovarianceField,
     ) -> Result<Self, String> {
         layout.validate_for(z.ncols())?;
         if covariance.dim() != z.ncols() {
@@ -213,7 +216,6 @@ impl LogslopeBlockJacobian {
                 self.z.ncols(),
             ));
         }
-        let covariance_ones = self.covariance.quadratic_form_unchecked(&[1.0]);
         let channels = self.layout.primary_channels();
         let designs = channels.as_slice();
         if designs.len() != 3 {
@@ -225,6 +227,9 @@ impl LogslopeBlockJacobian {
         let (entry_design, exit_design, rate_design) = (designs[0].1, designs[1].1, designs[2].1);
         for i in rows.clone() {
             let local_i = i - rows.start;
+            // `Σ` is the row's own conditional covariance when the gam#2766 gate
+            // fired; scalar score, so `1ᵀΣ1` IS `Σ`.
+            let covariance_ones = self.covariance.at_row(i).quadratic_form_unchecked(&[1.0]);
             let slope = self.layout.row_channels_from_beta(i, beta)?;
             if !slope.entry.is_finite() || !slope.exit.is_finite() || !slope.rate.is_finite() {
                 return Err(format!(
@@ -348,8 +353,9 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
                     "logslope effective Jacobian row {i} contains a non-finite physical slope"
                 ));
             }
-            self.covariance.multiply(values, &mut sigma_g);
-            let variance = self.covariance.quadratic_form_unchecked(values);
+            let covariance = self.covariance.at_row(i);
+            covariance.multiply(values, &mut sigma_g);
+            let variance = covariance.quadratic_form_unchecked(values);
             if !variance.is_finite() {
                 return Err(format!(
                     "logslope effective Jacobian covariance quadratic form is non-finite at row {i}: {variance}"
@@ -1103,7 +1109,11 @@ mod tests {
             .unwrap();
         let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
         let callback =
-            LogslopeBlockJacobian::new(layout, Arc::new(array![[1.5, -0.5]]), covariance.clone())
+            LogslopeBlockJacobian::new(
+                layout,
+                Arc::new(array![[1.5, -0.5]]),
+                covariance.clone().into(),
+            )
                 .unwrap();
         assert_eq!(
             crate::custom_family::BlockEffectiveJacobian::n_outputs(&callback),
@@ -1117,7 +1127,7 @@ mod tests {
                 array![[0.0, 0.0]],
                 None,
                 0.8,
-                &covariance,
+                &covariance.clone().into(),
             )
             .unwrap(),
         );
@@ -1173,7 +1183,7 @@ mod tests {
             array![[0.5], [-0.25]],
             Some((time_rows.clone(), marginal_rows.clone())),
             0.8,
-            &covariance,
+            &covariance.clone().into(),
         )
         .unwrap();
         let c_i = scalars.c_i.clone();

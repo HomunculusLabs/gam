@@ -339,7 +339,7 @@ pub fn replay_saved_survival_marginal_slope_alo(
         event: Arc::new(input.event.clone()),
         weights: Arc::new(input.prior_weights.clone()),
         z: Arc::new(z_matrix),
-        score_covariance,
+        score_covariance: score_covariance.into(),
         gaussian_frailty_sd: input.gaussian_frailty_sd,
         family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
         derivative_guard: input.derivative_guard,

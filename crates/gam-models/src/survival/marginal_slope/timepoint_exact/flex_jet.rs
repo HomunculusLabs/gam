@@ -5107,7 +5107,9 @@ mod moment_engine_tests {
             event: Arc::new(event),
             weights: Arc::new(weights),
             z: Arc::new(z.insert_axis(Axis(1))),
-            score_covariance: MarginalSlopeCovariance::diagonal(Array1::from(vec![1.0])).unwrap(),
+            score_covariance: MarginalSlopeCovariance::diagonal(Array1::from(vec![1.0]))
+                .unwrap()
+                .into(),
             gaussian_frailty_sd: None,
             family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
             derivative_guard: 1e-6,

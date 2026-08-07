@@ -222,7 +222,43 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
     let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
-    let score_covariance = marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
+    let pooled_score_covariance =
+        marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
+    // gam#2766: `Σ` in this family's defining identity is `Var(z | a)`, so the
+    // pooled matrix above is only the right object when that conditional
+    // covariance does not move. One robust Rao score test per score PAIR, on the
+    // SAME conditioning span the gam#2768 gate just used and at the same level,
+    // decides that; when it fires the fit consumes a materialised `Σ(a_i)` per
+    // row instead. The gate needs the calibrated score, which is why it is
+    // sequenced after the latent-measure gate and not beside it.
+    let score_covariance = match latent_calibration.conditioning.as_ref() {
+        Some(conditioning) => {
+            match crate::bms::ConditionalScoreCovariance::fit(
+                spec.z.view(),
+                spec.weights.view(),
+                conditioning.view(),
+            )? {
+                Some(model) => {
+                    log::info!(
+                        "[survival-marginal-slope] conditional score covariance ENGAGED on K={} \
+                         scores: pair Rao p-values {:?}",
+                        model.score_dim,
+                        model.pair_pvalues,
+                    );
+                    ScoreCovarianceField::conditional(
+                        pooled_score_covariance.clone(),
+                        model,
+                        conditioning.view(),
+                    )?
+                }
+                None => ScoreCovarianceField::pooled(pooled_score_covariance.clone()),
+            }
+        }
+        // No conditioning block (the #461 absorber suppressed it), so there is
+        // no span to condition `Σ` on and the pooled object is the only defined
+        // answer.
+        None => ScoreCovarianceField::pooled(pooled_score_covariance.clone()),
+    };
     let z_primary = spec.z.column(0).to_owned();
     let baseline_started = std::time::Instant::now();
     let baseline_slope = pooled_survival_baseline(
@@ -1809,7 +1845,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         z_normalization,
         latent_z_calibrations: latent_calibration.per_score,
         latent_conditioning_reproducible,
-        score_covariance: score_covariance.to_dense(),
+        score_covariance: pooled_score_covariance.to_dense(),
+        conditional_score_covariance: score_covariance.model().cloned(),
         time_block_penalties_len: time_penalties_len,
         time_wiggle_knots: spec
             .timewiggle_block

@@ -121,7 +121,7 @@ pub(crate) fn build_logslope_blockspec(
     rho: Array1<f64>,
     beta_hint: Option<Array1<f64>>,
     z: Arc<Array2<f64>>,
-    covariance: MarginalSlopeCovariance,
+    covariance: ScoreCovarianceField,
 ) -> Result<ParameterBlockSpec, String> {
     let jac_cb: Option<Arc<dyn crate::custom_family::BlockEffectiveJacobian>> = Some(Arc::new(
         LogslopeBlockJacobian::new(layout.clone(), z, covariance)?,

@@ -184,7 +184,22 @@ pub struct SurvivalMarginalSlopeFitResult {
     /// `true` whenever no conditional calibration fired — there is then nothing
     /// to reproduce.
     pub latent_conditioning_reproducible: bool,
+    /// The POOLED weighted empirical score covariance. Still the fit's summary
+    /// statistic and still what the on-disk contract carries; when
+    /// [`Self::conditional_score_covariance`] is `Some` it is no longer what the
+    /// row program consumed.
     pub score_covariance: Array2<f64>,
+    /// The fitted conditional score covariance `Σ(a) = Var(z | a)`, when the
+    /// pair-wise Rao gate escalated to one (gam#2766).
+    ///
+    /// This is fit state prediction would have to replay: the coefficients were
+    /// estimated against a per-row `c(a) = √(1 + r(a)ᵀΣ(a)r(a))`, so a predictor
+    /// that used the pooled `Σ̄` would evaluate a different model. It only exists
+    /// at `K ≥ 2`, which the saved-model contract already refuses (that contract
+    /// carries one `z_column` and validates a 1×1 score covariance), so today it
+    /// is a fit-time object with a refusal rather than a serialization — see
+    /// [`Self::persisted_latent_z_calibrations`].
+    pub conditional_score_covariance: Option<crate::bms::ConditionalScoreCovariance>,
     pub time_block_penalties_len: usize,
     pub time_wiggle_knots: Option<Array1<f64>>,
     pub time_wiggle_degree: Option<usize>,
@@ -232,6 +247,34 @@ impl SurvivalMarginalSlopeFitResult {
             &self.latent_z_calibrations,
             self.latent_conditioning_reproducible,
         )
+    }
+
+    /// Refuse to persist a fit whose row program consumed a CONDITIONAL score
+    /// covariance (gam#2766).
+    ///
+    /// This is a refusal at the point of loss, not a silent drop. The saved
+    /// contract carries one `z_column` and its loader validates a 1×1 score
+    /// covariance, so a `K ≥ 2` model is already unloadable; what a silent write
+    /// would additionally lose is the per-row `c(a) = √(1 + r(a)ᵀΣ(a)r(a))` every
+    /// fitted coefficient is defined against, which is not recoverable from the
+    /// pooled matrix the payload does carry. Naming it here means the failure
+    /// arrives at save time with the reason attached rather than at load time as
+    /// a shape mismatch.
+    pub fn persistable_score_covariance(&self) -> Result<&Array2<f64>, String> {
+        if self.conditional_score_covariance.is_some() {
+            return Err(
+                "survival marginal-slope fit consumed a CONDITIONAL score covariance Σ(a) \
+                 (gam#2766), and the saved-model contract carries only a single pooled matrix: \
+                 persisting it would give prediction the pooled Σ̄ and therefore a different \
+                 c(a) = √(1 + r(a)ᵀΣ(a)r(a)) at every row than the coefficients were fitted \
+                 under. This state needs K ≥ 2 latent scores, which that contract already \
+                 refuses at load (it validates a 1×1 score covariance); the refusal is raised \
+                 here so the reason travels with it. Supply scores whose conditional covariance \
+                 does not move on the marginal-index span if this model must be saved"
+                    .to_string(),
+            );
+        }
+        Ok(&self.score_covariance)
     }
 }
 

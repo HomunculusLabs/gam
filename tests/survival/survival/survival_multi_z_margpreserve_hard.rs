@@ -664,12 +664,13 @@ fn survival_multi_z_neglog_finite_under_random_shapes() {
         let q1 = q0 + 0.5 + rng.next_unit();
         let qd1 = 0.1 + rng.next_unit();
         let value = survival_marginal_slope_vector_neglog(
+            0,
             q0,
             q1,
             qd1,
             &slopes,
             &z,
-            &RigidVectorValueWorkspace::new(&cov),
+            &RigidVectorValueWorkspace::new(&cov.clone().into()),
             1.0,
             0.0,
             1e-6,

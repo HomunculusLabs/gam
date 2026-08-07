@@ -126,7 +126,13 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     pub(crate) event: Arc<Array1<f64>>,
     pub(crate) weights: Arc<Array1<f64>>,
     pub(crate) z: Arc<Array2<f64>>,
-    pub(crate) score_covariance: MarginalSlopeCovariance,
+    /// The score covariance the row program consumes, indexed BY ROW.
+    ///
+    /// `Σ` is `Var(z | a)` in the identity this family is defined by, so it is a
+    /// function of the marginal-index span and not a single matrix; the field
+    /// carries the pooled object when the conditional gate did not fire and a
+    /// materialised `Σ(a_i)` per row when it did (gam#2766).
+    pub(crate) score_covariance: ScoreCovarianceField,
     pub(crate) gaussian_frailty_sd: Option<f64>,
     pub(crate) family_hyper: SurvivalMarginalSlopeFamilyHyperState,
     pub(crate) derivative_guard: f64,

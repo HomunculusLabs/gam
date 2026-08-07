@@ -1525,6 +1525,7 @@ impl SurvivalMarginalSlopeFamily {
                             "per-score blockwise score row must be contiguous".to_string()
                         })?;
                         let nll = row_primary_closed_form_vector_into(
+                            row,
                             q0,
                             q1,
                             qd1,
@@ -1671,6 +1672,7 @@ impl SurvivalMarginalSlopeFamily {
                             "per-score dense-joint score row must be contiguous".to_string()
                         })?;
                         let nll = row_primary_closed_form_vector_into(
+                            row,
                             q0,
                             q1,
                             qd1,

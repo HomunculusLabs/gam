@@ -1,0 +1,1205 @@
+//! The CONDITIONAL score covariance `Σ(a) = Var(z | a)` (gam#2766).
+//!
+//! # What this fixes
+//!
+//! The marginal-slope probit identity, transcribed from
+//! [`crate::bms::gradient_paths`], is
+//!
+//! ```text
+//!   z | a ~ N(0, Σ(a)),   η = c(a)·q(t, a) + r(a)ᵀ z
+//!   E_z[Φ(−η) | a] = Φ(−q(t, a))    ⟺    c(a) = √(1 + r(a)ᵀ Σ(a) r(a))
+//! ```
+//!
+//! `Σ(a)`, conditional on the marginal-index span. Until this module existed the
+//! families supplied it from `marginal_slope_covariance_from_scores` — ONE
+//! weighted empirical covariance pooled over every row. Substituting a constant
+//! `c̄ = √(1 + rᵀΣ̄r)` into the exact integral leaves
+//!
+//! ```text
+//!   E_z[Φ(−η) | a] = Φ(−q · c̄ / √(1 + rᵀΣ(a)r))
+//! ```
+//!
+//! so the realised marginal index is `q · c̄/c(a)`: a multiplicative,
+//! covariate-dependent distortion of the one estimand this family exists to
+//! deliver. It is the same failure the `homoskedastic_var` field doc records for
+//! the K=1 diagonal (`Φ(q√(1+b²)/√(1+b²v))`), one dimension up.
+//!
+//! gam#2768 removed the per-coordinate half of it: after that gate every
+//! coordinate satisfies `E[ζ_j|a] = 0` and `Var(ζ_j|a) = 1`. What no
+//! per-coordinate location-scale map can reach is the OFF-DIAGONAL —
+//! `Cov(ζ_j, ζ_k | a)` — and that is what this module models.
+//!
+//! # The parameterisation, and why this one
+//!
+//! A covariance-valued regression has to return a positive-definite matrix at
+//! every `a`, including rows the fit never saw. Modelling the entries of `Σ(a)`
+//! directly does not: nothing keeps a fitted `[[1, ρ(a)], [ρ(a), 1]]` inside
+//! `|ρ| < 1`, and one row over the edge makes `c(a)` the square root of a
+//! negative number.
+//!
+//! This module uses Pourahmadi's **modified Cholesky decomposition** (MCD),
+//! whose parameters are *unconstrained* — every real value of every parameter
+//! yields a positive-definite `Σ(a)`, so extrapolation cannot manufacture an
+//! inadmissible covariance:
+//!
+//! ```text
+//!   T(a) Σ(a) T(a)ᵀ = D(a),
+//!   T(a) unit lower triangular with  T[j][k] = −φ_{jk}(a)  (k < j),
+//!   D(a) = diag(d_0(a), …, d_{K−1}(a)),   log d_j(a) = γ_jᵀ A(a).
+//! ```
+//!
+//! Read forwards this is a triangular system of ordinary regressions, which is
+//! exactly why it is the right object here — it is the SAME shape as the
+//! machinery gam#2768 already ships, applied one coordinate at a time:
+//!
+//! ```text
+//!   ζ_j = Σ_{k<j} φ_{jk}(a)·ζ_k + ε_j,     Var(ε_j | a) = d_j(a)
+//! ```
+//!
+//! the `φ` stage being a weighted ridge (like the conditional MEAN stage) and
+//! the `d` stage a log-linear variance fit (the conditional VARIANCE stage). The
+//! reconstruction `Σ(a) = T(a)⁻¹ D(a) T(a)⁻ᵀ` is one forward substitution, and
+//! `L(a) = T(a)⁻¹ D(a)^{1/2}` is its exact Cholesky factor — which is precisely
+//! the `Σ = L Lᵀ` shape [`MarginalSlopeCovariance::low_rank`] already admits, so
+//! the row program's quadratic forms stay exact sums of squares and no runtime
+//! eigendecomposition or PSD tolerance appears anywhere on this path.
+//!
+//! `log` d rather than a linear `d` with a floor (the shape gam#2768 used for
+//! the K=1 variance) because a floor is a non-differentiable clamp that can and
+//! does bind, whereas `exp` is positive by construction on the whole real line.
+//!
+//! # What triggers it
+//!
+//! One robust Rao score test per score PAIR, on the same centred marginal-index
+//! span the gam#2768 gate uses and at the same level: `u_i = ζ_ij·ζ_ik − mean`
+//! against `ã(C)`. That statistic tests exactly the sentence this issue is
+//! titled with — "the covariance between two scores varies" — and nothing else.
+//! If no pair fires, this module returns `None` and the caller keeps the pooled
+//! `Σ̄` object it already built, byte for byte.
+//!
+//! Once a pair HAS fired, every stage of the MCD is fitted honestly with its own
+//! gate: a `φ_{jk}` becomes `a`-varying only if its own interaction test fires,
+//! a `log d_j` becomes `a`-varying only if its own Breusch-Pagan test fires.
+//! That ordering — escalate on the thing the issue names, then fit the escalated
+//! model without further hedging — is the one gam#2768 already uses (a
+//! pure-variance trigger there still fits the conditional mean).
+//!
+//! # Extrapolation
+//!
+//! Each fitted linear predictor (`φ_{jk}(a)` and `log d_j(a)`) is clamped at
+//! evaluation to the range it took over the TRAINING rows. The bound is the
+//! data's, not a constant: a linear predictor is identified only on the range
+//! the sample explored, and holding the boundary value beyond it is the same
+//! monotone-extrapolation contract [`crate::bms::LatentZRankIntCalibration`]
+//! already states for out-of-support scores. Without it a predict row far
+//! outside the training hull could return an arbitrarily large `Σ(a)` from a
+//! model that had no evidence there.
+//!
+//! # `K = 1` is deliberately out of scope
+//!
+//! At `K = 1` there is no off-diagonal, and `Var(z|a)` is gam#2768's
+//! per-coordinate branch. Running a second, differently parameterised
+//! conditional-variance model on top of the score that branch has already
+//! standardised would double-correct it. [`ConditionalScoreCovariance::fit`]
+//! therefore returns `None` at `K < 2`, and the K=1 path is bit-for-bit
+//! unchanged.
+
+use super::{
+    AUTO_Z_CONDITIONAL_RAO_ALPHA, AUTO_Z_CONDITIONAL_RIDGE_REL, MarginalSlopeCovariance,
+    build_intercept_basis, robust_conditional_score_pvalue,
+};
+use gam_linalg::faer_ndarray::FaerCholesky;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use serde::{Deserialize, Serialize};
+
+/// Newton/Fisher-scoring iterations allowed for one log-linear innovation
+/// variance. The step is the exact Fisher-scoring step of a canonical-link GLM
+/// with a log variance function, whose information matrix `½·AᵀWA` does not
+/// depend on the response, so the iteration is the Newton iteration of a
+/// strictly concave problem and converges quadratically; this cap exists to
+/// bound the loop, not to select an answer, and a run that reaches it is a
+/// refusal rather than a truncation.
+const LOG_INNOVATION_MAX_ITERATIONS: usize = 64;
+
+/// One coordinate of the modified Cholesky decomposition.
+///
+/// `autoregression[k]` (for `k < j`) holds the coefficients of `φ_{jk}(a)` and
+/// `log_innovation` the coefficients of `log d_j(a)`, both over the
+/// intercept-augmented basis `A = [1 | a]`. A coefficient vector of length `1`
+/// is a CONSTANT — the stage's own gate did not fire — and one of length
+/// `1 + basis_ncols` is `a`-varying. The two lengths are the only encoding of
+/// "this stage varies"; there is no separate flag that could disagree with the
+/// coefficients.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalScoreCoordinate {
+    /// `φ_{jk}(a)` for `k = 0 … j−1`, in `k` order. Empty for `j = 0`.
+    pub autoregression: Vec<Vec<f64>>,
+    /// `log d_j(a)`.
+    pub log_innovation: Vec<f64>,
+    /// Training range `[min, max]` of each `φ_{jk}(a)` linear predictor, in the
+    /// same order as `autoregression`. Length-1 (constant) stages still carry
+    /// their degenerate range so evaluation has one code path.
+    pub autoregression_range: Vec<[f64; 2]>,
+    /// Training range `[min, max]` of the `log d_j(a)` linear predictor.
+    pub log_innovation_range: [f64; 2],
+}
+
+/// The fitted conditional score covariance `Σ(a) = Var(z | a)`.
+///
+/// Evaluation is [`Self::factor_into`], which writes the exact lower-triangular
+/// Cholesky factor `L(a)` with `Σ(a) = L(a)·L(a)ᵀ`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalScoreCovariance {
+    /// Number of latent-score coordinates `K`. Always `≥ 2`.
+    pub score_dim: usize,
+    /// Number of marginal-design columns in `a` (EXCLUDING the leading
+    /// intercept). A predict-time conditioning block must present exactly this
+    /// many columns.
+    pub basis_ncols: usize,
+    /// Per-coordinate MCD blocks, in coordinate order. Length `score_dim`.
+    pub coordinates: Vec<ConditionalScoreCoordinate>,
+    /// Weighted mean of each raw score column at fit time. `Σ(a)` is the second
+    /// CENTRAL moment about this vector, which is what makes the no-fire limit
+    /// of this model the pooled `marginal_slope_covariance_from_scores` object
+    /// it replaces.
+    pub score_mean: Vec<f64>,
+    /// The pair-wise Rao p-values that decided the escalation, `(j, k, p)` with
+    /// `j < k`. Diagnostic; carried so a fit can say WHY it escalated.
+    pub pair_pvalues: Vec<(usize, usize, f64)>,
+}
+
+/// The score-covariance geometry a marginal-slope fit consumes, ROW BY ROW.
+///
+/// One object with two states, because every consumer wants the same thing —
+/// "the covariance at this row" — and only the fit's own gate decides which
+/// state it is in:
+///
+/// * `Pooled` — the single weighted empirical `Σ̄` from
+///   `marginal_slope_covariance_from_scores`. Every row returns the same
+///   object, so a fit that does not escalate is bit-for-bit what it was before
+///   gam#2766.
+/// * conditional — a materialised `Σ(a_i)` per row, produced by
+///   [`ConditionalScoreCovariance::row_covariances`]. The pooled object is
+///   RETAINED alongside it: it is still the fit's summary statistic (it is what
+///   the on-disk contract carries and what a diagnostic reports), and keeping it
+///   means no caller has to decide between "the covariance" and "the covariance
+///   here".
+///
+/// The row lane is an index, not a branch on a model: `at_row` is one match on
+/// an `Option` and one slice index, so the conditional path costs the hot loop
+/// nothing beyond the indirection.
+#[derive(Clone, Debug)]
+pub struct ScoreCovarianceField {
+    pooled: MarginalSlopeCovariance,
+    per_row: Option<std::sync::Arc<Vec<MarginalSlopeCovariance>>>,
+    model: Option<std::sync::Arc<ConditionalScoreCovariance>>,
+}
+
+impl PartialEq for ScoreCovarianceField {
+    /// Compares the geometry, not the materialised stack: two fields built from
+    /// the same pooled covariance and the same conditional model ARE the same
+    /// field, and the per-row stack is a pure function of the two.
+    fn eq(&self, other: &Self) -> bool {
+        self.pooled == other.pooled && self.model == other.model
+    }
+}
+
+impl From<MarginalSlopeCovariance> for ScoreCovarianceField {
+    fn from(pooled: MarginalSlopeCovariance) -> Self {
+        Self {
+            pooled,
+            per_row: None,
+            model: None,
+        }
+    }
+}
+
+impl ScoreCovarianceField {
+    /// The pooled, row-invariant field. This is the pre-gam#2766 object.
+    pub fn pooled(pooled: MarginalSlopeCovariance) -> Self {
+        Self::from(pooled)
+    }
+
+    /// Materialise `Σ(a_i)` for every row of `a_block`, keeping `pooled` as the
+    /// fit's summary. Refuses a model whose score dimension disagrees with the
+    /// pooled covariance's, because the two are the same `K` by construction and
+    /// a mismatch means the caller paired a field with the wrong fit.
+    pub fn conditional(
+        pooled: MarginalSlopeCovariance,
+        model: ConditionalScoreCovariance,
+        a_block: ArrayView2<'_, f64>,
+    ) -> Result<Self, String> {
+        if model.score_dim != pooled.dim() {
+            return Err(format!(
+                "conditional score covariance is K={} but the pooled covariance is K={}",
+                model.score_dim,
+                pooled.dim()
+            ));
+        }
+        let per_row = model.row_covariances(a_block)?;
+        Ok(Self {
+            pooled,
+            per_row: Some(std::sync::Arc::new(per_row)),
+            model: Some(std::sync::Arc::new(model)),
+        })
+    }
+
+    /// The covariance at `row`.
+    #[inline(always)]
+    pub fn at_row(&self, row: usize) -> &MarginalSlopeCovariance {
+        match &self.per_row {
+            None => &self.pooled,
+            Some(stack) => &stack[row],
+        }
+    }
+
+    /// The fit's pooled summary covariance, whatever the field's state.
+    #[inline]
+    pub fn pooled_covariance(&self) -> &MarginalSlopeCovariance {
+        &self.pooled
+    }
+
+    /// `K`.
+    #[inline]
+    pub fn dim(&self) -> usize {
+        self.pooled.dim()
+    }
+
+    /// Whether the covariance varies by row.
+    #[inline]
+    pub fn is_conditional(&self) -> bool {
+        self.per_row.is_some()
+    }
+
+    /// The fitted conditional model, when the field carries one. This is the
+    /// object persistence and prediction need; the materialised stack is a
+    /// training-row cache and is never saved.
+    #[inline]
+    pub fn model(&self) -> Option<&ConditionalScoreCovariance> {
+        self.model.as_deref()
+    }
+
+    /// Rows the field was materialised for, when it is conditional. A caller
+    /// that indexes past this has mixed two samples.
+    #[inline]
+    pub fn materialised_rows(&self) -> Option<usize> {
+        self.per_row.as_ref().map(|stack| stack.len())
+    }
+}
+
+/// Affine evaluation `coeffs·[1 | a]`, clamped to the training range of that
+/// linear predictor. A length-1 coefficient vector is the constant stage.
+#[inline]
+fn clamped_affine(coeffs: &[f64], range: &[f64; 2], a_row: ArrayView1<'_, f64>) -> f64 {
+    let mut acc = coeffs[0];
+    for (coefficient, &value) in coeffs[1..].iter().zip(a_row.iter()) {
+        acc += coefficient * value;
+    }
+    acc.clamp(range[0], range[1])
+}
+
+impl ConditionalScoreCovariance {
+    /// The lower-triangular Cholesky factor `L(a)` of `Σ(a)`, written into
+    /// `factor` (shape `K × K`, fully overwritten including the strict upper
+    /// triangle).
+    ///
+    /// `T(a)` is unit lower triangular with `T[j][k] = −φ_{jk}(a)`, so its
+    /// inverse `U = T⁻¹` is unit lower triangular and obtained by one forward
+    /// substitution:
+    ///
+    /// ```text
+    ///   U[j][j] = 1,   U[j][k] = φ_{jk}(a) + Σ_{m=k+1}^{j−1} φ_{jm}(a)·U[m][k]
+    /// ```
+    ///
+    /// and `L = U·D^{1/2}`, i.e. `L[j][k] = U[j][k]·√d_k(a)`. Positive
+    /// definiteness needs only `d_k(a) > 0`, which `exp` guarantees.
+    pub fn factor_into(
+        &self,
+        a_row: ArrayView1<'_, f64>,
+        factor: &mut Array2<f64>,
+    ) -> Result<(), String> {
+        let k = self.score_dim;
+        if a_row.len() != self.basis_ncols {
+            return Err(format!(
+                "conditional score covariance expects {} basis columns, got {}",
+                self.basis_ncols,
+                a_row.len()
+            ));
+        }
+        if factor.dim() != (k, k) {
+            return Err(format!(
+                "conditional score covariance factor must be {k}x{k}, got {}x{}",
+                factor.nrows(),
+                factor.ncols()
+            ));
+        }
+        factor.fill(0.0);
+        for j in 0..k {
+            let block = &self.coordinates[j];
+            // U[j][*] by forward substitution, written in place into row j.
+            factor[[j, j]] = 1.0;
+            for k_index in 0..j {
+                let phi = clamped_affine(
+                    &block.autoregression[k_index],
+                    &block.autoregression_range[k_index],
+                    a_row,
+                );
+                if !phi.is_finite() {
+                    return Err(format!(
+                        "conditional score covariance autoregression ({j},{k_index}) is not finite"
+                    ));
+                }
+                let mut value = phi;
+                for m in (k_index + 1)..j {
+                    let phi_jm = clamped_affine(
+                        &block.autoregression[m],
+                        &block.autoregression_range[m],
+                        a_row,
+                    );
+                    value += phi_jm * factor[[m, k_index]];
+                }
+                factor[[j, k_index]] = value;
+            }
+        }
+        // Scale column `k` by √d_k(a).
+        for column in 0..k {
+            let block = &self.coordinates[column];
+            let log_d = clamped_affine(
+                &block.log_innovation,
+                &block.log_innovation_range,
+                a_row,
+            );
+            let scale = (0.5 * log_d).exp();
+            if !(scale.is_finite() && scale > 0.0) {
+                return Err(format!(
+                    "conditional score covariance innovation {column} evaluated to log d = {log_d}"
+                ));
+            }
+            for row in column..k {
+                factor[[row, column]] *= scale;
+            }
+        }
+        Ok(())
+    }
+
+    /// `Σ(a)` as a dense symmetric matrix. Diagnostics and tests; the row
+    /// program consumes [`Self::row_covariances`].
+    pub fn dense_at(&self, a_row: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
+        let mut factor = Array2::<f64>::zeros((self.score_dim, self.score_dim));
+        self.factor_into(a_row, &mut factor)?;
+        Ok(factor.dot(&factor.t()))
+    }
+
+    /// One admitted [`MarginalSlopeCovariance`] per row of `a_block`, in the
+    /// `Σ = L Lᵀ` low-rank representation whose quadratic forms are exact sums
+    /// of squares.
+    ///
+    /// Materialising the whole stack once is deliberate. The row program
+    /// evaluates `rᵀΣ(a_i)r` inside the inner Newton loop, many times per row
+    /// per outer step; re-running the forward substitution there would put an
+    /// `O(K³)` triangular solve in the hot path to save `K²` doubles of storage.
+    /// The stack costs `K` times the score matrix `z` the family already holds.
+    pub fn row_covariances(
+        &self,
+        a_block: ArrayView2<'_, f64>,
+    ) -> Result<Vec<MarginalSlopeCovariance>, String> {
+        if a_block.ncols() != self.basis_ncols {
+            return Err(format!(
+                "conditional score covariance expects {} basis columns, got {}",
+                self.basis_ncols,
+                a_block.ncols()
+            ));
+        }
+        let mut factor = Array2::<f64>::zeros((self.score_dim, self.score_dim));
+        let mut out = Vec::with_capacity(a_block.nrows());
+        for row in 0..a_block.nrows() {
+            self.factor_into(a_block.row(row), &mut factor)?;
+            out.push(MarginalSlopeCovariance::low_rank(factor.clone())?);
+        }
+        Ok(out)
+    }
+
+    /// Fit the conditional covariance, or decide there is nothing to fit.
+    ///
+    /// `scores` are the latent scores the row kernel will actually see — i.e.
+    /// AFTER the gam#2768 per-coordinate calibration, because `Σ` is the
+    /// covariance of the axis the likelihood integrates over. Returns `None`
+    /// when `K < 2`, when the basis is degenerate, or when no score pair's
+    /// covariance is significantly non-constant on `a_block`; in every one of
+    /// those the caller must keep the pooled object unchanged.
+    pub fn fit(
+        scores: ArrayView2<'_, f64>,
+        weights: ArrayView1<'_, f64>,
+        a_block: ArrayView2<'_, f64>,
+    ) -> Result<Option<Self>, String> {
+        let (n, k) = scores.dim();
+        let p = a_block.ncols();
+        if k < 2 || p == 0 || n == 0 {
+            return Ok(None);
+        }
+        if weights.len() != n || a_block.nrows() != n {
+            return Err(format!(
+                "conditional score covariance length mismatch: rows={n}, weights={}, basis rows={}",
+                weights.len(),
+                a_block.nrows()
+            ));
+        }
+        let total_weight = weights.iter().copied().sum::<f64>();
+        if !(total_weight.is_finite() && total_weight > 0.0) {
+            return Ok(None);
+        }
+        if scores.iter().chain(a_block.iter()).any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
+
+        // Centre on the weighted score mean, so the no-escalation limit of this
+        // model is exactly `marginal_slope_covariance_from_scores`.
+        let mut score_mean = vec![0.0_f64; k];
+        for coordinate in 0..k {
+            score_mean[coordinate] = scores
+                .column(coordinate)
+                .iter()
+                .zip(weights.iter())
+                .map(|(&value, &weight)| weight * value)
+                .sum::<f64>()
+                / total_weight;
+        }
+        let mut centered = Array2::<f64>::zeros((n, k));
+        for row in 0..n {
+            for coordinate in 0..k {
+                centered[[row, coordinate]] = scores[[row, coordinate]] - score_mean[coordinate];
+            }
+        }
+
+        // Centre the basis columns: the score tests are about conditional
+        // structure BEYOND the global level, and a constant column collapses to
+        // ~0 and is dropped by the statistic's own pseudo-inverse rank.
+        let mut a_centered = a_block.to_owned();
+        for column in 0..p {
+            let column_mean = a_block
+                .column(column)
+                .iter()
+                .zip(weights.iter())
+                .map(|(&value, &weight)| weight * value)
+                .sum::<f64>()
+                / total_weight;
+            a_centered
+                .column_mut(column)
+                .mapv_inplace(|value| value - column_mean);
+        }
+
+        // The escalation gate: one robust Rao score test per PAIR, on the
+        // cross-product residual. This is the statistic for the sentence the
+        // issue is titled with and nothing wider.
+        let mut pair_pvalues = Vec::new();
+        let mut any_pair_fires = false;
+        for left in 0..k {
+            for right in (left + 1)..k {
+                let products: Vec<f64> = (0..n)
+                    .map(|row| centered[[row, left]] * centered[[row, right]])
+                    .collect();
+                let mean = products
+                    .iter()
+                    .zip(weights.iter())
+                    .map(|(&value, &weight)| weight * value)
+                    .sum::<f64>()
+                    / total_weight;
+                let residual: Vec<f64> = products.iter().map(|&value| value - mean).collect();
+                let p_value =
+                    robust_conditional_score_pvalue(a_centered.view(), &residual, weights)?;
+                if let Some(p_value) = p_value {
+                    pair_pvalues.push((left, right, p_value));
+                    any_pair_fires |= p_value < AUTO_Z_CONDITIONAL_RAO_ALPHA;
+                }
+            }
+        }
+        if !any_pair_fires {
+            return Ok(None);
+        }
+
+        let basis = build_intercept_basis(a_block);
+        let mut coordinates = Vec::with_capacity(k);
+        // Column `j` of `innovations` is `ε_j`, needed by later coordinates only
+        // through their own regressions, but kept for the variance stage.
+        for j in 0..k {
+            let (autoregression, autoregression_range, residual) =
+                fit_autoregression(&centered, j, basis.view(), a_centered.view(), weights)?;
+            let (log_innovation, log_innovation_range) = fit_log_innovation(
+                &residual,
+                basis.view(),
+                a_centered.view(),
+                weights,
+                total_weight,
+            )?;
+            coordinates.push(ConditionalScoreCoordinate {
+                autoregression,
+                log_innovation,
+                autoregression_range,
+                log_innovation_range,
+            });
+        }
+
+        Ok(Some(Self {
+            score_dim: k,
+            basis_ncols: p,
+            coordinates,
+            score_mean,
+            pair_pvalues,
+        }))
+    }
+}
+
+/// Fit `ζ_j = Σ_{k<j} φ_{jk}(a)·ζ_k + ε_j`, returning the coefficient blocks,
+/// their realised training ranges, and the residual `ε_j`.
+///
+/// Each `φ_{jk}` starts constant. A robust Rao score test of the constant-fit
+/// residual against `ã ⊙ ζ_k` — the exact LM statistic for "the coefficient of
+/// `ζ_k` depends on `a`" — decides whether that one coefficient is promoted to
+/// the full basis. Promotion is per `(j, k)`, so a model with one varying
+/// coupling does not spend `p` parameters on the couplings that are constant.
+fn fit_autoregression(
+    centered: &Array2<f64>,
+    j: usize,
+    basis: ArrayView2<'_, f64>,
+    a_centered: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> Result<(Vec<Vec<f64>>, Vec<[f64; 2]>, Vec<f64>), String> {
+    let n = centered.nrows();
+    let response: Vec<f64> = (0..n).map(|row| centered[[row, j]]).collect();
+    if j == 0 {
+        return Ok((Vec::new(), Vec::new(), response));
+    }
+
+    // Stage 1 — constant couplings.
+    let mut constant_design = Array2::<f64>::zeros((n, j));
+    for row in 0..n {
+        for k_index in 0..j {
+            constant_design[[row, k_index]] = centered[[row, k_index]];
+        }
+    }
+    let (constant_coeffs, constant_fitted) =
+        weighted_ridge_columns(constant_design.view(), &response, weights)?;
+    let constant_residual: Vec<f64> = (0..n)
+        .map(|row| response[row] - constant_fitted[row])
+        .collect();
+
+    // Stage 2 — per-coupling interaction tests on that residual.
+    let mut varying = vec![false; j];
+    for k_index in 0..j {
+        let interaction: Vec<f64> = (0..n)
+            .map(|row| constant_residual[row] * centered[[row, k_index]])
+            .collect();
+        if let Some(p_value) =
+            robust_conditional_score_pvalue(a_centered, &interaction, weights)?
+        {
+            varying[k_index] = p_value < AUTO_Z_CONDITIONAL_RAO_ALPHA;
+        }
+    }
+    if varying.iter().all(|fires| !fires) {
+        let coeffs: Vec<Vec<f64>> = (0..j).map(|k| vec![constant_coeffs[k]]).collect();
+        let ranges: Vec<[f64; 2]> = (0..j)
+            .map(|k| [constant_coeffs[k], constant_coeffs[k]])
+            .collect();
+        return Ok((coeffs, ranges, constant_residual));
+    }
+
+    // Stage 3 — refit with the promoted couplings expanded over `[1 | a]`.
+    let basis_width = basis.ncols();
+    let mut widths = Vec::with_capacity(j);
+    let mut total_columns = 0usize;
+    for &fires in varying.iter() {
+        let width = if fires { basis_width } else { 1 };
+        widths.push(width);
+        total_columns += width;
+    }
+    let mut design = Array2::<f64>::zeros((n, total_columns));
+    let mut offset = 0usize;
+    for (k_index, &width) in widths.iter().enumerate() {
+        for row in 0..n {
+            let score = centered[[row, k_index]];
+            if width == 1 {
+                design[[row, offset]] = score;
+            } else {
+                for column in 0..basis_width {
+                    design[[row, offset + column]] = score * basis[[row, column]];
+                }
+            }
+        }
+        offset += width;
+    }
+    let (coeffs, fitted) = weighted_ridge_columns(design.view(), &response, weights)?;
+    let residual: Vec<f64> = (0..n).map(|row| response[row] - fitted[row]).collect();
+
+    // Unpack into per-coupling blocks and record each one's realised range.
+    let mut blocks = Vec::with_capacity(j);
+    let mut ranges = Vec::with_capacity(j);
+    let mut offset = 0usize;
+    for &width in widths.iter() {
+        let block: Vec<f64> = coeffs[offset..offset + width].to_vec();
+        let range = linear_predictor_range(&block, basis, weights);
+        blocks.push(block);
+        ranges.push(range);
+        offset += width;
+    }
+    Ok((blocks, ranges, residual))
+}
+
+/// Fit `log d(a) = γᵀ[1 | a]` for the innovation `ε` by exact Fisher scoring of
+/// the Gaussian log-linear variance model, gated by a Breusch-Pagan score test.
+///
+/// With `ε_i ~ N(0, d_i)`, `d_i = exp(A_iᵀγ)`, the weighted log-likelihood score
+/// and Fisher information are
+///
+/// ```text
+///   s(γ) = ½ Σ_i w_i A_i (ε_i²/d_i − 1),     I(γ) = ½ Σ_i w_i A_i A_iᵀ
+/// ```
+///
+/// so the Fisher-scoring step is `Δγ = (Σ w A Aᵀ)⁻¹ Σ w A (ε²/d − 1)`: the
+/// halves cancel, the information does not depend on the response, and the step
+/// is the Newton step of a strictly concave problem. That is why this is a short
+/// exact loop rather than the log-of-squares linear regression (Harvey's
+/// two-step), whose intercept carries the `E[log χ²₁] = −1.2704` bias and whose
+/// slopes are inefficient.
+fn fit_log_innovation(
+    residual: &[f64],
+    basis: ArrayView2<'_, f64>,
+    a_centered: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    total_weight: f64,
+) -> Result<(Vec<f64>, [f64; 2]), String> {
+    let n = residual.len();
+    let homoskedastic = residual
+        .iter()
+        .zip(weights.iter())
+        .map(|(&value, &weight)| weight * value * value)
+        .sum::<f64>()
+        / total_weight;
+    if !(homoskedastic.is_finite() && homoskedastic > 0.0) {
+        return Err(format!(
+            "conditional score covariance innovation variance is {homoskedastic}, which no \
+             log-linear variance model can represent"
+        ));
+    }
+    let constant = vec![homoskedastic.ln()];
+    let constant_range = [constant[0], constant[0]];
+
+    // Breusch-Pagan: does the innovation variance depend on `a` at all?
+    let bp_residual: Vec<f64> = residual
+        .iter()
+        .map(|&value| value * value - homoskedastic)
+        .collect();
+    let fires = robust_conditional_score_pvalue(a_centered, &bp_residual, weights)?
+        .is_some_and(|p_value| p_value < AUTO_Z_CONDITIONAL_RAO_ALPHA);
+    if !fires {
+        return Ok((constant, constant_range));
+    }
+
+    let width = basis.ncols();
+    let mut gamma = vec![0.0_f64; width];
+    gamma[0] = homoskedastic.ln();
+    let mut information = Array2::<f64>::zeros((width, width));
+    for row in 0..n {
+        let weight = weights[row];
+        if !(weight > 0.0) {
+            continue;
+        }
+        for left in 0..width {
+            let scaled = weight * basis[[row, left]];
+            for right in 0..width {
+                information[[left, right]] += scaled * basis[[row, right]];
+            }
+        }
+    }
+    // The same relative ridge the conditional location-scale stages use, for
+    // the same reason: a penalised-spline marginal index is routinely
+    // rank-deficient and the scoring step must still factorise.
+    for column in 0..width {
+        let diagonal = information[[column, column]].max(f64::MIN_POSITIVE);
+        information[[column, column]] = diagonal * (1.0 + AUTO_Z_CONDITIONAL_RIDGE_REL);
+    }
+    let information_factor = information.cholesky(faer::Side::Lower).map_err(|error| {
+        format!(
+            "conditional score covariance log-variance information is not factorisable: {error}"
+        )
+    })?;
+    let mut converged = false;
+    for _ in 0..LOG_INNOVATION_MAX_ITERATIONS {
+        let mut score = Array1::<f64>::zeros(width);
+        for row in 0..n {
+            let weight = weights[row];
+            if !(weight > 0.0) {
+                continue;
+            }
+            let mut linear = 0.0;
+            for column in 0..width {
+                linear += gamma[column] * basis[[row, column]];
+            }
+            let variance = linear.exp();
+            if !(variance.is_finite() && variance > 0.0) {
+                return Err(format!(
+                    "conditional score covariance log-variance iterate left the representable \
+                     range at row {row}: log d = {linear}"
+                ));
+            }
+            let deviation = residual[row] * residual[row] / variance - 1.0;
+            for column in 0..width {
+                score[column] += weight * basis[[row, column]] * deviation;
+            }
+        }
+        let step = information_factor.solvevec(&score);
+        let mut largest = 0.0_f64;
+        for column in 0..width {
+            gamma[column] += step[column];
+            largest = largest.max(step[column].abs());
+        }
+        if !gamma.iter().all(|value| value.is_finite()) {
+            return Err(
+                "conditional score covariance log-variance scoring produced a non-finite \
+                 coefficient"
+                    .to_string(),
+            );
+        }
+        // The criterion is the score's own scale: the step is exact Newton on a
+        // strictly concave objective, so a step below the working precision of
+        // the coefficient it moves cannot change the fitted variance.
+        if largest <= 1.0e-10 * (1.0 + gamma.iter().fold(0.0_f64, |m, v| m.max(v.abs()))) {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(format!(
+            "conditional score covariance log-variance scoring did not converge in \
+             {LOG_INNOVATION_MAX_ITERATIONS} Fisher steps"
+        ));
+    }
+    let range = linear_predictor_range(&gamma, basis, weights);
+    Ok((gamma, range))
+}
+
+/// `[min, max]` of `coeffs·[1 | a]` over the training rows that carry weight.
+/// A constant stage returns its own degenerate range, so evaluation has exactly
+/// one code path.
+fn linear_predictor_range(
+    coeffs: &[f64],
+    basis: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> [f64; 2] {
+    if coeffs.len() == 1 {
+        return [coeffs[0], coeffs[0]];
+    }
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    for row in 0..basis.nrows() {
+        if !(weights[row] > 0.0) {
+            continue;
+        }
+        let mut linear = 0.0;
+        for column in 0..coeffs.len() {
+            linear += coeffs[column] * basis[[row, column]];
+        }
+        low = low.min(linear);
+        high = high.max(linear);
+    }
+    if !(low.is_finite() && high.is_finite() && low <= high) {
+        return [coeffs[0], coeffs[0]];
+    }
+    [low, high]
+}
+
+/// Weighted ridge of `response` on `design` with the same relative,
+/// column-scaled Tikhonov penalty the conditional location-scale stages use.
+/// Returns the coefficients and the fitted values.
+fn weighted_ridge_columns(
+    design: ArrayView2<'_, f64>,
+    response: &[f64],
+    weights: ArrayView1<'_, f64>,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let width = design.ncols();
+    let mut penalty = Array2::<f64>::zeros((width, width));
+    for column in 0..width {
+        let diagonal = design
+            .column(column)
+            .iter()
+            .zip(weights.iter())
+            .map(|(&value, &weight)| weight * value * value)
+            .sum::<f64>()
+            .max(f64::MIN_POSITIVE);
+        penalty[[column, column]] = diagonal;
+    }
+    let response_array = Array1::from_vec(response.to_vec());
+    let response_column = response_array.view().insert_axis(ndarray::Axis(1));
+    let (coeffs, fitted) = gam_linalg::utils::gaussian_weighted_ridge(
+        design,
+        response_column,
+        penalty.view(),
+        weights,
+        AUTO_Z_CONDITIONAL_RIDGE_REL,
+    )?;
+    Ok((
+        coeffs.column(0).to_vec(),
+        fitted.column(0).to_vec(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic standard normals (Box–Muller over splitmix64).
+    fn gaussians(n: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed;
+        let mut unit = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let mut out = Vec::with_capacity(n + 1);
+        while out.len() < n {
+            let u1 = unit().max(1e-12);
+            let u2 = unit();
+            let r = (-2.0 * u1.ln()).sqrt();
+            out.push(r * (std::f64::consts::TAU * u2).cos());
+            out.push(r * (std::f64::consts::TAU * u2).sin());
+        }
+        out.truncate(n);
+        out
+    }
+
+    fn standardized(mut v: Vec<f64>) -> Vec<f64> {
+        let n = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / n;
+        let sd = (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n)
+            .sqrt()
+            .max(1e-12);
+        for value in v.iter_mut() {
+            *value = (*value - mean) / sd;
+        }
+        v
+    }
+
+    /// A `K = 2` sample drawn from EXACTLY the model this module fits:
+    /// `ζ₀ = √d₀·e₀`, `ζ₁ = φ(x)·ζ₀ + √d₁(x)·e₁` with `φ(x) = φ₀ + φ₁x` and
+    /// `log d₁(x) = γ₀ + γ₁x`. Recovery is then a statement about the estimator
+    /// and not about approximation error.
+    fn in_class_fixture(
+        n: usize,
+        phi: [f64; 2],
+        gamma: [f64; 2],
+        log_d0: f64,
+    ) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+        let x = standardized(gaussians(n, 0x2766_D4));
+        let e0 = standardized(gaussians(n, 0x2766_E5));
+        let e1 = standardized(gaussians(n, 0x2766_F6));
+        let mut scores = Array2::<f64>::zeros((n, 2));
+        let mut a_block = Array2::<f64>::zeros((n, 1));
+        let sd0 = (0.5 * log_d0).exp();
+        for row in 0..n {
+            a_block[[row, 0]] = x[row];
+            let z0 = sd0 * e0[row];
+            let sd1 = (0.5 * (gamma[0] + gamma[1] * x[row])).exp();
+            scores[[row, 0]] = z0;
+            scores[[row, 1]] = (phi[0] + phi[1] * x[row]) * z0 + sd1 * e1[row];
+        }
+        (scores, Array1::<f64>::ones(n), a_block)
+    }
+
+    /// The estimator must recover a truth drawn from its own model class:
+    /// the coupling slope, the innovation-variance slope, and hence `Σ(a)`
+    /// itself across the covariate range.
+    #[test]
+    fn recovers_an_in_class_conditional_covariance() {
+        let n = 40_000;
+        let phi = [0.3_f64, 0.5];
+        let gamma = [(0.75_f64).ln(), -0.4];
+        let log_d0 = 0.0;
+        let (scores, weights, a_block) = in_class_fixture(n, phi, gamma, log_d0);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("a varying cross-score covariance must escalate");
+
+        assert_eq!(fitted.score_dim, 2);
+        assert_eq!(fitted.basis_ncols, 1);
+        // Coordinate 1's coupling must be the planted affine function.
+        let coupling = &fitted.coordinates[1].autoregression[0];
+        assert_eq!(
+            coupling.len(),
+            2,
+            "the coupling depends on a, so its own interaction gate must promote it"
+        );
+        assert!(
+            (coupling[0] - phi[0]).abs() < 0.02 && (coupling[1] - phi[1]).abs() < 0.02,
+            "coupling {coupling:?} against planted {phi:?}"
+        );
+        let innovation = &fitted.coordinates[1].log_innovation;
+        assert_eq!(innovation.len(), 2, "the innovation variance depends on a");
+        assert!(
+            (innovation[0] - gamma[0]).abs() < 0.03 && (innovation[1] - gamma[1]).abs() < 0.03,
+            "log innovation {innovation:?} against planted {gamma:?}"
+        );
+
+        // And the assembled Σ(a) itself, against the closed-form truth.
+        for &probe in &[-1.5_f64, -0.5, 0.0, 0.5, 1.5] {
+            let a_row = Array1::from_vec(vec![probe]);
+            let sigma = fitted.dense_at(a_row.view()).expect("Σ(a)");
+            let phi_true = phi[0] + phi[1] * probe;
+            let d0_true = log_d0.exp();
+            let d1_true = (gamma[0] + gamma[1] * probe).exp();
+            let truth = [
+                d0_true,
+                phi_true * d0_true,
+                phi_true * phi_true * d0_true + d1_true,
+            ];
+            let got = [sigma[[0, 0]], sigma[[0, 1]], sigma[[1, 1]]];
+            for (index, (&want, &have)) in truth.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (want - have).abs() < 0.05 * (1.0 + want.abs()),
+                    "Σ(a={probe}) entry {index}: got {have}, want {want}"
+                );
+            }
+            assert_eq!(sigma[[0, 1]], sigma[[1, 0]], "Σ(a) must be symmetric");
+        }
+        // The gate's own evidence must name the pair it fired on.
+        assert!(
+            fitted
+                .pair_pvalues
+                .iter()
+                .any(|&(left, right, p)| left == 0 && right == 1 && p < 1.0e-3),
+            "the (0,1) pair must be the recorded trigger: {:?}",
+            fitted.pair_pvalues
+        );
+    }
+
+    /// A constant conditional covariance must NOT escalate. A trigger-happy
+    /// gate would install a fitted covariance field on every multi-score fit,
+    /// which is a worse failure than the one it exists to prevent: the pooled
+    /// object is exactly right when the covariance really is constant.
+    #[test]
+    fn stays_quiet_on_a_constant_conditional_covariance() {
+        let n = 40_000;
+        let (scores, weights, a_block) =
+            in_class_fixture(n, [0.4, 0.0], [(0.75_f64).ln(), 0.0], 0.0);
+        let decision =
+            ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+                .expect("fit");
+        assert!(
+            decision.is_none(),
+            "a constant Cov(z_j, z_k | a) must leave the pooled Σ in place"
+        );
+    }
+
+    /// `K = 1` has no off-diagonal, and its conditional variance is gam#2768's
+    /// per-coordinate branch. Escalating here would double-correct it.
+    #[test]
+    fn a_single_score_is_out_of_scope() {
+        let n = 4_000;
+        let x = standardized(gaussians(n, 0x2766_D4));
+        let e = standardized(gaussians(n, 0x2766_E5));
+        let mut scores = Array2::<f64>::zeros((n, 1));
+        let mut a_block = Array2::<f64>::zeros((n, 1));
+        for row in 0..n {
+            a_block[[row, 0]] = x[row];
+            scores[[row, 0]] = (0.5 * x[row]).exp() * e[row];
+        }
+        let weights = Array1::<f64>::ones(n);
+        assert!(
+            ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+                .expect("fit")
+                .is_none(),
+            "K = 1 is gam#2768's branch, not this one"
+        );
+    }
+
+    /// Positive definiteness is a property of the PARAMETERISATION, so it must
+    /// survive rows the fit never saw — including rows far outside the training
+    /// hull, where a model on the entries of `Σ` would return `|ρ| > 1`.
+    #[test]
+    fn the_factor_is_positive_definite_off_the_training_hull() {
+        let n = 20_000;
+        let (scores, weights, a_block) =
+            in_class_fixture(n, [0.3, 0.9], [(0.5_f64).ln(), -0.8], 0.0);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+        for &probe in &[-1.0e6_f64, -50.0, -5.0, 0.0, 5.0, 50.0, 1.0e6] {
+            let a_row = Array1::from_vec(vec![probe]);
+            let mut factor = Array2::<f64>::zeros((2, 2));
+            fitted.factor_into(a_row.view(), &mut factor).expect("L(a)");
+            assert!(
+                factor[[0, 1]] == 0.0,
+                "L(a) must be lower triangular; got {factor:?}"
+            );
+            assert!(
+                factor[[0, 0]] > 0.0 && factor[[1, 1]] > 0.0,
+                "L(a) must have a strictly positive diagonal at a={probe}: {factor:?}"
+            );
+            let sigma = fitted.dense_at(a_row.view()).expect("Σ(a)");
+            let determinant = sigma[[0, 0]] * sigma[[1, 1]] - sigma[[0, 1]] * sigma[[1, 0]];
+            assert!(
+                sigma[[0, 0]] > 0.0 && determinant > 0.0,
+                "Σ(a={probe}) must be positive definite: {sigma:?} (det {determinant})"
+            );
+            let correlation = sigma[[0, 1]] / (sigma[[0, 0]] * sigma[[1, 1]]).sqrt();
+            assert!(
+                correlation.abs() < 1.0,
+                "an admissible Σ cannot have |corr| >= 1; got {correlation} at a={probe}"
+            );
+        }
+    }
+
+    /// The materialised per-row stack must be the same object `dense_at`
+    /// describes, in the `Σ = L Lᵀ` representation whose quadratic forms the row
+    /// program evaluates as exact sums of squares.
+    #[test]
+    fn the_row_stack_agrees_with_the_dense_evaluation() {
+        let n = 4_000;
+        let (scores, weights, a_block) =
+            in_class_fixture(n, [0.2, 0.6], [(0.9_f64).ln(), 0.3], 0.1);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+        let stack = fitted.row_covariances(a_block.view()).expect("row stack");
+        assert_eq!(stack.len(), n);
+        for &row in &[0usize, 1, 17, n / 2, n - 1] {
+            let dense = fitted.dense_at(a_block.row(row)).expect("Σ(a)");
+            let from_stack = stack[row].to_dense();
+            for left in 0..2 {
+                for right in 0..2 {
+                    assert!(
+                        (dense[[left, right]] - from_stack[[left, right]]).abs() < 1.0e-12,
+                        "row {row} entry ({left},{right}): {} vs {}",
+                        dense[[left, right]],
+                        from_stack[[left, right]]
+                    );
+                }
+            }
+            // `1ᵀΣ1` is the cached scalar the SHARED log-slope lane consumes; it
+            // must be the same number the dense matrix implies.
+            let ones_form: f64 = dense.iter().sum();
+            assert!(
+                (stack[row].ones_quadratic_form() - ones_form).abs()
+                    < 1.0e-10 * (1.0 + ones_form.abs()),
+                "row {row}: cached 1'Σ1 {} vs dense {ones_form}",
+                stack[row].ones_quadratic_form()
+            );
+        }
+    }
+
+    /// Three scores, so the triangular reconstruction is exercised past the
+    /// `K = 2` special case where `T⁻¹` has no accumulated term.
+    #[test]
+    fn three_scores_reconstruct_through_the_forward_substitution() {
+        let n = 30_000;
+        let x = standardized(gaussians(n, 0x2766_1A));
+        let e0 = standardized(gaussians(n, 0x2766_2B));
+        let e1 = standardized(gaussians(n, 0x2766_3C));
+        let e2 = standardized(gaussians(n, 0x2766_4D));
+        let mut scores = Array2::<f64>::zeros((n, 3));
+        let mut a_block = Array2::<f64>::zeros((n, 1));
+        // φ₁₀(x) = 0.4 + 0.3x,  φ₂₀ = 0.2 (constant),  φ₂₁(x) = −0.1 + 0.45x.
+        for row in 0..n {
+            let xi = x[row];
+            a_block[[row, 0]] = xi;
+            let z0 = e0[row];
+            let z1 = (0.4 + 0.3 * xi) * z0 + 0.8 * e1[row];
+            let z2 = 0.2 * z0 + (-0.1 + 0.45 * xi) * z1 + 0.7 * e2[row];
+            scores[[row, 0]] = z0;
+            scores[[row, 1]] = z1;
+            scores[[row, 2]] = z2;
+        }
+        let weights = Array1::<f64>::ones(n);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+        assert_eq!(fitted.coordinates.len(), 3);
+        assert_eq!(fitted.coordinates[2].autoregression.len(), 2);
+        for &probe in &[-1.0_f64, 0.0, 1.0] {
+            let a_row = Array1::from_vec(vec![probe]);
+            let sigma = fitted.dense_at(a_row.view()).expect("Σ(a)");
+            // Closed-form truth by the same forward recursion.
+            let phi10 = 0.4 + 0.3 * probe;
+            let phi20 = 0.2_f64;
+            let phi21 = -0.1 + 0.45 * probe;
+            let (d0, d1, d2) = (1.0_f64, 0.64_f64, 0.49_f64);
+            let s00 = d0;
+            let s01 = phi10 * d0;
+            let s11 = phi10 * phi10 * d0 + d1;
+            let s02 = phi20 * d0 + phi21 * s01;
+            let s12 = phi20 * s01 + phi21 * s11;
+            let s22 = phi20 * s02 + phi21 * s12 + d2;
+            let truth = [s00, s01, s02, s11, s12, s22];
+            let got = [
+                sigma[[0, 0]],
+                sigma[[0, 1]],
+                sigma[[0, 2]],
+                sigma[[1, 1]],
+                sigma[[1, 2]],
+                sigma[[2, 2]],
+            ];
+            for (index, (&want, &have)) in truth.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (want - have).abs() < 0.06 * (1.0 + want.abs()),
+                    "K=3 Σ(a={probe}) entry {index}: got {have}, want {want}"
+                );
+            }
+        }
+    }
+
+    /// A fitted field has to survive the on-disk round trip unchanged: the
+    /// predict path rebuilds `Σ(a)` from exactly these coefficients, so a
+    /// serialisation that dropped a stage would silently evaluate a different
+    /// model.
+    #[test]
+    fn the_fitted_field_round_trips_through_serde() {
+        let n = 8_000;
+        let (scores, weights, a_block) =
+            in_class_fixture(n, [0.25, 0.55], [(0.8_f64).ln(), -0.35], 0.0);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+        let encoded = serde_json::to_string(&fitted).expect("encode");
+        let decoded: ConditionalScoreCovariance = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, fitted);
+        let a_row = Array1::from_vec(vec![0.37]);
+        let before = fitted.dense_at(a_row.view()).expect("Σ before");
+        let after = decoded.dense_at(a_row.view()).expect("Σ after");
+        assert_eq!(before, after);
+    }
+
+    /// Against the object it replaces: averaged over the training rows, the
+    /// conditional field must reproduce the pooled covariance. `Σ̄ = E[Σ(a)] +
+    /// Var(E[z|a])`, and the conditional mean is zero here, so the two agree —
+    /// which is the sense in which this is a refinement of the pooled estimator
+    /// and not a different quantity.
+    #[test]
+    fn the_row_average_reproduces_the_pooled_covariance() {
+        let n = 40_000;
+        let (scores, weights, a_block) =
+            in_class_fixture(n, [0.3, 0.5], [(0.75_f64).ln(), -0.4], 0.0);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+        let pooled = super::super::marginal_slope_covariance_from_scores(scores.view(), &weights)
+            .expect("pooled Σ")
+            .to_dense();
+        let stack = fitted.row_covariances(a_block.view()).expect("stack");
+        let mut average = Array2::<f64>::zeros((2, 2));
+        for covariance in &stack {
+            average += &covariance.to_dense();
+        }
+        average /= n as f64;
+        for left in 0..2 {
+            for right in 0..2 {
+                let want = pooled[[left, right]];
+                let have = average[[left, right]];
+                assert!(
+                    (want - have).abs() < 0.05 * (1.0 + want.abs()),
+                    "row-averaged Σ({left},{right}) = {have} against pooled {want}"
+                );
+            }
+        }
+    }
+}

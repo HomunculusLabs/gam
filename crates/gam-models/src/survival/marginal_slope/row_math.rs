@@ -486,30 +486,36 @@ pub fn survival_marginal_slope_vector_eta(
         .map_err(|err| format!("survival marginal-slope vector eta: {err}"))
 }
 
-/// Allocation-free value-only workspace bound to one covariance whose shape,
-/// finiteness, symmetry, and positive-semidefinite contract were validated at
-/// covariance admission. Per-row evaluation uses the cached square-root factor
-/// and never constructs primary-width runtime jets.
-pub struct RigidVectorValueWorkspace<'covariance> {
-    covariance: &'covariance MarginalSlopeCovariance,
+/// Allocation-free value-only workspace bound to one score-covariance FIELD
+/// whose shape, finiteness, symmetry, and positive-semidefinite contract were
+/// validated at covariance admission. Per-row evaluation uses that row's cached
+/// square-root factor and never constructs primary-width runtime jets.
+///
+/// The binding is to the field rather than to one matrix (gam#2766): `Σ` is
+/// `Var(z | a)`, so it is a function of the row's marginal index whenever the
+/// conditional gate fired. A pooled field returns the same matrix at every row,
+/// which is why nothing about the K=1 lane moves.
+pub struct RigidVectorValueWorkspace<'field> {
+    field: &'field ScoreCovarianceField,
     dimension: usize,
 }
 
-impl<'covariance> RigidVectorValueWorkspace<'covariance> {
-    pub fn new(covariance: &'covariance MarginalSlopeCovariance) -> Self {
+impl<'field> RigidVectorValueWorkspace<'field> {
+    pub fn new(field: &'field ScoreCovarianceField) -> Self {
         Self {
-            covariance,
-            dimension: covariance.dim(),
+            field,
+            dimension: field.dim(),
         }
     }
 
     #[inline(always)]
-    fn quadratic_value(&self, slopes: &[f64]) -> f64 {
-        self.covariance.quadratic_form_unchecked(slopes)
+    fn quadratic_value(&self, row: usize, slopes: &[f64]) -> f64 {
+        self.field.at_row(row).quadratic_form_unchecked(slopes)
     }
 }
 
 pub fn survival_marginal_slope_vector_neglog(
+    row: usize,
     q0: f64,
     q1: f64,
     qd1: f64,
@@ -539,7 +545,7 @@ pub fn survival_marginal_slope_vector_neglog(
         .into());
     }
     let inputs = RigidRowInputs {
-        row: 0,
+        row,
         wi: weight,
         di: event,
         z_sum: 0.0,
@@ -553,7 +559,8 @@ pub fn survival_marginal_slope_vector_neglog(
         linear_dot += slopes[axis] * z[axis];
     }
     let linear = probit_scale * linear_dot;
-    let variance = validated_vector_variance(workspace.quadratic_value(slopes), probit_scale)?;
+    let variance =
+        validated_vector_variance(workspace.quadratic_value(row, slopes), probit_scale)?;
     let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0)
         .map(|value| RuntimeValue::constant(value, RIGID_FEATURE_DIMENSION, &()));
     Ok(rigid_feature_runtime_nll(&features, &inputs, RIGID_FEATURE_DIMENSION, &())?.value())
@@ -1330,10 +1337,20 @@ fn checked_upper_triangle_cells(dimension: usize) -> Result<usize, String> {
 }
 
 /// Reusable, allocation-free production workspace bound to one validated score
-/// covariance. The row kernel performs one covariance matvec and one packed
-/// coefficient traversal; validation and representation binding happen here.
-pub(crate) struct RigidVectorRowWorkspace<'covariance> {
-    covariance: &'covariance MarginalSlopeCovariance,
+/// covariance FIELD. The row kernel performs one covariance matvec and one
+/// packed coefficient traversal; validation and representation binding happen
+/// here.
+///
+/// Since gam#2766 the binding is per ROW rather than per fit: `Σ` is
+/// `Var(z | a)` and varies with the row's marginal index whenever the
+/// conditional gate fired. [`Self::bind_row`] re-points the borrowed covariance
+/// and refreshes the packed low-rank coefficient cache; the buffers themselves
+/// never resize, because every row of a field shares one `K` and one
+/// representation by construction.
+pub(crate) struct RigidVectorRowWorkspace<'field> {
+    field: &'field ScoreCovarianceField,
+    covariance: &'field MarginalSlopeCovariance,
+    bound_row: usize,
     score_dimension: usize,
     sigma_g: Box<[f64]>,
     linear_direction: Box<[f64]>,
@@ -1342,25 +1359,34 @@ pub(crate) struct RigidVectorRowWorkspace<'covariance> {
     derivative_cells: Box<[f64]>,
 }
 
-impl<'covariance> RigidVectorRowWorkspace<'covariance> {
-    pub(crate) fn new(covariance: &'covariance MarginalSlopeCovariance) -> Result<Self, String> {
+/// Pack the upper triangle of `L Lᵀ` for a low-rank covariance, so the row
+/// kernel's score-Hessian block reads a coefficient per visit rather than
+/// re-contracting the factor.
+fn pack_low_rank_upper(factor: ndarray::ArrayView2<'_, f64>, cells: &mut [f64]) {
+    let dimension = factor.nrows();
+    let mut slot = 0;
+    for left in 0..dimension {
+        for right in left..dimension {
+            let mut coefficient = 0.0;
+            for rank in 0..factor.ncols() {
+                coefficient += factor[[left, rank]] * factor[[right, rank]];
+            }
+            cells[slot] = coefficient;
+            slot += 1;
+        }
+    }
+}
+
+impl<'field> RigidVectorRowWorkspace<'field> {
+    pub(crate) fn new(field: &'field ScoreCovarianceField) -> Result<Self, String> {
+        let covariance = field.at_row(0);
         let score_dimension = covariance.dim();
         let derivative_cells = checked_vector_workspace_layout(score_dimension)?;
         let (projection_dimension, low_rank_covariance_upper) = match covariance.representation() {
             MarginalSlopeCovarianceRef::LowRank(factor) => {
                 let mut covariance_upper =
                     vec![0.0; checked_upper_triangle_cells(score_dimension)?];
-                let mut slot = 0;
-                for left in 0..score_dimension {
-                    for right in left..score_dimension {
-                        let mut coefficient = 0.0;
-                        for rank in 0..factor.ncols() {
-                            coefficient += factor[[left, rank]] * factor[[right, rank]];
-                        }
-                        covariance_upper[slot] = coefficient;
-                        slot += 1;
-                    }
-                }
+                pack_low_rank_upper(factor.view(), &mut covariance_upper);
                 (factor.ncols(), covariance_upper.into_boxed_slice())
             }
             MarginalSlopeCovarianceRef::Diagonal(_) | MarginalSlopeCovarianceRef::Full(_) => {
@@ -1368,7 +1394,9 @@ impl<'covariance> RigidVectorRowWorkspace<'covariance> {
             }
         };
         Ok(Self {
+            field,
             covariance,
+            bound_row: 0,
             score_dimension,
             sigma_g: vec![0.0; score_dimension].into_boxed_slice(),
             linear_direction: vec![0.0; score_dimension].into_boxed_slice(),
@@ -1376,6 +1404,56 @@ impl<'covariance> RigidVectorRowWorkspace<'covariance> {
             low_rank_covariance_upper,
             derivative_cells: vec![0.0; derivative_cells].into_boxed_slice(),
         })
+    }
+
+    /// Point the workspace at `row`'s covariance. A no-op for a pooled field
+    /// (every row is the same object, so the pointer comparison short-circuits)
+    /// and one re-pack of the low-rank coefficient cache for a conditional one.
+    #[inline]
+    pub(crate) fn bind_row(&mut self, row: usize) -> Result<(), String> {
+        if !self.field.is_conditional() || row == self.bound_row {
+            self.bound_row = row;
+            return Ok(());
+        }
+        let covariance = self.field.at_row(row);
+        if covariance.dim() != self.score_dimension {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "survival marginal-slope conditional covariance row {row} has width {} against the workspace's {}",
+                    covariance.dim(),
+                    self.score_dimension,
+                ),
+            }
+            .into());
+        }
+        match covariance.representation() {
+            MarginalSlopeCovarianceRef::LowRank(factor) => {
+                if factor.ncols() != self.low_rank_projection.len() {
+                    return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                        reason: format!(
+                            "survival marginal-slope conditional covariance row {row} has rank {} against the workspace's {}",
+                            factor.ncols(),
+                            self.low_rank_projection.len(),
+                        ),
+                    }
+                    .into());
+                }
+                pack_low_rank_upper(factor.view(), &mut self.low_rank_covariance_upper);
+            }
+            MarginalSlopeCovarianceRef::Diagonal(_) | MarginalSlopeCovarianceRef::Full(_) => {
+                if !self.low_rank_covariance_upper.is_empty() {
+                    return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                        reason: format!(
+                            "survival marginal-slope conditional covariance row {row} changed representation away from the low-rank shape the workspace was sized for"
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+        self.covariance = covariance;
+        self.bound_row = row;
+        Ok(())
     }
 
     pub(crate) fn derivatives(&self) -> (ArrayView1<'_, f64>, ArrayView2<'_, f64>) {
@@ -1681,6 +1759,7 @@ fn rigid_vector_feature_pullback_into(
 }
 
 pub(crate) fn row_primary_closed_form_vector_into(
+    row: usize,
     q0: f64,
     q1: f64,
     qd1: f64,
@@ -1692,6 +1771,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
     probit_scale: f64,
     workspace: &mut RigidVectorRowWorkspace<'_>,
 ) -> Result<f64, String> {
+    workspace.bind_row(row)?;
     let k = slopes.len();
     let configured_score_dimension = workspace.score_dimension;
     if z.len() != k {
@@ -1713,7 +1793,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
         .into());
     }
     validate_vector_probit_scale(&RigidRowInputs {
-        row: 0,
+        row,
         wi: w,
         di: d,
         z_sum: 0.0,
@@ -1729,7 +1809,9 @@ pub(crate) fn row_primary_closed_form_vector_into(
     }
     let dimension = 3 + k;
     let RigidVectorRowWorkspace {
+        field: _,
         covariance,
+        bound_row: _,
         score_dimension: _,
         sigma_g,
         linear_direction,
@@ -1753,7 +1835,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
     let raw_variance = validated_vector_variance(raw_quadratic, probit_scale)?;
     let linear = probit_scale * linear_dot;
     let inputs = RigidRowInputs {
-        row: 0,
+        row,
         wi: w,
         di: d,
         z_sum: 0.0,
@@ -2489,9 +2571,11 @@ mod tests {
         };
 
         for (case, &(covariance, event, q0, q1, qd1, probit_scale)) in cases.iter().enumerate() {
+            let field = ScoreCovarianceField::pooled(covariance.clone());
             let mut workspace =
-                RigidVectorRowWorkspace::new(covariance).expect("k=3 production workspace");
+                RigidVectorRowWorkspace::new(&field).expect("k=3 production workspace");
             let production_value = row_primary_closed_form_vector_into(
+                0,
                 q0,
                 q1,
                 qd1,
@@ -2660,11 +2744,13 @@ mod tests {
             let mut graph_workspace = Order2GraphWorkspace::new();
             let mut dynamic_arena = DynamicJetArena::new();
             for (shape_index, covariance) in covariances.iter().enumerate() {
+                let field = ScoreCovarianceField::pooled(covariance.clone());
                 let mut production_workspace =
-                    RigidVectorRowWorkspace::new(covariance).expect("production width workspace");
-                let value_workspace = RigidVectorValueWorkspace::new(covariance);
+                    RigidVectorRowWorkspace::new(&field).expect("production width workspace");
+                let value_workspace = RigidVectorValueWorkspace::new(&field);
                 for event in [0.0, 0.35, 1.0] {
                     let production_value = row_primary_closed_form_vector_into(
+                        0,
                         q0,
                         q1,
                         qd1,
@@ -2679,6 +2765,7 @@ mod tests {
                     .expect("production vector row");
                     let production = collect_workspace_row(production_value, &production_workspace);
                     let value = survival_marginal_slope_vector_neglog(
+                        0,
                         q0,
                         q1,
                         qd1,
@@ -2864,11 +2951,13 @@ mod tests {
         };
 
         for (shape, covariance) in covariances.iter().enumerate() {
+            let field = ScoreCovarianceField::pooled(covariance.clone());
             let mut production_workspace =
-                RigidVectorRowWorkspace::new(covariance).expect("k=14 production workspace");
-            let value_workspace = RigidVectorValueWorkspace::new(covariance);
+                RigidVectorRowWorkspace::new(&field).expect("k=14 production workspace");
+            let value_workspace = RigidVectorValueWorkspace::new(&field);
             for event in [0.0, 0.35, 1.0] {
                 let production_value = row_primary_closed_form_vector_into(
+                    0,
                     -0.31,
                     0.47,
                     1.09,
@@ -2883,6 +2972,7 @@ mod tests {
                 .expect("production dynamic-boundary row");
                 let production = collect_workspace_row(production_value, &production_workspace);
                 let value = survival_marginal_slope_vector_neglog(
+                    0,
                     -0.31,
                     0.47,
                     1.09,
@@ -3008,8 +3098,9 @@ mod tests {
                 );
             }
 
+            let field = ScoreCovarianceField::pooled(covariance.clone());
             let workspace =
-                RigidVectorRowWorkspace::new(covariance).expect("validated vector workspace");
+                RigidVectorRowWorkspace::new(&field).expect("validated vector workspace");
             match covariance.representation() {
                 MarginalSlopeCovarianceRef::LowRank(_) => {
                     let mut slot = 0;
@@ -3044,9 +3135,11 @@ mod tests {
         assert!(checked_upper_triangle_cells(usize::MAX).is_err());
 
         assert!(MarginalSlopeCovariance::diagonal(Array1::zeros(0)).is_err());
-        let covariance = MarginalSlopeCovariance::diagonal(Array1::ones(3)).unwrap();
+        let covariance =
+            ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(Array1::ones(3)).unwrap());
         let mut workspace = RigidVectorRowWorkspace::new(&covariance).expect("k=3 workspace");
         let error = row_primary_closed_form_vector_into(
+            0,
             -0.2,
             0.4,
             1.1,
@@ -3127,7 +3220,8 @@ mod tests {
 
                 for &(label, covariance) in &cases {
                     for event in [0.0, 1.0] {
-                        let mut workspace = RigidVectorRowWorkspace::new(covariance)
+                        let field = ScoreCovarianceField::pooled((*covariance).clone());
+                        let mut workspace = RigidVectorRowWorkspace::new(&field)
                             .expect("packed production workspace");
                         let mut hand_workspace =
                             vector_hand_oracle_tests::ReusableHandVectorRowWorkspace::new(
@@ -3144,7 +3238,7 @@ mod tests {
                         let mut dynamic_hessian = [0.0; $dim * $dim];
                         let evaluate_production = |workspace: &mut RigidVectorRowWorkspace<'_>| {
                             let value = row_primary_closed_form_vector_into(
-                                -0.28, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8, 0.87,
+                                0, -0.28, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8, 0.87,
                                 workspace,
                             )
                             .expect("packed production width");

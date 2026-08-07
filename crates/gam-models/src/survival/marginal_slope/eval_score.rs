@@ -220,8 +220,15 @@ impl SurvivalMarginalSlopeFamily {
             .fill_shared_values(block_states[2].eta[row], workspace)
     }
 
-    pub(crate) fn shared_logslope_covariance_scale(&self) -> f64 {
-        self.score_covariance.ones_quadratic_form()
+    /// `1ᵀΣ(a_row)1`, the whole covariance dependence of the SHARED log-slope
+    /// lane: with one slope `g` shared across all `K` scores the row's variance
+    /// is `g²·1ᵀΣ1`, so the row program needs this scalar and nothing else.
+    ///
+    /// Row-indexed since gam#2766. It is the cached quadratic form of that row's
+    /// own covariance, so a pooled field returns the same number for every row
+    /// exactly as before.
+    pub(crate) fn shared_logslope_covariance_scale(&self, row: usize) -> f64 {
+        self.score_covariance.at_row(row).ones_quadratic_form()
     }
 
     pub(crate) fn exact_shared_score_summary(
@@ -247,6 +254,6 @@ impl SurvivalMarginalSlopeFamily {
             }
             .into());
         }
-        Ok((z_sum, self.shared_logslope_covariance_scale()))
+        Ok((z_sum, self.shared_logslope_covariance_scale(row)))
     }
 }

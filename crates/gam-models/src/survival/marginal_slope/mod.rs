@@ -34,8 +34,8 @@ pub(crate) use gam_linalg::faer_ndarray::{FaerCholesky, fast_atv, fast_av, fast_
 pub(crate) use crate::bms::{
     CrossBlockIdentifiabilityWarning, DeviationBlockConfig, DeviationRuntime, LatentZNormalization,
     LatentZPolicy, MarginalSlopeCovariance, MarginalSlopeCovarianceRef, ParametricAnchorBlock,
-    marginal_slope_covariance_from_scores, marginal_slope_preserving_scale,
-    marginal_slope_probit_eta, padded_deviation_seed,
+    ScoreCovarianceField, marginal_slope_covariance_from_scores,
+    marginal_slope_preserving_scale, marginal_slope_probit_eta, padded_deviation_seed,
 };
 
 pub(crate) use crate::bms::{

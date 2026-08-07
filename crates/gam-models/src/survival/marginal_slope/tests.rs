@@ -87,8 +87,8 @@ fn empty_termspec() -> TermCollectionSpec {
     }
 }
 
-fn unit_score_covariance() -> MarginalSlopeCovariance {
-    MarginalSlopeCovariance::diagonal(array![1.0]).unwrap()
+fn unit_score_covariance() -> ScoreCovarianceField {
+    ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(array![1.0]).unwrap())
 }
 
 fn base_time_block() -> TimeBlockInput {
@@ -263,10 +263,16 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
 #[test]
 fn k1_shared_logslope_uses_cached_arbitrary_variance_932() {
     let mut family = make_closed_form_test_family(3);
-    family.score_covariance = MarginalSlopeCovariance::diagonal(array![3.75]).unwrap();
-    let cached = family.score_covariance.ones_quadratic_form();
+    family.score_covariance =
+        ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(array![3.75]).unwrap());
+    let cached = family
+        .score_covariance
+        .pooled_covariance()
+        .ones_quadratic_form();
     assert!((cached - 3.75).abs() <= f64::EPSILON);
-    assert_eq!(family.shared_logslope_covariance_scale(), cached);
+    for row in 0..family.n {
+        assert_eq!(family.shared_logslope_covariance_scale(row), cached);
+    }
 }
 
 fn closed_form_block_states(
@@ -8298,7 +8304,7 @@ fn logslope_port_jacobian(
     let layout = LogslopeLayout::shared(DesignMatrix::from(design.clone()), Array1::zeros(n));
     let z_mat = Array2::from_shape_fn((n, 1), |(i, _)| z[i]);
     let covariance = MarginalSlopeCovariance::diagonal(array![1.0]).expect("unit covariance");
-    super::block_jacobians::LogslopeBlockJacobian::new(layout, Arc::new(z_mat), covariance)
+    super::block_jacobians::LogslopeBlockJacobian::new(layout, Arc::new(z_mat), covariance.into())
         .expect("logslope jacobian construction")
 }
 
@@ -8400,7 +8406,7 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
             slopes,
             None,
             s_f,
-            &covariance,
+            &covariance.clone().into(),
         )
         .expect("family scalars"),
     );
@@ -8550,7 +8556,7 @@ fn make_timewiggle_test_family(
         event: Arc::new(event),
         weights: Arc::new(weights),
         z: Arc::new(z),
-        score_covariance: covariance,
+        score_covariance: covariance.into(),
         gaussian_frailty_sd: None,
         family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
         derivative_guard: 1e-6,

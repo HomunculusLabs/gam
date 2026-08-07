@@ -565,12 +565,13 @@ fn survival_neglog_k1_matches_closed_form_20_fixtures() {
         let derivative_guard = 1e-12;
 
         let got = survival_marginal_slope_vector_neglog(
+            0,
             q0,
             q1,
             qd1,
             &slope,
             &z,
-            &RigidVectorValueWorkspace::new(&cov),
+            &RigidVectorValueWorkspace::new(&cov.clone().into()),
             weight,
             event,
             derivative_guard,

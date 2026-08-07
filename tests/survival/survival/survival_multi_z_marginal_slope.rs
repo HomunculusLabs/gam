@@ -134,12 +134,13 @@ fn survival_multi_z_shared_slope_neglog_uses_row_sum_and_covariance_quadratic() 
             - event * (qd1 * c).ln());
 
     let actual = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &[shared_slope, shared_slope],
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         event,
         1e-6,
@@ -227,12 +228,13 @@ fn survival_multi_z_k1_neglog_matches_scalar_identity_fixture() {
             - log_phi_eta1
             - (qd1 * c).ln());
     let actual = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slope,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.2,
         1.0,
         1e-6,
@@ -249,12 +251,13 @@ fn survival_multi_z_k1_neglog_matches_scalar_identity_fixture() {
 fn survival_multi_z_neglog_rejects_derivative_guard_violation() {
     let covariance = MarginalSlopeCovariance::diagonal(array![1.0, 1.0]).unwrap();
     let err = survival_marginal_slope_vector_neglog(
+        0,
         0.0,
         0.2,
         1e-7,
         &[0.2, -0.1],
         &[0.4, 0.5],
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.0,
         1.0,
         1e-6,

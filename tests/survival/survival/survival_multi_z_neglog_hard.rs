@@ -171,12 +171,13 @@ fn neglog_matches_closed_form_across_dims_shapes_events() {
                     let qd1 = rng.uniform(0.1, 3.0);
 
                     let actual = survival_marginal_slope_vector_neglog(
+                        0,
                         q0,
                         q1,
                         qd1,
                         &slopes,
                         &z,
-                        &RigidVectorValueWorkspace::new(&covariance),
+                        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
                         weight,
                         event,
                         1e-9,
@@ -224,12 +225,13 @@ fn neglog_event_zero_is_bitwise_invariant_under_qd1() {
     let q1 = 0.83;
 
     let v_small = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         1e-3,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         0.0,
         1e-9,
@@ -237,12 +239,13 @@ fn neglog_event_zero_is_bitwise_invariant_under_qd1() {
     )
     .expect("neglog small qd1");
     let v_large = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         1e6,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         0.0,
         1e-9,
@@ -266,12 +269,13 @@ fn neglog_errors_when_derivative_guard_is_violated() {
         let slopes = random_slopes(&mut rng, k);
         let z = random_z(&mut rng, k);
         let err = survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.2,
             1e-7,
             &slopes,
             &z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             1.0,
             1.0,
             1e-6,
@@ -312,12 +316,13 @@ fn neglog_finite_and_continuous_just_above_guard() {
         let qd1 = (log_hi + (log_lo - log_hi) * t).exp();
         assert!(qd1 > 1e-6, "qd1={qd1:.3e} must clear guard");
         let v = survival_marginal_slope_vector_neglog(
+            0,
             q0,
             q1,
             qd1,
             &slopes,
             &z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-6,
@@ -350,12 +355,13 @@ fn neglog_is_linear_in_weight_and_zero_for_zero_weight() {
     let event = 1.0;
 
     let base = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.0,
         event,
         1e-9,
@@ -365,12 +371,13 @@ fn neglog_is_linear_in_weight_and_zero_for_zero_weight() {
 
     for &w in &[0.25_f64, 0.5, 2.0, 3.7] {
         let v = survival_marginal_slope_vector_neglog(
+            0,
             q0,
             q1,
             qd1,
             &slopes,
             &z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             w,
             event,
             1e-9,
@@ -386,12 +393,13 @@ fn neglog_is_linear_in_weight_and_zero_for_zero_weight() {
     }
 
     let zero = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         0.0,
         event,
         1e-9,
@@ -434,12 +442,13 @@ fn neglog_invariant_under_joint_negation_of_z_and_slopes() {
             let qd1 = rng.uniform(0.2, 2.5);
 
             let a = survival_marginal_slope_vector_neglog(
+                0,
                 q0,
                 q1,
                 qd1,
                 &slopes,
                 &z,
-                &RigidVectorValueWorkspace::new(&covariance),
+                &RigidVectorValueWorkspace::new(&covariance.clone().into()),
                 weight,
                 event,
                 1e-9,
@@ -447,12 +456,13 @@ fn neglog_invariant_under_joint_negation_of_z_and_slopes() {
             )
             .expect("a");
             let b = survival_marginal_slope_vector_neglog(
+                0,
                 q0,
                 q1,
                 qd1,
                 &neg_slopes,
                 &neg_z,
-                &RigidVectorValueWorkspace::new(&covariance),
+                &RigidVectorValueWorkspace::new(&covariance.clone().into()),
                 weight,
                 event,
                 1e-9,
@@ -484,12 +494,13 @@ fn neglog_lone_sign_flip_changes_value() {
     let qd1 = 0.9;
 
     let base = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         event,
         1e-9,
@@ -500,12 +511,13 @@ fn neglog_lone_sign_flip_changes_value() {
     let neg_slopes: Vec<f64> = slopes.iter().map(|&v| -v).collect();
 
     let flip_z = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slopes,
         &neg_z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         event,
         1e-9,
@@ -513,12 +525,13 @@ fn neglog_lone_sign_flip_changes_value() {
     )
     .expect("flip_z");
     let flip_slopes = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &neg_slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         event,
         1e-9,
@@ -555,12 +568,13 @@ fn neglog_invariant_under_probit_scale_slope_rescale() {
     let s_base = 0.95_f64;
 
     let base = survival_marginal_slope_vector_neglog(
+        0,
         q0,
         q1,
         qd1,
         &slopes,
         &z,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         weight,
         event,
         1e-9,
@@ -572,12 +586,13 @@ fn neglog_invariant_under_probit_scale_slope_rescale() {
         let s_scaled = alpha * s_base;
         let slopes_scaled: Vec<f64> = slopes.iter().map(|&g| g / alpha).collect();
         let v = survival_marginal_slope_vector_neglog(
+            0,
             q0,
             q1,
             qd1,
             &slopes_scaled,
             &z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -603,12 +618,13 @@ fn neglog_errors_on_dimension_mismatch() {
 
     // z too short.
     let err = survival_marginal_slope_vector_neglog(
+        0,
         0.1,
         0.4,
         0.9,
         &slopes_ok,
         &[0.5],
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.0,
         1.0,
         1e-9,
@@ -619,12 +635,13 @@ fn neglog_errors_on_dimension_mismatch() {
 
     // slopes too long.
     let err = survival_marginal_slope_vector_neglog(
+        0,
         0.1,
         0.4,
         0.9,
         &[0.3, -0.2, 0.1],
         &z_ok,
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.0,
         1.0,
         1e-9,
@@ -635,12 +652,13 @@ fn neglog_errors_on_dimension_mismatch() {
 
     // Both wrong vs. covariance.
     let err = survival_marginal_slope_vector_neglog(
+        0,
         0.1,
         0.4,
         0.9,
         &[0.3, -0.2, 0.1],
         &[0.5, -0.4, 0.2],
-        &RigidVectorValueWorkspace::new(&covariance),
+        &RigidVectorValueWorkspace::new(&covariance.clone().into()),
         1.0,
         1.0,
         1e-9,
@@ -675,12 +693,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "q0=NaN",
         survival_marginal_slope_vector_neglog(
+            0,
             nan,
             0.4,
             0.9,
             &good_slopes,
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -690,12 +709,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "q1=Inf",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             inf,
             0.9,
             &good_slopes,
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -705,12 +725,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "qd1=NaN",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.4,
             nan,
             &good_slopes,
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -720,12 +741,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "slopes has NaN",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.4,
             0.9,
             &[nan, -0.13],
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -735,12 +757,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "z has Inf",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.4,
             0.9,
             &good_slopes,
             &[inf, -0.3],
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,
@@ -750,12 +773,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "weight=NaN",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.4,
             0.9,
             &good_slopes,
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             nan,
             event,
             1e-9,
@@ -765,12 +789,13 @@ fn neglog_nonfinite_inputs_yield_error_or_nonfinite() {
     check(
         "probit_scale=Inf",
         survival_marginal_slope_vector_neglog(
+            0,
             0.1,
             0.4,
             0.9,
             &good_slopes,
             &good_z,
-            &RigidVectorValueWorkspace::new(&covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             weight,
             event,
             1e-9,

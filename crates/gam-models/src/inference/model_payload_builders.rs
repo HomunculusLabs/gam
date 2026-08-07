@@ -2189,7 +2189,7 @@ fn payload_for_survival_marginal_slope(
             link_dev_runtime: ms_result.link_dev_runtime.as_ref(),
             influence_absorber_width: ms_result.influence_absorber_width,
             influence_absorber_design: ms_result.influence_absorber_design.as_ref(),
-            score_covariance: &ms_result.score_covariance,
+            score_covariance: ms_result.persistable_score_covariance()?,
         },
         SavedModelSourceMetadata {
             training_headers: dataset.headers.clone(),

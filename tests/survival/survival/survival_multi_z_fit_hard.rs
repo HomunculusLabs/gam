@@ -113,12 +113,13 @@ fn total_neglog(
     for i in 0..N {
         let z_row = [data.z[[i, 0]], data.z[[i, 1]]];
         let row = survival_marginal_slope_vector_neglog(
+            0,
             data.q0[i],
             data.q1[i],
             data.qd1[i],
             slopes,
             &z_row,
-            &RigidVectorValueWorkspace::new(covariance),
+            &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             data.weights[i],
             data.event[i],
             DERIV_GUARD,

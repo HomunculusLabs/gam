@@ -36,6 +36,7 @@ impl SurvivalMarginalSlopeFamily {
             "survival marginal-slope vector value score row must be contiguous".to_string()
         })?;
         survival_marginal_slope_vector_neglog(
+            row,
             q_geom.q0,
             q_geom.q1,
             q_geom.qd1,

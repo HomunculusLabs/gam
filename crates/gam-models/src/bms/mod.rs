@@ -2689,6 +2689,7 @@ pub(super) const BERNOULLI_MARGSLOPE_LINE_SEARCH_EARLY_EXIT_CHUNK_ROWS: usize = 
 // Submodule declarations
 // ---------------------------------------------------------------------------
 pub(crate) mod block_specs;
+pub mod conditional_score_covariance;
 pub(crate) mod exact_eval_cache;
 pub(crate) mod family;
 pub(crate) mod flex_row_program;
@@ -2916,6 +2917,9 @@ mod latent_measure_2768_tests;
 pub(crate) mod row_primary_hessian;
 
 pub use block_specs::fit_bernoulli_marginal_slope_terms;
+pub use conditional_score_covariance::{
+    ConditionalScoreCoordinate, ConditionalScoreCovariance, ScoreCovarianceField,
+};
 pub use gradient_paths::{
     MarginalSlopeCovariance, MarginalSlopeCovarianceShape, marginal_slope_covariance_from_scores,
     marginal_slope_preserving_scale, marginal_slope_probit_eta, padded_deviation_seed,
