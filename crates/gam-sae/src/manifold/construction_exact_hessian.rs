@@ -3075,18 +3075,21 @@ impl SaeManifoldTerm {
         // (see `tests_streaming_outer_gradient_2026`) and because a future route that
         // reintroduces a `B`-priced value must not silently acquire an `A` gradient.
         //
-        // ⚠ THE LIVE INCOHERENCE IS NOW THE MIRROR CELL, AND THIS GUARD CANNOT SEE IT.
-        // `exact_a_logdet_route` is false whenever a derivative bundle OR a matrix-free
-        // system is present, so every streaming/bundle evaluation now pairs an `A`-priced
-        // VALUE with `B`-differentiated trace and θ-adjoint channels. That is #2515's
-        // open half, MEASURED on its fixture as `logdet_trace` gaps of `1.231477e-1`
-        // (smooth atom 0) and `5.052577e-2` (ARD) — see
-        // `exact_a_route_gap_is_two_coordinates_with_two_causes_2515`. It is NOT refused
-        // here: the same cell is the DELIBERATE `ThresholdGate` staging documented on
-        // `dense_exact_a_theta_adjoint_is_modelled`, and refusing it would take every
-        // streaming SAE fit with it. Naming it so the next reader does not conclude from
-        // this guard's existence that the value/gradient pairing is checked in both
-        // directions. It is checked in one.
+        // THE MIRROR CELL IS CLOSED. It used to be the live one: `exact_a_logdet_route`
+        // is false whenever a derivative bundle or a matrix-free system is present, so
+        // every streaming/bundle evaluation paired an `A`-priced VALUE with
+        // `B`-differentiated trace and θ-adjoint channels. That was #2515's open half,
+        // and on its fixture it cost `logdet_trace` gaps of `1.231477e-1` (smooth atom 0)
+        // and `5.052577e-2` (ARD). The bundle route now carries a
+        // `BundleEvidenceGeometry` naming the exact observed information and carrying its
+        // OWN factor cache, so `exact_a_logdet_route` being false no longer means the
+        // gradient prices `B` — it means the exact-`A` channels are assembled from the
+        // bundle rather than from the dense pseudo-inverse. Measured route-parity at a
+        // fixed state, complete gradient: `1.57e-14`
+        // (`laplace_value_and_gradient_are_route_invariant_2515`).
+        //
+        // So this guard is now the ONLY value/gradient pairing that can still go wrong,
+        // and it is checked. Its scope note below is unchanged.
         //
         // LIMIT — this guard reads the PLAN, so it catches a predicate mismatch, not
         // a caller that hand-picks `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
@@ -3397,24 +3400,17 @@ impl SaeManifoldTerm {
         // Explicit / occam / rank-charge-direct channels are majorizer-
         // independent and were produced on both routes.
         //
-        // ⚠ THE MATRIX-FREE / BUNDLE ROUTE STILL DIFFERENTIATES ½log|B| HERE, BUT
-        // NOT FOR THE REASON THIS COMMENT USED TO GIVE. It said "until Phase-2b
-        // (streaming signed-LDLᵀ A-factor)", which now sends the reader looking
-        // for work that has already landed: #2509 Phase-2b (`5563a2a18`) moved
-        // BOTH branches of `streaming_exact_arrow_log_det_with_lane_and_system`
-        // onto the exact observed information, so every production VALUE route
-        // prices ½log|A| today — the same correction the route-coherence guard
-        // above carries for its own premise. What keeps these routes on `B` is
-        // that `exact_a_logdet_route` is false whenever a bundle or a
-        // matrix-free system is present, so the trace and θ-adjoint channels
-        // are still built from the majorizer while the value is not. That
-        // A-priced-value / B-differentiated-gradient cell is #2515's open half,
-        // measured on its fixture as `logdet_trace` gaps of `1.231477e-1`
-        // (smooth atom 0) and `5.052577e-2` (ARD). #2333 — routing this
-        // θ-adjoint through the Trace row-jet seam on A's selected inverse —
-        // is downstream of that, not of a missing Phase-2b.
+        // BOTH ROUTES DIFFERENTIATE ½log|A| (#2515). #2509 Phase-2b (`5563a2a18`)
+        // moved every production VALUE route onto the exact observed information;
+        // #2515 then moved the bundle route's DERIVATIVE there too, by giving it a
+        // `BundleEvidenceGeometry` that names the operator and carries `A`'s own
+        // factor cache. `exact_a_logdet_route` still selects which ASSEMBLY runs —
+        // the dense priced pseudo-inverse below, or the from-probes channels above
+        // — but no longer which operator is priced. #2333 (routing this θ-adjoint
+        // through the Trace row-jet seam on `A`'s selected inverse) is a
+        // representation change downstream of that, not a missing operator.
         //
-        // Exactly one arm produces Γ, so the two majorizers cannot both be paid
+        // Exactly one arm produces Γ, so the two assemblies cannot both be paid
         // for on one gradient.
         let (gamma, dense_stationarity_adjoint) = match majorizer_gamma {
             Some(gamma) => (gamma, None),

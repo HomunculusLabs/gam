@@ -4146,9 +4146,18 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
 /// same full-basis probe bundle that module builds. Leaving a shell here would
 /// have meant two fixtures for one contract.
 ///
-/// #2515 — the route gap is TWO coordinates with TWO different causes, and the
-/// named witness `laplace_value_and_gradient_are_route_invariant_2515` can report
-/// neither, because it asserts per-coordinate and panics on the first violation.
+/// #2515 — the route gap WAS two coordinates with two different causes, and this
+/// is the attribution that decided the repair. It is retained after the repair
+/// because the attribution is what makes the repair readable: the numbers below
+/// are the MAJORIZER-rooted bundle's gap against the dense exact-`A` route, i.e.
+/// what production carried until `019f716b5`, measured at the historical
+/// `α = 250`. Production now mints an exact-`A` geometry and matches the dense
+/// route to `1.57e-14`
+/// (`tests_exact_a_bundle_2515::laplace_value_and_gradient_are_route_invariant_2515`);
+/// nothing here is a live defect.
+///
+/// The named witness can report neither of the two causes on its own, because it
+/// asserts per-coordinate and panics on the first violation.
 ///
 /// `∂A/∂ρ = ∂B/∂ρ + ∂ΔC/∂ρ`, so a bundle route that prices `B` can be wrong in two
 /// independent ways: it can contract the wrong INVERSE, or it can differentiate the
@@ -4171,6 +4180,12 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
 /// The per-coordinate gaps are REPORTED rather than asserted, because the contract
 /// they belong to is the witness's and it already owns it. What would otherwise be
 /// lost is that there is a second one at all.
+///
+/// This fixture also stays at `α = 250` deliberately, which is the regime where
+/// the exact-`A` operator is indefinite and the streaming evidence route refuses.
+/// That makes it the complement of the witness rather than a duplicate: the
+/// witness states parity where both routes exist, this one states what the two
+/// operators do where only one does.
 #[test]
 fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
     let n = 24usize;
