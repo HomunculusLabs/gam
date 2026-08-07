@@ -25,6 +25,7 @@ mod survival_multi_z_marginal_slope;
 mod survival_multi_z_margpreserve_hard;
 mod survival_multi_z_neglog_hard;
 mod survival_multi_z_reduction_hard;
+mod survival_multi_z_slope_scale_equivariance_2764;
 mod survival_optimizer_api;
 mod survival_regression;
 mod survival_right_censored_shorthand_posterior_sample;

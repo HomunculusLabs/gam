@@ -1,5 +1,43 @@
 ## Unreleased
 
+- **The "logslope" block is the SLOPE, and the name was the only thing wrong
+  (#2764).** `rigid_observed_logslope(g, s) = s·g` — the identity, no `exp`
+  anywhere on that path — so the penalty is on `b`, not on `log b`. The issue
+  proposed making the map a genuine log on two grounds: scale-invariance of the
+  penalty, and positivity. Both were measured, and the proposed remedy is the
+  wrong half of the repair.
+
+  **The slope is signed and the sign is an estimand.**
+  `survival_multi_z_fit_hard::survival_multi_z_fit_truth_neglog_minimised_at_true_slopes_30_seeds`
+  plants `(0.32, −0.21)` and pins that the population negative log-likelihood is
+  minimised there over 30 seeds. `b = exp(g)` cannot represent that fit at all,
+  so it is a strictly smaller model rather than a naming repair. The zero
+  crossing the identity map permits is the covariate value at which the score
+  stops predicting.
+
+  **The scale-invariance argument is about `λ`'s units, not about the fit.**
+  Rescaling `z → z/κ` sends `g → κg` and `Σ → Σ/κ²`, and the row negative
+  log-likelihood, the preserving scale `c` and the index `η` are all POINTWISE
+  invariant under that — now measured at `κ ∈ {2, ¼, 10, 0.3}` in
+  `survival_multi_z_slope_scale_equivariance_2764`, together with the
+  admissibility of a negative slope and the evenness of `c` in the slope. What
+  is left over is `λβᵀSβ`, which needs `λ → λ/κ²`; REML supplies it, because
+  under `β̃ = κβ` its Laplace criterion satisfies
+  `Ṽ(λ/κ²) = V(λ) − ½·nullity·log κ²`, a shift constant in `λ`, so `λ̂ → λ̂/κ²`
+  and the fitted surface does not move. Two honest caveats travel with that, and
+  are recorded on the function: the `ρ = log λ` box is absolute, so a large
+  enough rescaling breaks the correspondence at the wall; and so would any
+  absolute — as opposed to relative — solver tolerance.
+
+  So the fix is the name, at the point where the mathematics is stated:
+  `rigid_observed_logslope` → `rigid_observed_slope` in both marginal-slope
+  families, carrying the decision record above. The block, the
+  `logslope_formula=` keyword, the CLI flag and the on-disk fields keep the
+  historical spelling — renaming a public keyword and a saved-model contract is
+  a breaking change and is not this commit's to take — and
+  `docs/marginal-slope.md` now says plainly that the surface is the signed
+  slope and why.
+
 - **The measure-jet representer chart spent the same half-mantissa twice, and
   paid for it in span (#2761, #2754, #2751).** `condition_representer_section`
   whitened the chart against the SQUARED operator `G = EᵀE` and cut at

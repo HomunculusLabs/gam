@@ -112,6 +112,33 @@ function of covariates given by `logslope_formula`. In the Python API,
 omitting `logslope_formula` reuses the main covariate formula for the
 slope surface.
 
+### A note on the name: `logslope_formula` is the SLOPE surface
+
+The keyword says `logslope`; the map is the identity. `logslope_formula=`
+gives the surface `b(x)` that the latent score enters the probit index
+with directly, not its logarithm, and that is deliberate rather than an
+oversight:
+
+- **The slope is signed.** `b(x) < 0` is a score that is protective at
+  that point in covariate space, and with several scores each carries its
+  own sign. A genuine log link `b = exp(g)` cannot express either. Where
+  the surface crosses zero is not a pathology; it is the covariate value
+  at which the score stops predicting.
+- **A log penalty would not change the fit, only `λ`'s units.** Rescaling
+  the score `z → z/κ` sends `b → κb` and the score covariance
+  `Σ → Σ/κ²`, and the index `η` and the preserving scale `c` are
+  *pointwise* unchanged under that — measured, in
+  `survival_multi_z_slope_scale_equivariance_2764`. What is left is the
+  penalty `λβᵀSβ`, which needs `λ → λ/κ²` to match, and REML supplies
+  exactly that on its own: its criterion shifts by a constant in `λ` under
+  the reparameterisation, so `λ̂` moves and the fitted surface does not. A
+  penalty on `log b` would additionally pin the numeric value of `λ̂`; that
+  is a statement about units, and it would cost the sign.
+
+The keyword, the CLI flag and the saved-model fields keep the historical
+spelling. Inside the library the function that states the map is called
+`rigid_observed_slope`, because that is what it computes.
+
 ## Letting the slope vary along follow-up (survival)
 
 `logslope_formula` makes the slope a surface in *covariates*. On the survival

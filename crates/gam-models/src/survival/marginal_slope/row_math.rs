@@ -20,20 +20,64 @@ use gam_row_macros::row_program;
 // `row_program!` SSA graph as `rigid_row_nll` and CUDA. It remains stack-only
 // without constructing a forward jet or duplicating the mathematical program.
 
+/// The OBSERVED slope `b = s_f·g`: the coefficient the latent score enters the
+/// probit index with, given the block's linear predictor `g` and the frailty
+/// probit scale `s_f`.
+///
+/// # The block is called "logslope" and this map is the IDENTITY (gam#2764)
+///
+/// It is the identity on purpose, and it has to be.
+///
+/// **The slope is signed, and the sign is an estimand.** `b < 0` is a score that
+/// is protective where it is negative; with `K > 1` the per-score slopes carry
+/// independent signs. `survival_multi_z_fit_hard::
+/// survival_multi_z_fit_truth_neglog_minimised_at_true_slopes_30_seeds` plants
+/// `(0.32, −0.21)` and pins that the population negative log-likelihood is
+/// minimised there over 30 seeds. A genuine log link `b = exp(g)` cannot
+/// represent that fit at all, so it is not a naming repair — it is a strictly
+/// smaller model. The zero crossing the name's absence permits is not a
+/// pathology either: it is the covariate value at which the score stops
+/// predicting.
+///
+/// **The scale-invariance argument for penalising `log b` does not bite here.**
+/// Rescaling the latent score `z → z/κ` sends `g → κg` and `Σ → Σ/κ²`, and both
+/// `b·z` and `c = √(1 + s²gᵀΣg)` are pointwise invariant under that — the row
+/// index does not move. What moves is the penalty: `λβᵀSβ` needs `λ → λ/κ²` to
+/// stay equal. REML supplies exactly that. Under `β̃ = κβ` the Laplace criterion
+/// satisfies `Ṽ(λ/κ²) = V(λ) − ½·nullity·log κ²`, a shift CONSTANT in `λ`, so
+/// `λ̂ → λ̂/κ²` and the fitted surface is unchanged. A penalty on `log b` would
+/// make the numeric VALUE of `λ̂` invariant too; that is a statement about units,
+/// and it costs the sign.
+///
+/// Two honest caveats on that equivariance, since it is an argument and not a
+/// theorem about this implementation: the `ρ = log λ` search box is absolute, so
+/// a rescaling large enough to push `λ̂` outside it breaks the correspondence
+/// (a property of the box, not of the parameterisation); and any absolute — as
+/// opposed to relative — tolerance inside the solver would too. The row
+/// The row program's own half of the invariance is not argued, it is measured:
+/// `survival_multi_z_slope_scale_equivariance_2764` holds `(z, g, Σ)` against
+/// `(z/κ, κg, Σ/κ²)` at `κ ∈ {2, ¼, 10, 0.3}` and finds the row negative
+/// log-likelihood, the preserving scale `c` and the index `η` all unchanged to
+/// round-off.
+///
+/// The block, its formula keyword and its on-disk fields keep the `logslope`
+/// spelling: renaming a public keyword and a saved-model contract is a breaking
+/// change and belongs to whoever owns that decision, not to this function. What
+/// is fixed here is the name at the point where the mathematics is STATED.
 #[inline]
-pub(crate) fn rigid_observed_logslope(g: f64, probit_scale: f64) -> f64 {
+pub(crate) fn rigid_observed_slope(g: f64, probit_scale: f64) -> f64 {
     probit_scale * g
 }
 
 #[inline]
 pub(crate) fn rigid_observed_scale(g: f64, probit_scale: f64) -> f64 {
-    let observed_g = rigid_observed_logslope(g, probit_scale);
+    let observed_g = rigid_observed_slope(g, probit_scale);
     (1.0 + observed_g * observed_g).sqrt()
 }
 
 #[inline]
 pub(crate) fn rigid_observed_eta(q: f64, g: f64, z: f64, probit_scale: f64) -> f64 {
-    q * rigid_observed_scale(g, probit_scale) + rigid_observed_logslope(g, probit_scale) * z
+    q * rigid_observed_scale(g, probit_scale) + rigid_observed_slope(g, probit_scale) * z
 }
 
 /// Survival row Hessian row metric at a β-independent pilot η, used to
@@ -255,7 +299,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
     //   ∂η₁/∂g = q·c'(g) + s'(g)·z
     //
     // The chain factors are the EXACT closed forms from `c_derivatives`
-    // (which returns `(c, c', c'', …)`) and `rigid_observed_logslope`
+    // (which returns `(c, c', c'', …)`) and `rigid_observed_slope`
     // (`s(g) = probit_scale·g`, so `s'(g) = probit_scale`). They weight the
     // W metric for the pilot IRLS step and are not propagated into a final
     // coefficient, but the analytic chain is bit-stable and avoids the
@@ -1898,7 +1942,7 @@ pub(crate) fn standardize_latent_z_matrix_with_policy(
 /// Derivatives of c(g) = √(1 + (s_f g)^2) up to 4th order in the raw slope g.
 #[inline]
 pub(crate) fn c_derivatives(g: f64, probit_scale: f64) -> (f64, f64, f64, f64, f64) {
-    let observed_g = rigid_observed_logslope(g, probit_scale);
+    let observed_g = rigid_observed_slope(g, probit_scale);
     let g2 = observed_g * observed_g;
     let s2 = probit_scale * probit_scale;
     let s4 = s2 * s2;
@@ -1965,7 +2009,7 @@ mod test_support {
         probit_scale: f64,
     ) -> Result<(f64, [f64; N_PRIMARY], [[f64; N_PRIMARY]; N_PRIMARY]), String> {
         let (c, c1, c2, ..) = c_derivatives(g, probit_scale);
-        let observed_g = rigid_observed_logslope(g, probit_scale);
+        let observed_g = rigid_observed_slope(g, probit_scale);
 
         // Linear predictors
         let eta0 = q0 * c + observed_g * z;
@@ -2428,7 +2472,7 @@ mod tests {
 
     /// Sanity: `c_derivatives` itself is the analytic derivative of
     /// `rigid_observed_scale` (the `c(g)` the chain reuses), and
-    /// `rigid_observed_logslope` is linear in g with slope `probit_scale`. This
+    /// `rigid_observed_slope` is linear in g with slope `probit_scale`. This
     /// guards the two ingredients the chain depends on, independent of the chain
     /// assembly above.
     #[test]
@@ -2448,8 +2492,8 @@ mod tests {
                     (c1 - fd_c1).abs() / c1.abs().max(1.0) < 1e-6,
                     "c'(g) analytic vs FD mismatch at g={g}, scale={probit_scale}: {c1} vs {fd_c1}"
                 );
-                let fd_s = (rigid_observed_logslope(g + h, probit_scale)
-                    - rigid_observed_logslope(g - h, probit_scale))
+                let fd_s = (rigid_observed_slope(g + h, probit_scale)
+                    - rigid_observed_slope(g - h, probit_scale))
                     / (2.0 * h);
                 assert!(
                     (probit_scale - fd_s).abs() < 1e-6,

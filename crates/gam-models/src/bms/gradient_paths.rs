@@ -686,15 +686,19 @@ pub(crate) fn signed_probit_neglog_unary_stack(signed_margin: f64, weight: f64) 
     ]
 }
 
+/// The OBSERVED slope `b = s·g`. Identity in `g`, exactly as in the survival
+/// family — see `survival::marginal_slope::row_math::rigid_observed_slope` for
+/// why the block's `logslope` name is the thing that is wrong here and not the
+/// map (gam#2764).
 #[inline]
-pub(super) fn rigid_observed_logslope(logslope: f64, probit_scale: f64) -> f64 {
-    probit_scale * logslope
+pub(super) fn rigid_observed_slope(slope: f64, probit_scale: f64) -> f64 {
+    probit_scale * slope
 }
 
 #[inline]
 pub(super) fn rigid_observed_scale(logslope: f64, probit_scale: f64) -> f64 {
-    let observed_logslope = rigid_observed_logslope(logslope, probit_scale);
-    (1.0 + observed_logslope * observed_logslope).sqrt()
+    let observed_slope = rigid_observed_slope(logslope, probit_scale);
+    (1.0 + observed_slope * observed_slope).sqrt()
 }
 
 #[inline]
@@ -742,7 +746,7 @@ pub(super) fn marginal_slope_standard_normal_scalar_eta(
     z: f64,
     probit_scale: f64,
 ) -> f64 {
-    let observed_slope = rigid_observed_logslope(slope, probit_scale);
+    let observed_slope = rigid_observed_slope(slope, probit_scale);
     q * (1.0 + observed_slope * observed_slope).sqrt() + observed_slope * z
 }
 
@@ -1366,7 +1370,7 @@ pub fn marginal_slope_probit_eta(
 ///
 ///   F(a) = log Σᵢ wᵢ Φ(a + b·zᵢ) − log μ★ = 0,
 ///
-/// where `b = rigid_observed_logslope(slope, probit_scale)` and `(zᵢ, wᵢ)` are
+/// where `b = rigid_observed_slope(slope, probit_scale)` and `(zᵢ, wᵢ)` are
 /// the supplied quadrature nodes and (positive) weights.
 ///
 /// Mathematical structure of `F`:
@@ -1402,7 +1406,7 @@ pub(super) fn empirical_rigid_calibration_eval(
             "empirical latent calibration: non-finite intercept {intercept}"
         ));
     }
-    let observed_slope = rigid_observed_logslope(slope, probit_scale);
+    let observed_slope = rigid_observed_slope(slope, probit_scale);
     const HALF_LOG_2PI: f64 = 0.918_938_533_204_672_8; // 0.5 * ln(2π)
 
     // Streaming LSE accumulators for log Σ wᵢ φᵢ and log Σ wᵢ Φᵢ.

@@ -1203,10 +1203,10 @@ impl HandRigidProbitKernel {
     #[inline]
     fn new(q: f64, g: f64, z: f64, y: f64, w: f64, probit_scale: f64) -> Result<Self, String> {
         let s = 2.0 * y - 1.0;
-        let observed_logslope = rigid_observed_logslope(g, probit_scale);
-        let g2 = observed_logslope * observed_logslope;
+        let observed_slope = rigid_observed_slope(g, probit_scale);
+        let g2 = observed_slope * observed_slope;
         let c = (1.0 + g2).sqrt();
-        let c1 = probit_scale * observed_logslope / c;
+        let c1 = probit_scale * observed_slope / c;
         let c_inv3 = 1.0 / (c * c * c);
         let c_inv5 = c_inv3 / (c * c);
         let c_inv7 = c_inv5 / (c * c);
@@ -1222,7 +1222,7 @@ impl HandRigidProbitKernel {
             u4: k4,
             c1,
             c2: probit_scale * probit_scale * c_inv3,
-            c3: -3.0 * probit_scale.powi(3) * observed_logslope * c_inv5,
+            c3: -3.0 * probit_scale.powi(3) * observed_slope * c_inv5,
             c4: probit_scale.powi(4) * (12.0 * g2 - 3.0) * c_inv7,
             eta_q: c,
             eta_g: q * c1 + probit_scale * z,
