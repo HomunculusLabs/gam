@@ -690,6 +690,13 @@ pub(crate) fn signed_probit_neglog_unary_stack(signed_margin: f64, weight: f64) 
 /// family — see `survival::marginal_slope::row_math::rigid_observed_slope` for
 /// why the block's `logslope` name is the thing that is wrong here and not the
 /// map (gam#2764).
+///
+/// One argument is even shorter on this side. The survival lane carries a score
+/// covariance, so "rescale `z`" is a reparameterisation there and the invariance
+/// has to be checked. This kernel is the STANDARD-NORMAL lowering: the
+/// latent-measure gate pins the axis at `N(0,1)` before the kernel ever sees it,
+/// so there is no rescaling to be invariant to, and the only thing a penalty on
+/// `log b` would buy is the loss of the sign.
 #[inline]
 pub(super) fn rigid_observed_slope(slope: f64, probit_scale: f64) -> f64 {
     probit_scale * slope
