@@ -4099,7 +4099,9 @@ fn run_exact_joint_spatial_optimization(
         coord_dim,
         theta_dim,
         Derivative::Analytic,
-        if analytic_outer_hessian_available {
+        if analytic_outer_hessian_available
+            && (!suppress_outer_hessian_for_nfree || kind == SpatialHyperKind::Isotropic)
+        {
             // `Either` even when the #1033 n-free ψ-lane is armed (gam#2760).
             //
             // The suppression used to force `Unavailable` here, on the stated
@@ -4142,6 +4144,28 @@ fn run_exact_joint_spatial_optimization(
             // `suppress_outer_hessian_for_nfree` was also answering both "how
             // should the SEARCH route?" and a second question it had no
             // business answering (there, `with_require_measured_psd`).
+            //
+            // SCOPED TO THE ISOTROPIC LANE, and the scope is a measurement, not
+            // a preference. Restoring curvature on the ANISOTROPIC lane too
+            // makes `exact_spatial_joint_engine_aniso_iso_parity_1d` refuse —
+            // and the refusal is honest, which is exactly why it cannot ride in
+            // on this issue:
+            //
+            //   aniso-psi joint REML: |Pg| = 5.143e-3 vs bound 8.100e-3 (STATIONARY)
+            //   hessian_psd=NO curvature_source=terminal-analytic
+            //   INDEFINITE CURVATURE AT INTERIOR OPTIMUM (curvature floor did not clear)
+            //   [interior lambda_min = -1.585e-3, gradient_floor = 3.061e-3]
+            //
+            // That fit is at a stationary point whose interior curvature is
+            // measurably indefinite, and before this it shipped with
+            // `curvature_source=unavailable` — nobody had checked. Turning "not
+            // checked" into "refused, with the eigenvalue that refused it" is
+            // the right direction, but it is a claim about the anisotropic
+            // route's terminal geometry, not about #2760's iso-κ search, and it
+            // wants its own issue and its own investigation rather than being
+            // smuggled in as a side effect. The isotropic lane — the one this
+            // issue is about, and the one whose arms this repair had to turn
+            // green — takes the curvature now.
             DeclaredHessianForm::Either
         } else {
             DeclaredHessianForm::Unavailable

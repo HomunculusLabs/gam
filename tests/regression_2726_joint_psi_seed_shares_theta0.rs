@@ -62,9 +62,20 @@ const MIN_LENGTH_SCALE: f64 = 1.0e-2;
 const MAX_LENGTH_SCALE: f64 = 1.0e2;
 const N_ROWS: usize = 600;
 
-/// Fragments of the two refusals that can only fire when θ₀ is not shared
-/// between the joint and the scalar-ρ route. Either one appearing means #2726
-/// has regressed; every other refusal is a different defect.
+/// Fragments of the refusals that can only fire when θ₀ is not shared between
+/// the joint and the scalar-ρ route. Either one appearing means #2726 has
+/// regressed; every other refusal is a different defect.
+///
+/// gam#2760 note on the FIRST string. It is the #2454 cross-route criterion
+/// comparison, and that comparison is now a warning rather than a refusal —
+/// two independent assemblies of one criterion have an `O(ε·κ)` forward error
+/// and no fixed relative constant can denominate it (see
+/// `try_exact_joint_spatial_length_scale_optimization`). The string is kept
+/// because it costs nothing and a future revision could reinstate it, but the
+/// load-bearing half of this gate is now the SECOND string — #2726's own ψ
+/// guard, which is untouched and still a hard refusal — together with
+/// `regression_2726_out_of_window_fixture_still_fits` below, which asserts the
+/// stronger property the original refusal was a proxy for.
 const THETA0_REFUSALS: [&str; 2] = [
     "disagree about the criterion AT THE SAME POINT theta0",
     "the scalar-rho incumbent was never realized at",
@@ -229,5 +240,33 @@ fn regression_2726_joint_and_scalar_rho_routes_share_theta0() {
                 }
             }
         }
+    }
+}
+
+/// The property the #2454 refusal was a proxy for, asserted directly (gam#2760).
+///
+/// "The two routes do not disagree about the criterion at θ₀" is a statement
+/// about two floating-point assemblies; what it was standing in for is that
+/// this out-of-window fixture PRODUCES A FIT. That is strictly stronger — it
+/// survives any subsequent change to how the cross-route comparison is
+/// denominated — and it is the thing a user of `min_length_scale` cares about.
+///
+/// It is also the arm the #2760 repairs are about: at `n = 600` the scalar-ρ
+/// incumbent already puts 4 of 5 coordinates below `−JOINT_RHO_BOUND`, so the
+/// pre-#2760 box pasted its lower wall onto them and the certified n-free
+/// ψ-Gram surrogate was still the measure at certification time. Both budgets
+/// are exercised for the same reason the sibling gate exercises both: the
+/// original refusal was budget-independent.
+#[test]
+fn regression_2726_out_of_window_fixture_still_fits() {
+    gam_solve::progress_log::init_logging_at(log::LevelFilter::Info);
+    for max_outer_iter in [15usize, 60] {
+        let outcome = run_fit(max_outer_iter);
+        assert!(
+            outcome.is_ok(),
+            "the out-of-window length-scale fixture must FIT at \
+             max_outer_iter={max_outer_iter}; it refused with: {}",
+            outcome.unwrap_err(),
+        );
     }
 }
