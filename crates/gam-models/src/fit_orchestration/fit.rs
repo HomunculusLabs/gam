@@ -4189,6 +4189,36 @@ pub(crate) fn crossfit_score_calibration(
     // (and p₁ = p_resp · p_cov) drifts across folds and the OOF Jacobian
     // assembly fails the fold-alignment check below ("cross-fit fold p₁ mismatch").
     fold_config.response_num_internal_knots_pinned = true;
+    // Resolve the response knot vector ONCE on the FULL response, exactly as the
+    // covariate side is frozen once on full data above, and pin it into every
+    // fold (gam#2680).
+    //
+    // The knot vector fixes the certified response support `[y_lo, y_hi]`, and a
+    // CTN's score is the PIT of `h(y|x)` against a standard normal TRUNCATED to
+    // that support. Left fold-local it breaks the out-of-fold score twice over:
+    //
+    //   1. whichever fold holds out the global response minimum or maximum
+    //      evaluates it against a support built from a complement that does not
+    //      contain it, so the held-out row is outside its own fold's certified
+    //      domain and `transformation_normal_pit_score` refuses — taking the
+    //      entire OOF assembly with it. With `K` folds and a guard of 0.1 % of
+    //      the fold span that is close to guaranteed;
+    //   2. even with no refusal, `z_oof` would be stitched together from `K`
+    //      PITs taken against `K` different truncations. The Stage-2 consumers
+    //      require `z ~ N(0, 1)` and the moment gate in `bms::gradient_paths`
+    //      refuses a score that is not — but a mixture of differently-truncated
+    //      PITs is not one latent scale at all, so the gate would be measuring a
+    //      quantity that has no single definition.
+    //
+    // The full response is the right seed: every fold's held-out rows are drawn
+    // from it, so the support contains all of them by construction, and the
+    // knots are identical across folds, so `p_resp` is fold-invariant for a
+    // second, structural reason on top of the count pin.
+    fold_config.response_knots_pinned = Some(crate::transformation_normal::ctn_response_knots(
+        response_full.view(),
+        fold_config.response_degree,
+        fold_config.response_num_internal_knots,
+    )?);
 
     let mut z_oof = Array1::<f64>::zeros(n);
     let mut jac_oof: Option<Array2<f64>> = None;

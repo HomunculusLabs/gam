@@ -1,3 +1,5 @@
+use ndarray::Array1;
+
 #[derive(Clone, Debug)]
 pub struct TransformationNormalConfig {
     /// B-spline degree for the response-direction deviation basis (default 3).
@@ -18,6 +20,20 @@ pub struct TransformationNormalConfig {
     /// is fold-invariant; the data-driven complexity cap would otherwise round
     /// to different counts on each fold's response subsample (workflow.rs §3).
     pub response_num_internal_knots_pinned: bool,
+    /// A pre-resolved response knot vector, used verbatim by
+    /// `build_response_basis` instead of regenerating one from this fit's own
+    /// response. The knot vector fixes the **certified response support**
+    /// `[y_lo, y_hi]` that every PIT is normalized against, so it is a shared
+    /// object whenever several CTN fits must produce comparable scores.
+    ///
+    /// The cross-fit Stage-1 calibration is that case and it is why this exists
+    /// (gam#2680): it refits the CTN on each fold complement and scores the
+    /// held-out rows, so a fold-local support refuses the fold that holds out a
+    /// response extreme, and — when it does not refuse — assembles the
+    /// out-of-fold score from `K` PITs taken against `K` different truncations,
+    /// which is not one latent scale. `None` means "resolve it from this fit's
+    /// own response", which is right for every single-fit path.
+    pub response_knots_pinned: Option<Array1<f64>>,
 }
 
 impl Default for TransformationNormalConfig {
@@ -29,6 +45,7 @@ impl Default for TransformationNormalConfig {
             response_extra_penalty_orders: vec![1],
             double_penalty: true,
             response_num_internal_knots_pinned: false,
+            response_knots_pinned: None,
         }
     }
 }

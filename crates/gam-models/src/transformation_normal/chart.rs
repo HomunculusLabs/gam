@@ -44,7 +44,7 @@
 
 use super::{
     BasisOptions, Dense, KnotSource, TRANSFORMATION_MONOTONICITY_EPS, create_basis,
-    create_ispline_derivative_dense,
+    create_ispline_derivative_dense, initializewiggle_knots_from_seed,
 };
 use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2, ArrayView1};
@@ -55,6 +55,14 @@ use ndarray::{Array1, Array2, ArrayView1};
 /// basis, and it is the one coordinate the monotonicity cone does not
 /// constrain.
 pub const CTN_LOCATION_COLUMNS: usize = 1;
+
+/// Fraction of the response span by which the certified support is widened past
+/// the observed extremes, so every observation the knots were built from sits
+/// STRICTLY inside `[y_lo, y_hi]` rather than on its boundary. A response
+/// exactly at an endpoint would make its PIT exactly `0` or `1` and clip, which
+/// is a real score for a genuinely extreme observation but a fabricated one for
+/// the sample maximum of any finite sample.
+pub const CTN_RESPONSE_SUPPORT_GUARD_FRACTION: f64 = 1.0e-3;
 
 /// Response-direction basis rows for one observation, in the chart's own order.
 ///
@@ -188,6 +196,103 @@ pub fn ctn_component_sensitivity(
 ) -> f64 {
     match chart {
         TransformationNormalParameterization::DirectAlpha => basis[k],
+    }
+}
+
+/// Number of knots the I-spline response basis carries for a given degree and
+/// internal-knot count.
+///
+/// The builder integrates a degree-`(response_degree + 1)` B-spline basis, so
+/// the seed produces `k_prime = K − 2` interior knots inside a clamped vector
+/// with `response_degree + 2` boundary repeats at each end.
+pub fn ctn_response_knot_count(
+    response_degree: usize,
+    response_num_internal_knots: usize,
+) -> Result<usize, String> {
+    let k_prime = response_num_internal_knots.checked_sub(2).ok_or_else(|| {
+        format!(
+            "response_num_internal_knots = {response_num_internal_knots}; I-spline contract \
+             requires K' = K − 2 ≥ 0, so need K ≥ 2"
+        )
+    })?;
+    Ok(k_prime + 2 * (response_degree + 2))
+}
+
+/// The clamped I-spline knot vector for a response column, and with it the
+/// **certified response support** `[knots.first, knots.last]` that every PIT
+/// normalizes against.
+///
+/// Interior knots come from the wiggle seed; the boundary repeats are pinned to
+/// `[min − guard, max + guard]` with a guard of `0.1 %` of the response span, so
+/// every observation used to build them sits strictly inside the support.
+///
+/// This is a function rather than an inline block in
+/// [`super::build_response_basis`] because the support it defines is a *shared*
+/// object whenever more than one CTN fit has to produce comparable scores. The
+/// cross-fit Stage-1 calibration is exactly that case: it refits the CTN on each
+/// fold complement and evaluates the score on the held-out rows, so a
+/// fold-local support both (a) fails outright on whichever fold holds out a
+/// response extreme — the held-out row is then outside its own fold's certified
+/// domain and the PIT refuses it — and (b) when it does not fail, assembles the
+/// out-of-fold score from `K` PITs taken against `K` *different* truncations,
+/// which is not one latent scale. Resolving it once on the full response and
+/// pinning it (`TransformationNormalConfig::response_knots_pinned`) removes both.
+pub fn ctn_response_knots(
+    response: ArrayView1<'_, f64>,
+    response_degree: usize,
+    response_num_internal_knots: usize,
+) -> Result<Array1<f64>, String> {
+    let k_prime = response_num_internal_knots.checked_sub(2).ok_or_else(|| {
+        format!(
+            "response_num_internal_knots = {response_num_internal_knots}; I-spline contract \
+             requires K' = K − 2 ≥ 0, so need K ≥ 2"
+        )
+    })?;
+    // The I-spline builder integrates a degree-`(response_degree + 1)` B-spline
+    // basis into a degree-`response_degree` value basis, so the seed-time degree
+    // is `response_degree + 1`.
+    let mut knots = initializewiggle_knots_from_seed(response, response_degree + 1, k_prime)?;
+    let response_min = response.iter().copied().fold(f64::INFINITY, f64::min);
+    let response_max = response.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let response_span = (response_max - response_min).abs().max(1.0);
+    let support_guard = response_span * CTN_RESPONSE_SUPPORT_GUARD_FRACTION;
+    let boundary_repeats = response_degree + 2;
+    if knots.len() >= 2 * boundary_repeats {
+        for idx in 0..boundary_repeats {
+            knots[idx] = response_min - support_guard;
+            let right_idx = knots.len() - 1 - idx;
+            knots[right_idx] = response_max + support_guard;
+        }
+    }
+    Ok(knots)
+}
+
+/// The knot vector a CTN fit will actually use: the pinned one when the config
+/// carries it, otherwise one resolved from this fit's own response.
+///
+/// This is the single decision point for "whose response defines the certified
+/// support", which is why it is a named function rather than a branch inside
+/// [`super::build_response_basis`] — the cross-fit needs to make that decision
+/// and needs to be able to check it (gam#2680).
+pub fn ctn_resolved_response_knots(
+    response: ArrayView1<'_, f64>,
+    response_degree: usize,
+    response_num_internal_knots: usize,
+    pinned: Option<&Array1<f64>>,
+) -> Result<Array1<f64>, String> {
+    let expected = ctn_response_knot_count(response_degree, response_num_internal_knots)?;
+    match pinned {
+        Some(knots) => {
+            if knots.len() != expected {
+                return Err(format!(
+                    "pinned response knot vector has {} entries but degree {response_degree} with \
+                     {response_num_internal_knots} internal knots requires {expected}",
+                    knots.len()
+                ));
+            }
+            Ok(knots.clone())
+        }
+        None => ctn_response_knots(response, response_degree, response_num_internal_knots),
     }
 }
 

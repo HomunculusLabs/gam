@@ -48,31 +48,15 @@ pub(crate) fn build_response_basis(
         }
         .into());
     }
-    let k_internal = config.response_num_internal_knots;
-    let k_prime = k_internal.checked_sub(2).ok_or_else(|| {
-        format!(
-            "response_num_internal_knots = {k_internal}; I-spline contract \
-             requires K' = K − 2 ≥ 0, so need K ≥ 2"
-        )
-    })?;
-
-    // Regenerate clamped knots. The I-spline builder integrates a degree
-    // `(response_degree + 1)` B-spline basis into a degree-`response_degree`
-    // value basis, so the seed-time degree passed here is `response_degree + 1`.
-    let mut knots =
-        initializewiggle_knots_from_seed(response.view(), response_degree + 1, k_prime)?;
-    let response_min = response.iter().copied().fold(f64::INFINITY, f64::min);
-    let response_max = response.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let response_span = (response_max - response_min).abs().max(1.0);
-    let support_guard = response_span * 1.0e-3;
-    let boundary_repeats = response_degree + 2;
-    if knots.len() >= 2 * boundary_repeats {
-        for idx in 0..boundary_repeats {
-            knots[idx] = response_min - support_guard;
-            let right_idx = knots.len() - 1 - idx;
-            knots[right_idx] = response_max + support_guard;
-        }
-    }
+    // The knot vector, and with it the certified response support `[y_lo, y_hi]`
+    // every PIT is normalized against. A caller that has already resolved it
+    // supplies it verbatim; see `ctn_response_knots` for why the cross-fit must.
+    let knots = ctn_resolved_response_knots(
+        response.view(),
+        response_degree,
+        config.response_num_internal_knots,
+        config.response_knots_pinned.as_ref(),
+    )?;
 
     // Response-direction value / derivative bases `[1, I_k(y)]` / `[0, M_k(y)]`,
     // assembled by the chart module so the fit and every replay path (predict,
