@@ -3614,14 +3614,20 @@ fn run_exact_joint_spatial_optimization(
             "[{label}] analytic outer Hessian unavailable for family/design; routing without second-order geometry (coord_dim={coord_dim})"
         );
     }
-    // #1033: set when the n-free Gaussian ψ-lane arms below. It must SUPPRESS the
-    // declared analytic outer Hessian (force `Unavailable`), not merely reserve
-    // it for the #2359 terminal certificate: the n-free lane cannot even build
-    // that curvature slab without realizing O(n) state. A
-    // `ValueGradientHessian` eval forces the O(n) design re-realization because
-    // the outer Hessian curvature slab `B_j` is irreducibly n-dependent, so only
-    // routing to a gradient-only solver (BFGS) keeps every in-window κ-trial on
-    // the n-free `ValueAndGradient` skip.
+    // #1033: set when the n-free Gaussian ψ-lane arms below. It keeps the SEARCH
+    // gradient-only — the outer Hessian curvature slab `B_j` is irreducibly
+    // n-dependent, so a `ValueGradientHessian` eval forces the O(n) design
+    // re-realization and an in-window κ-trial must never issue one. It also
+    // disables the EFS/HybridEFS fixed-point lane, whose trace Gram
+    // `tr(H⁻¹ B_d H⁻¹ B_e)` realizes the same slab.
+    //
+    // It no longer suppresses the DECLARED Hessian (gam#2760). Declaring
+    // `Unavailable` never was what routed the search to BFGS —
+    // `with_prefer_gradient_only(true)` is — and erasing the declaration cost
+    // the mint the one terminal curvature evaluation #2359 reserves for it,
+    // together with every certificate rung that reads curvature. See the
+    // `DeclaredHessianForm` argument at the `exact_joint_multistart_outer_problem`
+    // call below.
     let mut suppress_outer_hessian_for_nfree = false;
 
     log::trace!(
@@ -3905,9 +3911,10 @@ fn run_exact_joint_spatial_optimization(
         {
             suppress_outer_hessian_for_nfree = true;
             log::info!(
-                "[{label}] n-free Gaussian ψ-lane armed; suppressing the analytic outer \
-                 Hessian and routing gradient-only (BFGS) so the κ outer loop never realizes \
-                the O(n) second-order slab — n-independent outer loop (#1033)"
+                "[{label}] n-free Gaussian ψ-lane armed; routing the SEARCH gradient-only \
+                 (BFGS, fixed-point lane off) so no in-window κ-trial realizes the O(n) \
+                 second-order slab — n-independent outer loop (#1033). The terminal \
+                 certificate keeps its one exact curvature evaluation (gam#2760)."
             );
         }
     } else if coord_dim == 1 && family.is_gaussian_identity() {
@@ -4005,13 +4012,51 @@ fn run_exact_joint_spatial_optimization(
         coord_dim,
         theta_dim,
         Derivative::Analytic,
-        if analytic_outer_hessian_available && !suppress_outer_hessian_for_nfree {
+        if analytic_outer_hessian_available {
+            // `Either` even when the #1033 n-free ψ-lane is armed (gam#2760).
+            //
+            // The suppression used to force `Unavailable` here, on the stated
+            // grounds that "the planner then selects BFGS instead of ARC". It
+            // does not need to: `with_prefer_gradient_only(true)` below is
+            // unconditional, and `capability::plan` reads
+            // `(Analytic, Analytic) if prefer_gradient_only -> S::Bfgs` BEFORE
+            // the ARC arm. Gradient-only ROUTING was already secured; the
+            // declaration was not what secured it.
+            //
+            // What `Unavailable` actually did was erase the ONE terminal
+            // curvature evaluation the mint is entitled to — the arrangement
+            // `with_prefer_gradient_only`'s own doc describes three lines below
+            // ("Hessian availability is a terminal-certification capability, not
+            // a warrant to rebuild that tower at every accepted iterate";
+            // "reserve it for that one terminal evaluation"). With curvature
+            // gone, this lane silently forfeits FOUR certification mechanisms
+            // that every other outer route has: the `curvature-resolvability`
+            // rung (the only bound in the ladder derived from the criterion's
+            // own resolution), the #2348 asymptote-rail certificate, the
+            // curvature-scaled flat-valley widening, and the #2299 large-step
+            // flatness certificate. Its refusals then rest entirely on a raw
+            // gradient-magnitude band, which is how a converged fit at the
+            // criterion's noise floor reads as `NOT STATIONARY` (gam#2760: the
+            // n = 4000 rung refuses at `|Pg| = 7.677e-1` against `2.566e-1`
+            // after a line search that spent 48 consecutive probes below the
+            // fifth digit of θ without improving the objective — the signature
+            // of a remaining decrement under the criterion's own resolution,
+            // which is exactly the question `curvature-resolvability` answers
+            // and this lane could not ask).
+            //
+            // This costs ONE O(n) evaluation per minted candidate. #1033's
+            // invariant is per-TRIAL cost — "an in-window hyperparameter trial
+            // touches only k×k objects" — and a terminal certification is not a
+            // trial; the fit already pays O(n) for its final PIRLS assembly.
+            // The per-trial skip is untouched: BFGS still issues only
+            // `ValueAndGradient`, so every in-window trial stays n-free.
+            //
+            // This is the same shape as #2706's repair one flag over, where
+            // `suppress_outer_hessian_for_nfree` was also answering both "how
+            // should the SEARCH route?" and a second question it had no
+            // business answering (there, `with_require_measured_psd`).
             DeclaredHessianForm::Either
         } else {
-            // `Unavailable` when the n-free Gaussian ψ-lane is armed (#1033): the
-            // planner then selects BFGS instead of ARC, so the κ loop issues only
-            // `ValueAndGradient` evals and every in-window trial takes the n-free
-            // design-realization skip.
             DeclaredHessianForm::Unavailable
         },
         // Single-block spatial path: penalty-like rho + spatial psi.
