@@ -533,6 +533,26 @@ impl ConditionalScoreCovariance {
         }
 
         let basis = build_intercept_basis(a_block);
+        // The band inside which an innovation variance is indistinguishable
+        // from zero. Same form and same coefficient as the PSD band
+        // `MarginalSlopeCovariance::full` admits an eigenvalue inside
+        // (`128·k·ε·max|λ̂|`), against the largest weighted second moment of the
+        // centred scores -- the scale a variance of this sample can have. It is
+        // derived from the sample and the floating-point type, and it exists
+        // because `log 0` is not a number, not because a number had to be
+        // picked.
+        let score_scale = (0..k)
+            .map(|coordinate| {
+                (0..n)
+                    .map(|row| {
+                        weights[row] * centered[[row, coordinate]] * centered[[row, coordinate]]
+                    })
+                    .sum::<f64>()
+                    / total_weight
+            })
+            .fold(0.0_f64, f64::max);
+        let innovation_floor =
+            (128.0 * k as f64 * f64::EPSILON * score_scale).max(f64::MIN_POSITIVE);
         let mut coordinates = Vec::with_capacity(k);
         // Column `j` of `innovations` is `ε_j`, needed by later coordinates only
         // through their own regressions, but kept for the variance stage.
@@ -545,6 +565,7 @@ impl ConditionalScoreCovariance {
                 a_centered.view(),
                 weights,
                 total_weight,
+                innovation_floor,
             )?;
             coordinates.push(ConditionalScoreCoordinate {
                 autoregression,
@@ -686,22 +707,37 @@ fn fit_log_innovation(
     a_centered: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     total_weight: f64,
+    innovation_floor: f64,
 ) -> Result<(Vec<f64>, [f64; 2]), String> {
     let n = residual.len();
-    let homoskedastic = residual
+    let raw = residual
         .iter()
         .zip(weights.iter())
         .map(|(&value, &weight)| weight * value * value)
         .sum::<f64>()
         / total_weight;
-    if !(homoskedastic.is_finite() && homoskedastic > 0.0) {
+    if !raw.is_finite() {
         return Err(format!(
-            "conditional score covariance innovation variance is {homoskedastic}, which no \
-             log-linear variance model can represent"
+            "conditional score covariance innovation variance is {raw}, which no log-linear \
+             variance model can represent"
         ));
     }
+    let homoskedastic = raw.max(innovation_floor);
     let constant = vec![homoskedastic.ln()];
     let constant_range = [constant[0], constant[0]];
+
+    // A direction the sample does not distinguish from a point. Collinear
+    // scores are a REAL and expected input -- `MarginalSlopeCovariance::full`
+    // says so, and admits an eigenvalue anywhere inside its own solver band as
+    // an exact zero -- so this cannot be a refusal. It is instead the one place
+    // the log parameterisation needs a floor, because `log 0` is not a number:
+    // the innovation is held at the same band `full` clamps inside, which
+    // contributes no spread at the working precision and keeps `Σ(a)` positive
+    // definite rather than singular. Below it there is nothing to model, so the
+    // Breusch-Pagan stage is skipped as well.
+    if raw <= innovation_floor {
+        return Ok((constant, constant_range));
+    }
 
     // Breusch-Pagan: does the innovation variance depend on `a` at all?
     let bp_residual: Vec<f64> = residual
@@ -1139,6 +1175,56 @@ mod tests {
                     < 1.0e-10 * (1.0 + ones_form.abs()),
                 "row {row}: cached 1'Σ1 {} vs dense {ones_form}",
                 stack[row].ones_quadratic_form()
+            );
+        }
+    }
+
+    /// Collinear scores are a real and expected input — `MarginalSlopeCovariance`
+    /// says so in its own admission doc, and admits the exactly-singular pooled
+    /// matrix they produce. The log parameterisation cannot represent a zero
+    /// innovation variance, so this is the one place it needs a floor, and the
+    /// floor must not turn a valid input into a refusal.
+    ///
+    /// The fixture makes the pair gate fire on a perfectly collinear pair:
+    /// `z₁ = z₀` with `Var(z₀|a)` moving, so `Cov(z₀, z₁|a) = Var(z₀|a)` moves
+    /// too. Before the floor this reached `fit_log_innovation` with an exactly
+    /// zero residual variance and errored the whole fit.
+    #[test]
+    fn collinear_scores_are_admitted_rather_than_refused() {
+        let n = 20_000;
+        let x = standardized(gaussians(n, 0x2766_5E));
+        let e0 = standardized(gaussians(n, 0x2766_6F));
+        let mut scores = Array2::<f64>::zeros((n, 2));
+        let mut a_block = Array2::<f64>::zeros((n, 1));
+        for row in 0..n {
+            a_block[[row, 0]] = x[row];
+            let z0 = (0.5 * (0.6 * x[row])).exp() * e0[row];
+            scores[[row, 0]] = z0;
+            scores[[row, 1]] = z0;
+        }
+        let weights = Array1::<f64>::ones(n);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("a collinear score pair must be admitted, not refused")
+            .expect("a moving Var(z₀|a) makes Cov(z₀,z₁|a) move, so the pair gate fires");
+        for &probe in &[-1.5_f64, 0.0, 1.5] {
+            let a_row = Array1::from_vec(vec![probe]);
+            let sigma = fitted.dense_at(a_row.view()).expect("Σ(a)");
+            let determinant = sigma[[0, 0]] * sigma[[1, 1]] - sigma[[0, 1]] * sigma[[1, 0]];
+            assert!(
+                sigma[[0, 0]] > 0.0 && determinant > 0.0,
+                "Σ(a={probe}) must stay positive definite on a collinear pair: {sigma:?}"
+            );
+            let correlation = sigma[[0, 1]] / (sigma[[0, 0]] * sigma[[1, 1]]).sqrt();
+            assert!(
+                (correlation - 1.0).abs() < 1.0e-6,
+                "a collinear pair must read as correlation 1; got {correlation} at a={probe}"
+            );
+            // And the variance itself must track the planted `exp(0.6·x)`.
+            let planted = (0.6 * probe).exp();
+            assert!(
+                (sigma[[0, 0]] - planted).abs() < 0.1 * (1.0 + planted),
+                "Σ₀₀(a={probe}) = {} against planted {planted}",
+                sigma[[0, 0]]
             );
         }
     }
