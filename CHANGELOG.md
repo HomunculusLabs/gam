@@ -1,5 +1,83 @@
 ## Unreleased
 
+- **The iso-κ joint outer search was walking a certified SURROGATE and nobody
+  was putting it away (#2760).** The joint `[ρ, ψ]` spatial search refused at
+  `n ≥ 4000` with `NOT STATIONARY` after a Strong-Wolfe line search that
+  backtracked to `StepSizeTooSmall` — 50 attempts, 48 of them at a step below
+  the fifth printed digit of `θ`. Three independent defects were stacked
+  underneath it, and all three are fixed.
+
+  **1. The joint ρ box's wall passed through the point the result is graded
+  against.** `#2454` widened the `±JOINT_RHO_BOUND = ±12` search box "only as
+  far as the incumbent" — `(-12).min(seed)` — so every coordinate whose
+  scalar-route `ln λ̂` fell below `−12` began the joint search exactly ON its
+  lower bound: an active constraint from iteration zero, its outward gradient
+  KKT-projected to zero, unable to descend even where the joint criterion at
+  the ψ the search was moving to wanted it lower. Containment in a closed set
+  is not the property this route needs; the graded point has to be INTERIOR.
+  Measured on a noiseless 1-D Duchon `y = sin(t)`: REML drives `λ̂` down as `n`
+  grows, so the incumbents cross `−12` one at a time — 4 of 5 coordinates
+  pasted onto the wall at `n = 1000…8000`, all 5 at `n = 16000`, where
+  `∂V/∂ρ₀ = +1.484` at the wall against a whole stationarity bound of `1.030`.
+  A coordinate whose incumbent is not strictly inside the joint prior now falls
+  back to the engine's own `±RHO_BOUND` — the box the incumbent was found in.
+  Everything strictly inside keeps the historical box byte-for-byte.
+
+  **2. The mint had no curvature, and never needed to lack it.** The #1033
+  n-free ψ-lane declared `DeclaredHessianForm::Unavailable` "so the planner
+  selects BFGS instead of ARC". It did not need to: `with_prefer_gradient_only`
+  is unconditional on this problem and `capability::plan` reads
+  `(Analytic, Analytic) if prefer_gradient_only → Bfgs` *before* the ARC arm.
+  What `Unavailable` actually did was erase the one terminal evaluation #2359
+  reserves for the mint, and with it the `curvature-resolvability` rung (the
+  only bound in the ladder derived from the criterion's own resolution), the
+  #2348 asymptote-rail certificate, the curvature-scaled flat-valley widening
+  and the #2299 large-step flatness certificate. Same shape as #2706's repair,
+  one flag over.
+
+  **3. The criterion the search ranks is not the criterion. THIS is the line
+  search.** With the mint finally asking for the analytic lane, `run.rs`'s
+  existing value-agreement guard named it at once, at the point the `n = 2000`
+  search stopped, both inner solves converged:
+
+  ```text
+  value-only      = -1.2781058170149880e4
+  analytic-sample = -1.2781006804748626e4
+  disagreement = 5.137e-2   roundoff bound = 1.905e-4
+  ```
+
+  `270×` `outer_value_agreement_bound`, i.e. `4e-6` relative where `√ε` is the
+  contract. The two lanes are the #1033b certified n-free ψ-Gram tensor and the
+  exact realized design. The tensor is certified on the **Gram**
+  (`PSI_GRAM_CERT_RTOL = 1e-9`) and on the reduced-basis **subspace**
+  (`PSI_GRAM_SKIP_PROJ_ATOL = 1e-7`); nothing in that certification bounds the
+  **criterion** the optimizer ranks, and `β̂ = (G + λS)⁻¹r` amplifies a Gram
+  residual by the radial-kernel conditioning — which is the regime this search
+  lives in, at `λ = e⁻³⁰`. A value probe that crosses a skip-eligibility
+  boundary therefore sees the criterion JUMP by more than the decrease the line
+  search is hunting. So the surrogate is a SEARCH object, the same kind of
+  thing as the staged-pilot row subsample the sibling N-block driver already
+  retires, and it gets the same exit: `begin_exact_polish` retires it at the
+  search checkpoint and the optimizer continues, and certifies, on the exact
+  streamed criterion. Every in-window trial of the search stays n-free.
+
+  **What the gate at `theta0` could and could not say.** The joint and scalar
+  routes' criteria at `theta0` disagree by `−1.4e-13`, `−1.7e-13`, `+5.5e-13`,
+  `+6.0e-8`, `+6.0e-8` relative at `n = 1000, 2000, 4000, 8000, 16000`. Five
+  orders in one step, and the step is not in `n`: it is the rung at which a
+  SECOND penalty block reaches `λ = e⁻³⁰ ≈ 9.4e-14` and stops contributing to
+  `H = XᵀWX + S_λ` at working precision, after which `log|H|` is a sum of logs
+  across the raw Duchon Gram's `~1e15` spectrum and two independent assemblies
+  part company at exactly the scale `ε·κ` predicts. No fixed relative constant
+  can be both tight enough to catch the `5.047e-5` formula difference #2671
+  found and loose enough to admit that. So the cross-route number keeps its
+  full decomposition as a warning, and the REFUSAL moves to a comparison both
+  sides of which are `fit_score` of a **scalar-route** fit: the incumbent at
+  `theta0` against the accept-fit at `θ*`. Like for like, one arithmetic, on
+  the quantity that ships — which is what the gate's own sentence ("the joint
+  search is minimizing a different function than the one its result is graded
+  against") asks for.
+
 - **The CTN fit and every replay of it read the coefficients through two
   different charts (#2680).** `#2306` moved the conditional-transformation-normal
   likelihood onto the direct-α chart
