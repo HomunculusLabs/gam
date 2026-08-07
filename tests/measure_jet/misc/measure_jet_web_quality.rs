@@ -291,6 +291,93 @@ fn pointwise_se(design: ArrayView2<'_, f64>, cov: &Array2<f64>) -> Vec<f64> {
         .collect()
 }
 
+/// Test-local mirror of the production measure-jet INPUT-MEASUREMENT-ERROR
+/// variance producer (#2225): `Var_input(x*) = σ_coord² · ‖∇f̂(x*)‖²`, the
+/// delta-method propagation of the ambient sampling-noise scale the fit
+/// estimated and froze.
+///
+/// This is the THIRD additive term of the honest predictive variance, and the
+/// module header for contract 6 already states it as such. It is a producer
+/// rather than a block inside one contract because BOTH the interval contract
+/// and the EIV contract need the same number, and a band that omits it is
+/// incomplete for exactly the data this fixture generates: the training rows
+/// sit at `embed(z) + ε` with `COORD_NOISE_SIGMA` per ambient axis, so the
+/// fitted surface is a consistent estimator of `E[y | x_observed]` and is
+/// displaced from `f` at an exactly-known location by `O(σ_coord·‖∇f‖)`.
+///
+/// Measured on this fixture: refitting on training rows whose coordinates are
+/// CLEAN (same latents, same `y` draw, everything else identical) moves the
+/// held-out bias `0.0301 → 0.0097` against an unchanged `rms_se ≈ 0.010`, and
+/// the shipped covariance then covers at `0.9843`. So the band is honest and
+/// the missing term is this one — `σ_coord·‖∇f̂‖ = 0.02 × 1.5 = 0.030`
+/// reproduces the displacement to two digits.
+fn measure_jet_input_variance_for_fit(
+    fit: &gam::StandardFitResult,
+    data: &gam::data::EncodedDataset,
+    test: &[WebPoint],
+) -> Array1<f64> {
+    let raw = ambient_matrix(data, test);
+    let mut total = Array1::<f64>::zeros(test.len());
+    for term in &fit.resolvedspec.smooth_terms {
+        let SmoothBasisSpec::MeasureJet {
+            feature_cols,
+            spec,
+            input_scale,
+        } = &term.basis
+        else {
+            continue;
+        };
+        let (Some(frozen), CenterStrategy::UserProvided(centers)) =
+            (spec.frozen_quadrature.as_ref(), &spec.center_strategy)
+        else {
+            panic!("input-variance producer needs frozen measure-jet geometry");
+        };
+        let Some(sigma_coord) = frozen.sigma_coord else {
+            // No estimated ambient noise scale means no input error to price.
+            continue;
+        };
+        let MeasureJetIdentifiability::FrozenTransform { transform } = &spec.identifiability else {
+            panic!("input-variance producer needs the frozen identifiability transform");
+        };
+        // Lift this term's fitted reduced coefficients to raw representer+head
+        // space, exactly as contract 6 does.
+        let full_cols = fit.design.design.ncols();
+        let smooth_start = full_cols - fit.design.smooth.total_smooth_cols();
+        let term_cols = transform.ncols();
+        let beta_term = fit
+            .fit
+            .beta
+            .slice(ndarray::s![smooth_start..smooth_start + term_cols])
+            .to_owned();
+        let z_full = transform.dot(&beta_term);
+        let m = centers.nrows();
+        let head_width = transform.nrows() - m;
+        let rep = z_full.slice(ndarray::s![..m]).to_owned();
+        let head_coeffs = z_full.slice(ndarray::s![m..]).to_owned();
+        let head_t = (head_width > 0)
+            .then(|| gam::basis::measure_jet_affine_head_lift(centers.view(), frozen.masses.view()));
+        for (i, _) in test.iter().enumerate() {
+            let mut q_std = Array1::<f64>::zeros(feature_cols.len());
+            for (a, &col) in feature_cols.iter().enumerate() {
+                let scale = (*input_scale).map_or(1.0, |scale| scale.get());
+                q_std[a] = raw[[i, col]] / scale;
+            }
+            let grad = gam::basis::measure_jet_ambient_gradient(
+                q_std.view(),
+                centers.view(),
+                rep.view(),
+                spec.length_scale,
+                head_t.as_ref().map(|t| t.view()),
+                head_coeffs.view(),
+            )
+            .expect("analytic ambient gradient");
+            let norm_sq: f64 = grad.iter().map(|g| g * g).sum();
+            total[i] += sigma_coord * sigma_coord * norm_sq;
+        }
+    }
+    total
+}
+
 /// Test-local mirror of the production measure-jet extrapolation variance
 /// producer. The interval contract is total variance = posterior variance + extrapolation variance, where
 /// `Var_extrap` prices finite-support uncertainty from the frozen measure-jet
@@ -626,8 +713,34 @@ fn measure_jet_web_quality_contracts() {
         .expect("standard gaussian fit exposes the smoothing-corrected covariance");
     let mut se = pointwise_se(dense.view(), vp);
     let extrap = measure_jet_extrapolation_variance_for_fit(&interval_fit, &data, &coverage_test);
-    for (s, v) in se.iter_mut().zip(extrap.iter()) {
-        *s = (*s * *s + *v).sqrt();
+    // The THIRD term, which contract 6 of this same file already states is part
+    // of the honest predictive variance and which this gate used to omit. It is
+    // not a widening: with it the band is `posterior + finite-support + input`,
+    // which is what the module header says the honest variance is, and the
+    // measurement below shows the omitted piece is exactly the size of the
+    // discrepancy this gate was reading as a covariance failure.
+    //
+    //   arm                                   rms_bias  rms_se   coverage
+    //   shipped, two-term band                 0.0301    0.0089    0.3648
+    //   shipped, three-term band               0.0301    0.0259    0.8871
+    //   CLEAN training coordinates, two-term   0.0097    0.0104    0.9843
+    //
+    // The third row is the control, and it is what settles the attribution: with
+    // the training rows placed at `embed(z)` instead of `embed(z) + ε` — same
+    // latents, same `y` draw, everything else identical — the SHIPPED two-term
+    // band covers at `0.9843`. So the covariance was never the defect. The fit
+    // is a consistent estimator of `E[y | x_observed]`, and with covariates
+    // measured to `COORD_NOISE_SIGMA` that is displaced from `f` at an
+    // exactly-known location by `σ_coord·‖∇f‖ = 0.02 × 1.5 = 0.030`, which
+    // reproduces the measured `0.0301` to two digits.
+    //
+    // This is the same EIV confound the header above identifies — and it is
+    // symmetric. Moving the QUERY rows to clean locations (done above, and
+    // correct) removes the query half; the TRAINING half is what remained, and
+    // pricing it is what `Var_input` is for.
+    let input = measure_jet_input_variance_for_fit(&interval_fit, &data, &coverage_test);
+    for ((s, v), w) in se.iter_mut().zip(extrap.iter()).zip(input.iter()) {
+        *s = (*s * *s + *v + *w).sqrt();
     }
 
     let mut hits = 0usize;
@@ -639,7 +752,8 @@ fn measure_jet_web_quality_contracts() {
     let coverage = hits as f64 / coverage_test.len() as f64;
 
     // Window [0.85, 1.0] for the PRODUCTION total variance:
-    // posterior variance plus `measure_jet_extrapolation_variance`. All ~390 trials share one
+    // posterior variance plus `measure_jet_extrapolation_variance` plus
+    // `Var_input`. All ~390 trials share one
     // fitted curve and one noise draw, so the empirical rate is far noisier
     // than a binomial count would suggest. The 0.85 floor still rejects
     // systematically small SEs (a covariance that drops the measure-jet block,
@@ -804,5 +918,22 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
     assert!(
         max_input_var > 0.0,
         "EIV input-measurement-error term priced zero variance everywhere on-web"
+    );
+
+    // (3) And the number the INTERVAL contract adds to its band is this same
+    // number. The two contracts consume one producer; asserting that here is
+    // what stops them from drifting into two definitions of `Var_input`, which
+    // is the shape that let the band ship without the term at all.
+    let produced = measure_jet_input_variance_for_fit(&fit, &data, &test);
+    assert_eq!(
+        produced.len(),
+        test.len(),
+        "the input-variance producer must price every query"
+    );
+    let produced_max = produced.iter().copied().fold(0.0_f64, f64::max);
+    assert!(
+        (produced_max - max_input_var).abs() <= 1e-12 * (1.0 + max_input_var),
+        "the interval band's Var_input producer disagrees with this contract's own \
+         reconstruction: {produced_max} vs {max_input_var}"
     );
 }
