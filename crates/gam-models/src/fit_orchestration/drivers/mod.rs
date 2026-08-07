@@ -116,6 +116,23 @@ pub struct SpatialLengthScaleOptimizationTiming {
     pub nfree_miss_revision: u64,
     pub nfree_miss_second_order: u64,
     pub nfree_miss_other: u64,
+    /// Whether `begin_exact_polish` retired the #1033b n-free ψ-Gram surrogate
+    /// and the optimizer continued on the exact streamed criterion (gam#2760).
+    ///
+    /// Every counter above is a statement about the SEARCH and stops at this
+    /// boundary — "an in-window hyperparameter TRIAL touches only k×k objects"
+    /// is a claim about trials, and the polish is not a trial phase. The two
+    /// fields below carry the polish's own O(n) cost so it is published rather
+    /// than either hidden or charged to the search.
+    pub exact_polish_ran: bool,
+    /// `slow_path_resets` accrued AFTER the exact-polish boundary. Bounded by
+    /// the polish's own iteration budget, so n-independent; every one of them is
+    /// intended, because the polish exists precisely to leave the n-free lane.
+    pub polish_slow_path_resets: u64,
+    /// `nfree_skip_row_touches` accrued after the exact-polish boundary. The
+    /// surrogate is gone by then, so no evaluation can take the skip path and
+    /// this must stay 0 — a nonzero value would mean the retirement did not take.
+    pub polish_nfree_skip_row_touches: u64,
     pub optim_total_s: f64,
 }
 

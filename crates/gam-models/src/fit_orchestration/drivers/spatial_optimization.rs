@@ -2822,6 +2822,21 @@ struct SpatialJointContext<'d> {
     /// recoverable walls before converging.
     value_realization_failures: usize,
     value_evaluation_failures: usize,
+    /// `Some((slow_path_resets, nfree_skip_row_touches))` read at the instant
+    /// `begin_exact_polish` retired the #1033b n-free surrogate; `None` while
+    /// the SEARCH is still running (gam#2760).
+    ///
+    /// The `[KAPPA-PHASE-SUMMARY]` counters — and the #1868 / #1264 gates that
+    /// consume them — are statements about the SEARCH: "an in-window
+    /// hyperparameter TRIAL touches only k×k objects", "the exact-lane fallback
+    /// COUNT is n-independent". The exact polish is not a trial phase; it is the
+    /// deliberate, once-per-fit transition onto the exact streamed criterion,
+    /// and every one of its evaluations takes the O(n) lane BY CONSTRUCTION.
+    /// Charging those to the search's counters would make a correctness repair
+    /// read as a broken skip. Splitting them here keeps both facts reportable
+    /// and neither hidden: the search's counts stay exactly what they measured
+    /// before, and the polish's own O(n) cost is published beside them.
+    nfree_polish_boundary: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3715,6 +3730,7 @@ fn run_exact_joint_spatial_optimization(
         kind,
         value_realization_failures: 0,
         value_evaluation_failures: 0,
+        nfree_polish_boundary: None,
         cache: SingleBlockExactJointDesignCache::new_with_policy(
             data,
             resolvedspec.clone(),
@@ -4379,6 +4395,12 @@ fn run_exact_joint_spatial_optimization(
             // Objective memoization is theta-only, so a surrogate value at the
             // warm checkpoint must not alias the exact value at the same theta.
             ctx.cache.forget_eval_memo();
+            // The SEARCH's n-independence counters stop here; the polish's own
+            // O(n) work is measured from this boundary and reported beside them.
+            ctx.nfree_polish_boundary = Some((
+                ctx.evaluator.slow_path_reset_count(),
+                gam_solve::pirls::nfree_skip_row_element_touches(),
+            ));
             log::info!(
                 "[KAPPA-PHASE-POLISH] the certified n-free psi-Gram surrogate is retired at \
                  the search checkpoint; the optimizer continues and certifies on the exact \
@@ -4403,16 +4425,31 @@ fn run_exact_joint_spatial_optimization(
     }
     drop(obj);
     let kphase_total_s = kphase_optim_start.elapsed().as_secs_f64();
-    let kphase_slow_resets = ctx
-        .evaluator
-        .slow_path_reset_count()
-        .saturating_sub(kphase_slow_resets_start);
+    let slow_resets_end = ctx.evaluator.slow_path_reset_count();
+    let skip_touches_end = gam_solve::pirls::nfree_skip_row_element_touches();
+    // gam#2760: the SEARCH's counters stop at the exact-polish boundary. Every
+    // polish evaluation takes the O(n) lane by construction — that IS the
+    // repair — so charging them to gates whose subject is "an in-window
+    // hyperparameter TRIAL touches only k×k objects" would report a correctness
+    // fix as a broken skip. Both halves are published; neither is hidden.
+    let (search_slow_resets_end, search_skip_touches_end) =
+        ctx.nfree_polish_boundary.unwrap_or((slow_resets_end, skip_touches_end));
+    let kphase_slow_resets = search_slow_resets_end.saturating_sub(kphase_slow_resets_start);
+    let kphase_polish_slow_resets = slow_resets_end.saturating_sub(search_slow_resets_end);
     let kphase_design_revision_delta = ctx
         .cache
         .design_revision()
         .saturating_sub(kphase_design_revision_start);
-    let kphase_nfree_skip_touches = gam_solve::pirls::nfree_skip_row_element_touches()
-        .saturating_sub(kphase_nfree_skip_touches_start);
+    let kphase_nfree_skip_touches =
+        search_skip_touches_end.saturating_sub(kphase_nfree_skip_touches_start);
+    let kphase_polish_skip_touches = skip_touches_end.saturating_sub(search_skip_touches_end);
+    log::info!(
+        "[KAPPA-PHASE-POLISH-SUMMARY] n_rows={} exact_polish_ran={} polish_slow_path_resets={} polish_nfree_skip_row_touches={}",
+        data.nrows(),
+        ctx.nfree_polish_boundary.is_some(),
+        kphase_polish_slow_resets,
+        kphase_polish_skip_touches,
+    );
     log::info!(
         "[KAPPA-PHASE-SUMMARY] n_rows={} log_kappa_dim={} n_cost={} cost_total_s={:.4} n_eval={} eval_total_s={:.4} n_efs={} efs_total_s={:.4} value_realization_failures={} value_evaluation_failures={} slow_path_resets={} design_revision_delta={} nfree_skip_row_touches={} nfree_miss_shape={} nfree_miss_value={} nfree_miss_gradient={} nfree_miss_penalty={} nfree_miss_revision={} nfree_miss_second_order={} nfree_miss_other={} optim_total_s={:.4}",
         data.nrows(),
@@ -4455,6 +4492,9 @@ fn run_exact_joint_spatial_optimization(
         nfree_miss_revision: kphase_nfree_miss_revision.get(),
         nfree_miss_second_order: kphase_nfree_miss_second_order.get(),
         nfree_miss_other: kphase_nfree_miss_other.get(),
+        exact_polish_ran: ctx.nfree_polish_boundary.is_some(),
+        polish_slow_path_resets: kphase_polish_slow_resets,
+        polish_nfree_skip_row_touches: kphase_polish_skip_touches,
         optim_total_s: kphase_total_s,
     };
     log::trace!(
@@ -7650,6 +7690,13 @@ where
         nfree_miss_revision: 0,
         nfree_miss_second_order: 0,
         nfree_miss_other: 0,
+        // The N-block driver never arms the #1033b ψ-Gram surrogate, so it has
+        // no surrogate to retire. Its own staged-pilot exit is a different
+        // transition (row measure, not criterion measure) and is asserted by
+        // the `RowSet::All` check immediately below.
+        exact_polish_ran: false,
+        polish_slow_path_resets: 0,
+        polish_nfree_skip_row_touches: 0,
         optim_total_s: kphase_total_s,
     };
 

@@ -77,6 +77,55 @@ use std::time::Instant;
 /// gradient eval and for parallel-reduction trajectory jitter.
 const NFREE_ROTATION_FALLBACK_CAP: u64 = 8;
 
+/// n-independent cap on the EXACT-POLISH phase's own `slow_path_resets`
+/// (gam#2760).
+///
+/// The polish is the once-per-fit transition off the certified n-free ψ-Gram
+/// surrogate and onto the exact streamed criterion, and every one of its
+/// evaluations takes the O(n) lane deliberately — that is the repair, not a
+/// broken skip. What must stay n-INDEPENDENT is how MANY of them there are: the
+/// polish re-enters `run_outer_uncertified` with `max_seeds = 1` from the
+/// search's own checkpoint, so its evaluation count is bounded by the outer
+/// iteration budget and by nothing about `n`. Observed on the #2760 ladder:
+/// 11 / 19 / 15 at n = 1k / 4k / 16k — flat, and a 16× lever that moved it 1.4×
+/// in the wrong direction for a scaling law. The cap sits comfortably above
+/// that spread and far below anything n-linear would reach at 16k.
+const EXACT_POLISH_RESET_CAP: u64 = 64;
+
+/// Assert what the exact polish must and must not have done (gam#2760).
+///
+/// Two claims, and they are different: the surrogate is GONE (so no evaluation
+/// after the boundary can have taken the n-free skip — `polish_nfree_skip_row_
+/// touches == 0` is the retirement's own witness), and the polish's O(n) cost is
+/// BOUNDED and n-independent.
+fn assert_exact_polish_is_bounded(
+    context: &str,
+    n: usize,
+    t: &SpatialLengthScaleOptimizationTiming,
+) {
+    eprintln!(
+        "[{context}] n={n} exact_polish_ran={} polish_slow_path_resets={} \
+         polish_nfree_skip_row_touches={}",
+        t.exact_polish_ran, t.polish_slow_path_resets, t.polish_nfree_skip_row_touches,
+    );
+    assert_eq!(
+        t.polish_nfree_skip_row_touches, 0,
+        "[{context}] n={n}: {} length-n row touches on the n-free SKIP path after the exact- \
+         polish boundary. The polish retires the ψ-Gram surrogate, so no evaluation past that \
+         boundary can be on the skip at all — a nonzero count means the retirement did not take \
+         and the certificate is still reading the surrogate's criterion (gam#2760).",
+        t.polish_nfree_skip_row_touches,
+    );
+    assert!(
+        t.polish_slow_path_resets <= EXACT_POLISH_RESET_CAP,
+        "[{context}] n={n}: the exact polish spent {} O(n) resets, above the n-independent cap \
+         ({EXACT_POLISH_RESET_CAP}). Its evaluation count is bounded by the outer iteration \
+         budget and by nothing about n; a count that scales with n would mean the polish is \
+         re-running the whole search rather than continuing from its checkpoint.",
+        t.polish_slow_path_resets,
+    );
+}
+
 /// Sum of `slow_path_reset` misses that indicate a GENUINE skip-logic break —
 /// every miss category EXCEPT the #1264 `nfree_miss_value` basis-rotation
 /// fallback, which is the one correctness-mandated, n-independent-bounded
@@ -316,13 +365,34 @@ fn kappa_iso_1d_convergence_diagnostic() {
             Ok(timing) => eprintln!("[kappa-diag] {label}: CONVERGED in {:.3}s", timing.wall_s),
             Err(reason) => eprintln!("[kappa-diag] {label}: FAILED — {reason}"),
         }
-        outcomes.push((label, r.is_ok()));
+        outcomes.push((label, r));
     }
-    // Report-only: this diagnostic exists to attribute the failure, not to gate
-    // CI on it. The follow-up measurement/fix lands once the converging path is
-    // known. (No assertion here — the printed matrix is the deliverable.)
-    let any_ok = outcomes.iter().any(|(_, ok)| *ok);
-    eprintln!("[kappa-diag] any-converged={any_ok}");
+    // GATED as of gam#2760. This was report-only with the note "the follow-up
+    // measurement/fix lands once the converging path is known"; it is known.
+    //
+    // Why this is the right gate for the #2760 root causes, from an angle the
+    // n-ladder does not cover. At `n = 600` the scalar-ρ incumbent already puts
+    // 4 of 5 coordinates below `−JOINT_RHO_BOUND`, so the pre-#2760 box pasted
+    // its lower wall onto them; and the ψ-Gram surrogate is armed on `tight`
+    // bounds and not on `wide`. `iso / tight` — both defects at once — was the
+    // one red cell here, refusing at `|Pg| = 7.011e-2` against `4.168e-2` after
+    // a `StepSizeTooSmall` line search at 14 iterations. All four cells converge
+    // now, and the four differ in exactly the two axes the repairs touch
+    // (which optimizer routes the ψ block; whether the surrogate arms), so a
+    // regression of either root cause turns a cell red here in seconds — long
+    // before the 16k ladder rung would notice.
+    for (label, outcome) in &outcomes {
+        assert!(
+            outcome.is_ok(),
+            "[kappa-diag] {label}: the 1-D Gaussian κ fit must converge at n={n} in every \
+             (optimizer route × length-scale window) configuration; it refused with {:?}. \
+             This cell was red before gam#2760 whenever the joint ρ box pinned the graded \
+             incumbent on its own wall, or the certified n-free ψ-Gram surrogate was still \
+             the measure at certification time.",
+            outcome.as_ref().err(),
+        );
+    }
+    eprintln!("[kappa-diag] all {} configurations converged", outcomes.len());
 }
 
 /// Pin the sample-size threshold at which the isotropic-analytic κ optimizer
@@ -479,6 +549,7 @@ fn kappa_outer_loop_is_n_independent_fast_ladder() {
     // `NFREE_ROTATION_FALLBACK_CAP` for why this replaces the old
     // `resets_last <= resets_first + 1` flat-reset assumption.
     for (&n, timing) in ns.iter().zip(&kappa_timings) {
+        assert_exact_polish_is_bounded("kappa-fast-ladder", n, timing);
         assert_eq!(
             non_rotation_resets(timing),
             0,
@@ -675,6 +746,7 @@ fn kappa_micro_2point_n_independence() {
     // Reset soundness: the exact-lane fallbacks must be the bounded,
     // n-independent #1264 basis-rotation kind, not a genuine skip break.
     for (&n, timing) in ns.iter().zip(&timings) {
+        assert_exact_polish_is_bounded("kappa-micro", n, timing);
         assert_eq!(
             non_rotation_resets(timing),
             0,
@@ -796,6 +868,7 @@ fn assert_kappa_n_free_at(n: usize) {
     // to zero by the `nfree_skip_row_touches` gate below). A fallback of any
     // OTHER kind, or a count above the n-independent cap, means the skip is not
     // firing.
+    assert_exact_polish_is_bounded("kappa-n-scaling", n, &timing);
     assert_eq!(
         non_rotation_resets(&timing),
         0,
