@@ -233,12 +233,6 @@ pub fn score_influence_jacobian(
     // Row-independent endpoint response bases and floor offsets (fitted).
     let lower_basis = family.response_lower_basis();
     let upper_basis = family.response_upper_basis();
-    let lower_basis_slice = lower_basis
-        .as_slice()
-        .ok_or("score_influence_jacobian: lower endpoint basis is not contiguous")?;
-    let upper_basis_slice = upper_basis
-        .as_slice()
-        .ok_or("score_influence_jacobian: upper endpoint basis is not contiguous")?;
     let lower_floor = family.response_lower_floor_offset();
     let upper_floor = family.response_upper_floor_offset();
     let median = family.response_median();
@@ -265,15 +259,6 @@ pub fn score_influence_jacobian(
         let val_row = resp_val.row(i);
         let deriv_row = resp_deriv.row(i);
         let x_row = x_cov.row(i);
-        let alpha_row_slice = alpha_row
-            .as_slice()
-            .ok_or_else(|| format!("score_influence_jacobian: alpha row {i} is not contiguous"))?;
-        let val_row_slice = val_row.as_slice().ok_or_else(|| {
-            format!("score_influence_jacobian: value basis row {i} is not contiguous")
-        })?;
-        let deriv_row_slice = deriv_row.as_slice().ok_or_else(|| {
-            format!("score_influence_jacobian: derivative basis row {i} is not contiguous")
-        })?;
 
         // h, L, U exactly as the CTN row-quantity build assembles them
         // (`row_quantities`): the additive linear-predictor offset enters h, L,
@@ -283,15 +268,15 @@ pub fn score_influence_jacobian(
         // floors are recomputed from the fitted median.
         let geometry = ctn_row_geometry(
             CTN_CHART,
-            alpha_row_slice,
+            alpha_row,
             CtnRowBases {
-                value: val_row_slice,
+                value: val_row,
                 // `h'` is not read by the PIT score or its Jacobian; the row's
                 // derivative basis is supplied because the one-chart evaluator
                 // computes all four components together.
-                derivative: deriv_row_slice,
-                lower: lower_basis_slice,
-                upper: upper_basis_slice,
+                derivative: deriv_row,
+                lower: lower_basis.view(),
+                upper: upper_basis.view(),
             },
             CtnRowFloors {
                 additive_offset: effective_offset[i],
@@ -398,9 +383,9 @@ pub fn score_influence_jacobian(
             // pre-gam#2680 code carried `2·γ_k` on the shape rows here, the
             // derivative of a squared chart the value path had already left.
             let (dh_scalar, dl_scalar, du_scalar) = (
-                ctn_component_sensitivity(CTN_CHART, val_row_slice, k),
-                ctn_component_sensitivity(CTN_CHART, lower_basis_slice, k),
-                ctn_component_sensitivity(CTN_CHART, upper_basis_slice, k),
+                ctn_component_sensitivity(CTN_CHART, val_row, k),
+                ctn_component_sensitivity(CTN_CHART, lower_basis.view(), k),
+                ctn_component_sensitivity(CTN_CHART, upper_basis.view(), k),
             );
             let base = k * p_cov;
             for j in 0..p_cov {

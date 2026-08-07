@@ -1,7 +1,7 @@
 use super::chart::{CtnRowBases, CtnRowFloors, ctn_component_sensitivity, ctn_row_geometry};
 use super::log_normal_cdf_diff_derivatives;
 use crate::inference::model::TransformationNormalParameterization;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 
 /// Complete local state for one saved transformation-normal likelihood row.
 pub struct TransformationNormalAloRowInput<'a> {
@@ -94,12 +94,12 @@ pub fn transformation_normal_alo_row_geometry(
     let chart = TransformationNormalParameterization::DirectAlpha;
     let geometry = ctn_row_geometry(
         chart,
-        input.alpha,
+        ArrayView1::from(input.alpha),
         CtnRowBases {
-            value: input.response_value_basis,
-            derivative: input.response_derivative_basis,
-            lower: input.response_lower_basis,
-            upper: input.response_upper_basis,
+            value: ArrayView1::from(input.response_value_basis),
+            derivative: ArrayView1::from(input.response_derivative_basis),
+            lower: ArrayView1::from(input.response_lower_basis),
+            upper: ArrayView1::from(input.response_upper_basis),
         },
         CtnRowFloors {
             additive_offset: input.additive_offset,
@@ -134,11 +134,17 @@ pub fn transformation_normal_alo_row_geometry(
     let mut dlower = vec![0.0; dimension];
     let mut dupper = vec![0.0; dimension];
     for component in 0..dimension {
-        dh[component] = ctn_component_sensitivity(chart, input.response_value_basis, component);
-        dh_prime[component] =
-            ctn_component_sensitivity(chart, input.response_derivative_basis, component);
-        dlower[component] = ctn_component_sensitivity(chart, input.response_lower_basis, component);
-        dupper[component] = ctn_component_sensitivity(chart, input.response_upper_basis, component);
+        dh[component] =
+            ctn_component_sensitivity(chart, ArrayView1::from(input.response_value_basis), component);
+        dh_prime[component] = ctn_component_sensitivity(
+            chart,
+            ArrayView1::from(input.response_derivative_basis),
+            component,
+        );
+        dlower[component] =
+            ctn_component_sensitivity(chart, ArrayView1::from(input.response_lower_basis), component);
+        dupper[component] =
+            ctn_component_sensitivity(chart, ArrayView1::from(input.response_upper_basis), component);
     }
 
     let inverse_h_prime = 1.0 / h_prime;

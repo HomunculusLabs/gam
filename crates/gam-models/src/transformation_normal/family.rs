@@ -958,23 +958,15 @@ impl TransformationNormalFamily {
                 let alpha_row = alpha.row(i);
                 let val_row = self.response_val_basis.row(i);
                 let deriv_row = self.response_deriv_basis.row(i);
-                // One chart, evaluated by one kernel (gam#2680). The rows are
-                // contiguous by construction (`Array2` row-major, both bases
-                // owned), so the slice views are free.
+                // One chart, evaluated by one kernel (gam#2680).
                 let geometry = ctn_row_geometry(
                     TransformationNormalParameterization::DirectAlpha,
-                    alpha_row.as_slice().expect("alpha row contiguous"),
+                    alpha_row,
                     CtnRowBases {
-                        value: val_row.as_slice().expect("value basis row contiguous"),
-                        derivative: deriv_row.as_slice().expect("derivative row contiguous"),
-                        lower: self
-                            .response_lower_basis
-                            .as_slice()
-                            .expect("lower endpoint basis contiguous"),
-                        upper: self
-                            .response_upper_basis
-                            .as_slice()
-                            .expect("upper endpoint basis contiguous"),
+                        value: val_row,
+                        derivative: deriv_row,
+                        lower: self.response_lower_basis.view(),
+                        upper: self.response_upper_basis.view(),
                     },
                     CtnRowFloors {
                         additive_offset: self.offset[i],

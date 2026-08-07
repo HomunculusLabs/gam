@@ -407,10 +407,8 @@ impl SavedCtnChart {
         &self,
         coefficients: &ndarray::ArrayView2<'_, f64>,
         covariate_row: ndarray::ArrayView1<'_, f64>,
-    ) -> Vec<f64> {
-        (0..self.p_resp)
-            .map(|k| coefficients.row(k).dot(&covariate_row))
-            .collect()
+    ) -> Array1<f64> {
+        Array1::from_shape_fn(self.p_resp, |k| coefficients.row(k).dot(&covariate_row))
     }
 
     fn floors(&self, y: f64, additive_offset: f64) -> CtnRowFloors {
@@ -502,20 +500,12 @@ fn transformation_normal_quantile_grid(
                 let derivative_row = grid_derivative_ref.row(k);
                 let geometry = ctn_row_geometry(
                     saved_ref.chart,
-                    &alpha,
+                    alpha.view(),
                     CtnRowBases {
-                        value: value_row.as_slice().expect("grid value row contiguous"),
-                        derivative: derivative_row
-                            .as_slice()
-                            .expect("grid derivative row contiguous"),
-                        lower: saved_ref
-                            .lower_basis
-                            .as_slice()
-                            .expect("lower endpoint contiguous"),
-                        upper: saved_ref
-                            .upper_basis
-                            .as_slice()
-                            .expect("upper endpoint contiguous"),
+                        value: value_row,
+                        derivative: derivative_row,
+                        lower: saved_ref.lower_basis.view(),
+                        upper: saved_ref.upper_basis.view(),
                     },
                     saved_ref.floors(grid_y_ref[k], offset[i]),
                 );
@@ -641,20 +631,12 @@ fn transformation_normal_observed_scores(
             let derivative_row = observed_derivative.row(row_index);
             let geometry = ctn_row_geometry(
                 saved_ref.chart,
-                &alpha,
+                alpha.view(),
                 CtnRowBases {
-                    value: value_row.as_slice().expect("value basis row contiguous"),
-                    derivative: derivative_row
-                        .as_slice()
-                        .expect("derivative basis row contiguous"),
-                    lower: saved_ref
-                        .lower_basis
-                        .as_slice()
-                        .expect("lower endpoint contiguous"),
-                    upper: saved_ref
-                        .upper_basis
-                        .as_slice()
-                        .expect("upper endpoint contiguous"),
+                    value: value_row,
+                    derivative: derivative_row,
+                    lower: saved_ref.lower_basis.view(),
+                    upper: saved_ref.upper_basis.view(),
                 },
                 saved_ref.floors(response[row_index], offset[row_index]),
             );

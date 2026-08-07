@@ -62,13 +62,13 @@ pub const CTN_LOCATION_COLUMNS: usize = 1;
 #[derive(Clone, Copy, Debug)]
 pub struct CtnRowBases<'a> {
     /// `[1, I_1(y_i), …]` — the value basis at this row's response.
-    pub value: &'a [f64],
+    pub value: ArrayView1<'a, f64>,
     /// `[0, M_1(y_i), …]` — the derivative basis at this row's response.
-    pub derivative: &'a [f64],
+    pub derivative: ArrayView1<'a, f64>,
     /// `[1, 0, …, 0]` — the value basis at the lower support knot.
-    pub lower: &'a [f64],
+    pub lower: ArrayView1<'a, f64>,
     /// `[1, 1ᵀT_{·1}, …]` — the value basis at the upper support knot.
-    pub upper: &'a [f64],
+    pub upper: ArrayView1<'a, f64>,
 }
 
 /// The additive scalars that do not depend on `α`: the composed linear-predictor
@@ -109,8 +109,18 @@ pub struct CtnRowGeometry {
 /// `basis` is read at every index of `alpha`; a caller that passes mismatched
 /// widths gets a bounds panic, which is the correct outcome for a corrupted
 /// coefficient layout (the surrounding paths all validate `p_resp` first).
+///
+/// The arguments are strided views rather than slices deliberately. `α` is a row
+/// of `Ψ · Aᵀ`, whose memory layout is the linear-algebra backend's business —
+/// requiring contiguity here would make a correct chart evaluation depend on
+/// whether a matrix product happened to come back row-major, which is a latent
+/// panic waiting for a shape that flips it.
 #[inline]
-pub fn ctn_chart_component(alpha: &[f64], basis: &[f64], floor: f64) -> f64 {
+pub fn ctn_chart_component(
+    alpha: ArrayView1<'_, f64>,
+    basis: ArrayView1<'_, f64>,
+    floor: f64,
+) -> f64 {
     let mut acc = basis[0] * alpha[0] + floor;
     for k in CTN_LOCATION_COLUMNS..alpha.len() {
         acc += basis[k] * alpha[k];
@@ -137,7 +147,7 @@ pub fn ctn_chart_component(alpha: &[f64], basis: &[f64], floor: f64) -> f64 {
 #[inline]
 pub fn ctn_row_geometry(
     chart: TransformationNormalParameterization,
-    alpha: &[f64],
+    alpha: ArrayView1<'_, f64>,
     bases: CtnRowBases<'_>,
     floors: CtnRowFloors,
 ) -> CtnRowGeometry {
@@ -173,7 +183,7 @@ pub fn ctn_row_geometry(
 #[inline]
 pub fn ctn_component_sensitivity(
     chart: TransformationNormalParameterization,
-    basis: &[f64],
+    basis: ArrayView1<'_, f64>,
     k: usize,
 ) -> f64 {
     match chart {
@@ -294,10 +304,10 @@ mod tests {
         upper: &'a [f64],
     ) -> CtnRowBases<'a> {
         CtnRowBases {
-            value,
-            derivative,
-            lower,
-            upper,
+            value: ArrayView1::from(value),
+            derivative: ArrayView1::from(derivative),
+            lower: ArrayView1::from(lower),
+            upper: ArrayView1::from(upper),
         }
     }
 
@@ -310,8 +320,12 @@ mod tests {
         let alpha = [0.5, 1.5, 2.5];
         let doubled: Vec<f64> = alpha.iter().map(|a| 2.0 * a).collect();
         let floor = -0.25;
-        let base = ctn_chart_component(&alpha, &basis, floor);
-        let twice = ctn_chart_component(&doubled, &basis, floor);
+        let base = ctn_chart_component(ArrayView1::from(&alpha[..]), ArrayView1::from(&basis[..]), floor);
+        let twice = ctn_chart_component(
+            ArrayView1::from(&doubled[..]),
+            ArrayView1::from(&basis[..]),
+            floor,
+        );
         assert!(
             ((twice - floor) - 2.0 * (base - floor)).abs() < 1e-14,
             "chart is not affine: base={base} twice={twice}"
@@ -333,7 +347,7 @@ mod tests {
         };
         let g = ctn_row_geometry(
             TransformationNormalParameterization::DirectAlpha,
-            &alpha,
+            ArrayView1::from(&alpha[..]),
             bases(&value, &derivative, &lower, &upper),
             floors,
         );
@@ -377,7 +391,7 @@ mod tests {
         let derivative = [0.0, 1.0, 1.0, 1.0];
         let g = ctn_row_geometry(
             TransformationNormalParameterization::DirectAlpha,
-            &alpha,
+            ArrayView1::from(&alpha[..]),
             bases(
                 &value,
                 &derivative,
