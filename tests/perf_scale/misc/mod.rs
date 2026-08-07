@@ -1,5 +1,6 @@
 mod joint_newton_isotropic_tr_starvation;
 mod kappa_loop_n_scaling;
+mod kappa_loop_n_scaling_ladder_probe;
 mod large_scale_accuracy_sweep;
 mod large_scale_ctn_bootstrap_repro;
 mod large_scale_margslope_repro;
