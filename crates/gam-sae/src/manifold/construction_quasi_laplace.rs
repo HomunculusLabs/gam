@@ -2992,40 +2992,65 @@ impl SaeManifoldTerm {
                     .to_string(),
             )
         })?;
-        // #2712 CORRECTED RATIONALE — this gate stays, but not for the reason it
-        // was written with. The three from-probes selected-inverse channels this
-        // lane's bundle feeds now PRICE per-row deflation: `A_i` is the
-        // conditioned row Cholesky, so the reconstructed block is the deflated
-        // `(H⁻¹)_tt`, and each channel applies the same Daleckii–Krein correction
-        // its dense sibling applies (measured route-identical on a deflated
-        // cache — `tests_deflated_from_probes_2712`).
+        // #2515 RE-MEASURED RATIONALE — this gate stays, and its reason has changed
+        // for the second time. It is retained on a NUMBER now, not an argument.
         //
-        // What still stands in front of a deflated fit going matrix-free end to
-        // end is a DIFFERENT deflation. `complete_outer_gradient_deflation_-
-        // contribution_is_route_independent_2712` measures the complete outer
-        // ρ-gradient both ways on this fixture class and finds a `8.45` route gap
-        // against `‖g‖∞ = 5.00` that is BIT-IDENTICAL with and without per-row
-        // deflation — #2499/#2515's β-Schur smoothness-EDF desync, where the dense
-        // route contracts the β-Schur deflated spectral pseudo-inverse and the
-        // from-probes route contracts the plain `S⁻¹` its bundle carries.
+        // Era 1 said the from-probes cluster could not price per-row deflation.
+        // #2712 disproved that: `A_i` is the conditioned row Cholesky, so the
+        // reconstructed block IS the deflated `(H⁻¹)_tt`, and every channel applies
+        // the same Daleckii–Krein correction its dense sibling applies.
         //
-        // TO LIFT THIS GATE: #2515 first, then a measured parity gate on a
-        // streaming-lane evaluation whose cache actually deflates. Argument alone
-        // is what put the wrong reason on it in the first place.
-        if let Some((row, directions)) = cache
-            .deflated_row_directions
-            .iter()
-            .enumerate()
-            .find(|(_, directions)| !directions.is_empty())
-        {
-            return Err(SaeCriterionError::Numerical(format!(
-                "streaming outer derivative is not admitted for row {row} with {} spectral \
-                 deflation direction(s): the from-probes selected-inverse channels do carry \
-                 the Daleckii--Krein correction (#2712), but the complete matrix-free outer \
-                 gradient still desyncs from the dense one through the #2515 beta-Schur \
-                 smoothness channel, whose gap is deflation-independent and unfixed",
-                directions.len()
-            )));
+        // Era 2 named the #2499/#2515 β-Schur smoothness-EDF desync — the dense
+        // route contracting a β-Schur deflated pseudo-inverse while the bundle
+        // contracted "whatever `S⁻¹` it carries". That is fixed: the bundle now
+        // carries the exact observed information's own reduced Schur AND its row
+        // factors, and the two routes agree to `1.57e-14` on the complete gradient
+        // at a non-deflating state (`laplace_value_and_gradient_are_route_-
+        // invariant_2515`).
+        //
+        // Era 3, MEASURED on #2712's own certified deflated anchor by
+        // `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`:
+        //
+        //     majorizer deflated rows 10, exact-A deflated rows 10
+        //     complete gradient max|Δ| = 9.131537e0 against ‖g‖∞ = 5.004339e0
+        //
+        // What is left is a DEFLATION-PRICING disagreement, not an operator one.
+        // The dense route floors the spectrum of the materialized `A` globally
+        // (with #2336 clamp-attributable pricing on negative directions); the arrow
+        // route conditions each row block and pseudo-inverts the reduced Schur.
+        // Two floors, two metrics, one `A` — the #2673 genus. That is what a
+        // deflated streaming fit would be ranked and steered by, and it is not the
+        // criterion the dense lane evaluates.
+        //
+        // TO LIFT THIS GATE: reconcile the two deflation prices, then delete the
+        // assertion in `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`
+        // — which goes RED the moment they agree, and says so.
+        //
+        // The check reads BOTH caches. `cache` is the `B` stationarity geometry the
+        // IFT solve rides; `exact_a_cache` is what the from-probes trace and
+        // θ-adjoint channels reconstruct their inverse blocks from. Since #2515
+        // those are different factorizations of different operators, and either one
+        // deflating puts the gradient in the regime measured above.
+        for (label, inspected) in [("majorizer", &cache), ("exact-A", &exact_a_cache)] {
+            if let Some((row, directions)) = inspected
+                .deflated_row_directions
+                .iter()
+                .enumerate()
+                .find(|(_, directions)| !directions.is_empty())
+            {
+                return Err(SaeCriterionError::Numerical(format!(
+                    "streaming outer derivative is not admitted: the {label} evidence \
+                     factorization spectrally deflates row {row} in {} direction(s). The \
+                     from-probes channels carry the Daleckii--Krein correction (#2712) and \
+                     now differentiate the exact observed information (#2515, parity \
+                     1.57e-14 undeflated), but on a DEFLATING cache the arrow route's \
+                     per-row + reduced-Schur pseudo-inverse and the dense route's global \
+                     spectral floor price deflation differently -- measured complete-gradient \
+                     gap 9.13 against ||g||inf = 5.00. Refusing rather than steering a fit \
+                     with the derivative of an operator the dense criterion does not rank",
+                    directions.len()
+                )));
+            }
         }
         Ok(StreamingOuterEvaluation {
             cost,

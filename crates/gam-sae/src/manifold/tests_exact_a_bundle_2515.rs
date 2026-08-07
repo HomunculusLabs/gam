@@ -843,3 +843,188 @@ fn laplace_value_and_gradient_are_route_invariant_2515() {
         "the routed log|H|-trace channel must be non-trivial; ‖logdet_trace‖²={trace_sq}"
     );
 }
+
+/// #2515/#2712 — THE MEASUREMENT THAT KEEPS THE STREAMING DEFLATION REFUSAL
+/// ALIVE, and the one that will tell the next person when to lift it.
+///
+/// `penalized_quasi_laplace_streaming_outer_evaluation` refuses any evaluation
+/// whose cache carries a per-row spectral deflation direction. Its stated reason
+/// was #2515 — "the complete matrix-free outer gradient still desyncs from the
+/// dense one through the #2515 beta-Schur smoothness channel, whose gap is
+/// deflation-independent and unfixed" — with the note that lifting it needs
+/// "#2515 first, then a measured parity gate on a streaming-lane evaluation whose
+/// cache actually deflates. Argument alone is what put the wrong reason on it in
+/// the first place."
+///
+/// #2515 is now first, and this is that measurement, on #2712's own certified
+/// deflated anchor. The result says the refusal must STAY, for a reason that is
+/// no longer #2515's:
+///
+/// ```text
+/// majorizer cache deflated rows = 10, exact-A cache deflated rows = 10
+/// exact-A arrow factorization REFUSED under positive-definite evidence
+///                             OK under unit deflation (the production policy)
+/// complete gradient max|Δ| = 9.131537e0 against ‖g‖∞ = 5.004339e0
+/// ```
+///
+/// On a NON-deflating state the same comparison is `1.57e-14`
+/// ([`laplace_value_and_gradient_are_route_invariant_2515`]), so what is left is
+/// a DEFLATION-PRICING disagreement, not an operator one: the dense route floors
+/// the spectrum of the materialized `A` globally (with #2336 clamp-attributable
+/// pricing on negative directions), while the arrow route conditions each row
+/// block and pseudo-inverts the reduced Schur. Two floors, two metrics, one `A` —
+/// the #2673 genus.
+///
+/// THIS TEST ASSERTS THE GAP IS STILL LARGE. That is deliberate. A refusal whose
+/// justification is a number needs that number under test, or it decays into
+/// folklore exactly as the #2515 reason did. When someone reconciles the two
+/// deflation prices this test goes RED, and its message says to lift the
+/// production gate rather than to loosen the bar.
+#[test]
+fn exact_a_route_parity_still_fails_on_a_deflated_cache_2515() {
+    let (mut term, rho, target, b_cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 exact-A parity on the #2712 deflated anchor",
+        );
+    let deflated_rows = b_cache
+        .deflated_row_directions
+        .iter()
+        .filter(|d| !d.is_empty())
+        .count();
+    println!("[#2515 DEFLATED] majorizer cache deflated rows = {deflated_rows}");
+    let loss = match term.loss(target.view(), &rho) {
+        Ok(loss) => loss,
+        Err(err) => {
+            println!("[#2515 DEFLATED] loss unavailable: {err}");
+            return;
+        }
+    };
+    let sys = match term.assemble_arrow_schur(target.view(), &rho, None) {
+        Ok(sys) => sys,
+        Err(err) => {
+            println!("[#2515 DEFLATED] arrow assembly refused: {err}");
+            return;
+        }
+    };
+    let a_sys = match term.exact_a_evidence_system(target.view(), &rho, &sys) {
+        Ok(sys) => sys,
+        Err(err) => {
+            println!("[#2515 DEFLATED] exact-A assembly refused: {err}");
+            return;
+        }
+    };
+    // The PD-evidence policy refuses an indefinite reduced Schur outright. The
+    // PRODUCTION evidence policy is unit deflation at the canonical spectral
+    // floor, which pseudo-inverts across the null/negative directions instead —
+    // that is the policy the streaming lane runs and therefore the one a parity
+    // statement about it has to use.
+    let mut a_cache = None;
+    for (label, options) in [
+        (
+            "positive-definite",
+            ArrowSolveOptions::direct().with_positive_definite_evidence(),
+        ),
+        (
+            "unit-deflation (production evidence policy)",
+            ArrowSolveOptions::direct()
+                .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+                .with_evidence_unit_deflation(
+                    gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+                ),
+        ),
+    ] {
+        match solve_arrow_newton_step_with_options(&a_sys, 0.0, 0.0, &options) {
+            Ok((_, _, cache)) => {
+                println!("[#2515 DEFLATED] exact-A arrow factorization OK under {label}");
+                a_cache = Some(cache);
+                break;
+            }
+            Err(err) => println!(
+                "[#2515 DEFLATED] exact-A arrow factorization refused under {label}: {err:?}"
+            ),
+        }
+    }
+    let Some(a_cache) = a_cache else {
+        return;
+    };
+    println!(
+        "[#2515 DEFLATED] exact-A cache deflated rows = {}  fingerprints differ = {}",
+        a_cache
+            .deflated_row_directions
+            .iter()
+            .filter(|d| !d.is_empty())
+            .count(),
+        a_cache.row_hessian_fingerprint != b_cache.row_hessian_fingerprint,
+    );
+    let b_solver = DeflatedArrowSolver::plain(&b_cache);
+    let dense = match term.analytic_outer_rho_gradient_components(
+        target.view(),
+        &rho,
+        &loss,
+        &b_cache,
+        &b_solver,
+    ) {
+        Ok(components) => components.gradient(),
+        Err(err) => {
+            println!("[#2515 DEFLATED] dense exact-A gradient refused: {err}");
+            return;
+        }
+    };
+    let (a_probes, a_sinv) = full_basis_probe_bundle(&a_cache);
+    let bundled = match term.analytic_outer_rho_gradient_components_with_bundle(
+        target.view(),
+        &rho,
+        &loss,
+        &b_cache,
+        &b_solver,
+        Some(BundleEvidenceGeometry {
+            operator: EvidenceOperator::ExactObservedInformation,
+            cache: &a_cache,
+            probes: &a_probes,
+            sinv: &a_sinv,
+        }),
+        None,
+    ) {
+        Ok(components) => components.gradient(),
+        Err(err) => {
+            println!("[#2515 DEFLATED] exact-A bundle gradient refused: {err}");
+            return;
+        }
+    };
+    let mut worst = 0.0_f64;
+    let mut scale = 0.0_f64;
+    for i in 0..dense.len() {
+        worst = worst.max((dense[i] - bundled[i]).abs());
+        scale = scale.max(dense[i].abs());
+        println!(
+            "[#2515 DEFLATED] coord {i}: dense={:+.10e} bundle={:+.10e} |Δ|={:.3e}",
+            dense[i],
+            bundled[i],
+            (dense[i] - bundled[i]).abs()
+        );
+    }
+    println!(
+        "[#2515 DEFLATED] complete gradient max|Δ|={worst:.6e} against ‖g‖∞={scale:.6e} \
+         (relative {:.6e})",
+        worst / scale.max(f64::MIN_POSITIVE)
+    );
+    assert!(
+        deflated_rows > 0,
+        "#2515/#2712: this anchor must actually deflate, or the measurement is about \
+         nothing; certified regime promised SomeRowDeflates"
+    );
+    assert!(
+        scale.is_finite() && scale > 1.0e-6,
+        "#2515/#2712: the gradient must be non-trivial for a relative gap to mean \
+         anything; ‖g‖∞={scale:.6e}"
+    );
+    assert!(
+        worst > 1.0e-2 * scale,
+        "#2515/#2712: the exact-A bundle route now AGREES with the dense exact-A route \
+         on a deflating cache (max|Δ|={worst:.6e} against ‖g‖∞={scale:.6e}; it was \
+         9.131537e0 against 5.004339e0 when this was written). That is the condition \
+         `penalized_quasi_laplace_streaming_outer_evaluation`'s spectral-deflation \
+         refusal is waiting on. LIFT THAT GATE and delete this assertion — do not \
+         loosen this bar."
+    );
+}

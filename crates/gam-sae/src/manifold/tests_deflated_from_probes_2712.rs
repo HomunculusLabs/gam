@@ -68,7 +68,7 @@ fn obb_deflated_anchor(label: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<
 /// declares: #2398 measured that the historical single lift now lands on an
 /// exact-`A` saddle where the deflated-PD state does not exist, so the ladder
 /// walks the lift down until a deflated maximum certifies.
-fn residual_excited_deflated_anchor(
+pub(crate) fn residual_excited_deflated_anchor(
     label: &str,
 ) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>, ArrowFactorCache) {
     let (mut term, mut target, mut rho) = gamma_fd_tiny_fixture();
