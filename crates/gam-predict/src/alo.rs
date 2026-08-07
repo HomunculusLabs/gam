@@ -33,9 +33,7 @@ use gam_solve::inference::alo::{
 };
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{GlmLikelihoodSpec, LinkFunction};
-use gam_terms::basis::{
-    BasisOptions, Dense, KnotSource, create_basis, create_ispline_derivative_dense,
-};
+use gam_terms::basis::BasisOptions;
 use gam_terms::smooth::{LinearCoefficientGeometry, TermCollectionSpec};
 use ndarray::{Array1, Array2, s};
 

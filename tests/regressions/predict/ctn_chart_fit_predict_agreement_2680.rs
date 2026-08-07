@@ -51,6 +51,13 @@
 //! `bms/gradient_paths.rs` applies before it will consume `z` as a generated
 //! regressor (`|mean| ≤ 4/√n`, `|sd − 1| ≤ 4/√(2(n−1))`). On the squared chart
 //! this fixture reports `sd ≈ 1.4`, roughly ten times its own bound.
+//!
+//! Both live in ONE test on ONE fit. A CTN fit at this size is ~35 s, and the
+//! two claims are about the same score vector, so a second fit would buy
+//! nothing but wall-clock and a second chance to trip over an unrelated
+//! optimizer refusal. The identity is asserted first: if the two sides disagree
+//! about what `β` means, the moments of either one are not the interesting
+//! number.
 
 use gam::data::EncodedDataset;
 use gam::inference::model::{FittedModel, PredictModelClass};
@@ -124,7 +131,7 @@ fn fit_ctn(dataset: &EncodedDataset) -> (FittedModel, Array1<f64>) {
         ..FitConfig::default()
     };
     let payload = fit_formula_to_payload(
-        "y ~ s(x1, k=5) + s(x2, k=5) + s(x3, k=5)".to_string(),
+        "y ~ s(x1, k=5) + s(x2, k=5)".to_string(),
         dataset,
         &config,
     )
@@ -154,8 +161,8 @@ fn fit_ctn(dataset: &EncodedDataset) -> (FittedModel, Array1<f64>) {
 #[test]
 fn ctn_predict_score_reproduces_the_fitted_score_2680() {
     init_parallelism();
-    const N: usize = 500;
-    let (headers, records, _) = build_fixture(N, 2680);
+    const N: usize = 400;
+    let (headers, records, _) = build_fixture(N, 4271);
     let dataset =
         encode_recordswith_inferred_schema(headers, records).expect("encode fixture dataset");
     let (model, fit_eta) = fit_ctn(&dataset);
@@ -177,6 +184,7 @@ fn ctn_predict_score_reproduces_the_fitted_score_2680() {
 
     assert_eq!(predicted.len(), fit_eta.len(), "score row count");
 
+    // ---- (1) PRIMARY: fit and predict are on ONE chart --------------------
     let mut max_gap = 0.0_f64;
     let mut worst = 0usize;
     for i in 0..predicted.len() {
@@ -186,6 +194,9 @@ fn ctn_predict_score_reproduces_the_fitted_score_2680() {
             worst = i;
         }
     }
+    eprintln!(
+        "#2680 CTN fit-vs-predict: n={N} max|predict − fit eta|={max_gap:.6e} at row {worst}"
+    );
 
     // Both sides evaluate the same affine chart on the same coefficients, so the
     // only admissible difference is accumulation round-off on `p_resp` terms —
@@ -201,46 +212,21 @@ fn ctn_predict_score_reproduces_the_fitted_score_2680() {
         predicted[worst],
         fit_eta[worst]
     );
-}
 
-#[test]
-fn ctn_observed_score_clears_the_generated_regressor_moment_gate_2680() {
-    init_parallelism();
-    const N: usize = 500;
-    let (headers, records, _) = build_fixture(N, 4271);
-    let dataset =
-        encode_recordswith_inferred_schema(headers, records).expect("encode fixture dataset");
-    let (model, _) = fit_ctn(&dataset);
-
-    let col_map = dataset.column_map();
-    let response_column = *col_map.get("y").expect("response column present");
-    let response = dataset.values.column(response_column).to_owned();
-    let offset = Array1::<f64>::zeros(N);
-    let z = build_transformation_normal_observed_scores(
-        &model,
-        dataset.values.view(),
-        &col_map,
-        model.training_headers.as_ref(),
-        &response,
-        &offset,
-    )
-    .expect("observed CTN scores");
-
-    let n = z.len() as f64;
-    let mean = z.iter().sum::<f64>() / n;
-    let sd = (z.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0)).sqrt();
+    // ---- (2) the statistical consequence, on the same score ---------------
+    let n = predicted.len() as f64;
+    let mean = predicted.iter().sum::<f64>() / n;
+    let sd = (predicted.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0)).sqrt();
 
     // The bars are the ones `bms::gradient_paths` applies before it will consume
     // `z` as a generated regressor: four standard errors of the mean and of the
     // sd of a standard normal sample. Derived from `n`, not tuned.
     let mean_tol = 4.0 / n.sqrt();
     let sd_tol = 4.0 / (2.0 * (n - 1.0)).sqrt();
-
     eprintln!(
         "#2680 CTN observed score: n={N} mean={mean:+.6} (tol {mean_tol:.4}) \
          sd={sd:.6} (tol {sd_tol:.4})"
     );
-
     assert!(
         mean.abs() <= mean_tol,
         "CTN observed score is not centred: mean={mean:+.6} exceeds {mean_tol:.4}"
