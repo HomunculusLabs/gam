@@ -24,7 +24,6 @@ use gam_models::transformation_normal::{
     ctn_endpoint_bases, ctn_response_bases_at, ctn_row_geometry, transformation_normal_pit_score,
 };
 use gam_problem::BlockRole;
-use gam_terms::basis::{BasisOptions, Dense, KnotSource, create_basis};
 use gam_terms::smooth::build_term_collection_design;
 use gam_terms::term_builder::resolve_role_col;
 

@@ -12,10 +12,11 @@
 //! with (SCOP form, see `transformation_normal.rs`)
 //!
 //! ```text
-//! h_i = b(x_i) + ε·(y_i − median) + Σ_{k≥1} I_k(y_i)·γ_k(x_i)²
+//! h_i = b(x_i) + ε·(y_i − median) + Σ_{k≥1} I_k(y_i)·α_k(x_i)
 //! L_i = h(y_min | x_i),  U_i = h(y_max | x_i)
 //! b(x_i)   = Xᶜᵒᵛ_i · θ_b           (location column, response basis col 0)
-//! γ_k(x_i) = Xᶜᵒᵛ_i · θ_{γk}         (squared SCOP shape coeffs, cols k≥1).
+//! α_k(x_i) = Xᶜᵒᵛ_i · θ_{αk}         (direct-α shape coordinates, cols k≥1,
+//!                                    non-negative by the Khatri-Rao cone).
 //! ```
 //!
 //! Stage 2 (marginal-slope) treats `z_i` as a **generated regressor**:
@@ -130,13 +131,18 @@ pub struct ScoreInfluenceJacobian {
 /// ∂u_i/∂θ₁ = [ φ(h_i)·∂h_i/∂θ₁
 ///              − u_i·(φ(U_i)·∂U_i/∂θ₁ − φ(L_i)·∂L_i/∂θ₁)
 ///              − φ(L_i)·∂L_i/∂θ₁ ] / (Φ(U_i) − Φ(L_i))
-/// ∂h_i/∂Γ[0,j]   = Xᶜᵒᵛ_{i,j}
-/// ∂h_i/∂Γ[k,j]   = 2·I_k(y_i)·γ_k(x_i)·Xᶜᵒᵛ_{i,j}   (k ≥ 1)
+/// ∂h_i/∂A[0,j]   = Xᶜᵒᵛ_{i,j}
+/// ∂h_i/∂A[k,j]   = I_k(y_i)·Xᶜᵒᵛ_{i,j}              (k ≥ 1)
 /// ```
 ///
 /// with `∂L_i`, `∂U_i` analogous (the response basis `I_k` evaluated at the
-/// lower/upper support endpoints). Non-finite rows, support-order violations,
-/// and an under-resolvable endpoint mass return `Err` with row context.
+/// lower/upper support endpoints). The shape rows carry NO chart factor: the
+/// direct-α transform is affine in `A`, so the sensitivity of every component is
+/// the basis entry itself, uniformly in `k`. (Before gam#2680 this line read
+/// `2·I_k(y_i)·γ_k(x_i)`, the derivative of the pre-`#2306` squared chart,
+/// against a value path the fit had already moved off.) Non-finite rows,
+/// support-order violations, and an under-resolvable endpoint mass return `Err`
+/// with row context.
 pub fn score_influence_jacobian(
     fit: &TransformationNormalFitResult,
     response: &Array1<f64>,
@@ -214,13 +220,13 @@ pub fn score_influence_jacobian(
         .compose_offset(offset.view(), "score influence Jacobian")
         .map_err(|e| e.to_string())?;
 
-    // γ_k(x_i) = Σ_j Xᶜᵒᵛ_{i,j}·Γ[k,j]  ⇒  gamma = Xᶜᵒᵛ · Γᵀ  (n × p_resp).
-    let gamma = fast_abt(&x_cov, &beta_mat);
-    if gamma.nrows() != n || gamma.ncols() != p_resp {
+    // α_k(x_i) = Σ_j Xᶜᵒᵛ_{i,j}·A[k,j]  ⇒  alpha = Xᶜᵒᵛ · Aᵀ  (n × p_resp).
+    let alpha = fast_abt(&x_cov, &beta_mat);
+    if alpha.nrows() != n || alpha.ncols() != p_resp {
         return Err(format!(
-            "score_influence_jacobian: gamma shape {}x{} != {n}x{p_resp}",
-            gamma.nrows(),
-            gamma.ncols()
+            "score_influence_jacobian: alpha shape {}x{} != {n}x{p_resp}",
+            alpha.nrows(),
+            alpha.ncols()
         ));
     }
 
@@ -255,11 +261,11 @@ pub fn score_influence_jacobian(
     let mut z_scores = Array1::<f64>::zeros(n);
 
     for i in 0..n {
-        let gamma_row = gamma.row(i);
+        let alpha_row = alpha.row(i);
         let val_row = resp_val.row(i);
         let deriv_row = resp_deriv.row(i);
         let x_row = x_cov.row(i);
-        let alpha_row_slice = gamma_row
+        let alpha_row_slice = alpha_row
             .as_slice()
             .ok_or_else(|| format!("score_influence_jacobian: alpha row {i} is not contiguous"))?;
         let val_row_slice = val_row.as_slice().ok_or_else(|| {

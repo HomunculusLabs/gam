@@ -26,8 +26,10 @@
 //! We feed gam's own fitted transform — reconstructed from the frozen I-spline /
 //! M-spline response basis and the fitted coefficients via the exact SCOP
 //! identity the predict path uses
-//! (`h = γ₀(x) + Σ_{r≥1} I_r(y)·γ_r(x)² + ε·(y − median)`,
-//!  `h' = ε + Σ_{r≥1} M_r(y)·γ_r(x)²`), with the held-out covariate design rows
+//! (`h = α₀(x) + Σ_{r≥1} I_r(y)·α_r(x) + ε·(y − median)`,
+//!  `h' = ε + Σ_{r≥1} M_r(y)·α_r(x)` — the direct-α chart of gam#2306, which the
+//!  fit's own likelihood evaluates and which gam#2680 restored on every replay
+//!  path), with the held-out covariate design rows
 //! rebuilt from the FROZEN (training-resolved) term spec — into `scipy.stats`
 //! and assert three intrinsic, objective correctness properties:
 //!   (1) calibration: KS distance of the HELD-OUT PITs from `U(0, 1)` is below
@@ -188,16 +190,18 @@ fn reconstruct_transform(
     let mut upper = vec![0.0; n];
     for i in 0..n {
         let cov_row = cov_rows.row(i);
-        let gamma0 = gamma.row(0).dot(&cov_row);
-        let mut val = gamma0; // resp_val column 0 == 1
-        let mut up = gamma0;
+        let alpha0 = gamma.row(0).dot(&cov_row);
+        let mut val = alpha0; // resp_val column 0 == 1
+        let mut up = alpha0;
         let mut hp = 0.0; // resp_deriv column 0 == 0
         for r in 1..p_resp {
-            let g = gamma.row(r).dot(&cov_row);
-            let g2 = g * g;
-            val += shape_val[[i, r - 1]] * g2;
-            up += upper_shape[r - 1] * g2;
-            hp += shape_deriv[[i, r - 1]] * g2;
+            // Direct-α chart (gam#2306): the transform is AFFINE in the
+            // coefficient matrix, with `α_r ≥ 0` supplied by the Khatri-Rao
+            // monotonicity cone rather than by squaring a latent coordinate.
+            let alpha = gamma.row(r).dot(&cov_row);
+            val += shape_val[[i, r - 1]] * alpha;
+            up += upper_shape[r - 1] * alpha;
+            hp += shape_deriv[[i, r - 1]] * alpha;
         }
         h[i] = val + eps * (y[i] - median);
         h_prime[i] = hp + eps;
@@ -471,7 +475,7 @@ emit("u_mean", [float(u.mean())])
          (n_test={n_test}); indicates an out-of-sample calibration failure"
     );
 
-    // (2) The SCOP parameterization makes h' = ε + Σ M_r γ_r² structurally
+    // (2) The SCOP parameterization makes h' = ε + Σ M_r α_r structurally
     // positive; a value below the derivative floor signals a real monotonicity
     // failure (cancellation / mis-assembled basis), so we require it to clear ε.
     assert!(

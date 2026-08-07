@@ -21,7 +21,7 @@
 //!
 //! gam constructs, in its SCOP transformation-normal family,
 //!
-//!     h(y | x) = b(x) + eps * (y - median) + sum_k I_k(y) * gamma_k(x)^2,
+//!     h(y | x) = b(x) + eps * (y - median) + sum_k I_k(y) * alpha_k(x),
 //!
 //! a monotone-in-`y` transformation whose shape varies with the covariate. Its
 //! I-spline response basis saturates at a finite response support `[y_lo, y_up]`,

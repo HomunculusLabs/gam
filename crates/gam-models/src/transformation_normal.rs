@@ -57,7 +57,8 @@ pub(crate) use crate::fit_orchestration::drivers::{
 };
 pub(crate) use crate::exact_mode_branch::ExactCoefficientModeBranch;
 pub(crate) use crate::inference::model::{
-    TRANSFORMATION_SCORE_PIT_CLIP_EPS, TransformationScoreCalibration,
+    TRANSFORMATION_SCORE_PIT_CLIP_EPS, TransformationNormalParameterization,
+    TransformationScoreCalibration,
 };
 pub(crate) use crate::model_types::UnifiedFitResult;
 pub(crate) use crate::penalized_projection::solve_penalizedweighted_projection;

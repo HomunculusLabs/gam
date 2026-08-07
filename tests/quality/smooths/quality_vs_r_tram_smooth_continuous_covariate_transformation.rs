@@ -85,10 +85,11 @@ impl SplitMix64 {
 /// gam's fitted transform `(h, h', lower, upper)` at the given covariate rows /
 /// response values, rebuilt from the frozen I-spline / M-spline response basis and
 /// the fitted SCOP coefficients via exactly the identity the predict path applies:
-///   h      = γ₀(x) + Σ_{r≥1} I_r(y) · γ_r(x)² + ε·(y − median)
-///   h'     = ε     + Σ_{r≥1} M_r(y) · γ_r(x)²
-///   lower  = γ₀(x) + ε·(knot₀  − median)
-///   upper  = γ₀(x) + Σ_{r≥1} (Σ_c T_{·c}) · γ_r(x)² + ε·(knot_last − median)
+///   h      = α₀(x) + Σ_{r≥1} I_r(y) · α_r(x) + ε·(y − median)
+///   h'     = ε     + Σ_{r≥1} M_r(y) · α_r(x)
+///   lower  = α₀(x) + ε·(knot₀  − median)
+///   upper  = α₀(x) + Σ_{r≥1} (Σ_c T_{·c}) · α_r(x) + ε·(knot_last − median)
+/// (the direct-α chart of gam#2306; gam#2680 restored it on every replay path)
 /// The finite-support conditional CDF is F(y|x) = (Φ(h)−Φ(lower))/(Φ(upper)−Φ(lower)).
 struct ReconstructedTransform {
     h: Vec<f64>,
@@ -154,20 +155,21 @@ fn reconstruct_transform(
     let mut upper = vec![0.0; n];
     for i in 0..n {
         let cov_row = cov_rows.row(i);
-        let gamma0 = gamma.row(0).dot(&cov_row);
-        let mut val = gamma0;
-        let mut up = gamma0;
+        let alpha0 = gamma.row(0).dot(&cov_row);
+        let mut val = alpha0;
+        let mut up = alpha0;
         let mut hp = 0.0;
         for r in 1..p_resp {
-            let g = gamma.row(r).dot(&cov_row);
-            let g2 = g * g;
-            val += shape_val[[i, r - 1]] * g2;
-            up += upper_shape[r - 1] * g2;
-            hp += shape_deriv[[i, r - 1]] * g2;
+            // Direct-α chart (gam#2306): affine in the coefficient matrix, with
+            // `α_r ≥ 0` supplied by the Khatri-Rao monotonicity cone.
+            let alpha = gamma.row(r).dot(&cov_row);
+            val += shape_val[[i, r - 1]] * alpha;
+            up += upper_shape[r - 1] * alpha;
+            hp += shape_deriv[[i, r - 1]] * alpha;
         }
         h[i] = val + eps * (y[i] - median);
         h_prime[i] = hp + eps;
-        lower[i] = gamma0 + lower_floor;
+        lower[i] = alpha0 + lower_floor;
         upper[i] = up + upper_floor;
     }
     ReconstructedTransform {

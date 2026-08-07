@@ -1,5 +1,82 @@
 ## Unreleased
 
+- **The CTN fit and every replay of it read the coefficients through two
+  different charts (#2680).** `#2306` moved the conditional-transformation-normal
+  likelihood onto the direct-α chart
+
+  ```text
+  h(y, x) = α₀(x) + Σ_{k≥1} I_k(y)·α_k(x) + offset + ε·(y − median),
+  α_k(x) = ψ(x)ᵀ A[k, :],
+  ```
+
+  with the shape coordinates held non-negative by the factored Khatri-Rao
+  monotonicity cone rather than by squaring a latent coordinate. The likelihood,
+  the exact-Newton Hessian, the function-space penalties and the ALO row replay
+  all moved. **Three consumers did not**, and kept reading the same
+  `blocks[0].beta` as `Σ_{k≥1} I_k(y)·γ_k(x)²`: the observed-score path behind
+  `model.transformation_score(df)`, the `E[Y|x]` inversion grid behind `predict`
+  and `generate` on a CTM, and `score_influence_jacobian` — the out-of-fold
+  generated regressor the calibrated marginal-slope chain consumes, together with
+  its Murphy–Topel Jacobian.
+
+  **What it did to the numbers.** The lower endpoint basis is `[1, 0, …, 0]`, so
+  `L(x) = α₀(x)` is the same on both charts, while `U(x) = Σ_k α_k` becomes
+  `Σ_k α_k²`. With the shape coordinates near a common `c` that makes the
+  reported score
+
+  ```text
+  z_reported ≈ c·z + (1 − c)·L,     sd(z_reported) = c,  mean(z_reported) = |L|·(c − 1),
+  ```
+
+  i.e. exactly right at `c = 1` and wrong in both location and scale otherwise —
+  and `c ≈ range(h)/p_shape` grows with the sample range of the response, so the
+  error is invisible on small fixtures and severe at production `n`. On #2680's
+  own fixture the fit's latent score is `N(+0.001, 1.011)` while the reported one
+  is `N(+0.957, 1.469)`; the reported means reproduce the issue's published
+  numbers to every printed digit. It also explains the issue's separate
+  saturated-row population: `U` pushed into the far tail makes `Φ(h)` and `Φ(U)`
+  both return exactly `1.0` in binary64, so those rows clip to `Φ⁻¹(1 − 1e-12) =
+  7.034` rather than being a tail of any normal.
+
+  Everything downstream of a CTN stage 1 consumed the wrong score: the
+  `bernoulli-marginal-slope` / `survival-marginal-slope` `z` moment gate (which
+  refuses to fit when the score is not `N(0,1)`), the Murphy–Topel
+  generated-regressor covariance, and the documented `transformation_normal_stage1`
+  chain.
+
+  **The repair is one evaluator, not five edits.** A new
+  `transformation_normal::chart` module is now the single definition of what `β`
+  means: `ctn_row_geometry` computes `(h, h', L, U)` from the covariate-side
+  coordinates, `ctn_component_sensitivity` states the derivative (for an affine
+  chart, the response-basis entry itself — no chart factor), `ctn_endpoint_bases`
+  states the structural endpoint bases, and `ctn_response_bases_at` assembles
+  `[1, I_k(y)·T]` / `[0, M_k(y)·T]` so the fit and every replay prepend the
+  location column identically. The family's `row_quantities` accumulates in the
+  same order it always did, so routing it through the shared kernel is
+  bit-identical rather than merely equivalent.
+
+  `ctn_row_geometry` **takes** the `TransformationNormalParameterization` marker
+  and matches on it. That marker has been persisted since `#2306`, and its own
+  doc says it exists "so a reader can reject coefficients written under any other
+  chart as a typed mismatch instead of silently reinterpreting them" — every
+  reader validated it and then reinterpreted them anyway. It is now load-bearing:
+  a replay path must name the chart it believes it is evaluating, and a second
+  variant becomes a compile error in one function instead of a silent divergence
+  in five. In `gam-predict` the two independent transcriptions of the CTN payload
+  collapse into one `SavedCtnChart` reader that carries the saved marker into the
+  evaluator, and the support endpoints now come from the structural bases instead
+  of a second I-spline evaluation at the boundary knots.
+
+  Pinned by `ctn_predict_score_reproduces_the_fitted_score_2680` (the predict
+  path's score equals `block_states[0].eta` to round-off — a chart-agnostic
+  invariant that catches this defect *and* its mirror image),
+  `ctn_observed_score_clears_the_generated_regressor_moment_gate_2680` (the
+  `bms::gradient_paths` moment bars at `n = 500`, where the squared chart reports
+  `sd ≈ 1.4` against its own `0.13` bound), and
+  `ctn_score_influence_jacobian_matches_its_own_finite_difference_2680` (the
+  Jacobian is the derivative of the score the same call emits, which is what
+  catches the `2·γ_k` shape factor independently of the value fix).
+
 - **An I-spline and its own derivative described two different functions
   outside the knot domain (#2695).** `create_ispline_dense` SATURATES there —
   the value is the all-zero row below `knots[degree+1]` and a constant row above
