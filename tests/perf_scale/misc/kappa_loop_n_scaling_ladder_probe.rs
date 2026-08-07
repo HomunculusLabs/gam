@@ -95,6 +95,64 @@ fn fit_options() -> FitOptions {
     }
 }
 
+/// Everything the solver says about the outer trajectory, to a file.
+///
+/// The sibling module's logger keeps four `[KAPPA-*]` prefixes; the question
+/// here is why the SEARCH stopped, so this one keeps the certificate and
+/// stationarity lanes too. `nextest` gives each test binary its own process and
+/// `set_logger` is idempotent-by-swallow, so installing both is safe: whichever
+/// runs first owns the process, and this probe reports the file it wrote.
+struct LadderTrace {
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+impl log::Log for LadderTrace {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+    fn log(&self, record: &log::Record) {
+        use std::io::Write;
+        let msg = format!("{}", record.args());
+        let keep = [
+            "[KAPPA-",
+            "[CERTIFICATE",
+            "[NFREE-RESET",
+            "[spatial-kappa",
+            "[OUTER",
+            "[RAIL",
+            "[COST-STALL",
+        ]
+        .iter()
+        .any(|prefix| msg.starts_with(prefix));
+        if !keep {
+            return;
+        }
+        if let Ok(mut f) = self.file.lock()
+            && let Err(error) = writeln!(f, "{msg}").and_then(|()| f.flush())
+        {
+            eprintln!("[2760-ladder] dropped a trace record: {error}");
+        }
+    }
+    fn flush(&self) {}
+}
+
+static LADDER_TRACE: std::sync::OnceLock<LadderTrace> = std::sync::OnceLock::new();
+
+fn install_trace() {
+    let logger = LADDER_TRACE.get_or_init(|| LadderTrace {
+        file: std::sync::Mutex::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open("/tmp/gam2760_ladder.log")
+                .expect("open ladder trace log"),
+        ),
+    });
+    drop(log::set_logger(logger));
+    log::set_max_level(log::LevelFilter::Debug);
+}
+
 /// One rung: the certificate the fit minted, or the refusal it died on.
 fn rung(n: usize) -> Result<String, String> {
     let (x, y) = simulate_1d_gaussian(n);
@@ -149,7 +207,10 @@ fn rung(n: usize) -> Result<String, String> {
 
 #[test]
 fn probe_2760_pg_and_bound_at_every_rung() {
+    install_trace();
     for &n in &[1_000usize, 2_000, 4_000, 8_000, 16_000] {
+        eprintln!("[2760-ladder] ==== rung n={n} ====");
+        log::info!("[KAPPA-RUNG] ================ n={n} ================");
         let t0 = std::time::Instant::now();
         match rung(n) {
             Ok(line) => eprintln!(
