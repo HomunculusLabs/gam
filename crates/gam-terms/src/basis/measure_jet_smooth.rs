@@ -987,8 +987,26 @@ fn condition_representer_section(
     // there is no distinct model past it", now realized by the arithmetic
     // rather than asserted next to it.
     let amplification_floor = anchor * f64::EPSILON.sqrt();
+    // Visibility: a damped direction enters the energy pullback
+    // `S = (E·W)ᵀQ(E·W)` with squared weight `(σ_i/floor)²`, so if that weight
+    // drops below the canonical penalty-spectrum rank cutoff the direction is
+    // classified UNPENALIZED — an accidentally free design direction, which is
+    // the opposite of conservative. It also makes `log|S|₊` a step function of
+    // `ℓ`: measured on the 1-D sweep fixture, the primary's nullity flapping by
+    // one moved the profiled criterion by `8.5` at fixed `λ`, which is what a
+    // `ln ℓ` line search cannot cross.
+    //
+    // So the chart's retention bar is at least as strict as the penalty's own:
+    // keep direction `i` only while `(σ_i/floor)² > tol`, with `tol` the same
+    // `spectral_tolerance` convention (#1425's single classifier) every other
+    // penalty-spectrum consumer reads. No second constant, and the two
+    // decisions can no longer disagree about which directions are penalized.
+    let rank_tolerance =
+        z_rbf.ncols().max(1) as f64 * super::bspline_build::SPECTRAL_RANK_RELATIVE_TOLERANCE;
+    let visibility = amplification_floor * rank_tolerance.sqrt();
+    let retention = existence.max(visibility);
     let kept: Vec<usize> = (0..singular.len())
-        .filter(|&i| singular[i] > existence)
+        .filter(|&i| singular[i] > retention)
         .collect();
     let kept = if kept.is_empty() {
         // Every representer direction is below the resolvable floor. Keep the

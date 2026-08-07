@@ -158,17 +158,39 @@ fn representer_range_moves_the_span_so_lambda_cannot_stand_in_for_it_2761() {
          flat_fit_floor={flat:.6}"
     );
 
-    // Same centers, same masses, same band, same penalty, same width: the ONLY
-    // thing that differs between these two designs is the representer range.
-    assert_eq!(
-        seed_p, long_p,
-        "the two ranges must produce the same basis width, or the comparison is \
-         about dimension rather than about span alignment"
+    // Same centers, same masses, same band, same penalty: the only thing that
+    // differs between these two designs is the representer range.
+    //
+    // The control that matters is that the long range does not BUY its lower
+    // floor with extra columns — narrower-and-better is strictly stronger
+    // evidence that the span moved than same-width-and-better is, and wider
+    // would make this a capacity comparison instead.
+    //
+    // This assertion used to demand exact equality of both counts, on the
+    // reasoning that "the Gaussian kernel is strictly PD for every ell > 0, so
+    // neither range may lose numerical rank". That is true in exact arithmetic
+    // and false in binary64, and this fixture is where it is false: at the long
+    // range `cond(K_cc·Z) = 9.1e9` with `sigma_min = 4.4e-12` against a
+    // `||K_cc||`-anchored roundoff floor of `~3e-15`. A direction that far down
+    // is amplified `3e12x` by the whitening, which drives its weight in the
+    // energy pullback below the canonical penalty-spectrum rank cutoff — i.e.
+    // it would enter the design UNPENALIZED. The builder drops it for that
+    // reason, so a rank drop here is part of the finding, not a confound.
+    assert!(
+        long_p <= seed_p,
+        "the long range must not buy its floor with extra columns: seed width {seed_p}, \
+         long width {long_p}"
     );
-    assert_eq!(
-        seed_rank, long_rank,
-        "the Gaussian kernel is strictly PD for every ell > 0, so neither range may \
-         lose numerical rank; a rank drop would make this a conditioning test"
+    assert!(
+        long_rank <= seed_rank,
+        "the long range must not buy its floor with extra spanning directions: seed rank \
+         {seed_rank}, long rank {long_rank}"
+    );
+    assert!(
+        long_rank == long_p || long_rank == long_p + 1,
+        "the long-range design must be of full column rank against the intercept \
+         (rank {long_rank} against width {long_p}); anything less means the two floors \
+         are being compared across a degenerate design"
     );
 
     // Anti-vacuity: the seed range's shortfall has to be a bias that MATTERS,
