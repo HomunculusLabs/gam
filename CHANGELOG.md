@@ -1,5 +1,65 @@
 ## Unreleased
 
+- **The outer gradient contracted an inverse that belonged to neither operator
+  (#2515).** The Laplace criterion ranks `½log|A|` for the exact observed
+  information `A = ∇²_θθ L`; `B` is the Gauss--Newton majorizer, the
+  positive-definite scale the Newton and IFT solves factor. #2509 Phase-2b moved
+  every production VALUE route onto `A`. The bundle/matrix-free route's
+  DERIVATIVE did not follow, and the thread recorded that as "the gradient still
+  prices `B`". Reading the lane settled that it was worse than that:
+
+  ```rust
+  let a_sys = chunk_term.exact_a_evidence_system(target, rho, &sys)?;   // A
+  let (log_det_tt, log_det_schur) = matrix_free_arrow_evidence_log_det_surrogate(
+      &a_sys, ..., lane.as_deref_mut())?;                               // value AND bundle off A
+  return Ok((log_det_tt + log_det_schur, Some(sys)));                   // returns B
+  ```
+
+  The from-probes channels reconstruct `(H⁻¹)_tt = A_i⁻¹ + G_i S⁻¹ G_iᵀ` — row
+  factors from a factor CACHE, `S⁻¹` from the probe bundle. Production paired
+  `A`'s reduced Schur with `B`'s row factors, so the reconstructed inverse
+  factored neither operator.
+
+  Four changes make the routes one criterion. `BundleEvidenceGeometry` carries
+  the operator and its OWN factor cache (`cache` stays `B` everywhere: promoting
+  it would double-count `ΔC`, which `solve_exact_stationarity_matrix_free` adds
+  back). The streaming lane takes the gradient-bearing evidence entry point, so
+  value, bundle and row factorization come from one factorization of one system.
+  `ArdAxisPrior::log_precision_curvature` and
+  `softmax_sparse_curvature_rho_derivative_block` emit `∂B/∂ρ` or `∂A/∂ρ` from
+  one function each — the same functions whose difference is the `ΔC` map. And
+  the coordinate-block θ-adjoint and the #2330 Patch-D residual
+  third-derivative leg, the last two channels still on `B` operands, were
+  ported.
+
+  Measured at a fixed state where BOTH routes are admitted (`α = 10`, `A` PD,
+  the periodic ARD clamp active on 12 of 24 rows so `ΔC ≠ 0`), bundle route
+  against dense exact-`A`:
+
+  ```text
+                            bundle on exact-A geometry     dense exact-A         |Δ|
+  value ½(log|A|−log|A_tt|)  5.15457065258939906e0         5.15457065258939906e0  0
+  logdet_trace smooth        1.41527087036750832e0         1.41527087036749344e0  1.49e-14
+  logdet_trace ard          -1.51312923828332035e0        -1.51312923828329660e0  2.38e-14
+  COMPLETE GRADIENT                                                               1.57e-14
+  ```
+
+  against `8.46e-1` for the majorizer-rooted carrier the witness now asserts as
+  a control. The ARD coordinate does not merely shrink — it changes sign, which
+  is what the unmajorized `α·cos κt` on twelve clamped rows is supposed to do.
+
+  Two boundaries are recorded rather than papered over. The historical `α = 250`
+  witness is OUTSIDE the region where route parity exists: there `A` has a
+  per-row eigenvalue of `−1.93e2`, the streaming route refuses outright, and only
+  the globally-priced dense route survives — so the witness was re-premised onto
+  the admitted regime, with the admission itself asserted. And on a cache that
+  actually DEFLATES the two routes still disagree (`9.13` against
+  `‖g‖∞ = 5.00`), because the dense route floors the spectrum of `A` globally
+  while the arrow route conditions per row and pseudo-inverts the reduced Schur.
+  The streaming lane's spectral-deflation refusal therefore stays, now reasoned
+  from that number and reading BOTH caches; the number is under test, so the
+  refusal cannot decay into folklore the way its previous justification did.
+
 - **The "logslope" block is the SLOPE, and the name was the only thing wrong
   (#2764).** `rigid_observed_logslope(g, s) = s·g` — the identity, no `exp`
   anywhere on that path — so the penalty is on `b`, not on `log b`. The issue
