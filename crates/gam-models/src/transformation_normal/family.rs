@@ -356,8 +356,7 @@ impl TransformationNormalFamily {
         let (resp_val, resp_deriv, resp_penalties, resp_knots, resp_transform) =
             build_response_basis(response, config)?;
         let p_resp = resp_val.ncols();
-        let (response_lower_basis, response_upper_basis) =
-            response_endpoint_value_bases(&resp_transform);
+        let (response_lower_basis, response_upper_basis) = ctn_endpoint_bases(&resp_transform);
 
         // ----- 2. Row-wise Kronecker product (operator form) -----
         let x_val_kron = KroneckerDesign::new_khatri_rao(&resp_val, covariate_design.clone())?;
@@ -409,7 +408,7 @@ impl TransformationNormalFamily {
             0.5 * (sorted_resp[sorted_resp.len() / 2 - 1] + sorted_resp[sorted_resp.len() / 2])
         };
         let (response_floor_offset, response_lower_floor_offset, response_upper_floor_offset) =
-            response_floor_offsets(response, &resp_knots, resp_median);
+            ctn_floor_offsets(response.view(), resp_knots.view(), resp_median)?;
 
         Ok(Self {
             x_val_kron,
@@ -555,8 +554,7 @@ impl TransformationNormalFamily {
                 p_resp
             ) }.into());
         }
-        let (response_lower_basis, response_upper_basis) =
-            response_endpoint_value_bases(&response_transform);
+        let (response_lower_basis, response_upper_basis) = ctn_endpoint_bases(&response_transform);
 
         // Row-wise Kronecker product (operator form).
         let x_val_kron =
@@ -609,7 +607,7 @@ impl TransformationNormalFamily {
             0.5 * (sorted_resp[sorted_resp.len() / 2 - 1] + sorted_resp[sorted_resp.len() / 2])
         };
         let (response_floor_offset, response_lower_floor_offset, response_upper_floor_offset) =
-            response_floor_offsets(response, &response_knots, resp_median);
+            ctn_floor_offsets(response.view(), response_knots.view(), resp_median)?;
 
         Ok(Self {
             x_val_kron,
@@ -764,54 +762,46 @@ impl TransformationNormalFamily {
         }
     }
 
-    /// Evaluate the response value basis `[1, I_1(y), …, I_K(y)]` (n × p_resp)
-    /// at arbitrary response values using the *fitted* clamped knots and degree.
+    /// Evaluate the response value / derivative bases `[1, I_k(y)]` and
+    /// `[0, M_k(y)]` (both n × p_resp) at arbitrary response values using the
+    /// *fitted* clamped knots and degree.
     ///
-    /// This is the out-of-sample analogue of the in-sample `response_val_basis`:
-    /// it reuses the exact I-spline kernel and stored knot vector so that the
-    /// score-influence Jacobian (and any other predict-time geometry) evaluates
-    /// `I_k(y)` consistently with how `h` was built during the fit. Knots are
-    /// taken from the family (not re-derived from `response`), so the basis is
-    /// identical to training whenever the response values coincide.
-    pub(crate) fn evaluate_response_value_basis(
+    /// This is the out-of-sample analogue of the in-sample `response_val_basis` /
+    /// `response_deriv_basis`, and it goes through the same
+    /// [`ctn_response_bases_at`] the fit's own basis build uses, so the location
+    /// column is prepended identically and `I_k(y)` on held-out rows is the same
+    /// function `h` was assembled from during the fit (gam#2680). Knots are taken
+    /// from the family, never re-derived from `response`.
+    pub(crate) fn evaluate_response_bases(
         &self,
         response: ArrayView1<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        let n = response.len();
+    ) -> Result<(Array2<f64>, Array2<f64>), String> {
         for (i, &v) in response.iter().enumerate() {
             if !v.is_finite() {
                 return Err(TransformationNormalError::NonFinite {
-                    reason: format!(
-                        "evaluate_response_value_basis: response[{i}] is not finite: {v}"
-                    ),
+                    reason: format!("evaluate_response_bases: response[{i}] is not finite: {v}"),
                 }
                 .into());
             }
         }
-        let (i_val_basis, _) = create_basis::<Dense>(
+        let (value, derivative) = ctn_response_bases_at(
             response,
-            KnotSource::Provided(self.response_knots.view()),
+            self.response_knots.view(),
             self.response_degree,
-            BasisOptions::i_spline(),
-        )
-        .map_err(|e| format!("evaluate_response_value_basis: I-spline build failed: {e}"))?;
-        let shape_val = i_val_basis.as_ref();
-        let p_shape = shape_val.ncols();
+            None,
+        )?;
         let p_resp = self.response_val_basis.ncols();
-        if p_shape + 1 != p_resp {
+        if value.ncols() != p_resp {
             return Err(TransformationNormalError::InvalidInput {
                 reason: format!(
-                    "evaluate_response_value_basis: rebuilt shape columns {p_shape} imply p_resp {}, \
-                     but fitted basis has {p_resp} columns",
-                    p_shape + 1
+                    "evaluate_response_bases: rebuilt basis has {} columns but the fitted basis \
+                     has {p_resp}",
+                    value.ncols()
                 ),
             }
             .into());
         }
-        let mut resp_val = Array2::<f64>::zeros((n, p_resp));
-        resp_val.column_mut(0).fill(1.0);
-        resp_val.slice_mut(s![.., 1..]).assign(shape_val);
-        Ok(resp_val)
+        Ok((value, derivative))
     }
 
     /// Clone the family with an outer-score Horvitz-Thompson mask installed.
@@ -968,25 +958,35 @@ impl TransformationNormalFamily {
                 let alpha_row = alpha.row(i);
                 let val_row = self.response_val_basis.row(i);
                 let deriv_row = self.response_deriv_basis.row(i);
-                let a0 = alpha_row[0];
-                let offset_i = self.offset[i];
-                let mut h_acc = val_row[0] * a0 + offset_i + self.response_floor_offset[i];
-                let mut hp_acc = deriv_row[0] * a0 + TRANSFORMATION_MONOTONICITY_EPS;
-                let mut lower_acc =
-                    self.response_lower_basis[0] * a0 + offset_i + self.response_lower_floor_offset;
-                let mut upper_acc =
-                    self.response_upper_basis[0] * a0 + offset_i + self.response_upper_floor_offset;
-                for k in 1..p_resp {
-                    let a_k = alpha_row[k];
-                    h_acc += val_row[k] * a_k;
-                    hp_acc += deriv_row[k] * a_k;
-                    lower_acc += self.response_lower_basis[k] * a_k;
-                    upper_acc += self.response_upper_basis[k] * a_k;
-                }
-                *h_i = h_acc;
-                *hp_i = hp_acc;
-                *lower_i = lower_acc;
-                *upper_i = upper_acc;
+                // One chart, evaluated by one kernel (gam#2680). The rows are
+                // contiguous by construction (`Array2` row-major, both bases
+                // owned), so the slice views are free.
+                let geometry = ctn_row_geometry(
+                    TransformationNormalParameterization::DirectAlpha,
+                    alpha_row.as_slice().expect("alpha row contiguous"),
+                    CtnRowBases {
+                        value: val_row.as_slice().expect("value basis row contiguous"),
+                        derivative: deriv_row.as_slice().expect("derivative row contiguous"),
+                        lower: self
+                            .response_lower_basis
+                            .as_slice()
+                            .expect("lower endpoint basis contiguous"),
+                        upper: self
+                            .response_upper_basis
+                            .as_slice()
+                            .expect("upper endpoint basis contiguous"),
+                    },
+                    CtnRowFloors {
+                        additive_offset: self.offset[i],
+                        value_floor: self.response_floor_offset[i],
+                        lower_floor: self.response_lower_floor_offset,
+                        upper_floor: self.response_upper_floor_offset,
+                    },
+                );
+                *h_i = geometry.h;
+                *hp_i = geometry.h_prime;
+                *lower_i = geometry.lower;
+                *upper_i = geometry.upper;
             });
         for (i, &value) in h.iter().enumerate() {
             if !value.is_finite() {

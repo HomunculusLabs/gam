@@ -12,14 +12,16 @@ use gam_model_kernels::scale_design::{
 };
 use gam_models::bms::LatentMeasureKind;
 use gam_models::inference::model::{
-    FittedModel, FittedModelError, PredictModelClass, append_deployment_extension_columns,
+    FittedModel, FittedModelError, PredictModelClass, SavedTransformationNormalGeometry,
+    append_deployment_extension_columns,
 };
 use gam_models::survival::predict::SurvivalPredictError;
 use gam_models::survival::predict::{
     fit_result_from_saved_model_for_prediction, resolve_termspec_for_prediction,
 };
 use gam_models::transformation_normal::{
-    TRANSFORMATION_MONOTONICITY_EPS, transformation_normal_pit_score,
+    CTN_LOCATION_COLUMNS, CtnRowBases, CtnRowFloors, TRANSFORMATION_MONOTONICITY_EPS,
+    ctn_endpoint_bases, ctn_response_bases_at, ctn_row_geometry, transformation_normal_pit_score,
 };
 use gam_problem::BlockRole;
 use gam_terms::basis::{BasisOptions, Dense, KnotSource, create_basis};
@@ -218,12 +220,212 @@ const TRANSFORMATION_NORMAL_INVERSION_GRID: usize = 257;
 /// space) used to average `h⁻¹(Z|x)` into the response-scale mean `E[Y|x]`.
 const TRANSFORMATION_NORMAL_MEAN_QUADRATURE: usize = 48;
 
+/// The chart a saved CTN model was written in, together with everything needed
+/// to replay its transform: the frozen response knots / degree / coefficient
+/// transform, the structural endpoint bases, and the three monotonicity floors.
+///
+/// This exists so the two replay paths in this module — the `E[Y|x]` inversion
+/// grid and the observed-response score — cannot read the same payload
+/// differently. Before gam#2680 they were two independent 60-line transcriptions
+/// of the payload and both of them evaluated `Σ_k I_k(y)·γ_k(x)²`, a chart the
+/// fit had left behind in `#2306`, while validating the very `parameterization`
+/// marker that says so. The marker is now carried into
+/// [`ctn_row_geometry`] rather than merely checked.
+struct SavedCtnChart {
+    chart: gam_models::inference::model::TransformationNormalParameterization,
+    knots: Array1<f64>,
+    transform: Array2<f64>,
+    degree: usize,
+    median: f64,
+    /// `[1, 0, …, 0]` — the value basis at the lower support knot.
+    lower_basis: Array1<f64>,
+    /// `[1, 1ᵀT_{·1}, …]` — the value basis at the upper support knot.
+    upper_basis: Array1<f64>,
+    lower_floor: f64,
+    upper_floor: f64,
+    /// `p_resp = 1 + p_shape`.
+    p_resp: usize,
+    /// The PIT clip the fit calibrated its score with.
+    clip_eps: f64,
+}
+
+impl SavedCtnChart {
+    fn from_model(model: &FittedModel) -> Result<Self, PredictInputError> {
+        let payload = model.payload();
+        let geometry: &SavedTransformationNormalGeometry = payload
+            .transformation_geometry
+            .as_ref()
+            .ok_or_else(|| PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing the coefficient-chart geometry \
+                         record; a pre-direct-α payload cannot be replayed"
+                    .to_string(),
+            })?;
+        let knot_values = payload
+            .transformation_response_knots
+            .as_ref()
+            .ok_or_else(|| PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing response_knots".to_string(),
+            })?;
+        let transform_rows = payload
+            .transformation_response_transform
+            .as_ref()
+            .ok_or_else(|| PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing response_transform".to_string(),
+            })?;
+        let degree = payload.transformation_response_degree.ok_or_else(|| {
+            PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing response_degree".to_string(),
+            }
+        })?;
+        let median = payload.transformation_response_median.ok_or_else(|| {
+            PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing response_median".to_string(),
+            }
+        })?;
+        let calibration = payload
+            .transformation_score_calibration
+            .as_ref()
+            .ok_or_else(|| PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing score calibration".to_string(),
+            })?;
+        calibration.validate("saved transformation-normal score calibration")?;
+
+        if knot_values.is_empty() {
+            return Err(PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal response knots are empty".to_string(),
+            });
+        }
+        let rows = transform_rows.len();
+        let cols = transform_rows.first().map_or(0, Vec::len);
+        if rows == 0 || cols == 0 || transform_rows.iter().any(|row| row.len() != cols) {
+            return Err(PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal response transform is empty or ragged"
+                    .to_string(),
+            });
+        }
+        let mut transform = Array2::<f64>::zeros((rows, cols));
+        for (i, row) in transform_rows.iter().enumerate() {
+            for (j, &value) in row.iter().enumerate() {
+                transform[[i, j]] = value;
+            }
+        }
+        let knots = Array1::from_vec(knot_values.clone());
+        let y_lo = knots[0];
+        let y_hi = knots[knots.len() - 1];
+        if !(y_hi > y_lo) {
+            return Err(PredictInputError::InvalidInput {
+                reason: format!(
+                    "transformation-normal response support is degenerate: lo={y_lo}, hi={y_hi}"
+                ),
+            });
+        }
+        let p_resp = cols + CTN_LOCATION_COLUMNS;
+        if geometry.shape_coordinate_count + CTN_LOCATION_COLUMNS != p_resp {
+            return Err(PredictInputError::DimensionMismatch {
+                reason: format!(
+                    "saved CTN geometry declares {} shape coordinates but the persisted response \
+                     transform carries {cols}",
+                    geometry.shape_coordinate_count
+                ),
+            });
+        }
+        let (lower_basis, upper_basis) = ctn_endpoint_bases(&transform);
+        Ok(Self {
+            chart: geometry.parameterization,
+            knots,
+            transform,
+            degree,
+            median,
+            lower_basis,
+            upper_basis,
+            lower_floor: TRANSFORMATION_MONOTONICITY_EPS * (y_lo - median),
+            upper_floor: TRANSFORMATION_MONOTONICITY_EPS * (y_hi - median),
+            p_resp,
+            clip_eps: calibration.clip_eps,
+        })
+    }
+
+    fn support(&self) -> (f64, f64) {
+        (self.knots[0], self.knots[self.knots.len() - 1])
+    }
+
+    /// `[1, I_k(y)·T]` at arbitrary response values, on the frozen basis.
+    fn value_basis_at(&self, y: &Array1<f64>) -> Result<Array2<f64>, PredictInputError> {
+        let (value, _derivative) = ctn_response_bases_at(
+            y.view(),
+            self.knots.view(),
+            self.degree,
+            Some(&self.transform),
+        )
+        .map_err(|reason| PredictInputError::InvalidInput { reason })?;
+        if value.ncols() != self.p_resp {
+            return Err(PredictInputError::DimensionMismatch {
+                reason: format!(
+                    "rebuilt transformation-normal response basis has {} columns, saved layout \
+                     requires {}",
+                    value.ncols(),
+                    self.p_resp
+                ),
+            });
+        }
+        Ok(value)
+    }
+
+    /// The coefficient matrix `A` (`p_resp × p_cov`) behind a saved fit.
+    fn coefficient_matrix<'a>(
+        &self,
+        model: &'a FittedModel,
+        p_cov: usize,
+    ) -> Result<ndarray::ArrayView2<'a, f64>, PredictInputError> {
+        let fit_saved = model
+            .unified()
+            .ok_or_else(|| PredictInputError::MissingMetadata {
+                reason: "saved transformation-normal model missing unified fit".to_string(),
+            })?;
+        let beta = &fit_saved.blocks[0].beta;
+        if beta.len() != self.p_resp * p_cov {
+            return Err(PredictInputError::DimensionMismatch {
+                reason: format!(
+                    "beta length {} != p_resp({}) * p_cov({p_cov})",
+                    beta.len(),
+                    self.p_resp
+                ),
+            });
+        }
+        beta.view()
+            .into_shape_with_order((self.p_resp, p_cov))
+            .map_err(|error| PredictInputError::DimensionMismatch {
+                reason: format!("beta reshape failed: {error}"),
+            })
+    }
+
+    /// `α_k(x_i) = ψ(x_i)ᵀ A[k, :]` for one covariate row.
+    fn alpha_row(
+        &self,
+        coefficients: &ndarray::ArrayView2<'_, f64>,
+        covariate_row: ndarray::ArrayView1<'_, f64>,
+    ) -> Vec<f64> {
+        (0..self.p_resp)
+            .map(|k| coefficients.row(k).dot(&covariate_row))
+            .collect()
+    }
+
+    fn floors(&self, y: f64, additive_offset: f64) -> CtnRowFloors {
+        CtnRowFloors {
+            additive_offset,
+            value_floor: TRANSFORMATION_MONOTONICITY_EPS * (y - self.median),
+            lower_floor: self.lower_floor,
+            upper_floor: self.upper_floor,
+        }
+    }
+}
+
 /// Materialize the per-row monotone conditional transform `h(y | x_i)` of a
 /// fitted conditional transformation-normal (CTM) model on a shared fine
-/// response grid. The latent model is `h(Y|x) ~ N(0, 1)` with `h(·|x)` strictly
-/// increasing in `y`:
-///   `h(y|x) = γ₀(x) + Σ_{r≥1} I_r(y)·γ_r(x)² + offset + ε·(y − median)`,
-/// `γ_r(x) = β_r · cov_row(x)`, `I_r` the frozen I-spline value basis.
+/// response grid, in the chart the model was written in:
+///   `h(y|x) = α₀(x) + Σ_{r≥1} I_r(y)·α_r(x) + offset + ε·(y − median)`,
+/// `α_r(x) = A[r,:] · cov_row(x)`, `I_r` the frozen I-spline value basis, and
+/// `α_r ≥ 0` on the fitted rows by the Khatri-Rao monotonicity cone.
 ///
 /// Returning the tabulated curve lets the response-scale conditional mean
 /// `E[Y|x]` (predict, #1612) and inverse-transform response-scale sampling
@@ -244,101 +446,16 @@ fn transformation_normal_quantile_grid(
         .map_err(|error| PredictInputError::InvalidInput {
             reason: error.to_string(),
         })?;
-    let payload = model.payload();
-    let response_knots = payload
-        .transformation_response_knots
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_knots".to_string(),
-        })?;
-    let response_transform_vecs = payload
-        .transformation_response_transform
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_transform".to_string(),
-        })?;
-    let response_degree = payload.transformation_response_degree.ok_or_else(|| {
-        PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_degree".to_string(),
-        }
-    })?;
-    let response_median = payload.transformation_response_median.ok_or_else(|| {
-        PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_median".to_string(),
-        }
-    })?;
-
-    let t_rows = response_transform_vecs.len();
-    let t_cols = if t_rows > 0 {
-        response_transform_vecs[0].len()
-    } else {
-        0
-    };
-    let mut resp_transform = Array2::<f64>::zeros((t_rows, t_cols));
-    for (i, row) in response_transform_vecs.iter().enumerate() {
-        for (j, &v) in row.iter().enumerate() {
-            resp_transform[[i, j]] = v;
-        }
-    }
-    let resp_knots = Array1::from_vec(response_knots.clone());
-
-    let p_shape = resp_transform.ncols();
-    let p_resp = 1 + p_shape;
-
-    let fit_saved = model
-        .unified()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing unified fit".to_string(),
-        })?;
-    let beta = &fit_saved.blocks[0].beta;
+    let saved = SavedCtnChart::from_model(model)?;
+    let (y_lo, y_hi) = saved.support();
     let p_cov = design.design.ncols();
-    if beta.len() != p_resp * p_cov {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "beta length {} != p_resp({}) * p_cov({})",
-                beta.len(),
-                p_resp,
-                p_cov
-            ),
-        });
-    }
-    let beta_mat = beta
-        .view()
-        .into_shape_with_order((p_resp, p_cov))
-        .map_err(|e| PredictInputError::DimensionMismatch {
-            reason: format!("beta reshape failed: {e}"),
+    let coefficients = saved.coefficient_matrix(model, p_cov)?;
+    let cov_mat = design
+        .design
+        .try_row_chunk(0..n)
+        .map_err(|error| PredictInputError::InvalidInput {
+            reason: error.to_string(),
         })?;
-    let cov_mat =
-        design
-            .design
-            .try_row_chunk(0..n)
-            .map_err(|e| PredictInputError::InvalidInput {
-                reason: e.to_string(),
-            })?;
-    let calibration = payload
-        .transformation_score_calibration
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing score calibration".to_string(),
-        })?;
-    calibration.validate("saved transformation-normal score calibration")?;
-
-    if resp_knots.is_empty() {
-        return Err(PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal response knots are empty".to_string(),
-        });
-    }
-
-    let monotonicity_eps = TRANSFORMATION_MONOTONICITY_EPS;
-    let y_lo = resp_knots[0];
-    let y_hi = resp_knots[resp_knots.len() - 1];
-    if !(y_hi > y_lo) {
-        return Err(PredictInputError::InvalidInput {
-            reason: format!(
-                "transformation-normal response support is degenerate: lo={y_lo}, hi={y_hi}"
-            ),
-        });
-    }
 
     // A shared fine `y`-grid spanning the response support; the I-spline value
     // basis is evaluated once here and reused for every row, so the per-row
@@ -347,33 +464,8 @@ fn transformation_normal_quantile_grid(
     let grid_y: Array1<f64> = Array1::from_shape_fn(GRID, |k| {
         y_lo + (y_hi - y_lo) * (k as f64) / ((GRID - 1) as f64)
     });
-    let (grid_val_basis, _) = create_basis::<Dense>(
-        grid_y.view(),
-        KnotSource::Provided(resp_knots.view()),
-        response_degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|e| PredictInputError::InvalidInput {
-        reason: e.to_string(),
-    })?;
-    let grid_raw_val = grid_val_basis.as_ref().clone();
-    if grid_raw_val.ncols() != resp_transform.nrows() {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "saved transformation-normal response transform shape mismatch: raw I-spline cols={} transform rows={}",
-                grid_raw_val.ncols(),
-                resp_transform.nrows()
-            ),
-        });
-    }
-    // `grid_shape[k, r] = I_{r+1}(grid_y[k])` (shape part only, column 0 is the
-    // constant `1`). The linear `ε·(y − median)` floor is added per row.
-    let grid_shape = grid_raw_val.dot(&resp_transform);
+    let grid_value = saved.value_basis_at(&grid_y)?;
 
-    let beta_mat_ref = &beta_mat;
-    let cov_mat_ref = &cov_mat;
-    let grid_shape_ref = &grid_shape;
-    let grid_y_ref = &grid_y;
     // The CTM latent that is calibrated to N(0,1) is the finite-support PIT
     // score, not the raw roughness transform `h` (see
     // `calibrate_transformation_scores`). The inverse-transform consumers —
@@ -386,28 +478,47 @@ fn transformation_normal_quantile_grid(
     // support bounds. Applying the model's own PIT here reuses the fit-time
     // score semantics exactly, so prediction, generation, and fitting share a
     // single latent scale.
-    let clip_eps = calibration.clip_eps;
+    let saved_ref = &saved;
+    let grid_value_ref = &grid_value;
+    let grid_y_ref = &grid_y;
+    let coefficients_ref = &coefficients;
+    let cov_mat_ref = &cov_mat;
     let rows: Vec<Result<Vec<f64>, String>> = (0..n)
         .into_par_iter()
         .map(|i| {
             let cov_row = cov_mat_ref.row(i);
-            let gamma0 = beta_mat_ref.row(0).dot(&cov_row);
-            // Squared shape factors γ_r(x)² (non-negative, r ≥ 1).
-            let mut gamma_sq = vec![0.0_f64; p_shape];
-            for r in 1..p_resp {
-                let g = beta_mat_ref.row(r).dot(&cov_row);
-                gamma_sq[r - 1] = g * g;
-            }
-            // `h(y_k | x_i)` on the shared grid: monotone increasing in k.
+            let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
+            // `h`, and the row's own support endpoints, from the one chart
+            // evaluator. `L`/`U` do not depend on the grid node, so they are
+            // taken from the first evaluation and reused.
             let mut h_row = vec![0.0_f64; GRID];
+            let mut endpoints: Option<(f64, f64)> = None;
             for k in 0..GRID {
-                let mut val = gamma0;
-                let shape_row = grid_shape_ref.row(k);
-                for r in 0..p_shape {
-                    val += shape_row[r] * gamma_sq[r];
+                let value_row = grid_value_ref.row(k);
+                let geometry = ctn_row_geometry(
+                    saved_ref.chart,
+                    &alpha,
+                    CtnRowBases {
+                        value: value_row.as_slice().expect("grid value row contiguous"),
+                        // `h'` is not consumed by the inversion grid; the value
+                        // basis is reused so the evaluator has a slice of the
+                        // right width for every component it computes.
+                        derivative: value_row.as_slice().expect("grid value row contiguous"),
+                        lower: saved_ref
+                            .lower_basis
+                            .as_slice()
+                            .expect("lower endpoint contiguous"),
+                        upper: saved_ref
+                            .upper_basis
+                            .as_slice()
+                            .expect("upper endpoint contiguous"),
+                    },
+                    saved_ref.floors(grid_y_ref[k], offset[i]),
+                );
+                if endpoints.is_none() {
+                    endpoints = Some((geometry.lower, geometry.upper));
                 }
-                h_row[k] =
-                    val + offset[i] + monotonicity_eps * (grid_y_ref[k] - response_median);
+                h_row[k] = geometry.h;
                 if !h_row[k].is_finite() {
                     let max_abs_cov = inf_norm(cov_row.iter().copied());
                     return Err(format!(
@@ -421,7 +532,7 @@ fn transformation_normal_quantile_grid(
             for k in 1..GRID {
                 if h_row[k] <= h_row[k - 1] {
                     return Err(format!(
-                        "transformation-normal transform is not strictly increasing at row {i} between grid nodes {} and {k} (h={:.6e} -> {:.6e}); under SCOP h' = ε + Σ M_r γ_r² is structurally positive, so this indicates floating-point cancellation",
+                        "transformation-normal transform is not strictly increasing at row {i} between grid nodes {} and {k} (h={:.6e} -> {:.6e}); under SCOP h' = ε + Σ M_r α_r is structurally positive, so this indicates floating-point cancellation",
                         k - 1,
                         h_row[k - 1],
                         h_row[k]
@@ -430,16 +541,18 @@ fn transformation_normal_quantile_grid(
             }
             // Map the raw transform onto the calibrated N(0,1) latent scale via
             // the finite-support PIT, normalized by this row's own support
-            // endpoints `h(y_lo|x_i)`, `h(y_hi|x_i)`. The PIT is computed in
-            // log-CDF space, so it stays well-conditioned even when the raw `h`
-            // window sits deep in a normal tail (where a direct `Φ(h)`
-            // difference would underflow). It is strictly increasing in `h`, so
-            // the calibrated row inherits the monotonicity just verified.
-            let h_lo = h_row[0];
-            let h_hi = h_row[GRID - 1];
+            // endpoints `h(y_lo|x_i)`, `h(y_hi|x_i)`. Those endpoints come from
+            // the chart evaluator's structural `lower`/`upper` bases (the
+            // I-splines are exactly 0 and exactly 1 at the boundary knots), not
+            // from re-evaluating the basis there, so `U − L` is exactly the
+            // represented support width. The PIT is computed in log-CDF space,
+            // so it stays well-conditioned even when the raw `h` window sits
+            // deep in a normal tail. It is strictly increasing in `h`, so the
+            // calibrated row inherits the monotonicity just verified.
+            let (h_lo, h_hi) = endpoints.expect("grid has at least one node");
             let mut s_row = vec![0.0_f64; GRID];
             for k in 0..GRID {
-                s_row[k] = transformation_normal_pit_score(h_row[k], h_lo, h_hi, clip_eps)
+                s_row[k] = transformation_normal_pit_score(h_row[k], h_lo, h_hi, saved_ref.clip_eps)
                     .map_err(|err| {
                         format!(
                             "transformation-normal PIT calibration failed at row {i}, grid node {k}: {err}"
@@ -465,7 +578,12 @@ fn transformation_normal_quantile_grid(
 /// per row.  This is deliberately separate from ordinary prediction:
 /// `predict` returns the response-scale conditional mean `E[Y|x]`, whereas an
 /// observed score is the labelled-data quantity
-/// `Phi^-1(F_hat(y_i | x_i))` consumed by a downstream marginal-slope model.
+/// `Phi^{-1}(F_hat(y_i | x_i))` consumed by a downstream marginal-slope model.
+///
+/// The score is evaluated in the chart the model was written in, through the
+/// same `ctn_row_geometry` the fit's own `row_quantities` uses. On the training
+/// rows of the model that produced it, the result therefore reproduces
+/// `block_states[0].eta` to round-off — the invariant gam#2680 broke.
 fn transformation_normal_observed_scores(
     model: &FittedModel,
     design: &gam_terms::smooth::TermCollectionDesign,
@@ -496,137 +614,10 @@ fn transformation_normal_observed_scores(
             reason: error.to_string(),
         })?;
 
-    let payload = model.payload();
-    let response_knots = payload
-        .transformation_response_knots
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_knots".to_string(),
-        })?;
-    let response_transform_vecs = payload
-        .transformation_response_transform
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_transform".to_string(),
-        })?;
-    let response_degree = payload.transformation_response_degree.ok_or_else(|| {
-        PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_degree".to_string(),
-        }
-    })?;
-    let response_median = payload.transformation_response_median.ok_or_else(|| {
-        PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing response_median".to_string(),
-        }
-    })?;
-    let calibration = payload
-        .transformation_score_calibration
-        .as_ref()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing score calibration".to_string(),
-        })?;
-    calibration.validate("saved transformation-normal score calibration")?;
-
-    if response_knots.is_empty() {
-        return Err(PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal response knots are empty".to_string(),
-        });
-    }
-    let y_lo = response_knots[0];
-    let y_hi = response_knots[response_knots.len() - 1];
-    if !(y_hi > y_lo) {
-        return Err(PredictInputError::InvalidInput {
-            reason: format!(
-                "transformation-normal response support is degenerate: lo={y_lo}, hi={y_hi}"
-            ),
-        });
-    }
-
-    let transform_rows = response_transform_vecs.len();
-    let transform_cols = response_transform_vecs.first().map_or(0, Vec::len);
-    if transform_rows == 0
-        || transform_cols == 0
-        || response_transform_vecs
-            .iter()
-            .any(|row| row.len() != transform_cols)
-    {
-        return Err(PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal response transform is empty or ragged".to_string(),
-        });
-    }
-    let mut response_transform = Array2::<f64>::zeros((transform_rows, transform_cols));
-    for (row_index, row) in response_transform_vecs.iter().enumerate() {
-        for (column_index, &value) in row.iter().enumerate() {
-            response_transform[[row_index, column_index]] = value;
-        }
-    }
-    let knots = Array1::from_vec(response_knots.clone());
-    let (observed_basis, _) = create_basis::<Dense>(
-        response.view(),
-        KnotSource::Provided(knots.view()),
-        response_degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|error| PredictInputError::InvalidInput {
-        reason: format!(
-            "failed to evaluate transformation-normal observed-response basis: {error}"
-        ),
-    })?;
-    let observed_raw = observed_basis.as_ref();
-    if observed_raw.ncols() != transform_rows {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "observed-response I-spline columns={} but saved response transform rows={transform_rows}",
-                observed_raw.ncols()
-            ),
-        });
-    }
-    let observed_shape = observed_raw.dot(&response_transform);
-
-    let endpoints = Array1::from_vec(vec![y_lo, y_hi]);
-    let (endpoint_basis, _) = create_basis::<Dense>(
-        endpoints.view(),
-        KnotSource::Provided(knots.view()),
-        response_degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|error| PredictInputError::InvalidInput {
-        reason: format!("failed to evaluate transformation-normal support basis: {error}"),
-    })?;
-    let endpoint_raw = endpoint_basis.as_ref();
-    if endpoint_raw.ncols() != transform_rows {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "support I-spline columns={} but saved response transform rows={transform_rows}",
-                endpoint_raw.ncols()
-            ),
-        });
-    }
-    let endpoint_shape = endpoint_raw.dot(&response_transform);
-
-    let p_shape = transform_cols;
-    let p_response = 1 + p_shape;
-    let fit_saved = model
-        .unified()
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "saved transformation-normal model missing unified fit".to_string(),
-        })?;
-    let beta = &fit_saved.blocks[0].beta;
-    let p_covariate = design.design.ncols();
-    if beta.len() != p_response * p_covariate {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "beta length {} != p_response({p_response}) * p_covariate({p_covariate})",
-                beta.len()
-            ),
-        });
-    }
-    let beta_matrix = beta
-        .view()
-        .into_shape_with_order((p_response, p_covariate))
-        .map_err(|error| PredictInputError::DimensionMismatch {
-            reason: format!("beta reshape failed: {error}"),
-        })?;
+    let saved = SavedCtnChart::from_model(model)?;
+    let p_cov = design.design.ncols();
+    let coefficients = saved.coefficient_matrix(model, p_cov)?;
+    let observed_value = saved.value_basis_at(response)?;
     let covariate_matrix =
         design
             .design
@@ -634,33 +625,40 @@ fn transformation_normal_observed_scores(
             .map_err(|error| PredictInputError::InvalidInput {
                 reason: error.to_string(),
             })?;
-    let clip_eps = calibration.clip_eps;
 
+    let saved_ref = &saved;
+    let coefficients_ref = &coefficients;
     let rows: Vec<Result<f64, String>> = (0..n)
         .into_par_iter()
         .map(|row_index| {
             let covariate_row = covariate_matrix.row(row_index);
-            let gamma0 = beta_matrix.row(0).dot(&covariate_row);
-            let gamma_squared: Vec<f64> = (1..p_response)
-                .map(|component| {
-                    let gamma = beta_matrix.row(component).dot(&covariate_row);
-                    gamma * gamma
-                })
-                .collect();
-            let raw_transform = |shape: ndarray::ArrayView1<'_, f64>, y: f64| {
-                gamma0
-                    + shape
-                        .iter()
-                        .zip(gamma_squared.iter())
-                        .map(|(basis, gamma_sq)| basis * gamma_sq)
-                        .sum::<f64>()
-                    + offset[row_index]
-                    + TRANSFORMATION_MONOTONICITY_EPS * (y - response_median)
-            };
-            let h = raw_transform(observed_shape.row(row_index), response[row_index]);
-            let lower = raw_transform(endpoint_shape.row(0), y_lo);
-            let upper = raw_transform(endpoint_shape.row(1), y_hi);
-            transformation_normal_pit_score(h, lower, upper, clip_eps).map_err(|error| {
+            let alpha = saved_ref.alpha_row(coefficients_ref, covariate_row);
+            let value_row = observed_value.row(row_index);
+            let geometry = ctn_row_geometry(
+                saved_ref.chart,
+                &alpha,
+                CtnRowBases {
+                    value: value_row.as_slice().expect("value basis row contiguous"),
+                    // `h'` is not consumed by the PIT score.
+                    derivative: value_row.as_slice().expect("value basis row contiguous"),
+                    lower: saved_ref
+                        .lower_basis
+                        .as_slice()
+                        .expect("lower endpoint contiguous"),
+                    upper: saved_ref
+                        .upper_basis
+                        .as_slice()
+                        .expect("upper endpoint contiguous"),
+                },
+                saved_ref.floors(response[row_index], offset[row_index]),
+            );
+            transformation_normal_pit_score(
+                geometry.h,
+                geometry.lower,
+                geometry.upper,
+                saved_ref.clip_eps,
+            )
+            .map_err(|error| {
                 format!("transformation-normal observed score failed at row {row_index}: {error}")
             })
         })

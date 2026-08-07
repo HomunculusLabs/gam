@@ -252,13 +252,12 @@ fn run_cell(path: &str, n_expected: usize, seed: usize) {
     let y_hi = knots[knots.len() - 1];
     eprintln!(
         "#2680 probe: support y in [{y_lo:.5}, {y_hi:.5}] median={:.5} p_resp={} p_cov={} edf={:.3} \
-         loglik={:.3} outer_converged={}",
+         loglik={:.3}",
         tn.family.response_median(),
         1 + tn.family.response_transform().ncols(),
         cov_rows.ncols(),
         tn.fit.edf_total().unwrap_or(f64::NAN),
         tn.fit.log_likelihood,
-        tn.fit.outer_converged,
     );
 
     // (A) The fit's OWN score. `calibrate_transformation_scores` overwrites

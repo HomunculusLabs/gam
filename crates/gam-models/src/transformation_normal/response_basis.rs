@@ -74,45 +74,26 @@ pub(crate) fn build_response_basis(
         }
     }
 
-    // I-spline value basis I_k(y).
-    let (i_val_basis, _) = create_basis::<Dense>(
-        response.view(),
-        KnotSource::Provided(knots.view()),
-        response_degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|e| e.to_string())?;
-    let shape_val = i_val_basis.as_ref().clone();
-    let p_shape = shape_val.ncols();
-
-    // M-spline derivative basis M_k(y) = I'_k(y).
-    let shape_deriv = create_ispline_derivative_dense(response.view(), &knots, response_degree, 1)
-        .map_err(|e| e.to_string())?;
-    if shape_deriv.ncols() != p_shape {
+    // Response-direction value / derivative bases `[1, I_k(y)]` / `[0, M_k(y)]`,
+    // assembled by the chart module so the fit and every replay path (predict,
+    // observed score, generated-regressor Jacobian) prepend the location column
+    // the same way. Passing `None` for the coefficient transform IS the identity
+    // chart this builder then returns below — the fit is the definition of the
+    // chart, so it evaluates the untransformed frame. See gam#2680.
+    let (resp_val, resp_deriv) =
+        ctn_response_bases_at(response.view(), knots.view(), response_degree, None)?;
+    let p_resp = resp_val.ncols();
+    let p_shape = p_resp - CTN_LOCATION_COLUMNS;
+    if resp_val.nrows() != n || resp_deriv.nrows() != n {
         return Err(TransformationNormalError::InvalidInput {
             reason: format!(
-                "I-spline derivative column count {} does not match value basis {p_shape}",
-                shape_deriv.ncols()
+                "response basis row counts ({}, {}) do not match n = {n}",
+                resp_val.nrows(),
+                resp_deriv.nrows()
             ),
         }
         .into());
     }
-    if shape_deriv.nrows() != n {
-        return Err(TransformationNormalError::InvalidInput {
-            reason: format!(
-                "I-spline derivative row count {} does not match n = {n}",
-                shape_deriv.nrows()
-            ),
-        }
-        .into());
-    }
-
-    let p_resp = p_shape + 1;
-    let mut resp_val = Array2::<f64>::zeros((n, p_resp));
-    resp_val.column_mut(0).fill(1.0);
-    resp_val.slice_mut(s![.., 1..]).assign(&shape_val);
-    let mut resp_deriv = Array2::<f64>::zeros((n, p_resp));
-    resp_deriv.slice_mut(s![.., 1..]).assign(&shape_deriv);
 
     // SCOP-CTN coef-transform is identity: the direct-α chart (gam#2306) keeps
     // the I-spline shape coordinates as-is (no square, no reparameterization),
@@ -337,38 +318,6 @@ pub(crate) fn affine_shape_direction(
         ));
     }
     Ok(direction)
-}
-
-pub(crate) fn response_endpoint_value_bases(transform: &Array2<f64>) -> (Array1<f64>, Array1<f64>) {
-    let mut lower = Array1::<f64>::zeros(transform.ncols() + 1);
-    let mut upper = Array1::<f64>::zeros(transform.ncols() + 1);
-    lower[0] = 1.0;
-    upper[0] = 1.0;
-    for col in 0..transform.ncols() {
-        upper[col + 1] = transform.column(col).sum();
-    }
-    (lower, upper)
-}
-
-pub(crate) fn response_floor_offsets(
-    response: &Array1<f64>,
-    knots: &Array1<f64>,
-    response_median: f64,
-) -> (Array1<f64>, f64, f64) {
-    let row_offsets = response.mapv(|y| TRANSFORMATION_MONOTONICITY_EPS * (y - response_median));
-    let lower_y = knots
-        .first()
-        .copied()
-        .unwrap_or_else(|| response.iter().copied().fold(f64::INFINITY, f64::min));
-    let upper_y = knots
-        .last()
-        .copied()
-        .unwrap_or_else(|| response.iter().copied().fold(f64::NEG_INFINITY, f64::max));
-    (
-        row_offsets,
-        TRANSFORMATION_MONOTONICITY_EPS * (lower_y - response_median),
-        TRANSFORMATION_MONOTONICITY_EPS * (upper_y - response_median),
-    )
 }
 
 /// Data-driven cap on the response-shape internal-knot budget keyed on how far

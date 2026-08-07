@@ -1,4 +1,6 @@
-use super::{TRANSFORMATION_MONOTONICITY_EPS, log_normal_cdf_diff_derivatives};
+use super::chart::{CtnRowBases, CtnRowFloors, ctn_component_sensitivity, ctn_row_geometry};
+use super::log_normal_cdf_diff_derivatives;
+use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2};
 
 /// Complete local state for one saved transformation-normal likelihood row.
@@ -87,24 +89,31 @@ pub fn transformation_normal_alo_row_geometry(
         });
     }
 
-    let alpha0 = input.alpha[0];
-    let mut h = input.response_value_basis[0] * alpha0
-        + input.additive_offset
-        + input.response_floor_offset;
-    let mut h_prime = input.response_derivative_basis[0] * alpha0 + TRANSFORMATION_MONOTONICITY_EPS;
-    let mut lower = input.response_lower_basis[0] * alpha0
-        + input.additive_offset
-        + input.response_lower_floor_offset;
-    let mut upper = input.response_upper_basis[0] * alpha0
-        + input.additive_offset
-        + input.response_upper_floor_offset;
-    for component in 1..dimension {
-        let alpha = input.alpha[component];
-        h += input.response_value_basis[component] * alpha;
-        h_prime += input.response_derivative_basis[component] * alpha;
-        lower += input.response_lower_basis[component] * alpha;
-        upper += input.response_upper_basis[component] * alpha;
-    }
+    // One chart, one evaluator (gam#2680): the saved-model ALO replay reads the
+    // same coefficients as the fit and must read them the same way.
+    let chart = TransformationNormalParameterization::DirectAlpha;
+    let geometry = ctn_row_geometry(
+        chart,
+        input.alpha,
+        CtnRowBases {
+            value: input.response_value_basis,
+            derivative: input.response_derivative_basis,
+            lower: input.response_lower_basis,
+            upper: input.response_upper_basis,
+        },
+        CtnRowFloors {
+            additive_offset: input.additive_offset,
+            value_floor: input.response_floor_offset,
+            lower_floor: input.response_lower_floor_offset,
+            upper_floor: input.response_upper_floor_offset,
+        },
+    );
+    let (h, h_prime, lower, upper) = (
+        geometry.h,
+        geometry.h_prime,
+        geometry.lower,
+        geometry.upper,
+    );
     if !(h.is_finite() && h_prime.is_finite() && lower.is_finite() && upper.is_finite()) {
         return Err(format!(
             "transformation-normal ALO row transform is non-finite: h={h}, h_prime={h_prime}, lower={lower}, upper={upper}"
@@ -125,10 +134,11 @@ pub fn transformation_normal_alo_row_geometry(
     let mut dlower = vec![0.0; dimension];
     let mut dupper = vec![0.0; dimension];
     for component in 0..dimension {
-        dh[component] = input.response_value_basis[component];
-        dh_prime[component] = input.response_derivative_basis[component];
-        dlower[component] = input.response_lower_basis[component];
-        dupper[component] = input.response_upper_basis[component];
+        dh[component] = ctn_component_sensitivity(chart, input.response_value_basis, component);
+        dh_prime[component] =
+            ctn_component_sensitivity(chart, input.response_derivative_basis, component);
+        dlower[component] = ctn_component_sensitivity(chart, input.response_lower_basis, component);
+        dupper[component] = ctn_component_sensitivity(chart, input.response_upper_basis, component);
     }
 
     let inverse_h_prime = 1.0 / h_prime;
@@ -166,7 +176,7 @@ pub fn transformation_normal_alo_row_geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformation_normal::log_normal_cdf_diff;
+    use crate::transformation_normal::{TRANSFORMATION_MONOTONICITY_EPS, log_normal_cdf_diff};
 
     fn scalar_nll(alpha: [f64; 2]) -> f64 {
         let value = [1.0, 0.4];

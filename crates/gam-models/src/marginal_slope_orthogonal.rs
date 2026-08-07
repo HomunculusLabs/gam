@@ -34,14 +34,20 @@
 //! flat index of `Γ[k, j]` is `k·p_cov + j`. **`J`'s columns follow exactly
 //! this order**: column `k·p_cov + j` holds `∂z_i/∂Γ[k, j]`. Response row
 //! `k = 0` is the unconstrained location block `b(x)`; rows `k ≥ 1` are the
-//! squared SCOP shape blocks for `γ_k(x)`.
+//! direct-α SCOP shape coordinates `α_k(x)`, non-negative on the fitted rows by
+//! the Khatri-Rao monotonicity cone. The transform is AFFINE in those
+//! coordinates, so both the value and the Jacobian below go through the one
+//! chart evaluator in `transformation_normal::chart` (gam#2680).
 
-use crate::inference::model::TRANSFORMATION_SCORE_PIT_CLIP_EPS;
+use crate::inference::model::{
+    TRANSFORMATION_SCORE_PIT_CLIP_EPS, TransformationNormalParameterization,
+};
 use crate::probability::{
     log1mexp_positive, normal_cdf, normal_logcdf, normal_pdf, standard_normal_quantile,
 };
 use crate::transformation_normal::{
-    TRANSFORMATION_MONOTONICITY_EPS, TransformationNormalFitResult, transformation_normal_pit_score,
+    CtnRowBases, CtnRowFloors, TRANSFORMATION_MONOTONICITY_EPS, TransformationNormalFitResult,
+    ctn_component_sensitivity, ctn_row_geometry, transformation_normal_pit_score,
 };
 use faer::Side;
 use gam_linalg::faer_ndarray::{
@@ -61,6 +67,14 @@ use ndarray::{Array1, Array2, ArrayView2};
 /// shrinkage is explicit or REML-selected, never a pinned magic constant);
 /// this floor only keeps the seed sane for degenerate row counts.
 pub(crate) const INFLUENCE_ABSORBER_SEED_FLOOR_LOG_LAMBDA: f64 = 0.0;
+
+/// The coefficient chart a *fitted* (in-memory) CTN carries. A fit is the
+/// definition of its own chart — the persisted marker exists so a saved model
+/// can be *read back* under the chart it was written in, and it is checked on
+/// the predict path. Naming it here keeps the generated-regressor Jacobian and
+/// the likelihood on one evaluator (gam#2680).
+const CTN_CHART: TransformationNormalParameterization =
+    TransformationNormalParameterization::DirectAlpha;
 
 /// REML seed for the absorber ridge with `n_rows` observations.
 ///
@@ -172,8 +186,9 @@ pub fn score_influence_jacobian(
         .into_shape_with_order((p_resp, p_cov))
         .map_err(|e| format!("score_influence_jacobian: beta reshape failed: {e}"))?;
 
-    // Response value basis [1, I_1(y), …, I_K(y)] at the fitted knots.
-    let resp_val = family.evaluate_response_value_basis(response.view())?;
+    // Response value basis [1, I_1(y), …, I_K(y)] at the fitted knots, built by
+    // the same helper the fit's own basis build uses.
+    let (resp_val, resp_deriv) = family.evaluate_response_bases(response.view())?;
     if resp_val.nrows() != n || resp_val.ncols() != p_resp {
         return Err(format!(
             "score_influence_jacobian: response basis shape {}x{} != {n}x{p_resp}",
@@ -212,6 +227,12 @@ pub fn score_influence_jacobian(
     // Row-independent endpoint response bases and floor offsets (fitted).
     let lower_basis = family.response_lower_basis();
     let upper_basis = family.response_upper_basis();
+    let lower_basis_slice = lower_basis
+        .as_slice()
+        .ok_or("score_influence_jacobian: lower endpoint basis is not contiguous")?;
+    let upper_basis_slice = upper_basis
+        .as_slice()
+        .ok_or("score_influence_jacobian: upper endpoint basis is not contiguous")?;
     let lower_floor = family.response_lower_floor_offset();
     let upper_floor = family.response_upper_floor_offset();
     let median = family.response_median();
@@ -236,8 +257,17 @@ pub fn score_influence_jacobian(
     for i in 0..n {
         let gamma_row = gamma.row(i);
         let val_row = resp_val.row(i);
+        let deriv_row = resp_deriv.row(i);
         let x_row = x_cov.row(i);
-        let g0 = gamma_row[0];
+        let alpha_row_slice = gamma_row
+            .as_slice()
+            .ok_or_else(|| format!("score_influence_jacobian: alpha row {i} is not contiguous"))?;
+        let val_row_slice = val_row.as_slice().ok_or_else(|| {
+            format!("score_influence_jacobian: value basis row {i} is not contiguous")
+        })?;
+        let deriv_row_slice = deriv_row.as_slice().ok_or_else(|| {
+            format!("score_influence_jacobian: derivative basis row {i} is not contiguous")
+        })?;
 
         // h, L, U exactly as the CTN row-quantity build assembles them
         // (`row_quantities`): the additive linear-predictor offset enters h, L,
@@ -245,18 +275,26 @@ pub fn score_influence_jacobian(
         // operating point (and the emitted z) where the fitted model evaluates
         // it. The per-row monotonicity floor ε·(y − median) and the endpoint
         // floors are recomputed from the fitted median.
-        let offset_i = effective_offset[i];
-        let value_floor = TRANSFORMATION_MONOTONICITY_EPS * (response[i] - median);
-        let mut h = val_row[0] * g0 + offset_i + value_floor;
-        let mut l = lower_basis[0] * g0 + offset_i + lower_floor;
-        let mut u = upper_basis[0] * g0 + offset_i + upper_floor;
-        for k in 1..p_resp {
-            let gk = gamma_row[k];
-            let gk_sq = gk * gk;
-            h += val_row[k] * gk_sq;
-            l += lower_basis[k] * gk_sq;
-            u += upper_basis[k] * gk_sq;
-        }
+        let geometry = ctn_row_geometry(
+            CTN_CHART,
+            alpha_row_slice,
+            CtnRowBases {
+                value: val_row_slice,
+                // `h'` is not read by the PIT score or its Jacobian; the row's
+                // derivative basis is supplied because the one-chart evaluator
+                // computes all four components together.
+                derivative: deriv_row_slice,
+                lower: lower_basis_slice,
+                upper: upper_basis_slice,
+            },
+            CtnRowFloors {
+                additive_offset: effective_offset[i],
+                value_floor: TRANSFORMATION_MONOTONICITY_EPS * (response[i] - median),
+                lower_floor,
+                upper_floor,
+            },
+        );
+        let (h, l, u) = (geometry.h, geometry.lower, geometry.upper);
 
         if !(h.is_finite() && l.is_finite() && u.is_finite()) {
             return Err(format!(
@@ -347,20 +385,17 @@ pub fn score_influence_jacobian(
 
         let mut row = columns.row_mut(i);
         for k in 0..p_resp {
-            // ∂h/∂Γ[k,j], ∂L/∂Γ[k,j], ∂U/∂Γ[k,j] share the factor Xᶜᵒᵛ_{i,j};
-            // the response-side scalar differs between the location block
-            // (k = 0, basis value, unsquared) and the shape blocks
-            // (k ≥ 1, 2·basis·γ_k).
-            let (dh_scalar, dl_scalar, du_scalar) = if k == 0 {
-                (val_row[0], lower_basis[0], upper_basis[0])
-            } else {
-                let two_gk = 2.0 * gamma_row[k];
-                (
-                    val_row[k] * two_gk,
-                    lower_basis[k] * two_gk,
-                    upper_basis[k] * two_gk,
-                )
-            };
+            // ∂h/∂A[k,j], ∂L/∂A[k,j], ∂U/∂A[k,j] share the factor Xᶜᵒᵛ_{i,j}.
+            // The direct-α chart is AFFINE in the coefficient matrix, so the
+            // response-side scalar is the basis entry itself for every k —
+            // location block and shape blocks alike, with no chart factor. The
+            // pre-gam#2680 code carried `2·γ_k` on the shape rows here, the
+            // derivative of a squared chart the value path had already left.
+            let (dh_scalar, dl_scalar, du_scalar) = (
+                ctn_component_sensitivity(CTN_CHART, val_row_slice, k),
+                ctn_component_sensitivity(CTN_CHART, lower_basis_slice, k),
+                ctn_component_sensitivity(CTN_CHART, upper_basis_slice, k),
+            );
             let base = k * p_cov;
             for j in 0..p_cov {
                 let xij = x_row[j];
