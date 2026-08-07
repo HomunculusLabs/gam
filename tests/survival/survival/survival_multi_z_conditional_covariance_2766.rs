@@ -206,7 +206,7 @@ fn conditional_covariance_preserves_the_marginal_index_within_every_stratum() {
         // The model is fitted, not known, and is linear in a span that does not
         // contain the planted sigmoid, so the residual is estimation error plus
         // approximation error on top of Monte-Carlo noise. Measured worst across
-        // these five `q` is 2.6 SE; the bar is 4, and the pooled arm below
+        // these five `q` is 2.9 SE; the bar is 4, and the pooled arm below
         // clears 8 on the same data.
         assert!(
             miss <= 4.0,

@@ -153,13 +153,13 @@ use super::{
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
-/// Newton/Fisher-scoring iterations allowed for one log-linear innovation
-/// variance. The step is the exact Fisher-scoring step of a canonical-link GLM
-/// with a log variance function, whose information matrix `½·AᵀWA` does not
-/// depend on the response, so the iteration is the Newton iteration of a
-/// strictly concave problem and converges quadratically; this cap exists to
-/// bound the loop, not to select an answer, and a run that reaches it is a
-/// refusal rather than a truncation.
+/// Damped Fisher-scoring iterations allowed for one log-linear innovation
+/// variance. The objective is strictly concave and bounded above and every
+/// accepted step strictly ascends it, so the loop terminates on its own; this
+/// cap exists to bound it, not to select an answer, and a run that reaches it is
+/// a refusal rather than a truncation. Measured on the module's own fixtures the
+/// hardest fit converges in 22 accepted steps, with the gain shrinking by about
+/// 4.5x per step — from which 64 is roughly 40 orders of magnitude of headroom.
 const LOG_INNOVATION_MAX_ITERATIONS: usize = 64;
 
 /// One coordinate of the modified Cholesky decomposition.
@@ -229,11 +229,25 @@ pub struct ConditionalScoreCovariance {
 /// The row lane is an index, not a branch on a model: `at_row` is one match on
 /// an `Option` and one slice index, so the conditional path costs the hot loop
 /// nothing beyond the indirection.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScoreCovarianceField {
     pooled: MarginalSlopeCovariance,
     per_row: Option<std::sync::Arc<Vec<MarginalSlopeCovariance>>>,
     model: Option<std::sync::Arc<ConditionalScoreCovariance>>,
+}
+
+impl std::fmt::Debug for ScoreCovarianceField {
+    /// Summarises rather than dumps. A derived `Debug` on a conditional field
+    /// prints one `K × K` matrix PER ROW, which on a biobank-scale fit is a
+    /// multi-gigabyte line the first time anything formats a family.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScoreCovarianceField")
+            .field("pooled", &self.pooled)
+            .field("materialised_rows", &self.materialised_rows())
+            .field("conditional_model", &self.model)
+            .finish()
+    }
 }
 
 impl PartialEq for ScoreCovarianceField {
@@ -716,17 +730,17 @@ fn fit_autoregression(
 ///   s(γ) = ½ Σ_i w_i A_i (ε_i²/d_i − 1),     I(γ) = ½ Σ_i w_i A_i A_iᵀ
 /// ```
 ///
-/// so the Fisher-scoring step is `Δγ = (Σ w A Aᵀ)⁻¹ Σ w A (ε²/d − 1)`: the
-/// halves cancel, the information does not depend on the response, and the step
-/// is the Newton step of a strictly concave problem. That is why this is a short
-/// exact loop rather than the log-of-squares linear regression (Harvey's
-/// two-step), whose intercept carries the `E[log χ²₁] = −1.2704` bias and whose
-/// slopes are inefficient.
+/// so the scoring step is `Δγ = (Σ w A Aᵀ)⁻¹ Σ w A (ε²/d − 1)`: the halves
+/// cancel and the information does not depend on the response. That is why this
+/// is a short exact loop rather than the log-of-squares linear regression
+/// (Harvey's two-step), whose intercept carries the `E[log χ²₁] = −1.2704` bias
+/// and whose slopes are inefficient.
 ///
-/// The step is literally a weighted least-squares fit of `u_i = ε_i²/d_i − 1` on
-/// `A`, so it is taken with the same regularised primitive the coupling stage
-/// uses; the two then degrade identically on a rank-deficient span instead of
-/// one of them having its own hand-rolled normal equations.
+/// `Σ w A Aᵀ` is the EXPECTED information, not the observed one — the observed
+/// Hessian carries an `ε²/d` weight — so the undamped step overshoots and the
+/// iteration is monotone in the log-likelihood but not in any norm of the step.
+/// The loop is therefore a line-searched ascent, not a bare Newton iteration;
+/// see the body for the measurement that forced it.
 fn fit_log_innovation(
     residual: &[f64],
     basis: ArrayView2<'_, f64>,
@@ -779,74 +793,116 @@ fn fit_log_innovation(
     let width = basis.ncols();
     let mut gamma = vec![0.0_f64; width];
     gamma[0] = homoskedastic.ln();
-    // Fisher scoring. The step `Δγ = (AᵀWA)⁻¹ AᵀW u` with `u_i = ε_i²/d_i − 1` IS
-    // a weighted least-squares fit of `u` on `A`, so it is taken with the same
-    // regularised primitive every other stage of this module uses rather than a
-    // hand-rolled normal-equation solve: a penalised-spline conditioning span is
-    // routinely rank-deficient, and the two must degrade identically.
-    let mut deviation = Array1::<f64>::zeros(n);
-    let mut converged = false;
-    let mut previous_step = f64::INFINITY;
-    for _ in 0..LOG_INNOVATION_MAX_ITERATIONS {
-        let mut largest_linear = 0.0_f64;
+
+    // The Gaussian log-likelihood of the log-linear variance model, up to a
+    // constant: `ℓ(γ) = −½ Σ w (A_iᵀγ + ε_i²·exp(−A_iᵀγ))`. Non-finite is a
+    // legitimate answer — an iterate that drives `exp(−A_iᵀγ)` past the
+    // representable range is simply not an ascent step, and the line search
+    // below halves past it rather than the whole fit refusing.
+    let log_likelihood = |coefficients: &[f64]| -> Option<f64> {
+        let mut total = 0.0_f64;
         for row in 0..n {
-            let mut value = 0.0;
+            let weight = weights[row];
+            if !(weight > 0.0) {
+                continue;
+            }
+            let mut linear = 0.0;
             for column in 0..width {
-                value += gamma[column] * basis[[row, column]];
+                linear += coefficients[column] * basis[[row, column]];
             }
-            let variance = value.exp();
-            if !(variance.is_finite() && variance > 0.0) {
-                return Err(format!(
-                    "conditional score covariance log-variance iterate left the representable \
-                     range at row {row}: log d = {value}"
-                ));
+            total -= 0.5 * weight * (linear + residual[row] * residual[row] * (-linear).exp());
+        }
+        total.is_finite().then_some(total)
+    };
+
+    // Fisher scoring with a step-halving line search.
+    //
+    // The scoring step `Δγ = (Σ w A Aᵀ)⁻¹ Σ w A (ε²/d − 1)` is literally a
+    // weighted least-squares fit of `u_i = ε_i²/d_i − 1` on `A`, so it is taken
+    // with the same regularised primitive the coupling stage uses; the two then
+    // degrade identically on a rank-deficient span instead of one of them having
+    // its own hand-rolled normal equations.
+    //
+    // The line search is not optional. `Σ w A Aᵀ` is the EXPECTED information;
+    // the observed one carries an `ε²/d` weight, so the undamped step
+    // systematically overshoots and the iteration is not monotone in any norm of
+    // the step. Measured on a cubic span: the raw step's `max|A·Δγ|` went
+    // 3.21 → 1.04 → 1.66, and an earlier "stop when the step stops shrinking"
+    // rule took that third reading as convergence and returned a `log d` short of
+    // the optimum by 4.5 nats. Damping restores monotone ASCENT, which is the
+    // property a strictly concave objective actually supports, and the same run
+    // then converges in 22 accepted steps.
+    let mut current = log_likelihood(&gamma).ok_or_else(|| {
+        format!(
+            "conditional score covariance log-variance seed log d = {} is not evaluable",
+            gamma[0]
+        )
+    })?;
+    let mut converged = false;
+    for _ in 0..LOG_INNOVATION_MAX_ITERATIONS {
+        let mut deviation = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let mut linear = 0.0;
+            for column in 0..width {
+                linear += gamma[column] * basis[[row, column]];
             }
-            largest_linear = largest_linear.max(value.abs());
-            deviation[row] = residual[row] * residual[row] / variance - 1.0;
+            deviation[row] = residual[row] * residual[row] * (-linear).exp() - 1.0;
+        }
+        if !deviation.iter().all(|value| value.is_finite()) {
+            return Err(
+                "conditional score covariance log-variance iterate left the representable range"
+                    .to_string(),
+            );
         }
         let (step, _) = weighted_ridge_columns(
             basis,
             deviation.as_slice().expect("deviation is standard layout"),
             weights,
         )?;
-        let mut largest_move = 0.0_f64;
-        for row in 0..n {
-            if !(weights[row] > 0.0) {
-                continue;
+        // Halve until the step ascends. Two derived exits and no chosen
+        // tolerance: a trial that no longer moves `γ` at all in floating point
+        // cannot ascend, and a gain below the log-likelihood's own last place is
+        // not a gain.
+        let mut trial = 1.0_f64;
+        let mut accepted: Option<(Vec<f64>, f64)> = None;
+        while trial > 0.0 {
+            let candidate: Vec<f64> = gamma
+                .iter()
+                .zip(step.iter())
+                .map(|(value, direction)| value + trial * direction)
+                .collect();
+            if candidate
+                .iter()
+                .zip(gamma.iter())
+                .all(|(new, old)| new.to_bits() == old.to_bits())
+            {
+                break;
             }
-            let mut moved = 0.0;
-            for column in 0..width {
-                moved += step[column] * basis[[row, column]];
+            if let Some(value) = log_likelihood(&candidate)
+                && value > current
+            {
+                accepted = Some((candidate, value));
+                break;
             }
-            largest_move = largest_move.max(moved.abs());
+            trial *= 0.5;
         }
-        for column in 0..width {
-            gamma[column] += step[column];
-        }
-        if !gamma.iter().all(|value| value.is_finite()) {
-            return Err(
-                "conditional score covariance log-variance scoring produced a non-finite \
-                 coefficient"
-                    .to_string(),
-            );
-        }
-        // Two derived stopping rules, no chosen tolerance. The first: the step no
-        // longer moves the fitted `log d` by as much as a floating-point unit in
-        // its own last place, so it cannot change the variance the row program
-        // reads. The second: the step stopped shrinking, which on a strictly
-        // concave objective with a quadratically convergent iteration means the
-        // round-off floor was reached and further steps are noise.
-        let resolution = f64::EPSILON * (1.0 + largest_linear);
-        if largest_move <= resolution || largest_move >= previous_step {
+        let Some((candidate, value)) = accepted else {
+            // No representable step ascends: this IS the optimum to round-off.
+            converged = true;
+            break;
+        };
+        let gain = value - current;
+        gamma = candidate;
+        current = value;
+        if gain <= f64::EPSILON * (1.0 + current.abs()) {
             converged = true;
             break;
         }
-        previous_step = largest_move;
     }
     if !converged {
         return Err(format!(
             "conditional score covariance log-variance scoring did not converge in \
-             {LOG_INNOVATION_MAX_ITERATIONS} Fisher steps"
+             {LOG_INNOVATION_MAX_ITERATIONS} damped Fisher steps"
         ));
     }
     let range = linear_predictor_range(&gamma, basis, weights);
@@ -1313,6 +1369,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An INDEPENDENT oracle: the fitted `Σ(a)` against a nonparametric local
+    /// estimate.
+    ///
+    /// Every other recovery test here compares the fit to the coefficients it
+    /// was generated from, which is a comparison inside the model's own
+    /// parameterisation. This one is not: it bins the rows by the conditioning
+    /// covariate, takes the ordinary empirical second moments inside each bin,
+    /// and asks the fitted surface to reproduce them. It would catch a
+    /// parameterisation that recovers its own planted coefficients and still
+    /// assembles the wrong matrix — a forward-substitution transposition, a
+    /// column scaled by `d` instead of `√d`, a coordinate order swapped.
+    ///
+    /// The truth is IN the model class here, deliberately: the bar is each bin's
+    /// own sampling band, so any approximation error would be read as a defect.
+    /// How the model behaves when the truth is out of class is a different
+    /// question and is measured where it belongs — on the end-to-end identity,
+    /// in `survival_multi_z_conditional_covariance_2766`, against a planted
+    /// sigmoid.
+    #[test]
+    fn the_fitted_surface_matches_a_nonparametric_local_covariance() {
+        const BINS: usize = 8;
+        let n = 40_000;
+        let phi = [0.15_f64, 0.42];
+        let gamma = [(0.7_f64).ln(), -0.3];
+        let (scores, weights, a_block) = in_class_fixture(n, phi, gamma, 0.0);
+        let fitted = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a_block.view())
+            .expect("fit")
+            .expect("escalates");
+
+        // Bin on the conditioning covariate's own rank, so every bin holds the
+        // same number of rows and the band below is the same in each.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&left, &right| {
+            a_block[[left, 0]]
+                .partial_cmp(&a_block[[right, 0]])
+                .expect("the fixture covariate is finite, so the ordering is total")
+        });
+        let mut bin = vec![0usize; n];
+        for (rank, &row) in order.iter().enumerate() {
+            bin[row] = (rank * BINS / n).min(BINS - 1);
+        }
+
+        let mut counts = vec![0usize; BINS];
+        let mut empirical = vec![[0.0_f64; 3]; BINS];
+        let mut modelled = vec![[0.0_f64; 3]; BINS];
+        for row in 0..n {
+            let index = bin[row];
+            counts[index] += 1;
+            let (left, right) = (scores[[row, 0]], scores[[row, 1]]);
+            empirical[index][0] += left * left;
+            empirical[index][1] += left * right;
+            empirical[index][2] += right * right;
+            let sigma = fitted.dense_at(a_block.row(row)).expect("Σ(a)");
+            modelled[index][0] += sigma[[0, 0]];
+            modelled[index][1] += sigma[[0, 1]];
+            modelled[index][2] += sigma[[1, 1]];
+        }
+        let mut worst = 0.0_f64;
+        let mut worst_label = String::new();
+        for index in 0..BINS {
+            let scale = counts[index] as f64;
+            // A second moment of Gaussians has sampling standard error
+            // `moment·√(2/n_bin)`; three of those is the band a correct surface
+            // sits inside, and it is derived from the bin rather than chosen.
+            for entry in 0..3 {
+                let want = empirical[index][entry] / scale;
+                let have = modelled[index][entry] / scale;
+                let reference = (empirical[index][0] / scale).max(empirical[index][2] / scale);
+                let band = 3.0 * reference * (2.0 / scale).sqrt();
+                let miss = (want - have).abs() / band;
+                if miss > worst {
+                    worst = miss;
+                    worst_label = format!(
+                        "bin {index} (n={}) entry {entry}: empirical {want:.4} against fitted \
+                         {have:.4}, band {band:.4}",
+                        counts[index]
+                    );
+                }
+            }
+        }
+        assert!(
+            worst <= 1.0,
+            "the fitted surface must sit inside each bin's own sampling band; worst {worst:.2}x \
+             at {worst_label}"
+        );
     }
 
     /// A fitted field has to survive the on-disk round trip unchanged: the
