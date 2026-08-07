@@ -1,6 +1,5 @@
 use gam_linalg::faer_ndarray::fast_ata;
 
-use super::construction::coordinate_block_log_det;
 pub(crate) use super::tests_recovery_split_780::{
     FdAnchorRegime, FdBranchRegime, FiniteDifferenceStratumCertificate,
     certified_branch_stable_central_difference, certified_central_logdet_difference,
@@ -4139,192 +4138,14 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
     }
 }
 
-/// #2515 route-invariance contract: storage and host capability must not choose the
-/// statistical criterion. The dense direct route currently prices the exact observed
-/// information `A = B + ΔC`, while the probe/bundle route prices the Gauss--Newton
-/// majorizer `B`. This fixture holds `theta`, `rho`, the assembled system and every
-/// non-logdet channel fixed, then requires BOTH the Laplace logdet value component and
-/// the complete analytic outer gradient to agree across routes. Full-basis probes
-/// `√k·e_j` with exact `S⁻¹ e_j` remove stochastic approximation from the comparison,
-/// so any delta is an operator-authority defect rather than probe noise.
-#[test]
-fn laplace_value_and_gradient_are_route_invariant_2515() {
-    let n = 24usize;
-    let p = 2usize;
-    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
-    let (phi, jet) = periodic_basis(&coords);
-    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
-    assert_eq!(decoder.ncols(), p);
-    // Keep this routing witness on a resolved hard-MP branch. The former target
-    // was unrelated to the hand-seeded decoder, so the canonical rank-zero veto
-    // fired before either dense or bundled selected-inverse route was exercised.
-    let mut target = phi.dot(&decoder);
-    for row in 0..n {
-        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
-        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
-    }
-    let atom = SaeManifoldAtom::new_with_provided_function_gram(
-        "periodic",
-        SaeAtomBasisKind::Periodic,
-        1,
-        phi,
-        jet,
-        decoder,
-        Array2::<f64>::eye(3),
-    )
-    .unwrap()
-    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
-    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
-        Array2::<f64>::zeros((n, 1)),
-        vec![coords],
-        vec![LatentManifold::Circle { period: 1.0 }],
-        AssignmentMode::softmax(1.0),
-    )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
-    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
-    let sys = term
-        .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
-    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
-    let (_delta_t, _delta_beta, cache) =
-        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
-    let loss = term.loss(target.view(), &rho).unwrap();
-
-    // Value-side witness. All non-logdet criterion terms are identical at this fixed
-    // state, so half the joint-minus-coordinate logdet difference is the complete
-    // route-dependent value delta.
-    let (log_a, log_a_tt) = term
-        .exact_observed_information_log_dets(&rho, target.view(), &cache)
-        .unwrap();
-    let log_b = cache
-        .arrow_log_det()
-        .expect("majorizer joint logdet must be available");
-    let log_b_tt = coordinate_block_log_det(&cache).unwrap();
-    let exact_a_laplace_logdet = 0.5 * (log_a - log_a_tt);
-    let majorizer_laplace_logdet = 0.5 * (log_b - log_b_tt);
-    eprintln!(
-        "[#2515 ROUTE-PARITY] exact_A_laplace_logdet={exact_a_laplace_logdet:.17e} \
-         majorizer_B_laplace_logdet={majorizer_laplace_logdet:.17e} \
-         delta={:.17e}",
-        exact_a_laplace_logdet - majorizer_laplace_logdet
-    );
-
-    // Same plain (undeflated) solver in BOTH assemblies — the only variable is the
-    // bundle routing of the two selected-inverse channels.
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let dense = term
-        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
-        .unwrap();
-
-    let k = cache.k;
-    let sqrt_k = (k as f64).sqrt();
-    let probes: Vec<Array1<f64>> = (0..k)
-        .map(|j| {
-            let mut v = Array1::<f64>::zeros(k);
-            v[j] = sqrt_k;
-            v
-        })
-        .collect();
-    let sinv: Vec<Array1<f64>> = probes
-        .iter()
-        .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
-        .collect();
-    let bundled = term
-        .analytic_outer_rho_gradient_components_with_bundle(
-            target.view(),
-            &rho,
-            &loss,
-            &cache,
-            &solver,
-            Some(BundleEvidenceGeometry {
-                operator: EvidenceOperator::Majorizer,
-                cache: &cache,
-                probes: &probes,
-                sinv: &sinv,
-            }),
-            None,
-        )
-        .unwrap();
-
-    // The routed log|H|-trace channel must match the dense selected-inverse trace on
-    // every ρ-coordinate…
-    assert_eq!(dense.logdet_trace.len(), bundled.logdet_trace.len());
-    for (i, (d, b)) in dense
-        .logdet_trace
-        .iter()
-        .zip(bundled.logdet_trace.iter())
-        .enumerate()
-    {
-        assert!(
-            d.is_finite() && b.is_finite(),
-            "logdet-trace coordinate {i} must be finite (dense={d}, bundled={b})"
-        );
-        // Name the coordinate. `sparse_flat_index` / `smooth_flat_index` /
-        // `ard_flat_index` are the layout's own accessors, so this cannot drift
-        // from `to_flat` — and a bare "0.159 vs 0.282" costs the next reader the
-        // whole layout walk to find out which channel desynced.
-        let role = if Some(i) == rho.sparse_flat_index() {
-            "assignment log-strength".to_string()
-        } else if i >= rho.smooth_flat_start() && i < rho.smooth_flat_start() + rho.k_atoms() {
-            format!("smooth atom {}", i - rho.smooth_flat_start())
-        } else {
-            format!("ard flat {i}")
-        };
-        assert!(
-            (d - b).abs() <= 1.0e-9,
-            "logdet-trace coordinate {i} ({role}) desynced between the dense \
-             selected inverse and the bundle route: dense={d}, bundled={b}, \
-             |Δ|={:.6e}",
-            (d - b).abs()
-        );
-    }
-    // …and the FULLY ASSEMBLED gradient (all channels summed) must agree, since every
-    // other channel is fed identical inputs.
-    //
-    // Per-CHANNEL first, so a divergence names the channel that produced it rather
-    // than only the summed number (#2465). `logdet_trace` is checked above; the
-    // bundle also routes the #1006 envelope Γ, which lands in
-    // `third_order_correction`, and that one had no assertion of its own — a
-    // desync there could only ever surface as an unattributed total.
-    for (label, d, b) in [
-        ("explicit", &dense.explicit, &bundled.explicit),
-        ("occam", &dense.occam, &bundled.occam),
-        (
-            "third_order_correction",
-            &dense.third_order_correction,
-            &bundled.third_order_correction,
-        ),
-    ] {
-        assert_eq!(d.len(), b.len(), "{label} length");
-        for (i, (dv, bv)) in d.iter().zip(b.iter()).enumerate() {
-            assert_abs_diff_eq!(dv, bv, epsilon = 1.0e-9);
-            assert!(
-                dv.is_finite() && bv.is_finite(),
-                "{label} coordinate {i} must be finite (dense={dv}, bundled={bv})"
-            );
-        }
-    }
-    let dense_grad = dense.gradient();
-    let bundled_grad = bundled.gradient();
-    assert_eq!(dense_grad.len(), bundled_grad.len());
-    for (d, b) in dense_grad.iter().zip(bundled_grad.iter()) {
-        assert_abs_diff_eq!(d, b, epsilon = 1.0e-9);
-    }
-    // Non-triviality: the routed trace must be a genuine, nonzero contribution so the
-    // parity assertion is not vacuous (identity smooth penalty + ARD-shrunk axis).
-    let trace_sq: f64 = dense.logdet_trace.iter().map(|v| v * v).sum();
-    assert!(
-        trace_sq > 0.0 && trace_sq.is_finite(),
-        "the routed log|H|-trace channel must be non-trivial; ‖logdet_trace‖²={trace_sq}"
-    );
-    assert_abs_diff_eq!(
-        exact_a_laplace_logdet,
-        majorizer_laplace_logdet,
-        epsilon = 1.0e-9
-    );
-}
-
+/// #2515 route-invariance contract — see
+/// [`super::tests_exact_a_bundle_2515::laplace_value_and_gradient_are_route_invariant_2515`].
+///
+/// The witness moved to the module that owns the exact-`A` fixture, because it
+/// needs the same admitted-`α` state, the same exact-`A` evidence system, and the
+/// same full-basis probe bundle that module builds. Leaving a shell here would
+/// have meant two fixtures for one contract.
+///
 /// #2515 — the route gap is TWO coordinates with TWO different causes, and the
 /// named witness `laplace_value_and_gradient_are_route_invariant_2515` can report
 /// neither, because it asserts per-coordinate and panics on the first violation.

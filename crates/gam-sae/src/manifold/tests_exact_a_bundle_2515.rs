@@ -22,6 +22,7 @@
 //! noise.
 
 use super::tests::{TestPeriodicEvaluator, periodic_basis};
+use approx::assert_abs_diff_eq;
 use super::construction::ThetaAdjointDhChannel;
 use super::outer_objective::sae_surrogate_lane_config;
 use super::*;
@@ -271,6 +272,43 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
             .iter()
             .filter(|d| !d.is_empty())
             .count()
+    );
+
+    // VALUE side. `log|A| - log|A_tt| = log|S_A|` is an algebraic identity, and the
+    // two routes reach it by completely different means: the dense route
+    // eigendecomposes the materialized `A` and its t-block under one spectral
+    // floor, the streaming route factors `exact_a_evidence_system` row by row and
+    // eliminates. If the two disagree the routes are not ranking one operator, and
+    // no gradient parity would mean anything.
+    let (dense_log_a, dense_log_a_tt) = term
+        .exact_observed_information_log_dets(&rho, target.view(), &b_cache)
+        .expect("the dense exact-A log-determinants must be available");
+    let arrow_log_a = a_cache
+        .arrow_log_det()
+        .expect("the exact-A arrow factorization must publish its joint log-det");
+    let arrow_log_a_tt = super::construction::coordinate_block_log_det(&a_cache)
+        .expect("the exact-A coordinate block log-det must be available");
+    println!(
+        "[#2515 A-GEOMETRY] value: dense 1/2(log|A|-log|A_tt|)={:.17e}          arrow 1/2 log|S_A|={:.17e} |Δ|={:.6e}",
+        0.5 * (dense_log_a - dense_log_a_tt),
+        0.5 * (arrow_log_a - arrow_log_a_tt),
+        (0.5 * (dense_log_a - dense_log_a_tt) - 0.5 * (arrow_log_a - arrow_log_a_tt)).abs(),
+    );
+    let b_log_b = b_cache
+        .arrow_log_det()
+        .expect("the majorizer arrow factorization must publish its joint log-det");
+    let b_log_b_tt = super::construction::coordinate_block_log_det(&b_cache)
+        .expect("the majorizer coordinate block log-det must be available");
+    println!(
+        "[#2515 A-GEOMETRY] value: majorizer 1/2 log|S_B|={:.17e} (A-vs-B separation {:.6e})",
+        0.5 * (b_log_b - b_log_b_tt),
+        (0.5 * (arrow_log_a - arrow_log_a_tt) - 0.5 * (b_log_b - b_log_b_tt)).abs(),
+    );
+    println!(
+        "[#2515 A-GEOMETRY] row-Hessian fingerprints: B={} A={} equal={}",
+        b_cache.row_hessian_fingerprint,
+        a_cache.row_hessian_fingerprint,
+        b_cache.row_hessian_fingerprint == a_cache.row_hessian_fingerprint,
     );
 
     let dense = term
@@ -537,5 +575,271 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
     assert!(
         dense.logdet_trace.iter().all(|v| v.is_finite()),
         "the dense exact-A logdet trace must be finite"
+    );
+}
+
+/// #2515 THE CONTRACT — storage and host capability must not choose the
+/// statistical criterion.
+///
+/// The Laplace normalizer is `½log|∇²_θθ L|`, and `A = B + ΔC` IS that Hessian.
+/// `B` is the Gauss--Newton / PSD-majorizer arrow system: the positive-definite
+/// scale the Newton and IFT solves factor, and a preconditioner for `A`. A
+/// preconditioner is not the operator it preconditions, so a route that ranks
+/// `½log|A|` and differentiates `½log|B|` is differentiating a criterion nothing
+/// evaluates. This fixture holds `θ`, `ρ`, the assembled system and every
+/// non-logdet channel fixed, then requires BOTH the value component and the
+/// COMPLETE analytic outer gradient to agree across the dense and bundle routes.
+///
+/// # Why `α = 10` and not the historical `α = 250`
+///
+/// Route parity is only a statement about states where BOTH routes are admitted.
+/// At `α = 250` the exact observed information is badly indefinite — worst per-row
+/// `H_tt` eigenvalue `−1.93e2`, reduced Schur indefinite — and the streaming
+/// evidence route refuses outright while the dense arrow factorization refuses
+/// too. Only the globally-priced dense route survives there, through #2336
+/// clamp-attributable pricing (`1/(λ+e_v)`), for which the per-row spectral
+/// conditioning of the streaming lane has no analogue. Asserting parity there
+/// would be asserting a property of one route.
+///
+/// `zz_scan_exact_a_admitted_alpha_2515` walks four decades and locates the
+/// boundary: at `α ≤ 10` both routes are admitted, `A` stays PD, and the periodic
+/// ARD concave clamp is still ACTIVE on 12 of 24 rows — so `ΔC ≠ 0` and the two
+/// operators remain distinguishable. That is where the contract can be written,
+/// and the non-vacuity block below refuses to claim it unless the state still has
+/// all three properties.
+///
+/// # Why full-basis probes
+///
+/// `√k·e_j` with exact `S⁻¹ e_j` makes the Hutchinson umbrella
+/// `(1/m)Σ_j (S⁻¹z_j)ᵀ M z_j` EXACTLY `tr(S⁻¹M)`, so any residual is an
+/// operator-authority defect rather than probe noise. The production lane
+/// contracts the rational surrogate's own weighted derivative representation
+/// instead, whose value/gradient consistency is #2080's contract, not this one's.
+#[test]
+fn laplace_value_and_gradient_are_route_invariant_2515() {
+    let ExactAWitness2515 {
+        mut term,
+        target,
+        rho,
+    } = exact_a_witness_2515_at_alpha(10.0);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("the witness arrow system must assemble");
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_delta_t, _delta_beta, b_cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+            .expect("the majorizer arrow factorization must succeed");
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("the loss at the frozen state must be available");
+
+    // (0) ADMISSION. Both routes must exist at this state, or parity is a
+    // statement about one of them.
+    let a_sys = term
+        .exact_a_evidence_system(target.view(), &rho, &sys)
+        .expect("#2515: the exact-A evidence system must be constructible at this state");
+    let (_, _, a_cache) = solve_arrow_newton_step_with_options(&a_sys, 0.0, 0.0, &options)
+        .expect(
+            "#2515: this witness must sit in the regime where the exact-A arrow \
+             factorization is ADMITTED — see zz_scan_exact_a_admitted_alpha_2515 for the \
+             α boundary; at α = 250 it refuses and no parity statement is available",
+        );
+
+    // (1) NON-VACUITY, before any parity claim.
+    //
+    // (1a) `ΔC ≠ 0` on the ARD coordinate. Without a live clamp `A == B` and
+    // every assertion below passes for the wrong reason.
+    let delta_by_flat = term
+        .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &b_cache)
+        .expect("the exact-A penalty derivative delta must be assemblable");
+    let ard_flat = rho.ard_flat_index(0, 0);
+    let clamped_rows = delta_by_flat
+        .get(&ard_flat)
+        .map(|block| block.diag().iter().filter(|v| **v != 0.0).count())
+        .unwrap_or(0);
+    assert!(
+        clamped_rows > 0,
+        "#2515: this witness must carry a live ∂ΔC/∂log α on ARD coordinate {ard_flat} \
+         (cos κt < 0 on some rows), or A == B and route invariance is vacuous. \
+         Keys present: {:?}",
+        delta_by_flat.keys().collect::<Vec<_>>()
+    );
+
+    // (1b) The two caches must factor DIFFERENT operators. The row-Hessian
+    // fingerprint is content-derived (#2515 `2a740061c` / `60feddc2e`), so equal
+    // fingerprints would mean the exact-A system is the majorizer and the
+    // geometry swap below is a no-op.
+    assert_ne!(
+        a_cache.row_hessian_fingerprint, b_cache.row_hessian_fingerprint,
+        "#2515: the exact-A and majorizer caches must factor different operators; \
+         identical row-Hessian fingerprints mean ΔC never reached the arrow blocks"
+    );
+
+    // (2) VALUE parity. `log|A| − log|A_tt| = log|S_A|` is an identity, and the
+    // two routes reach it by unrelated means: the dense route eigendecomposes the
+    // materialized `A` and its t-block under one spectral floor; the arrow route
+    // factors `exact_a_evidence_system` row by row and eliminates the border.
+    let (dense_log_a, dense_log_a_tt) = term
+        .exact_observed_information_log_dets(&rho, target.view(), &b_cache)
+        .expect("the dense exact-A log-determinants must be available");
+    let arrow_log_a = a_cache
+        .arrow_log_det()
+        .expect("the exact-A arrow factorization must publish its joint log-det");
+    let arrow_log_a_tt = super::construction::coordinate_block_log_det(&a_cache)
+        .expect("the exact-A coordinate block log-det must be available");
+    let dense_value = 0.5 * (dense_log_a - dense_log_a_tt);
+    let arrow_value = 0.5 * (arrow_log_a - arrow_log_a_tt);
+    let majorizer_value = 0.5
+        * (b_cache
+            .arrow_log_det()
+            .expect("the majorizer arrow factorization must publish its joint log-det")
+            - super::construction::coordinate_block_log_det(&b_cache)
+                .expect("the majorizer coordinate block log-det must be available"));
+    eprintln!(
+        "[#2515 ROUTE-PARITY] dense ½(log|A|−log|A_tt|)={dense_value:.17e} \
+         arrow ½log|S_A|={arrow_value:.17e} majorizer ½log|S_B|={majorizer_value:.17e}"
+    );
+    // (1c) …and they must be far apart, or "both routes price A" is unfalsifiable
+    // here: a bundle still rooted in `B` would pass a parity test whose two
+    // operators happen to coincide.
+    assert!(
+        (arrow_value - majorizer_value).abs() > 1.0e-3,
+        "#2515: the exact-A and majorizer Laplace values must SEPARATE on this \
+         witness, else nothing distinguishes the two routes: A={arrow_value:.17e} \
+         B={majorizer_value:.17e}"
+    );
+    assert_abs_diff_eq!(dense_value, arrow_value, epsilon = 1.0e-9);
+
+    // (3) GRADIENT parity. The dense route takes the exact-A arm (no bundle, no
+    // matrix-free system); the bundle route is handed the exact-A geometry, which
+    // is exactly what production now mints.
+    let b_solver = DeflatedArrowSolver::plain(&b_cache);
+    let dense = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &b_cache, &b_solver)
+        .expect("the dense exact-A gradient must assemble");
+    let (a_probes, a_sinv) = full_basis_probe_bundle(&a_cache);
+    let bundled = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &b_cache,
+            &b_solver,
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::ExactObservedInformation,
+                cache: &a_cache,
+                probes: &a_probes,
+                sinv: &a_sinv,
+            }),
+            None,
+        )
+        .expect("the exact-A bundle gradient must assemble");
+
+    // (1d) THE CARRIER CONTROL. A geometry that silently passed the MAJORIZER
+    // cache in the exact-A slot would reconstruct `B⁻¹` while claiming `A`, and
+    // every assertion above would still pass. Require that mis-paired carrier to
+    // land far from the dense route before believing the correct one lands on it.
+    let (b_probes, b_sinv) = full_basis_probe_bundle(&b_cache);
+    let miswired = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &b_cache,
+            &b_solver,
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::Majorizer,
+                cache: &b_cache,
+                probes: &b_probes,
+                sinv: &b_sinv,
+            }),
+            None,
+        )
+        .expect("the majorizer bundle gradient must assemble")
+        .gradient();
+    let dense_gradient = dense.gradient();
+    let miswired_gap = dense_gradient
+        .iter()
+        .zip(miswired.iter())
+        .map(|(d, m)| (d - m).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        miswired_gap > 1.0e-3,
+        "#2515: the MAJORIZER-rooted bundle must still disagree with the dense \
+         exact-A gradient (measured 8.46e-1 when this was written). A gap of \
+         {miswired_gap:.6e} means the two operators have collapsed on this state and \
+         the parity assertion below proves nothing"
+    );
+
+    // Per-CHANNEL first, so a divergence names the channel that produced it
+    // rather than only the summed number (#2465).
+    assert_eq!(dense.logdet_trace.len(), bundled.logdet_trace.len());
+    for (i, (d, b)) in dense
+        .logdet_trace
+        .iter()
+        .zip(bundled.logdet_trace.iter())
+        .enumerate()
+    {
+        assert!(
+            d.is_finite() && b.is_finite(),
+            "logdet-trace coordinate {i} must be finite (dense={d}, bundled={b})"
+        );
+        // Name the coordinate. `sparse_flat_index` / `smooth_flat_start` /
+        // `ard_flat_index` are the layout's own accessors, so this cannot drift
+        // from `to_flat` — and a bare "0.159 vs 0.282" costs the next reader the
+        // whole layout walk to find out which channel desynced.
+        let role = if Some(i) == rho.sparse_flat_index() {
+            "assignment log-strength".to_string()
+        } else if i >= rho.smooth_flat_start() && i < rho.smooth_flat_start() + rho.k_atoms() {
+            format!("smooth atom {}", i - rho.smooth_flat_start())
+        } else {
+            format!("ard flat {i}")
+        };
+        assert!(
+            (d - b).abs() <= 1.0e-9,
+            "logdet-trace coordinate {i} ({role}) desynced between the dense exact-A \
+             route and the exact-A bundle route: dense={d}, bundled={b}, |Δ|={:.6e}",
+            (d - b).abs()
+        );
+    }
+    for (label, d, b) in [
+        ("explicit", &dense.explicit, &bundled.explicit),
+        ("occam", &dense.occam, &bundled.occam),
+        (
+            "third_order_correction",
+            &dense.third_order_correction,
+            &bundled.third_order_correction,
+        ),
+    ] {
+        assert_eq!(d.len(), b.len(), "{label} length");
+        for (i, (dv, bv)) in d.iter().zip(b.iter()).enumerate() {
+            assert!(
+                dv.is_finite() && bv.is_finite(),
+                "{label} coordinate {i} must be finite (dense={dv}, bundled={bv})"
+            );
+            assert_abs_diff_eq!(dv, bv, epsilon = 1.0e-9);
+        }
+    }
+    let bundled_gradient = bundled.gradient();
+    assert_eq!(dense_gradient.len(), bundled_gradient.len());
+    let worst = dense_gradient
+        .iter()
+        .zip(bundled_gradient.iter())
+        .map(|(d, b)| (d - b).abs())
+        .fold(0.0_f64, f64::max);
+    eprintln!(
+        "[#2515 ROUTE-PARITY] complete gradient max|Δ|={worst:.6e}  (majorizer-rooted \
+         carrier control: {miswired_gap:.6e}, clamped rows: {clamped_rows})"
+    );
+    for (d, b) in dense_gradient.iter().zip(bundled_gradient.iter()) {
+        assert_abs_diff_eq!(d, b, epsilon = 1.0e-9);
+    }
+
+    // Non-triviality of the channel under test: the routed trace must be a
+    // genuine, nonzero contribution so the parity assertion is not vacuous.
+    let trace_sq: f64 = dense.logdet_trace.iter().map(|v| v * v).sum();
+    assert!(
+        trace_sq > 0.0 && trace_sq.is_finite(),
+        "the routed log|H|-trace channel must be non-trivial; ‖logdet_trace‖²={trace_sq}"
     );
 }
