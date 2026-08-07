@@ -73,24 +73,39 @@ impl SplitMix64 {
 #[test]
 fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
     init_parallelism();
-    const N: usize = 160;
+    // Deliberately the SAME fixture and formula as
+    // `ctn_predict_score_reproduces_the_fitted_score_2680`. The CTN inner solve
+    // refuses on some perfectly ordinary Gaussian fixtures for reasons that have
+    // nothing to do with this issue (a 96-dimensional constraint face whose
+    // truncated moments will not converge; a reduced-face KKT residual), so a
+    // chart gate should not go shopping for its own fixture and take that risk
+    // twice.
+    const N: usize = 400;
 
-    let mut rng = SplitMix64::new(26801);
-    let headers = vec!["x1".to_string(), "x2".to_string(), "y".to_string()];
+    let mut rng = SplitMix64::new(4271);
+    let headers = vec![
+        "x1".to_string(),
+        "x2".to_string(),
+        "x3".to_string(),
+        "y".to_string(),
+    ];
     let mut records = Vec::with_capacity(N);
-    let mut data = Array2::<f64>::zeros((N, 3));
+    let mut data = Array2::<f64>::zeros((N, 4));
     for i in 0..N {
         let x1 = rng.next_normal();
-        let x2 = 0.4 * x1 + (1.0 - 0.16_f64).sqrt() * rng.next_normal();
-        let y = 0.5 * x1 - 0.25 * x2 + 0.8 * rng.next_normal();
+        let x2 = 0.3 * x1 + (1.0 - 0.09_f64).sqrt() * rng.next_normal();
+        let x3 = rng.next_normal();
+        let y = 0.4 * x1 - 0.2 * x2 + 0.15 * x3 + 0.9 * rng.next_normal();
         records.push(csv::StringRecord::from(vec![
             format!("{x1:.17e}"),
             format!("{x2:.17e}"),
+            format!("{x3:.17e}"),
             format!("{y:.17e}"),
         ]));
         data[[i, 0]] = x1;
         data[[i, 1]] = x2;
-        data[[i, 2]] = y;
+        data[[i, 2]] = x3;
+        data[[i, 3]] = y;
     }
     let dataset =
         encode_recordswith_inferred_schema(headers, records).expect("encode fixture dataset");
@@ -110,7 +125,7 @@ fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
         panic!("expected a TransformationNormal fit result");
     };
 
-    let response: Array1<f64> = data.column(2).to_owned();
+    let response: Array1<f64> = data.column(3).to_owned();
     let offset = Array1::<f64>::zeros(N);
 
     let base = score_influence_jacobian(&tn, &response, data.view(), &offset)
