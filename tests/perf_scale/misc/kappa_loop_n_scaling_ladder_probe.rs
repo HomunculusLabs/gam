@@ -121,6 +121,7 @@ impl log::Log for LadderTrace {
             "[OUTER",
             "[RAIL",
             "[COST-STALL",
+            "[PSI-GRAM-INSTALL",
         ]
         .iter()
         .any(|prefix| msg.starts_with(prefix));

@@ -786,6 +786,10 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         // is released before the `&mut self.reml_state` installs below.
         let tensor = std::sync::Arc::clone(tensor);
         let mut cache = tensor.gaussian_fixed_cache_at(psi);
+        // gam#2760 instrument: `(psi_ref, max|ΔGram|, max|Δrhs|)` when the
+        // tensor Gram installed below was pinned to an exact anchor, `None` when
+        // it is the raw certified interpolation.
+        let mut corrected_at: Option<(f64, f64, f64)> = None;
         if let Some(psi_ref) = self.last_reset_psi.filter(|p| tensor.contains(*p)) {
             let correction_is_current = self
                 .psi_gram_anchor_correction
@@ -826,8 +830,25 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
                 );
                 cache.xtwx_orig += gram_delta;
                 cache.xtwy_orig += rhs_delta;
+                corrected_at = Some((
+                    psi_ref,
+                    gram_delta.iter().fold(0.0_f64, |a, &v| a.max(v.abs())),
+                    rhs_delta.iter().fold(0.0_f64, |a, &v| a.max(v.abs())),
+                ));
             }
         }
+        // gam#2760 instrument. The joint route's criterion at θ0 is graded
+        // against the scalar route's `fit_score`, and the two disagree by a
+        // deterministic ~6e-8 RELATIVE at every n on the #2760 ladder. This
+        // line says, for every install, whether the tensor Gram this criterion
+        // is being computed from was pinned to an exact anchor or is running on
+        // its own certified interpolation — the one fact that separates "the
+        // two routes evaluate different functions" from "the arithmetic differs".
+        log::info!(
+            "[PSI-GRAM-INSTALL] psi={psi:.9} last_reset_psi={:?} corrected={:?}",
+            self.last_reset_psi,
+            corrected_at,
+        );
         // #1868: attach the once-built ψ-invariant frozen row bundle so the
         // inner Gaussian zero-iteration synthesis shares its length-`n`
         // placeholders (η≡μ≡offset, z≡y, w, and the working-weight derivatives)
