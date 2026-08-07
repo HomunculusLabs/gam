@@ -199,22 +199,30 @@
   back to the engine's own `±RHO_BOUND` — the box the incumbent was found in.
   Everything strictly inside keeps the historical box byte-for-byte.
 
-  **2. The mint had no curvature, and never needed to lack it.** The #1033
-  n-free ψ-lane declared `DeclaredHessianForm::Unavailable` "so the planner
-  selects BFGS instead of ARC". It did not need to: `with_prefer_gradient_only`
-  is unconditional on this problem and `capability::plan` reads
-  `(Analytic, Analytic) if prefer_gradient_only → Bfgs` *before* the ARC arm.
-  What `Unavailable` actually did was erase the one terminal evaluation #2359
-  reserves for the mint, and with it the `curvature-resolvability` rung (the
-  only bound in the ladder derived from the criterion's own resolution), the
-  #2348 asymptote-rail certificate, the curvature-scaled flat-valley widening
-  and the #2299 large-step flatness certificate. Same shape as #2706's repair,
-  one flag over.
+  **2. The mint had no curvature — which is how the real defect was found.**
+  The #1033 n-free ψ-lane declares `DeclaredHessianForm::Unavailable` "so the
+  planner selects BFGS instead of ARC". It does not need to:
+  `with_prefer_gradient_only` is unconditional on this problem and
+  `capability::plan` reads `(Analytic, Analytic) if prefer_gradient_only → Bfgs`
+  *before* the ARC arm. What `Unavailable` actually erases is the one terminal
+  evaluation #2359 reserves for the mint, and with it the
+  `curvature-resolvability` rung, the #2348 asymptote-rail certificate, the
+  curvature-scaled flat-valley widening and the #2299 large-step flatness
+  certificate. Restoring it here made `run.rs`'s value-agreement guard fire —
+  that guard only compares lanes when the mint asks for the analytic one — and
+  that is what surfaced defect 3 below. It is NOT part of the shipped repair:
+  restoring it also makes `exact_spatial_joint_engine_aniso_iso_parity_1d`
+  refuse (`|Pg| = 5.143e-3` against a `8.100e-3` bound, so stationary, but
+  `interior lambda_min = -1.585e-3` against a `3.061e-3` gradient floor, with ψ
+  railed at its own box edge), and that indefinite-curvature verdict is a real
+  finding about this lane's terminal geometry that deserves its own issue rather
+  than arriving as a side effect. The ladder is green at all five rungs without
+  it. An instrument is not a fix.
 
   **3. The criterion the search ranks is not the criterion. THIS is the line
-  search.** With the mint finally asking for the analytic lane, `run.rs`'s
-  existing value-agreement guard named it at once, at the point the `n = 2000`
-  search stopped, both inner solves converged:
+  search.** With the mint asking for the analytic lane, `run.rs`'s existing
+  value-agreement guard named it at once, at the point the `n = 2000` search
+  stopped, both inner solves converged:
 
   ```text
   value-only      = -1.2781058170149880e4
