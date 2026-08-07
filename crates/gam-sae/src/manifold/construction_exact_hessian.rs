@@ -229,6 +229,122 @@ pub(crate) struct DenseExactALogdetChannels {
     pub(crate) stationarity_adjoint: SaeArrowVector,
 }
 
+/// #2515 — WHICH curvature operator a derivative channel differentiates and
+/// contracts.
+///
+/// `A = B + ΔC = ∇²_θθ L` is the exact observed information; it is the operator
+/// whose log-determinant the Laplace criterion **is**. `B` is the Gauss--Newton /
+/// PSD-majorizer arrow system: the positive-definite scale the Newton and IFT
+/// solves factor, and a preconditioner for `A`. A preconditioner is not the
+/// operator it preconditions.
+///
+/// This exists as one value resolved ONCE per gradient assembly, rather than as
+/// a per-channel argument, because the failure mode it guards is a channel
+/// contracting one operator's inverse while differentiating the other's — a
+/// state that is neither `A` nor `B` and that no single channel can detect
+/// locally.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EvidenceOperator {
+    /// The Gauss--Newton / PSD-majorizer arrow system `B`.
+    Majorizer,
+    /// The exact observed information `A = B + ΔC = ∇²_θθ L`.
+    ExactObservedInformation,
+}
+
+impl EvidenceOperator {
+    /// The historical boolean spelling, for channels whose exact-`A` port landed
+    /// before this type did (`logdet_theta_adjoint_from_probes`, `ac499b513`).
+    #[must_use]
+    pub(crate) fn is_exact_a(self) -> bool {
+        matches!(self, Self::ExactObservedInformation)
+    }
+}
+
+/// #2515 — the selected-inverse evidence a bundle-routed outer ρ-gradient
+/// contracts, as a type whose VARIANT names the operator.
+///
+/// The from-probes channels reconstruct the arrow inverse blocks as
+/// `(H⁻¹)_tt = A_i⁻¹ + G_i S⁻¹ G_iᵀ` and `(H⁻¹)_tβ = −G_i S⁻¹`: the row factors
+/// `A_i` and cross blocks come from a factor CACHE, and `S⁻¹` comes from the
+/// probe bundle. Those two must be factorizations of the same operator. Before
+/// this type existed the production streaming lane paired a bundle built on
+/// `exact_a_evidence_system`'s reduced Schur with the `B` row-factor cache from
+/// `converge_inner_for_undamped_logdet` — reconstructing an inverse that belongs
+/// to neither operator.
+///
+/// [`Self::ExactObservedInformation`] therefore carries its OWN cache. The
+/// `cache` argument passed alongside it stays the `B` stationarity geometry that
+/// [`SaeManifoldTerm::solve_exact_stationarity_matrix_free`] reassembles
+/// `A = B + ΔC` on top of; promoting that one to `A` would double-count `ΔC`.
+/// Making the cache part of the variant is what makes the mixed state
+/// unrepresentable rather than merely discouraged.
+pub(crate) enum BundleEvidenceGeometry<'a> {
+    /// The Arrow--Schur majorizer `B`. Its row factors ARE the `cache` argument
+    /// already passed alongside, so this variant carries only the bundle.
+    ///
+    /// **`#[cfg(test)]` on purpose.** Since the streaming lane was wired to
+    /// `matrix_free_arrow_evidence_evaluation`, no production route mints a
+    /// `B`-rooted bundle for this assembler: the criterion it feeds ranks
+    /// `½log|S_A|`, so a `B`-rooted derivative would differentiate an operator the
+    /// value never ranked. Gating the variant on `cfg(test)` is what makes that a
+    /// compile-time fact rather than a convention — a future route that wants a
+    /// `B` gradient has to delete this attribute and argue for it. The regression
+    /// gates that pin the from-probes reconstruction against its dense sibling on
+    /// the majorizer (#2712, #2080) keep using it, because THAT contract is about
+    /// the reconstruction machinery and is operator-agnostic.
+    #[cfg(test)]
+    Majorizer {
+        probes: &'a [Array1<f64>],
+        sinv: &'a [Array1<f64>],
+    },
+    /// The exact observed information `A = B + ΔC`, with the factor cache of the
+    /// arrow system whose reduced Schur produced `sinv`.
+    ExactObservedInformation {
+        cache: &'a ArrowFactorCache,
+        probes: &'a [Array1<f64>],
+        sinv: &'a [Array1<f64>],
+    },
+}
+
+impl<'a> BundleEvidenceGeometry<'a> {
+    #[must_use]
+    pub(crate) fn operator(&self) -> EvidenceOperator {
+        match self {
+            #[cfg(test)]
+            Self::Majorizer { .. } => EvidenceOperator::Majorizer,
+            Self::ExactObservedInformation { .. } => EvidenceOperator::ExactObservedInformation,
+        }
+    }
+
+    /// `(probes, S⁻¹·probes)` — for the rational lane these are the identical
+    /// weighted vectors emitted by `RationalLogdetPlan::into_directional_-
+    /// derivative_bundle`, so every contraction is the derivative of the SAME
+    /// shifted rational value rather than a separately sampled `S⁻¹`.
+    #[must_use]
+    pub(crate) fn probes(&self) -> (&'a [Array1<f64>], &'a [Array1<f64>]) {
+        match *self {
+            #[cfg(test)]
+            Self::Majorizer { probes, sinv } => (probes, sinv),
+            Self::ExactObservedInformation { probes, sinv, .. } => (probes, sinv),
+        }
+    }
+
+    /// The factor cache whose row geometry the from-probes channels reconstruct
+    /// the arrow inverse blocks from. `Majorizer` has no cache of its own — its
+    /// row factors are the caller's `B` cache — so it returns that one.
+    #[must_use]
+    pub(crate) fn evidence_cache<'b>(
+        &'b self,
+        #[cfg_attr(not(test), allow(unused_variables))] majorizer: &'b ArrowFactorCache,
+    ) -> &'b ArrowFactorCache {
+        match *self {
+            #[cfg(test)]
+            Self::Majorizer { .. } => majorizer,
+            Self::ExactObservedInformation { cache, .. } => cache,
+        }
+    }
+}
+
 /// Certified exact-stationarity solve for a genuinely matrix-free operator.
 /// Dense operators bypass this Krylov path and use the rank-revealing spectral
 /// pseudoinverse owned by [`ExactHessianSpectralBlock`].
@@ -2671,7 +2787,7 @@ impl SaeManifoldTerm {
         // the gradient does (construction_exact_hessian.rs analytic assembler).
         let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
         let mut gamma_eff = self.logdet_theta_adjoint(rho, cache, &solver)?;
-        let gamma_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache, &solver)?;
+        let gamma_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache)?;
         gamma_eff.t -= &gamma_tt.t;
         gamma_eff.beta -= &gamma_tt.beta;
         gamma_eff.t.scaled_add(2.0, &rank_charge.theta.t);
@@ -2833,7 +2949,12 @@ impl SaeManifoldTerm {
     /// #2080 forward plumbing — the analytic outer-ρ gradient with an OPTIONAL
     /// low-rank representation of the reduced-logdet derivative.
     ///
-    /// When `logdet_derivative_bundle` is `Some`, the THREE reduced-logdet channels
+    /// #2515 — `evidence` is a [`BundleEvidenceGeometry`], not a bare probe pair:
+    /// its variant NAMES the operator whose selected inverse the from-probes
+    /// channels contract, and the exact-`A` variant carries that operator's own
+    /// factor cache. `cache` stays the `B` stationarity geometry on every route.
+    ///
+    /// When `evidence` is `Some`, the THREE reduced-logdet channels
     /// that have matrix-free siblings — the per-atom decoder smoothness EDF
     /// `tr(H⁻¹ M_k)`, the per-(atom,axis) ARD log-precision Hessian trace
     /// `½tr(H⁻¹ ∂H/∂logα)`, and the #1006 envelope Γ = tr(H⁻¹ ∂H/∂θ) — are evaluated
@@ -2873,12 +2994,26 @@ impl SaeManifoldTerm {
         loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
         solver: &DeflatedArrowSolver<'_>,
-        logdet_derivative_bundle: Option<(&[Array1<f64>], &[Array1<f64>])>,
+        evidence: Option<BundleEvidenceGeometry<'_>>,
         matrix_free_system: Option<&ArrowSchurSystem>,
     ) -> Result<SaeOuterRhoGradientComponents, OuterGradientError> {
         self.assignment
             .validate_rho_domain(rho)
             .map_err(OuterGradientError::internal)?;
+        // #2515 — resolve the evidence geometry ONCE. `logdet_derivative_bundle`
+        // is the probe pair every from-probes channel contracts; `evidence_cache`
+        // is the factor cache whose row blocks those channels reconstruct the
+        // arrow inverse from; `evidence_operator` is which operator's ρ/θ
+        // derivative the curvature channels differentiate. All three come from
+        // one value, so they cannot name different operators.
+        let logdet_derivative_bundle = evidence.as_ref().map(BundleEvidenceGeometry::probes);
+        let evidence_cache = match evidence.as_ref() {
+            Some(geometry) => geometry.evidence_cache(cache),
+            None => cache,
+        };
+        let evidence_operator = evidence
+            .as_ref()
+            .map_or(EvidenceOperator::Majorizer, BundleEvidenceGeometry::operator);
         let n_params = rho.to_flat().len();
         let mut explicit = Array1::<f64>::zeros(n_params);
         let mut logdet_trace = Array1::<f64>::zeros(n_params);
@@ -2996,14 +3131,24 @@ impl SaeManifoldTerm {
             if !exact_a_logdet_route {
                 let joint_trace = match logdet_derivative_bundle {
                     Some((probes, sinv)) => self
-                        .assignment_log_strength_hessian_trace_from_probes(rho, cache, probes, sinv)
+                        .assignment_log_strength_hessian_trace_from_probes(
+                            rho,
+                            evidence_cache,
+                            probes,
+                            sinv,
+                            evidence_operator,
+                        )
                         .map_err(OuterGradientError::internal)?,
                     None => self
                         .assignment_log_strength_hessian_trace(rho, cache, solver)
                         .map_err(OuterGradientError::internal)?,
                 };
                 let coordinate_trace = self
-                    .coordinate_block_assignment_log_strength_hessian_trace(rho, cache)
+                    .coordinate_block_assignment_log_strength_hessian_trace(
+                        rho,
+                        evidence_cache,
+                        evidence_operator,
+                    )
                     .map_err(OuterGradientError::internal)?;
                 logdet_trace[sparse_index] = joint_trace - coordinate_trace;
             }
@@ -3087,7 +3232,13 @@ impl SaeManifoldTerm {
         } else {
             let joint = match logdet_derivative_bundle {
                 Some((probes, sinv)) => self
-                    .ard_log_precision_hessian_trace_from_probes(rho, cache, probes, sinv)
+                    .ard_log_precision_hessian_trace_from_probes(
+                        rho,
+                        evidence_cache,
+                        probes,
+                        sinv,
+                        evidence_operator,
+                    )
                     .map_err(|err| OuterGradientError::InternalInvariant {
                         reason: format!(
                             "analytic_outer_rho_gradient_components: ARD logdet trace \
@@ -3095,13 +3246,17 @@ impl SaeManifoldTerm {
                         ),
                     })?,
                 None => self
-                    .ard_log_precision_hessian_trace(rho, cache, solver)
+                    .ard_log_precision_hessian_trace(rho, cache, solver, evidence_operator)
                     .map_err(|err| OuterGradientError::InternalInvariant {
                         reason: format!("analytic_outer_rho_gradient_components: {err}"),
                     })?,
             };
             let coordinate = self
-                .coordinate_block_ard_log_precision_hessian_trace(rho, cache)
+                .coordinate_block_ard_log_precision_hessian_trace(
+                    rho,
+                    evidence_cache,
+                    evidence_operator,
+                )
                 .map_err(|err| OuterGradientError::InternalInvariant {
                     reason: format!(
                         "analytic_outer_rho_gradient_components: coordinate-block ARD trace: {err}"
@@ -3159,14 +3314,24 @@ impl SaeManifoldTerm {
         } else {
             let mut gamma = match logdet_derivative_bundle {
                 Some((probes, sinv)) => self
-                    .logdet_theta_adjoint_from_probes(rho, cache, probes, sinv, false)
+                    .logdet_theta_adjoint_from_probes(
+                        rho,
+                        evidence_cache,
+                        probes,
+                        sinv,
+                        evidence_operator.is_exact_a(),
+                    )
                     .map_err(OuterGradientError::internal)?,
                 None => self
                     .logdet_theta_adjoint(rho, cache, solver)
                     .map_err(OuterGradientError::internal)?,
             };
+            // The coordinate-block leg must be taken on the SAME geometry as the
+            // joint one — `½log|H| − ½log|H_tt|` is one difference, and pairing an
+            // `A` joint with a `B` coordinate block is the same class of error the
+            // geometry type exists to remove.
             let coordinate_gamma = self
-                .coordinate_block_logdet_theta_adjoint(rho, cache, solver)
+                .coordinate_block_logdet_theta_adjoint(rho, evidence_cache)
                 .map_err(OuterGradientError::internal)?;
             gamma.t -= &coordinate_gamma.t;
             gamma.beta -= &coordinate_gamma.beta;
@@ -5197,7 +5362,7 @@ mod test_support {
                 None,
             )?;
             let prod_joint = self.logdet_theta_adjoint(rho, cache, &solver)?;
-            let prod_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache, &solver)?;
+            let prod_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache)?;
             let max_diff = |a: &SaeArrowVector, b: &SaeArrowVector| -> f64 {
                 let t =
                     a.t.iter()

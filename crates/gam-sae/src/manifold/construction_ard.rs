@@ -868,11 +868,17 @@ impl SaeManifoldTerm {
         Ok(out)
     }
 
+    /// `operator` (#2515) names WHICH curvature the `∂H/∂log α` operand is:
+    /// `Majorizer` differentiates `B`'s PSD-clamped `α·s_{τ₀}(cos κt)`,
+    /// `ExactObservedInformation` differentiates `A`'s unmajorized `α·cos κt`.
+    /// It must agree with the operator whose inverse `solver` factors, which is
+    /// why every trace entry point takes it explicitly rather than defaulting.
     pub(crate) fn ard_log_precision_hessian_trace(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         solver: &DeflatedArrowSolver<'_>,
+        operator: EvidenceOperator,
     ) -> Result<Vec<Array1<f64>>, ArrowSchurError> {
         self.assignment
             .validate_rho_domain(rho)
@@ -981,7 +987,7 @@ impl SaeManifoldTerm {
                             let alpha = ard_precisions[k][axis];
                             let t = coord.row(row)[axis];
                             let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
-                            let hess = w_row * prior.psd_majorizer_hess();
+                            let hess = w_row * prior.log_precision_curvature(operator);
                             let s = block_start + axis;
                             traces[k][axis] += 0.5 * inv_diag[row_base + s] * hess;
                             traces[k][axis] -= 0.5 * slot_correction(s, hess);
@@ -1000,7 +1006,7 @@ impl SaeManifoldTerm {
                             let alpha = ard_precisions[k][axis];
                             let t = coord.row(row)[axis];
                             let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
-                            let hess = w_row * prior.psd_majorizer_hess();
+                            let hess = w_row * prior.log_precision_curvature(operator);
                             let s = block_start + axis;
                             traces[k][axis] += 0.5 * inv_diag[row_base + s] * hess;
                             traces[k][axis] -= 0.5 * slot_correction(s, hess);
@@ -1021,10 +1027,14 @@ impl SaeManifoldTerm {
     /// back-substitution. Spectrally conditioned rows use the same
     /// Daleckii--Krein deflation-map differential as the scalar row-factor
     /// logdet, so this is the exact derivative of the `htt_half` value term.
+    /// `operator` (#2515): the same `∂H/∂log α` selection the joint leg makes.
+    /// `½log|H| − ½log|H_tt|` is one difference, so pairing an `A` joint leg with
+    /// a `B` coordinate leg is the same defect as contracting the wrong inverse.
     pub(crate) fn coordinate_block_ard_log_precision_hessian_trace(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
+        operator: EvidenceOperator,
     ) -> Result<Vec<Array1<f64>>, ArrowSchurError> {
         self.assignment
             .validate_rho_domain(rho)
@@ -1081,7 +1091,7 @@ impl SaeManifoldTerm {
                 let alpha = ard_precisions[atom][axis];
                 let t = self.assignment.coords[atom].row(row)[axis];
                 let prior = ArdAxisPrior::eval(alpha, t, periods[atom][axis]);
-                let curvature = row_weight * prior.psd_majorizer_hess();
+                let curvature = row_weight * prior.log_precision_curvature(operator);
                 let mut trace = inverse[[slot, slot]] * curvature;
                 if !directions.is_empty() && curvature != 0.0 {
                     let mut derivative = Array2::<f64>::zeros((q, q));
@@ -1163,6 +1173,7 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         probes: &[Array1<f64>],
         sinv_probes: &[Array1<f64>],
+        operator: EvidenceOperator,
     ) -> Result<Vec<Array1<f64>>, ArrowSchurError> {
         self.assignment
             .validate_rho_domain(rho)
@@ -1260,7 +1271,7 @@ impl SaeManifoldTerm {
                     let alpha = ard_precisions[k][axis];
                     let t = coord.row(row)[axis];
                     let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
-                    let hess = w_row * prior.psd_majorizer_hess();
+                    let hess = w_row * prior.log_precision_curvature(operator);
                     let s = block_start + axis;
                     traces[k][axis] += 0.5 * inv_diag_local[s] * hess;
                     traces[k][axis] -= 0.5 * slot_correction(s, hess);

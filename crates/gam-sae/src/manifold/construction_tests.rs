@@ -100,6 +100,7 @@ mod exact_hessian_fixture_tests {
 
 #[cfg(test)]
 mod amortized_encoder_tests {
+    use crate::manifold::EvidenceOperator;
     use crate::manifold::tests::small_two_atom_periodic_term;
 
     /// The fitted encoder is reachable end-to-end and returns one coordinate
@@ -437,10 +438,14 @@ mod amortized_encoder_tests {
                 .decoder_smoothness_effective_dof_with_solver_per_atom(&cache, &solver, &lambda)
                 .expect("smooth EDF trace");
             let ard_joint = t
-                .ard_log_precision_hessian_trace(&r, &cache, &solver)
+                .ard_log_precision_hessian_trace(&r, &cache, &solver, EvidenceOperator::Majorizer)
                 .expect("ard joint logdet trace");
             let ard_coord = t
-                .coordinate_block_ard_log_precision_hessian_trace(&r, &cache)
+                .coordinate_block_ard_log_precision_hessian_trace(
+                    &r,
+                    &cache,
+                    EvidenceOperator::Majorizer,
+                )
                 .expect("ard coordinate-block logdet trace");
             let mut v = Array1::<f64>::zeros(n_params);
             for a in 0..r.log_lambda_smooth.len() {
@@ -456,7 +461,11 @@ mod amortized_encoder_tests {
                     .assignment_log_strength_hessian_trace(&r, &cache, &solver)
                     .expect("sparse joint logdet trace");
                 let coord = t
-                    .coordinate_block_assignment_log_strength_hessian_trace(&r, &cache)
+                    .coordinate_block_assignment_log_strength_hessian_trace(
+                    &r,
+                    &cache,
+                    EvidenceOperator::Majorizer,
+                )
                     .expect("sparse coordinate-block logdet trace");
                 v[si] = joint - coord;
             }
@@ -959,7 +968,7 @@ mod amortized_encoder_tests {
             let gamma = match part {
                 0 => t.logdet_theta_adjoint(&r, &cache, &solver).unwrap(),
                 1 => t
-                    .coordinate_block_logdet_theta_adjoint(&r, &cache, &solver)
+                    .coordinate_block_logdet_theta_adjoint(&r, &cache)
                     .unwrap(),
                 _ => {
                     let rc = t
@@ -1143,7 +1152,7 @@ mod amortized_encoder_tests {
             .expect("gamma_joint");
         {
             let gtt = term
-                .coordinate_block_logdet_theta_adjoint(&rho, &cache, &solver)
+                .coordinate_block_logdet_theta_adjoint(&rho, &cache)
                 .expect("gamma_tt");
             gamma_eff.t -= &gtt.t;
             gamma_eff.beta -= &gtt.beta;
@@ -1208,7 +1217,7 @@ mod amortized_encoder_tests {
                     .logdet_theta_adjoint(&r, &cache, &solver)
                     .expect("gamma_joint");
                 let gtt = t
-                    .coordinate_block_logdet_theta_adjoint(&r, &cache, &solver)
+                    .coordinate_block_logdet_theta_adjoint(&r, &cache)
                     .expect("gamma_tt");
                 g.t -= &gtt.t;
                 g.beta -= &gtt.beta;

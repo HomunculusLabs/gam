@@ -662,9 +662,8 @@ fn threshold_gate_coordinate_block_theta_adjoint_matches_finite_difference_2500(
     for straddle in [false, true] {
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let (_loss, cache) = frozen_cache(&term, &target, &rho);
-        let solver = crate::manifold::arrow_solver::DeflatedArrowSolver::plain(&cache);
         let coord = term
-            .coordinate_block_logdet_theta_adjoint(&rho, &cache, &solver)
+            .coordinate_block_logdet_theta_adjoint(&rho, &cache)
             .expect("coordinate-block theta adjoint");
         let base_deflated = deflated_direction_count(&term, &cache);
         let block_logdet = |t: &SaeManifoldTerm| -> (f64, usize) {
@@ -737,7 +736,11 @@ fn threshold_gate_outer_gradient_uses_the_modelled_logdet_channels_2500() {
             .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
             .expect("B-route sparse joint trace");
         let coord = term
-            .coordinate_block_assignment_log_strength_hessian_trace(&rho, &cache)
+            .coordinate_block_assignment_log_strength_hessian_trace(
+                &rho,
+                &cache,
+                crate::manifold::EvidenceOperator::Majorizer,
+            )
             .expect("B-route sparse coordinate trace");
         joint - coord
     };

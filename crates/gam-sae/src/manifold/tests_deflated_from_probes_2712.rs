@@ -501,15 +501,26 @@ fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_27
     let compare = |label: &str, cache: &ArrowFactorCache| -> (f64, f64, f64, usize) {
         let solver = DeflatedArrowSolver::plain(cache);
         let dense = term
-            .ard_log_precision_hessian_trace(&rho, cache, &solver)
+            .ard_log_precision_hessian_trace(&rho, cache, &solver, EvidenceOperator::Majorizer)
             .expect("dense ARD trace");
         let blind_cache = deflation_blind_cache(cache);
         let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
         let blind = term
-            .ard_log_precision_hessian_trace(&rho, &blind_cache, &blind_solver)
+            .ard_log_precision_hessian_trace(
+                &rho,
+                &blind_cache,
+                &blind_solver,
+                EvidenceOperator::Majorizer,
+            )
             .expect("deflation-blind dense ARD trace");
         let from_probes = term
-            .ard_log_precision_hessian_trace_from_probes(&rho, cache, &probes, &sinv)
+            .ard_log_precision_hessian_trace_from_probes(
+                &rho,
+                cache,
+                &probes,
+                &sinv,
+                EvidenceOperator::Majorizer,
+            )
             .expect("the from-probes ARD trace must PRICE a deflated cache, not refuse it");
         let mut separation = 0.0_f64;
         let mut parity = 0.0_f64;
@@ -589,7 +600,13 @@ fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_r
         .expect("deflation-blind dense assignment-strength trace");
 
     let from_probes = term
-        .assignment_log_strength_hessian_trace_from_probes(&rho, &cache, &probes, &sinv)
+        .assignment_log_strength_hessian_trace_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+        )
         .expect("the from-probes assignment trace must PRICE a deflated cache, not refuse it");
 
     let separation = (dense - blind).abs();
@@ -665,7 +682,10 @@ fn complete_outer_gradient_deflation_contribution_is_route_independent_2712() {
                 &loss,
                 cache,
                 &solver,
-                Some((&probes, &sinv)),
+                Some(BundleEvidenceGeometry::Majorizer {
+                probes: &probes,
+                sinv: &sinv,
+            }),
                 None,
             )
             .expect(

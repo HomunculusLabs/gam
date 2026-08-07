@@ -209,3 +209,58 @@ fn active_softmax_majorizer_logit_derivative_entry(
     }
     acc + eps0_sq * cross * inv_envelope_sum
 }
+
+/// #2515 — one row's softmax `∂H_tt/∂ρ_sparse` logit block, for the operator the
+/// caller's inverse belongs to.
+///
+/// Both arms are the installed entry itself: the entropy curvature is degree-one
+/// in `λ_sparse = e^ρ` (it enters only through `scale = λ·sparsity/τ²`), so
+/// `∂/∂ρ` of what the assembly wrote IS what the assembly wrote. What differs is
+/// WHICH operator wrote it:
+///
+/// * `Majorizer` — `B` installs the soft-abs Gershgorin Loewner majorizer
+///   `D̃ = diag(Σ_j σ_ε(H_kj))` (#1419/#2339), which is DIAGONAL, so
+///   `∂B/∂ρ_sparse` has no off-diagonal entry at all;
+/// * `ExactObservedInformation` — `A = B + ΔC` carries the exact dense entropy
+///   Hessian `H_kj`, off-diagonal included.
+///
+/// Their difference is exactly the softmax block of
+/// [`SaeManifoldTerm::exact_stationarity_penalty_derivative_delta_by_flat`],
+/// entry for entry: `h_entropy − gershgorin` on the diagonal and `h_entropy`
+/// off it. Emitting both arms from ONE function is what keeps that identity from
+/// drifting — a trace channel and the `ΔC` map that is supposed to explain its
+/// gap must not re-derive the same block twice.
+///
+/// `slot_atoms[s]` is the global atom index occupying local logit slot `s`;
+/// `weight` is the row's design weight `w_row`, which the assembly folds into
+/// the installed curvature and every ρ-trace must therefore carry. `a` is the
+/// row's full-`K` softmax assignment vector and `m` its shared
+/// [`softmax_majorizer_log_mean`].
+pub(crate) fn softmax_sparse_curvature_rho_derivative_block(
+    a: &[f64],
+    slot_atoms: &[usize],
+    m: f64,
+    scale: f64,
+    weight: f64,
+    operator: EvidenceOperator,
+) -> Array2<f64> {
+    let slots = slot_atoms.len();
+    let mut out = Array2::<f64>::zeros((slots, slots));
+    match operator {
+        EvidenceOperator::Majorizer => {
+            for (slot, &atom) in slot_atoms.iter().enumerate() {
+                out[[slot, slot]] =
+                    weight * active_softmax_gershgorin_majorizer_entry(a, atom, m, scale);
+            }
+        }
+        EvidenceOperator::ExactObservedInformation => {
+            for (row_slot, &row_atom) in slot_atoms.iter().enumerate() {
+                for (col_slot, &col_atom) in slot_atoms.iter().enumerate() {
+                    out[[row_slot, col_slot]] = weight
+                        * softmax_dense_entropy_hessian_entry(a, row_atom, col_atom, m, scale);
+                }
+            }
+        }
+    }
+    out
+}

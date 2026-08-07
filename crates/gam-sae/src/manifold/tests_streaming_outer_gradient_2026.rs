@@ -816,7 +816,13 @@ fn assignment_strength_trace_from_probes_matches_dense_softmax() {
         })
         .collect::<Vec<_>>();
     let matrix_free = term
-        .assignment_log_strength_hessian_trace_from_probes(&rho, &cache, &probes, &inverse_probes)
+        .assignment_log_strength_hessian_trace_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &inverse_probes,
+            EvidenceOperator::Majorizer,
+        )
         .expect("matrix-free assignment-strength trace");
 
     assert!(
@@ -906,7 +912,10 @@ fn complete_matrix_free_outer_gradient_matches_dense_softmax() {
             &loss,
             &cache,
             &plain_solver,
-            Some((&probes, &inverse_probes)),
+            Some(BundleEvidenceGeometry::Majorizer {
+                probes: &probes,
+                sinv: &inverse_probes,
+            }),
             Some(&system),
         )
         .expect("matrix-free complete outer gradient")

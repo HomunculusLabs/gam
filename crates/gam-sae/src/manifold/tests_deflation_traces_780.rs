@@ -57,7 +57,7 @@ pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
     );
     let solver = DeflatedArrowSolver::plain(&cache);
     let analytic = term
-        .ard_log_precision_hessian_trace(&rho, &cache, &solver)
+        .ard_log_precision_hessian_trace(&rho, &cache, &solver, EvidenceOperator::Majorizer)
         .expect("ARD log-precision trace");
 
     let h = 1.0e-5;

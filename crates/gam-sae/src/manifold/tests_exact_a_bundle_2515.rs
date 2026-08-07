@@ -303,15 +303,16 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
     // Channel 2 — ARD log-precision Hessian trace. Reads the factor cache for the
     // row-local block AND differentiates the majorized curvature, so it can be
     // wrong in both ways at once.
-    for (label, cache, probes, sinv) in [
-        ("A", &a_cache, &a_probes, &a_sinv),
-        ("B", &b_cache, &b_probes, &b_sinv),
+    for (label, cache, probes, sinv, operator) in [
+        ("A/exact-A-operand", &a_cache, &a_probes, &a_sinv, EvidenceOperator::ExactObservedInformation),
+        ("A/B-operand", &a_cache, &a_probes, &a_sinv, EvidenceOperator::Majorizer),
+        ("B/B-operand", &b_cache, &b_probes, &b_sinv, EvidenceOperator::Majorizer),
     ] {
         let joint = term
-            .ard_log_precision_hessian_trace_from_probes(&rho, cache, probes, sinv)
+            .ard_log_precision_hessian_trace_from_probes(&rho, cache, probes, sinv, operator)
             .unwrap();
         let coordinate = term
-            .coordinate_block_ard_log_precision_hessian_trace(&rho, cache)
+            .coordinate_block_ard_log_precision_hessian_trace(&rho, cache, operator)
             .unwrap();
         for k in 0..rho.log_ard.len() {
             for axis in 0..rho.log_ard[k].len() {
@@ -345,11 +346,7 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
         match term.logdet_theta_adjoint_from_probes(&rho, cache, probes, sinv, exact_a) {
             Ok(mut gamma) => {
                 let coordinate_gamma = term
-                    .coordinate_block_logdet_theta_adjoint(
-                        &rho,
-                        cache,
-                        &DeflatedArrowSolver::plain(cache),
-                    )
+                    .coordinate_block_logdet_theta_adjoint(&rho, cache)
                     .unwrap();
                 gamma.t -= &coordinate_gamma.t;
                 gamma.beta -= &coordinate_gamma.beta;
@@ -447,6 +444,63 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
         "[#2515 A-GEOMETRY] from_probes(exact_a) vs dense(exact_a): \
          residual_target=None -> max|Δt|={against_none:.6e}; Some -> max|Δt|={against_some:.6e}"
     );
+
+    // THE ASSEMBLED GRADIENT, both geometries, through the one production entry
+    // point. `Majorizer` reproduces the historical bundle route byte for byte;
+    // `ExactObservedInformation` routes every from-probes and coordinate-block
+    // channel onto the exact-A factor cache.
+    let b_solver = DeflatedArrowSolver::plain(&b_cache);
+    let dense_components = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &b_cache, &b_solver)
+        .unwrap();
+    for (label, geometry) in [
+        (
+            "Majorizer",
+            BundleEvidenceGeometry::Majorizer {
+                probes: &b_probes,
+                sinv: &b_sinv,
+            },
+        ),
+        (
+            "ExactObservedInformation",
+            BundleEvidenceGeometry::ExactObservedInformation {
+                cache: &a_cache,
+                probes: &a_probes,
+                sinv: &a_sinv,
+            },
+        ),
+    ] {
+        match term.analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &b_cache,
+            &b_solver,
+            Some(geometry),
+            None,
+        ) {
+            Ok(components) => {
+                for i in 0..components.logdet_trace.len() {
+                    println!(
+                        "[#2515 A-GEOMETRY] assembled {label} logdet_trace[{i}]={:.17e} \
+                         dense_exact_A={:.17e} |Δ|={:.6e}",
+                        components.logdet_trace[i],
+                        dense_components.logdet_trace[i],
+                        (components.logdet_trace[i] - dense_components.logdet_trace[i]).abs(),
+                    );
+                }
+                let g = components.gradient();
+                let d = dense_components.gradient();
+                let worst = g
+                    .iter()
+                    .zip(d.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                println!("[#2515 A-GEOMETRY] assembled {label} complete gradient max|Δ|={worst:.6e}");
+            }
+            Err(err) => println!("[#2515 A-GEOMETRY] assembled {label}: REFUSED: {err}"),
+        }
+    }
 
     assert!(
         dense.logdet_trace.iter().all(|v| v.is_finite()),

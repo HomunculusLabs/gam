@@ -9,11 +9,34 @@
 /// operator, and lossless rational derivative are all emitted by the same
 /// frozen surrogate evaluation, so no consumer can accidentally differentiate
 /// a reassembled or differently-randomized operator.
+/// #2515 — what one gradient-bearing streaming evidence evaluation leaves
+/// behind, as ONE object so the two operators cannot be taken from different
+/// evaluations.
+///
+/// `majorizer_system` is `B`: the positive-definite Newton/IFT scale that
+/// [`SaeManifoldTerm::solve_exact_stationarity_matrix_free`] reassembles
+/// `A = B + ΔC` on top of. `exact_a_cache` is the factor cache of the exact
+/// observed information — the operator whose reduced-Schur log-determinant the
+/// criterion ranks and whose derivative representation the surrogate lane emits.
+/// Handing the from-probes channels the majorizer's cache alongside this lane's
+/// `A`-rooted bundle is the #2515 defect; keeping both in one struct, produced by
+/// one call, is what stops them being paired across evaluations.
+pub(crate) struct StreamingEvidenceArtifacts {
+    pub(crate) majorizer_system: ArrowSchurSystem,
+    pub(crate) exact_a_cache: ArrowFactorCache,
+}
+
 pub(crate) struct StreamingOuterEvaluation {
     pub(crate) cost: f64,
     pub(crate) loss: SaeManifoldLoss,
     pub(crate) cache: ArrowFactorCache,
     pub(crate) system: ArrowSchurSystem,
+    /// The factor cache of the exact-`A` evidence operator this evaluation's
+    /// `logdet_derivative_bundle` was produced from (#2515). The from-probes
+    /// selected-inverse channels reconstruct `(H⁻¹)_tt = A_i⁻¹ + G_i S⁻¹ G_iᵀ`,
+    /// so the row factors here and the `S⁻¹` in the bundle must be the same
+    /// operator's; `cache` above stays `B`.
+    pub(crate) exact_a_cache: ArrowFactorCache,
     /// Lossless low-rank derivative of the rational value (all shifts and the
     /// frozen deflation block). This, never the raw shift-zero inverse probes,
     /// owns the outer logdet trace and theta-adjoint channels.
@@ -2884,7 +2907,7 @@ impl SaeManifoldTerm {
         ridge_beta: f64,
         lane: Option<&mut SurrogateLaneState>,
     ) -> Result<(f64, SaeManifoldLoss, ArrowFactorCache), SaeCriterionError> {
-        let (cost, loss, cache, _system) = self
+        let (cost, loss, cache, _artifacts) = self
             .penalized_quasi_laplace_criterion_streaming_exact_with_cache_lane_and_system(
                 target,
                 rho,
@@ -2938,7 +2961,7 @@ impl SaeManifoldTerm {
                 ridge_beta,
                 Some(&mut *lane),
             );
-        let (cost, loss, cache, system) = match evaluated {
+        let (cost, loss, cache, artifacts) = match evaluated {
             Ok(evaluated) => evaluated,
             Err(error) => {
                 drop(lane.take_logdet_derivative_bundle());
@@ -2959,9 +2982,13 @@ impl SaeManifoldTerm {
                     .to_string(),
             ));
         }
-        let system = system.ok_or_else(|| {
+        let StreamingEvidenceArtifacts {
+            majorizer_system: system,
+            exact_a_cache,
+        } = artifacts.ok_or_else(|| {
             SaeCriterionError::Numerical(
-                "streaming outer evaluation did not retain its matrix-free evidence system"
+                "streaming outer evaluation did not retain its matrix-free evidence system \
+                 and exact-A factor cache"
                     .to_string(),
             )
         })?;
@@ -3005,6 +3032,7 @@ impl SaeManifoldTerm {
             loss,
             cache,
             system,
+            exact_a_cache,
             logdet_derivative_bundle,
             efs_inverse_probe_bundle,
         })
@@ -3025,7 +3053,7 @@ impl SaeManifoldTerm {
             f64,
             SaeManifoldLoss,
             ArrowFactorCache,
-            Option<ArrowSchurSystem>,
+            Option<StreamingEvidenceArtifacts>,
         ),
         SaeCriterionError,
     > {
@@ -3095,7 +3123,7 @@ impl SaeManifoldTerm {
         // #9: accumulate the per-atom Grams + N_eff + log_det_tt in the same
         // log-det pass. These are required by the canonical rank-charge criterion.
         let mut rank_inputs = StreamingRankInputs::default();
-        let (log_det, evidence_system) = self.streaming_exact_arrow_log_det_with_lane_and_system(
+        let (log_det, evidence_artifacts) = self.streaming_exact_arrow_log_det_with_lane_and_system(
             target,
             rho,
             registry,
@@ -3175,7 +3203,7 @@ impl SaeManifoldTerm {
                 rank_adjusted_quasi_laplace_complexity(log_det, ri.log_det_tt, &d_eff, &ri.n_eff)?;
             loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam
         };
-        Ok((v, loss, converged_cache, evidence_system))
+        Ok((v, loss, converged_cache, evidence_artifacts))
     }
 
     /// Value-only streaming criterion — the cache-returning
@@ -3525,7 +3553,7 @@ impl SaeManifoldTerm {
         registry: Option<&AnalyticPenaltyRegistry>,
         mut rank_inputs: Option<&mut StreamingRankInputs>,
         mut lane: Option<&mut SurrogateLaneState>,
-    ) -> Result<(f64, Option<ArrowSchurSystem>), String> {
+    ) -> Result<(f64, Option<StreamingEvidenceArtifacts>), String> {
         if target.dim() != (self.n_obs(), self.output_dim()) {
             return Err(format!(
                 "SaeManifoldTerm::streaming_exact_arrow_log_det: target must be ({}, {}); got {:?}",
@@ -3585,21 +3613,56 @@ impl SaeManifoldTerm {
             // derived-rank rational surrogate (matrix-free, value+ρ-gradient one
             // functional). `log_det_tt` (the Σ log|H_tt| coordinate block) is exact
             // on the shared factorization either way.
-            let (log_det_tt, log_det_schur) = matrix_free_arrow_evidence_log_det_surrogate(
-                &a_sys,
-                0.0,
-                0.0,
-                &options,
-                SCHUR_SLQ_LOGDET_PROBES,
-                SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
-                SCHUR_SLQ_LOGDET_SEED,
-                lane.as_deref_mut(),
-            )
-            .map_err(|err| {
-                format!(
-                    "SaeManifoldTerm::streaming_exact_arrow_log_det: matrix-free criterion log-det: {err:?}"
-                )
-            })?;
+            //
+            // #2515 — a lane-bearing evaluation takes the GRADIENT-BEARING entry
+            // point, which emits the exact-`A` row factorization alongside the
+            // value and the derivative bundle. All three then come from ONE
+            // factorization of ONE operator, which is what lets the outer gradient
+            // reconstruct `(H⁻¹)_tt = A_i⁻¹ + G_i S_A⁻¹ G_iᵀ` instead of splicing
+            // `A`'s reduced Schur onto `B`'s row blocks. The value-only entry is
+            // retained verbatim for `lane = None` (bit-identical SLQ).
+            let (log_det_tt, log_det_schur, exact_a_cache) = match lane.as_deref_mut() {
+                Some(lane) => {
+                    let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
+                        &a_sys,
+                        0.0,
+                        0.0,
+                        &options,
+                        SCHUR_SLQ_LOGDET_PROBES,
+                        SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
+                        SCHUR_SLQ_LOGDET_SEED,
+                        lane,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "SaeManifoldTerm::streaming_exact_arrow_log_det: matrix-free criterion log-det: {err:?}"
+                        )
+                    })?;
+                    (
+                        evaluated.log_det_tt,
+                        evaluated.log_det_schur,
+                        Some(evaluated.factor_cache),
+                    )
+                }
+                None => {
+                    let (log_det_tt, log_det_schur) = matrix_free_arrow_evidence_log_det_surrogate(
+                        &a_sys,
+                        0.0,
+                        0.0,
+                        &options,
+                        SCHUR_SLQ_LOGDET_PROBES,
+                        SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
+                        SCHUR_SLQ_LOGDET_SEED,
+                        None,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "SaeManifoldTerm::streaming_exact_arrow_log_det: matrix-free criterion log-det: {err:?}"
+                        )
+                    })?;
+                    (log_det_tt, log_det_schur, None)
+                }
+            };
             if !log_det_schur.is_finite() {
                 return Err(format!(
                     "SaeManifoldTerm::streaming_exact_arrow_log_det: matrix-free reduced-Schur \
@@ -3609,7 +3672,13 @@ impl SaeManifoldTerm {
             if let Some(ri) = rank_inputs.as_deref_mut() {
                 ri.log_det_tt = log_det_tt;
             }
-            return Ok((log_det_tt + log_det_schur, Some(sys)));
+            return Ok((
+                log_det_tt + log_det_schur,
+                exact_a_cache.map(|exact_a_cache| StreamingEvidenceArtifacts {
+                    majorizer_system: sys,
+                    exact_a_cache,
+                }),
+            ));
         }
         let n_total = self.n_obs();
         let chunk_size = plan.chunk_size.min(n_total.max(1));
@@ -4124,10 +4193,14 @@ impl SaeManifoldTerm {
     /// `½ Σ_i log|H_tt^(i)|` with respect to the assignment-strength rho
     /// coordinate. The canonical criterion subtracts this term from the full
     /// joint logdet, so the outer gradient must subtract this trace too.
+    /// `operator` (#2515) selects the `∂H/∂ρ_sparse` operand exactly as the joint
+    /// leg's does: `B`'s diagonal Gershgorin majorizer, or `A`'s dense entropy
+    /// Hessian. Both legs of `½log|H| − ½log|H_tt|` must name the same operator.
     pub(crate) fn coordinate_block_assignment_log_strength_hessian_trace(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
+        operator: EvidenceOperator,
     ) -> Result<f64, String> {
         self.assignment.validate_rho_domain(rho)?;
         let k_atoms = self.k_atoms();
@@ -4143,15 +4216,15 @@ impl SaeManifoldTerm {
                 Some((
                     temperature,
                     rho.lambda_sparse()? * sparsity * inv_tau * inv_tau,
-                    gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                        k_atoms,
-                        temperature,
-                    ),
                 ))
             }
             AssignmentMode::Softmax { .. } => return Ok(0.0),
             _ => None,
         };
+        // Per-row softmax assignment scratch, reused across rows (the softmax arm
+        // reads `a` rather than raw logits so both operator arms come off ONE
+        // vector — see `softmax_sparse_curvature_rho_derivative_block`).
+        let mut softmax_assignments = Array1::<f64>::zeros(k_atoms);
         let mut hdiag = if softmax.is_none() {
             crate::assignment::assignment_prior_log_strength_hdiag_weighted(
                 &self.assignment,
@@ -4210,17 +4283,34 @@ impl SaeManifoldTerm {
                 }
             }
             let mut derivative = Array2::<f64>::zeros((q, q));
-            if let Some((_temperature, scale, penalty)) = softmax.as_ref() {
+            if let Some((_temperature, scale)) = softmax.as_ref() {
                 let row_weight = row_weights.map_or(1.0, |weights| weights[row]);
                 match self.last_row_layout {
                     Some(_) => {}
                     None => {
-                        let logits = (0..k_atoms)
-                            .map(|atom| self.assignment.logits[[row, atom]])
-                            .collect::<Vec<_>>();
-                        let curvature = penalty.psd_majorizer_abs_row_sums(&logits, *scale);
-                        for atom in 0..assignment_dim.min(q) {
-                            derivative[[atom, atom]] = row_weight * curvature[atom];
+                        self.assignment.try_assignments_row_into(
+                            row,
+                            softmax_assignments
+                                .as_slice_mut()
+                                .expect("softmax assignment scratch is contiguous"),
+                        )?;
+                        let a_soft = softmax_assignments
+                            .as_slice()
+                            .expect("softmax assignment scratch is contiguous");
+                        let m = softmax_majorizer_log_mean(a_soft);
+                        let slot_atoms: Vec<usize> = (0..assignment_dim.min(q)).collect();
+                        let block = softmax_sparse_curvature_rho_derivative_block(
+                            a_soft,
+                            &slot_atoms,
+                            m,
+                            *scale,
+                            row_weight,
+                            operator,
+                        );
+                        for (a, _) in slot_atoms.iter().enumerate() {
+                            for (b, _) in slot_atoms.iter().enumerate() {
+                                derivative[[a, b]] = block[[a, b]];
+                            }
                         }
                     }
                 }
@@ -4284,6 +4374,7 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         probes: &[Array1<f64>],
         sinv_probes: &[Array1<f64>],
+        operator: EvidenceOperator,
     ) -> Result<f64, String> {
         self.assignment.validate_rho_domain(rho)?;
         let m = probes.len();
@@ -4317,15 +4408,12 @@ impl SaeManifoldTerm {
                 Some((
                     temperature,
                     rho.lambda_sparse()? * sparsity * inv_tau * inv_tau,
-                    gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                        k_atoms,
-                        temperature,
-                    ),
                 ))
             }
             AssignmentMode::Softmax { .. } => return Ok(0.0),
             _ => None,
         };
+        let mut softmax_assignments = Array1::<f64>::zeros(k_atoms);
         let mut hdiag = if softmax.is_none() {
             crate::assignment::assignment_prior_log_strength_hdiag_weighted(
                 &self.assignment,
@@ -4392,27 +4480,66 @@ impl SaeManifoldTerm {
                 .get(row)
                 .and_then(Option::as_ref);
 
-            if let Some((_temperature, scale, penalty)) = softmax.as_ref() {
+            if let Some((_temperature, scale)) = softmax.as_ref() {
                 let row_weight = row_loss_weights.map_or(1.0, |weights| weights[row]);
                 match self.last_row_layout {
                     Some(_) => {}
                     None => {
-                        let row_logits = (0..k_atoms)
-                            .map(|atom| self.assignment.logits[[row, atom]])
-                            .collect::<Vec<_>>();
-                        let curvature = penalty.psd_majorizer_abs_row_sums(&row_logits, *scale);
+                        self.assignment.try_assignments_row_into(
+                            row,
+                            softmax_assignments
+                                .as_slice_mut()
+                                .expect("softmax assignment scratch is contiguous"),
+                        )?;
+                        let a_soft = softmax_assignments
+                            .as_slice()
+                            .expect("softmax assignment scratch is contiguous");
+                        let m = softmax_majorizer_log_mean(a_soft);
                         let logit_dim = assignment_dim.min(inverse_diagonal.len());
-                        for atom in 0..logit_dim {
-                            // Kept-subspace diagonal, matching the dense softmax
-                            // branch's `latent_inverse_diagonal_kept`: the deflated
-                            // inverse assigns `1/λ̃ = 1` to each `vᵢ`, and a
-                            // ρ-independent direction must contribute 0.
-                            let kept = inverse_diagonal[atom]
-                                - dirs
-                                    .iter()
-                                    .map(|v| v.get(atom).copied().unwrap_or(0.0).powi(2))
-                                    .sum::<f64>();
-                            trace += kept * row_weight * curvature[atom];
+                        let slot_atoms: Vec<usize> = (0..logit_dim).collect();
+                        let block = softmax_sparse_curvature_rho_derivative_block(
+                            a_soft,
+                            &slot_atoms,
+                            m,
+                            *scale,
+                            row_weight,
+                            operator,
+                        );
+                        match operator {
+                            EvidenceOperator::Majorizer => {
+                                // `∂B/∂ρ_sparse` is DIAGONAL, so the contraction is
+                                // the kept-subspace diagonal — matching the dense
+                                // softmax branch's `latent_inverse_diagonal_kept`:
+                                // the deflated inverse assigns `1/λ̃ = 1` to each
+                                // `vᵢ`, and a ρ-independent direction must
+                                // contribute 0.
+                                for atom in 0..logit_dim {
+                                    let kept = inverse_diagonal[atom]
+                                        - dirs
+                                            .iter()
+                                            .map(|v| v.get(atom).copied().unwrap_or(0.0).powi(2))
+                                            .sum::<f64>();
+                                    trace += kept * block[[atom, atom]];
+                                }
+                            }
+                            EvidenceOperator::ExactObservedInformation => {
+                                // `∂A/∂ρ_sparse` is the DENSE entropy Hessian, so the
+                                // diagonal shortcut does not apply: contract the full
+                                // block and take the general Daleckii–Krein deflation
+                                // correction, exactly as the non-softmax arm below.
+                                let mut d_mat = Array2::<f64>::zeros((q, q));
+                                for a in 0..logit_dim {
+                                    for b in 0..logit_dim {
+                                        d_mat[[a, b]] = block[[a, b]];
+                                        trace += inv_vv[[b, a]] * block[[a, b]];
+                                    }
+                                }
+                                if !dirs.is_empty() {
+                                    trace -= Self::deflation_block_correction(
+                                        &inv_vv, &d_mat, dirs, spectrum,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -5418,13 +5545,19 @@ impl SaeManifoldTerm {
 
     /// `Γ_tt = ∂_theta Σ_i log|H_tt^(i)|`, the state derivative of the
     /// coordinate-block logdet removed by the canonical rank-charge criterion.
+    /// #2515 — the coordinate-block leg takes NO solver. Its `joint_block = false`
+    /// arm never reaches one: `fast_selected` short-circuits on `joint_block`,
+    /// `beta_inv` is the zero block, and every row's `(H⁻¹)_tt` is the row-local
+    /// Cholesky inverse. Accepting a solver here only created a way for a caller
+    /// to pair this leg with a different operator's inverse than the joint leg it
+    /// is subtracted from, which is the class of defect #2515 is about.
     pub(crate) fn coordinate_block_logdet_theta_adjoint(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
-        solver: &DeflatedArrowSolver<'_>,
     ) -> Result<SaeArrowVector, String> {
-        self.logdet_theta_adjoint_for_block(rho, cache, solver, false)
+        let solver = DeflatedArrowSolver::plain(cache);
+        self.logdet_theta_adjoint_for_block(rho, cache, &solver, false)
     }
 
     fn logdet_theta_adjoint_for_block(

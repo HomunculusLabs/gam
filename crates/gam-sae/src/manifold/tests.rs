@@ -4104,7 +4104,7 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
 
     let solver = DeflatedArrowSolver::plain(&cache);
     let dense = term
-        .ard_log_precision_hessian_trace(&rho, &cache, &solver)
+        .ard_log_precision_hessian_trace(&rho, &cache, &solver, EvidenceOperator::Majorizer)
         .unwrap();
 
     let k = cache.k;
@@ -4121,7 +4121,13 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
         .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
         .collect();
     let matrix_free = term
-        .ard_log_precision_hessian_trace_from_probes(&rho, &cache, &probes, &sinv)
+        .ard_log_precision_hessian_trace_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+        )
         .unwrap();
 
     assert_eq!(dense.len(), matrix_free.len());
@@ -4231,7 +4237,10 @@ fn laplace_value_and_gradient_are_route_invariant_2515() {
             &loss,
             &cache,
             &solver,
-            Some((&probes, &sinv)),
+            Some(BundleEvidenceGeometry::Majorizer {
+                probes: &probes,
+                sinv: &sinv,
+            }),
             None,
         )
         .unwrap();
@@ -4432,7 +4441,10 @@ fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
             &loss,
             &cache,
             &solver,
-            Some((&probes, &sinv)),
+            Some(BundleEvidenceGeometry::Majorizer {
+                probes: &probes,
+                sinv: &sinv,
+            }),
             None,
         )
         .unwrap();
@@ -5276,7 +5288,10 @@ fn zz_measure_smoothness_dof_bundle_vs_deflated_2499() {
             &loss,
             &cache,
             &solver,
-            Some((&probes, &sinv)),
+            Some(BundleEvidenceGeometry::Majorizer {
+                probes: &probes,
+                sinv: &sinv,
+            }),
             None,
         )
         .unwrap();

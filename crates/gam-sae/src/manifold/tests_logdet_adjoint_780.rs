@@ -788,7 +788,7 @@ fn assert_dual_rho_logdet_parity_2156(
     }
 
     let ard_analytic = term
-        .ard_log_precision_hessian_trace(rho, cache, &solver)
+        .ard_log_precision_hessian_trace(rho, cache, &solver, EvidenceOperator::Majorizer)
         .expect("production ARD rho trace");
     let mut flat = 1 + rho.log_lambda_smooth.len();
     for atom in 0..rho.log_ard.len() {
@@ -884,7 +884,7 @@ fn assert_dual_ard_logdet_parity_2156(
     let h = dense_cached_arrow_hessian_2156(cache);
     let solver = DeflatedArrowSolver::plain(cache);
     let ard_analytic = term
-        .ard_log_precision_hessian_trace(rho, cache, &solver)
+        .ard_log_precision_hessian_trace(rho, cache, &solver, EvidenceOperator::Majorizer)
         .expect("production ARD rho trace");
     let mut max_rel = 0.0_f64;
     for atom in 0..rho.log_ard.len() {

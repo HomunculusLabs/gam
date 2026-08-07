@@ -564,6 +564,8 @@ pub fn rank_charge_dof(
 }
 
 pub use construction::{SaeCriterionError, VanishedAtoms};
+// #2515 — the bundle-routed outer gradient's evidence geometry, named by variant.
+pub(crate) use construction::{BundleEvidenceGeometry, EvidenceOperator};
 
 pub use crate::inference::atlas_nerve::AtlasCoveringSide;
 pub use atlas_topology::*;

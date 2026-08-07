@@ -414,6 +414,28 @@ impl ArdAxisPrior {
         gam_linalg::utils::smooth_psd_clamp_slope(cos)
     }
 
+    /// #2515 — the `∂/∂log α` curvature operand for `operator`.
+    ///
+    /// Both arms are exact log-precision derivatives by the SAME homogeneity
+    /// argument recorded above: `α·s_{τ₀}(cos κt)` and `α·cos κt` are each
+    /// degree-one in `α`, so each is its own `∂/∂log α`. `Majorizer` therefore
+    /// returns `∂B/∂log α` and `ExactObservedInformation` returns
+    /// `∂A/∂log α = V''`, the unmajorized signed curvature.
+    ///
+    /// This is a SELECTION, not a re-derivation: `hess == psd_majorizer_hess() +
+    /// negative_hessian_remainder()` holds bit-for-bit, and
+    /// `exact_a_ard_operator_derivative_is_the_unmajorized_hessian_2515` pins that
+    /// identity against the production `∂ΔC/∂ρ` map row by row. Reading the two
+    /// arms through one accessor is what stops a channel from differentiating one
+    /// operator while contracting the other's inverse.
+    #[inline]
+    pub(crate) fn log_precision_curvature(&self, operator: EvidenceOperator) -> f64 {
+        match operator {
+            EvidenceOperator::Majorizer => self.psd_majorizer_hess(),
+            EvidenceOperator::ExactObservedInformation => self.hess,
+        }
+    }
+
     /// Positive-semidefinite curvature used by the Newton/Schur majorizer.
     ///
     /// This is deliberately not the exact prior Hessian on a periodic axis: the

@@ -711,7 +711,13 @@ struct ReactiveWaypointCheckpoint {
 }
 
 struct MatrixFreeOuterArtifacts {
+    /// The `B` majorizer operator the exact-stationarity solve reassembles
+    /// `A = B + ΔC` on top of.
     system: ArrowSchurSystem,
+    /// #2515 — the factor cache of the exact observed information whose reduced
+    /// Schur produced `logdet_derivative_bundle`. It travels WITH the bundle so
+    /// the outer gradient cannot contract `A`'s `S⁻¹` against `B`'s row blocks.
+    exact_a_cache: ArrowFactorCache,
     logdet_derivative_bundle: RationalLogdetDerivativeBundle,
     efs_inverse_probe_bundle: Option<(Vec<Array1<f64>>, Vec<Array1<f64>>)>,
 }
@@ -1199,6 +1205,7 @@ impl SaeManifoldOuterObjective {
             cache: evaluated.cache,
             matrix_free: Some(MatrixFreeOuterArtifacts {
                 system: evaluated.system,
+                exact_a_cache: evaluated.exact_a_cache,
                 logdet_derivative_bundle: evaluated.logdet_derivative_bundle,
                 efs_inverse_probe_bundle: evaluated.efs_inverse_probe_bundle,
             }),
@@ -1224,7 +1231,23 @@ impl SaeManifoldOuterObjective {
                     &evaluation.loss,
                     &evaluation.cache,
                     &solver,
-                    Some((derivative_vectors, derivative_vectors)),
+                    // #2515 — the ranked criterion on this lane is
+                    // `½log|S_A| + rank_charge` (`rank_adjusted_quasi_laplace_-
+                    // complexity` takes `½(log_det − log_det_tt)` and BOTH come
+                    // off `exact_a_evidence_system`, so the per-row t-block
+                    // log-dets cancel and the reduced Schur of `A` is the whole
+                    // operator exposure). Its derivative is therefore
+                    // `½tr(S_A⁻¹ ∂S_A/∂ρ)`, which the from-probes channels
+                    // reconstruct only if the row geometry and the `S⁻¹` come from
+                    // the same operator. `cache` stays `B`: it is the Newton/IFT
+                    // scale that `solve_exact_stationarity_matrix_free` rebuilds
+                    // `A = B + ΔC` on top of, and promoting it would double-count
+                    // `ΔC`.
+                    Some(BundleEvidenceGeometry::ExactObservedInformation {
+                        cache: &matrix_free.exact_a_cache,
+                        probes: derivative_vectors,
+                        sinv: derivative_vectors,
+                    }),
                     Some(&matrix_free.system),
                 )?
         } else {
