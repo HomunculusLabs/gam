@@ -1,5 +1,7 @@
 use super::*;
 
+use gam_linalg::faer_ndarray::FaerSvd;
+
 /// Generate a B-spline knot vector spanning a 1-D seed sample.
 ///
 /// Family-agnostic knot-generation helper relocated DOWN into `gam-terms`
@@ -2721,44 +2723,72 @@ fn ridge_from_null_metric_action(
     Ok(fast_abt(&gz, &gz))
 }
 
-/// Construct the same metric ridge while retaining its energy factor.
-fn constructive_ridge_from_null_metric_action(
+/// Construct the same metric ridge from the metric's own energy FACTOR, so the
+/// restricted metric is a Gram by construction and cannot come out indefinite.
+///
+/// `M = Nᵀ G_c N` with `G_c = A_Gᵀ A_G` is identically `(A_G N)ᵀ (A_G N)`. The
+/// two expressions agree in exact arithmetic and differ sharply in floating
+/// point: materializing `G_c` first squares `A_G`'s condition number and leaves
+/// an absolute error `O(ε·‖G_c‖)` on entries of `M`, which is unbounded
+/// *relative to `M`* whenever `N` sits where `G_c` is small. That error is
+/// signed, so a Gram that cannot be indefinite comes out indefinite, and the
+/// caller — having correctly observed that its input must be PSD — refuses.
+///
+/// Measured on the #2761 measure-jet sweep the moment the representer chart
+/// stopped being truncated (`346c1b992`): four of four cases died at
+/// `null-function metric is indefinite; eigenvalue -3.31e-5 below tolerance
+/// -1.30e-11`. The negative eigenvalues are entirely an artifact of the dense
+/// route — the same fixtures produce a strictly non-negative spectrum through
+/// the factor.
+///
+/// So the eigenpairs are taken from an SVD of `B = A_G N` (`M = V Σ² Vᵀ`) and
+/// `M` is never formed at all. This is the #2318 rule — *rank revelation acts
+/// on `A`, not on `AᵀA`* — applied to the metric restriction, which is where
+/// the sibling `null(S_c)` computation twenty lines up already applies it.
+fn constructive_ridge_from_null_metric_factor(
     n: &Array2<f64>,
-    w: &Array2<f64>,
+    metric_factor: &Array2<f64>,
     context: &str,
 ) -> Result<ConstructiveQuadratic, BasisError> {
-    // `M = NᵀW = Nᵀ G_c N` is the function metric restricted to `null(S_c)`.
-    let c_raw = n.t().dot(w);
-    let (c_sym, evals, evecs) = spectral_summary(&c_raw)?;
-    let tol = generalized_spectral_tolerance(&evals, &c_sym);
-    // A materially NEGATIVE metric eigenvalue is a construction failure: `M` is
-    // a Gram of the function metric restricted to a subspace and cannot be
-    // indefinite, so this means the supplied `W` is not that metric's action.
-    if let Some(&invalid) = evals.iter().find(|&&value| value < -tol) {
-        crate::bail_invalid_basis!(
-            "{context}: null-function metric is indefinite; eigenvalue {invalid:.6e} is below tolerance -{tol:.6e}"
-        );
-    }
-    // A SINGULAR one is not. The double penalty is not obliged to cover every
-    // unpenalized direction: Duchon deliberately leaves the model intercept
-    // free while shrinking only the affine trend, so a null space that is
-    // larger than the ridge's own subspace is the designed state, not a defect.
-    // `N M Nᵀ` with PSD `M` is identically `Ñ M̃ Ñᵀ` on `M`'s positive part, so
-    // dropping the null part is an identity rather than an approximation, and
-    // an all-zero `M` correctly yields a zero block that the candidate filter
-    // then drops. Rejecting this instead made the shipped topology depend on
-    // whether the primary's numerical null space happened to coincide with the
-    // ridge's support (gam#2433).
-    let kept: Vec<usize> = evals
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &value)| (value > tol).then_some(index))
+    let restricted = fast_ab(metric_factor, n);
+    let (_, singular, right) = restricted.svd(false, true).map_err(BasisError::LinalgError)?;
+    let right = right.ok_or_else(|| {
+        BasisError::LinalgError(gam_linalg::faer_ndarray::FaerLinalgError::SvdNoConvergence {
+            context: "null-metric restriction: right singular vectors were not returned",
+        })
+    })?;
+    // `‖M‖₂ = σ_max²` exactly, so the roundoff envelope is denominated in the
+    // restricted metric's own norm — no row-sum upper bound is needed to stand
+    // in for a norm the eigensolver might underestimate, because the singular
+    // values come from `B` directly rather than from two whitening solves.
+    let sigma_max = singular.iter().copied().fold(0.0_f64, f64::max);
+    let tol = default_rrqr_rank_alpha()
+        * f64::EPSILON
+        * n.ncols().max(1) as f64
+        * (sigma_max * sigma_max);
+    // A SINGULAR metric is admissible. The double penalty is not obliged to
+    // cover every unpenalized direction: Duchon deliberately leaves the model
+    // intercept free while shrinking only the affine trend, so a null space
+    // that is larger than the ridge's own subspace is the designed state, not a
+    // defect. `N M Nᵀ` with PSD `M` is identically `Ñ M̃ Ñᵀ` on `M`'s positive
+    // part, so dropping the null part is an identity rather than an
+    // approximation, and an all-zero `M` correctly yields a zero block that the
+    // candidate filter then drops. Rejecting this instead made the shipped
+    // topology depend on whether the primary's numerical null space happened to
+    // coincide with the ridge's support (gam#2433).
+    let kept: Vec<usize> = (0..singular.len())
+        .filter(|&index| singular[index] * singular[index] > tol)
         .collect();
     if kept.is_empty() {
         return ConstructiveQuadratic::from_energy_factor(Array2::zeros((0, n.nrows())), context);
     }
-    let evecs = evecs.select(Axis(1), &kept);
-    let evals = Array1::from_iter(kept.iter().map(|&index| evals[index]));
+    let mut evecs = Array2::<f64>::zeros((n.ncols(), kept.len()));
+    for (column, &index) in kept.iter().enumerate() {
+        for row in 0..n.ncols() {
+            evecs[(row, column)] = right[(index, row)];
+        }
+    }
+    let evals = Array1::from_iter(kept.iter().map(|&index| singular[index] * singular[index]));
     // The double-penalty ridge is `R = N M Nᵀ`, NOT the metric projector
     // `W M⁻¹ Wᵀ = G_c N (Nᵀ G_c N)⁻¹ Nᵀ G_c`. Both weight the null directions by the
     // function metric `M`, but `R`'s range is `span(N) = null(S_c)` (so `S_c·R = 0`
@@ -3155,10 +3185,13 @@ pub(crate) fn rebuild_metric_consistent_ridge(
             n
         }
     };
-    let w = ridge_constrained.dense().dot(&n);
-    Ok(Some(constructive_ridge_from_null_metric_action(
+    // The metric enters through its AUTHORITATIVE energy factor, not through
+    // its dense materialization: `Nᵀ R_c N = (A_R N)ᵀ (A_R N)` is the same
+    // object, PSD by construction, and does not square `A_R`'s conditioning on
+    // the way (see `constructive_ridge_from_null_metric_factor`).
+    Ok(Some(constructive_ridge_from_null_metric_factor(
         &n,
-        &w,
+        ridge_constrained.factor(),
         "metric-consistent ridge rebuild",
     )?))
 }

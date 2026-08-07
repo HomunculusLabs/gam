@@ -846,50 +846,71 @@ pub(crate) fn median_nearest_center_spacing(dist2: &Array2<f64>) -> Result<f64, 
 /// ## The section
 ///
 /// Whiten against the section's own center evaluation map,
-/// `E = K_cc Z = U Σ Vᵀ`: take `Z ← Z · V Σ⁻¹`, so the realized section
-/// satisfies `EᵀE = I` on the representer block, and drop only what the
-/// decomposition itself cannot resolve (`σ ≤ ε · σ_max · max(dim)`, the
-/// standard numerical-rank bar).
+/// `E = K_cc Z = U Σ Vᵀ`: take `Z ← Z · V · diag(1/max(σ, √ε·σ_max))`, so the
+/// realized section satisfies `EᵀE = I` wherever `E` is resolvable and is
+/// *damped rather than deleted* below that. Two questions, two bars, and they
+/// are not the same question:
+///
+/// * **Does the direction exist?** `σ > ε·σ_max·max(dim)` — the standard
+///   numerical-rank bar of the decomposition. Below it there is nothing to
+///   carry.
+/// * **How far may it be amplified?** `1/σ` is also the factor by which
+///   direction `i` amplifies the design's own roundoff, and the criterion
+///   squares the design into `XᵀWX`, so the amplification survives that Gram
+///   with significant digits exactly when `ε·(σ_max/σ_i)² < 1`. Hence the
+///   scaling — not the membership — is floored at `√ε·σ_max`.
+///
+/// **Damping instead of deleting is what makes the width `ℓ`-invariant.** A
+/// span is invariant under ANY invertible diagonal rescaling, so a damped
+/// direction contributes exactly the same column space as an undamped one; it
+/// simply enters the design with a small norm instead of an amplified one, and
+/// carries its own roundoff in at that same small norm. The realized chart
+/// therefore keeps every direction `E` has, at every `ℓ`, while
+/// `cond(E·W) ≤ √ε·cond(E)` is bounded by construction.
 ///
 /// * The rescaling is a pure change of coefficient chart. The profiled
 ///   criterion is invariant under an invertible reparameterization (`X → XT`,
 ///   `S → TᵀST` moves `log|XᵀWX + λS|` and `log|λS|₊` by the same
 ///   `2 ln|det T|`), so it changes no estimate — only the arithmetic.
-/// * **The whitening is what repairs the pullback, and it is exact — so there
-///   is nothing left below it to truncate.** With `EᵀE = I` the energy pullback
-///   is `S = UᵀQU` with `U` orthonormal, whose spectrum is bounded by `Q`'s;
-///   and `Q` is `ℓ`-INVARIANT (a form on center VALUES), so `cond(S)` stops
-///   being a function of the range at all. "The energy pullback squares `E`"
-///   is a true statement about an *unwhitened* section only: it does not
-///   survive its own remedy.
-/// * **The rank bar has to be read off `E`, not off `EᵀE`.** Forming the Gram
-///   squares the condition number, so an eigenvalue of `G` is meaningful only
-///   down to `ε·λ_max`, i.e. `σ/σ_max > √ε`; a `√ε·λ_max` cut on top of that is
-///   a *second* half-mantissa, admitting only `cond(E) ≤ ε^{-1/4} ≈ 8·10³`.
-///   Measured on the #2761 1-D-curve-in-3-D fixture at 16 centers, that deleted
-///   most of the span at the ranges REML actively selects:
+/// * **The whitening removes the squaring from the PENALTY, exactly.** With
+///   `EᵀE = I` the energy pullback is `S = UᵀQU` with `U` orthonormal, whose
+///   spectrum is bounded by `Q`'s; and `Q` is `ℓ`-INVARIANT (a form on center
+///   VALUES), so `cond(S)` stops being a function of the range at all.
+///   Measured, re-realizing the chart at each `ℓ` on the #2761 fixture:
+///   `cond(E) = 1.0`, `cond(S₊) = 21.1`, `log|S|₊ = 0.800` from `1×` to `16×`
+///   the seed range. So "the energy pullback squares `E`" — the reason the
+///   previous cut gave for being where it was — does not survive its own
+///   remedy.
+/// * **What the whitening does NOT remove is the squaring in `XᵀWX`.** The
+///   chart lives at the CENTERS; the design lives at the DATA, and `1/σ_i` is
+///   also the factor by which direction `i` amplifies the design's own
+///   roundoff. The criterion squares the design, so a retained direction
+///   survives with significant digits exactly when `ε·(σ_max/σ_i)² < 1`. That
+///   is where the half-mantissa belongs, and it is one half-mantissa, not two.
+/// * **The previous cut spent the half-mantissa twice, on an already-squared
+///   quantity — and spent it by DELETING.** It whitened against `G = EᵀE` and
+///   cut at `√ε·λ_max(G)`; since `λ = σ²` that is `σ > ε^{1/4}·σ_max`, i.e.
+///   `cond(E) ≤ ε^{-1/4} ≈ 8·10³`. Measured on the #2761 fixture at 16 centers,
+///   that deleted most of the span at the ranges REML actively selects:
 ///
 /// ```text
-///   ℓ/ℓ_seed  cond(E)    Gram cut: p  span floor    SVD cut: p  span floor
-///      1      3.0e+01        12        6.11e-2          12      6.11e-2
-///      2      2.8e+04        11        2.43e-2          12      1.94e-2
-///      4      4.2e+07         8        1.50e-2          12      2.10e-3
-///      8      9.1e+09         6        1.67e-2          12      1.81e-4   <- 92x
-///     16      2.7e+11         4        8.92e-2          12      3.54e-5
+///   ℓ/ℓ_seed  cond(E)   ε^{1/4} DELETE: p  span floor    √ε DAMP: p  span floor
+///      1      3.0e+01         12            6.11e-2          12       6.11e-2
+///      2      2.8e+04         11            2.43e-2          12       1.94e-2
+///      4      4.2e+07          8            1.50e-2          12       2.10e-3
+///      8      9.1e+09          6            1.67e-2          12       1.81e-4   <- 92x
+///     16      2.7e+11          4            8.92e-2          12       3.54e-5
 /// ```
 ///
 ///   `span floor` is the least-squares residual RMSE of the NOISELESS truth on
 ///   the realized design's own column span — the bound no `λ` can beat, since
-///   `λ` shrinks inside a span and never moves one. The `SVD cut` column
-///   reproduces an 80-digit projection of the same span to every printed digit,
-///   so double precision loses nothing that is being kept here. Note the Gram
-///   cut's floor going UP past `4×`: the truncated chart is worse than the seed
-///   it was meant to improve on.
-///
-///   The truncation also made `p` a STEP function of the `ln ℓ` dial
-///   (`12,11,8,6,4`) — the outer search's own model dimension moving underneath
-///   it — where the whitened section holds `p = 12`, `cond(E) = 1` and
-///   `log|S|₊ = 0.800` across that entire sweep.
+///   `λ` shrinks inside a span and never moves one. Note the `ε^{1/4}` floor
+///   going UP past `4×`: that chart is worse than the seed range it was meant
+///   to improve on. The damped column keeps the whole span (`1.81e-4` at `8×`
+///   reproduces an 80-digit projection of the same span to every digit) at a
+///   width that does not move with the dial, which a DELETING bar cannot do at
+///   any threshold — `12,11,8,6,4` for `ε^{1/4}` and `12,12,12,11,10` even for
+///   `√ε`.
 ///
 /// Realized per cold build from `K_cc(ℓ)`, so the chart tracks the dial it is a
 /// chart for; a frozen-quadrature replay reuses the composed transform verbatim.
@@ -913,13 +934,21 @@ fn condition_representer_section(
             context: "measure-jet representer section: right singular vectors were not returned",
         })
     })?;
-    // The numerical-rank bar of the decomposition itself: singular values carry
-    // absolute error `O(ε·σ_max)` with the usual `max(rows, cols)` dimension
-    // factor. After the whitening this is the ONLY bound in force, because the
-    // pullback no longer squares anything.
+    // Membership: the standard numerical-rank bar of the decomposition. A
+    // direction below it is not a direction `E` has.
     let dimension_factor = evaluation.nrows().max(evaluation.ncols()) as f64;
-    let cut = leading * f64::EPSILON * dimension_factor;
-    let kept: Vec<usize> = (0..singular.len()).filter(|&i| singular[i] > cut).collect();
+    let existence = leading * f64::EPSILON * dimension_factor;
+    // Amplification: ONE half-mantissa, on `σ(E)`, spent ONCE. `1/σ_i` is the
+    // factor by which direction `i` lifts the design's own roundoff, and the
+    // criterion squares the design into `XᵀWX`, so the lift survives that Gram
+    // with significant digits exactly when `ε·(σ_max/σ_i)² < 1`. Below
+    // `√ε·σ_max` the direction is DAMPED to that scaling rather than dropped —
+    // the span is unchanged (any invertible rescaling spans the same columns)
+    // and the roundoff comes in at the damped norm instead of an amplified one.
+    let amplification_floor = leading * f64::EPSILON.sqrt();
+    let kept: Vec<usize> = (0..singular.len())
+        .filter(|&i| singular[i] > existence)
+        .collect();
     let kept = if kept.is_empty() {
         // Every representer direction is below the resolvable floor. Keep the
         // single strongest one rather than emitting an empty block: a term with
@@ -933,7 +962,10 @@ fn condition_representer_section(
     };
     let mut transform = Array2::<f64>::zeros((z_rbf.ncols(), kept.len()));
     for (column, &index) in kept.iter().enumerate() {
-        let inverse = singular[index].max(f64::MIN_POSITIVE).recip();
+        let inverse = singular[index]
+            .max(amplification_floor)
+            .max(f64::MIN_POSITIVE)
+            .recip();
         // Sign gauge: a singular vector is defined up to sign, and the sign a
         // decomposition happens to return is not a property of the geometry.
         // Pin it on the entry of largest magnitude so the realized chart is
