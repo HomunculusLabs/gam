@@ -1484,6 +1484,20 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
         }
     }
 
+    /// Drop every memoized criterion value, keeping the realized design.
+    ///
+    /// The memo is keyed on θ alone, so it cannot tell two evaluations of two
+    /// different MEASURES at the same θ apart. `begin_exact_polish` changes the
+    /// measure — it retires the #1033b n-free surrogate — so the surrogate's
+    /// value at the search checkpoint must not be served to the exact lane that
+    /// follows (gam#2760). The sibling N-block driver's staged-pilot exit does
+    /// the same thing for the same reason.
+    fn forget_eval_memo(&mut self) {
+        self.last_eval_theta = None;
+        self.last_cost = None;
+        self.last_eval = None;
+    }
+
     /// Record an eval result keyed to the θ it was computed at. Used in place of
     /// the macro's `store_eval` so the memo key reflects the EVAL θ even when the
     /// design was not re-realized at that θ (#1033 certified skip).
@@ -4307,7 +4321,7 @@ fn run_exact_joint_spatial_optimization(
             }
             // Objective memoization is theta-only, so a surrogate value at the
             // warm checkpoint must not alias the exact value at the same theta.
-            ctx.cache.invalidate_objective_memo();
+            ctx.cache.forget_eval_memo();
             log::info!(
                 "[KAPPA-PHASE-POLISH] the certified n-free psi-Gram surrogate is retired at \
                  the search checkpoint; the optimizer continues and certifies on the exact \
