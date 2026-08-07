@@ -34,6 +34,13 @@
 //! is the constant boundary quantile and `J` is identically zero by design, so a
 //! finite difference across the boundary measures a kink rather than a
 //! derivative. The test asserts that the surviving population is large.
+//!
+//! Each column is judged against its own magnitude rather than a fixed absolute
+//! floor. The disagreement this gate exists to catch is a *factor* on the
+//! column (`2·α_k`), so a fraction-of-the-column bar is the natural metric; a
+//! fixed floor would instead grade the rows where the sensitivity happens to be
+//! near zero, where a central difference has nothing left but truncation and the
+//! test would be reporting its own step size.
 
 use gam::smooth::build_term_collection_design;
 use gam::{
@@ -165,9 +172,17 @@ fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
     // Probe every response row `k` (the location column and every shape
     // coordinate — the shape rows are where the chart factor lived) at one
     // covariate column each, cycling so the covariate columns are covered too.
+    //
+    // Each column is judged against ITS OWN magnitude: `max_i |J[i, index]|`
+    // over the unsaturated rows. A fixed absolute floor would instead measure
+    // finite-difference truncation on the rows where the sensitivity happens to
+    // be near zero — a statement about the step size, not about the chart.
+    // Scaling by the column's own scale asks the question the test is for: is
+    // this column the right column, up to a fraction of what it is.
     let mut checked_entries = 0usize;
     let mut checked_rows = 0usize;
     let mut worst_rel = 0.0_f64;
+    let mut worst_abs = 0.0_f64;
     let mut worst_label = String::new();
     // The score saturates at ±Φ⁻¹(1 − 1e-12) ≈ ±7.034; `J` is identically zero
     // there by construction, so those rows are not a derivative test.
@@ -184,21 +199,36 @@ fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
         let plus = perturbed_scores(index, delta);
         let minus = perturbed_scores(index, -delta);
         checked_entries += 1;
+
+        let unsaturated = |i: usize| {
+            base.z[i].abs() < SATURATION
+                && plus[i].abs() < SATURATION
+                && minus[i].abs() < SATURATION
+        };
+        let column_scale = (0..N)
+            .filter(|&i| unsaturated(i))
+            .map(|i| base.columns[[i, index]].abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            column_scale > 0.0,
+            "Jacobian column A[{k},{j}] is identically zero on every unsaturated row; the fixture \
+             is not exercising this coefficient"
+        );
+
         for i in 0..N {
-            if base.z[i].abs() >= SATURATION
-                || plus[i].abs() >= SATURATION
-                || minus[i].abs() >= SATURATION
-            {
+            if !unsaturated(i) {
                 continue;
             }
             let fd = (plus[i] - minus[i]) / (2.0 * delta);
             let analytic = base.columns[[i, index]];
-            let scale = analytic.abs().max(fd.abs()).max(1.0e-3);
-            let rel = (fd - analytic).abs() / scale;
+            let absolute = (fd - analytic).abs();
+            let rel = absolute / column_scale;
             if rel > worst_rel {
                 worst_rel = rel;
+                worst_abs = absolute;
                 worst_label = format!(
-                    "row {i}, A[{k},{j}] (flat {index}): analytic={analytic:.6e} fd={fd:.6e}"
+                    "row {i}, A[{k},{j}] (flat {index}): analytic={analytic:.6e} fd={fd:.6e} \
+                     column_scale={column_scale:.6e}"
                 );
             }
             checked_rows += 1;
@@ -207,8 +237,8 @@ fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
 
     eprintln!(
         "#2680 CTN Jacobian FD: p_resp={p_resp} p_cov={p_cov} probed {checked_entries} \
-         coefficients over {checked_rows} unsaturated rows; worst relative error {worst_rel:.3e} \
-         ({worst_label})"
+         coefficients over {checked_rows} unsaturated rows; worst error {worst_rel:.3e} of the \
+         column scale ({worst_abs:.3e} absolute) at {worst_label}"
     );
 
     assert!(
@@ -216,16 +246,19 @@ fn ctn_score_influence_jacobian_matches_its_own_finite_difference_2680() {
         "too few unsaturated rows survived the FD gate ({checked_rows}); the fixture is not \
          exercising the Jacobian"
     );
-    // Central differences on a smooth scalar with a magnitude-scaled step land
-    // near `δ²`-truncation plus `ε/δ` round-off; 1e-5 relative is loose enough
-    // to be step-insensitive and far tighter than any chart error. The
-    // pre-#2680 `2·γ_k` factor puts the shape columns off by `2·α_k`, i.e.
-    // O(1) relative.
+    // What the bar has to separate: the pre-#2680 shape factor multiplies the
+    // shape columns by `2·α_k`, which is an O(1) FRACTION of the column — tens
+    // of percent to several hundred. What the instrument can resolve: a
+    // magnitude-scaled central difference on this chain lands near `1e-8`
+    // absolute (measured), which against these columns is `~1e-5` of their
+    // scale. `1e-3` sits three orders below the defect and two above the
+    // instrument, so it is insensitive to the step and cannot be crossed by
+    // anything but a real disagreement.
     assert!(
-        worst_rel < 1.0e-5,
+        worst_rel < 1.0e-3,
         "score_influence_jacobian's Jacobian is not the derivative of its own score: \
-         worst relative error {worst_rel:.3e} at {worst_label}. A CTN chart is affine in the \
-         coefficient matrix, so every sensitivity is the response-basis entry itself — a shape \
-         factor here differentiates a function the value path does not compute."
+         worst error {worst_rel:.3e} of the column scale at {worst_label}. A CTN chart is affine \
+         in the coefficient matrix, so every sensitivity is the response-basis entry itself — a \
+         shape factor here differentiates a function the value path does not compute."
     );
 }
