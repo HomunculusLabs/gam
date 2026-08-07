@@ -1,5 +1,62 @@
 ## Unreleased
 
+- **`Σ` in the marginal-slope identity is `Var(z | a)`, and the fit was
+  supplying one global matrix (#2766).** `bms/gradient_paths.rs` writes the
+  identity the whole marginal-slope family is defined by as
+
+  ```text
+    z | a ~ N(0, Σ(a)),   η = c(a)·q(t,a) + r(a)ᵀz
+    E_z[Φ(−η) | a] = Φ(−q(t,a))    ⟺    c(a) = √(1 + r(a)ᵀ Σ(a) r(a))
+  ```
+
+  — `Σ(a)`, conditional on the marginal-index span — and then supplied it from
+  `marginal_slope_covariance_from_scores`, ONE weighted empirical covariance
+  pooled over every row. Substituting a constant `c̄` into the exact integral
+  leaves `E_z[Φ(−η)|a] = Φ(−q·c̄/c(a))`: the realized marginal index is
+  `q·c̄/c(a)`, a multiplicative, covariate-dependent distortion of the one
+  estimand this family exists to deliver. Measured on `K = 2` scores whose
+  conditional correlation moves over `±0.8` while both conditional marginals
+  stay exactly `N(0,1)`, the distortion reaches **1.46×** at a shared slope of
+  1.0, and a Monte-Carlo of the actual integral over 20000 rows reads a worst
+  relative marginal-index error of **0.145**. It is the same failure the K=1
+  `homoskedastic_var` field doc records (`Φ(q√(1+b²)/√(1+b²v))`), one dimension
+  up: #2768's per-coordinate location-scale gate forces `E[z_j|a] = 0` and
+  `Var(z_j|a) = 1`, and no per-coordinate map can reach the OFF-DIAGONAL.
+
+  `Σ(a)` is now a fitted object, parameterised by Pourahmadi's **modified
+  Cholesky decomposition** — `T(a)Σ(a)T(a)ᵀ = D(a)` with `T` unit lower
+  triangular carrying `φ_jk(a)` and `log d_j(a) = γ_jᵀ[1|a]`. Every parameter is
+  unconstrained, so every `a` — including rows off the training hull — yields a
+  positive-definite `Σ(a)`; a regression on the ENTRIES of `Σ` does not, and one
+  row at `|ρ| > 1` makes `c(a)` the square root of a negative number. Read
+  forwards it is a triangular system of the same two regressions #2768 already
+  ships, and `L(a) = T(a)⁻¹D(a)^{1/2}` is the exact Cholesky factor — the
+  `Σ = LLᵀ` low-rank shape `MarginalSlopeCovariance` already admits — so the row
+  program's quadratic forms stay exact sums of squares with no runtime
+  eigendecomposition and no PSD tolerance on this path.
+
+  **The escalation trigger is one robust Rao score test per score PAIR** on
+  `ζ_j·ζ_k`, on the same centred conditioning span and at the same α the #2768
+  gate uses: the statistic for the sentence the issue is titled with and nothing
+  wider. No pair fires ⇒ the pooled object stays in place byte for byte, and
+  `K = 1` never escalates at all (there is no off-diagonal there, and
+  `Var(z|a)` is #2768's branch — a second, differently parameterised variance
+  model on top of it would double-correct).
+
+  Every covariance consumer in the survival row program moved onto a row-indexed
+  `ScoreCovarianceField`: the shared lane's cached `1ᵀΣ1`, both vector
+  workspaces, the `c_i` in `SurvivalMarginalSlopeFamilyScalars`, and both
+  `LogslopeBlockJacobian` branches. Because `Σ(a_i)` is a per-row constant and
+  not a function of `β`, every existing derivative formula holds verbatim.
+
+  Saving a fit that consumed a conditional `Σ(a)` is refused at the point of
+  loss (`persistable_score_covariance`). That state needs `K ≥ 2`, which the
+  on-disk contract already refuses at load — it carries one `z_column` and
+  validates a 1×1 score covariance — so nothing new becomes unsaveable; the
+  refusal exists so the reason travels with it instead of arriving later as a
+  shape mismatch. Murphy–Topel is unaffected: `rigid_score_zeta_sensitivity`
+  already refuses at `K > 1`.
+
 - **The iso-κ joint outer search was walking a certified SURROGATE and nobody
   was putting it away (#2760).** The joint `[ρ, ψ]` spatial search refused at
   `n ≥ 4000` with `NOT STATIONARY` after a Strong-Wolfe line search that
