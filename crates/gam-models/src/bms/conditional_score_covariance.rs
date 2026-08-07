@@ -111,6 +111,32 @@
 //! mean structure into a "covariance", and the mean gate would then be
 //! correcting an axis whose scale had already moved.
 //!
+//! # Numerical edge cases
+//!
+//! * **Degenerate (collinear) scores.** A rank-deficient score geometry is a
+//!   real, expected input — [`MarginalSlopeCovariance::full`] says so and admits
+//!   the exactly-singular matrix it produces. Here it lands as a zero innovation
+//!   variance, which `log d` cannot represent, so the innovation is floored at
+//!   the SAME band that admission clamps a numerically-zero eigenvalue inside
+//!   (`128·K·ε·max weighted second moment`). The result is positive definite
+//!   rather than singular, which is strictly better for the `√(1 + rᵀΣr)` that
+//!   consumes it.
+//! * **Extreme magnitudes.** Every stage checks finiteness of what it produces
+//!   and refuses with the offending value rather than propagating a `NaN`: a
+//!   score scale that overflows `ε²` overflows the pooled estimator too, and
+//!   this path says so at the point it happens.
+//! * **An ill-conditioned conditioning span.** A penalised-spline marginal index
+//!   is routinely rank-deficient. Every regression here — the couplings and the
+//!   Fisher-scoring step for the innovation alike — goes through the same
+//!   relative, column-scaled Tikhonov primitive the gam#2768 stages use, so the
+//!   two degrade identically instead of one of them having its own normal
+//!   equations.
+//! * **Parallel and GPU row lanes.** `Σ(a_i)` is a per-row CONSTANT, not a
+//!   function of `β`, so every existing derivative formula holds verbatim and
+//!   nothing about the chain rule changes. Each rayon chunk binds its own row
+//!   workspace, and the survival GPU row kernel already carried `cov_ones` per
+//!   row, so the conditional lane needed no new device state.
+//!
 //! # `K = 1` is deliberately out of scope
 //!
 //! At `K = 1` there is no off-diagonal, and `Var(z|a)` is gam#2768's
