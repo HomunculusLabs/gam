@@ -288,6 +288,14 @@ the training data; each fitted linear predictor is additionally held to
 the range it took over the training rows, because a linear predictor is
 only identified on the range the sample explored.
 
+Those predictors are **linear in the conditioning span**, which is the
+marginal design. So the model removes the part of the covariance's
+variation that the marginal design can express, and no more — if the
+correlation moves smoothly with a covariate, put a smooth of that
+covariate in the marginal formula and the span will carry it. A bare
+linear column leaves a real residual when the truth is curved, and that
+residual grows with the slope rather than sitting at the noise floor.
+
 Two limits are worth stating plainly:
 
 - **`K = 1` is unaffected.** There is no off-diagonal, and `Var(z | a)` is
