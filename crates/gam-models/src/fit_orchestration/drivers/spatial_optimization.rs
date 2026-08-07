@@ -4099,9 +4099,7 @@ fn run_exact_joint_spatial_optimization(
         coord_dim,
         theta_dim,
         Derivative::Analytic,
-        if analytic_outer_hessian_available
-            && (!suppress_outer_hessian_for_nfree || kind == SpatialHyperKind::Isotropic)
-        {
+        if analytic_outer_hessian_available && !suppress_outer_hessian_for_nfree {
             // `Either` even when the #1033 n-free ψ-lane is armed (gam#2760).
             //
             // The suppression used to force `Unavailable` here, on the stated
@@ -4145,8 +4143,7 @@ fn run_exact_joint_spatial_optimization(
             // should the SEARCH route?" and a second question it had no
             // business answering (there, `with_require_measured_psd`).
             //
-            // SCOPED TO THE ISOTROPIC LANE, and the scope is a measurement, not
-            // a preference. Restoring curvature on the ANISOTROPIC lane too
+            // NOT RESTORED HERE, AND THE REASON IS A MEASUREMENT. Restoring it
             // makes `exact_spatial_joint_engine_aniso_iso_parity_1d` refuse —
             // and the refusal is honest, which is exactly why it cannot ride in
             // on this issue:
@@ -4156,16 +4153,23 @@ fn run_exact_joint_spatial_optimization(
             //   INDEFINITE CURVATURE AT INTERIOR OPTIMUM (curvature floor did not clear)
             //   [interior lambda_min = -1.585e-3, gradient_floor = 3.061e-3]
             //
-            // That fit is at a stationary point whose interior curvature is
-            // measurably indefinite, and before this it shipped with
+            // That fit is at a stationary point (`|Pg|` a third of its bound)
+            // whose interior curvature is measurably indefinite, with `ψ` railed
+            // at its own box edge. Before this it shipped with
             // `curvature_source=unavailable` — nobody had checked. Turning "not
             // checked" into "refused, with the eigenvalue that refused it" is
-            // the right direction, but it is a claim about the anisotropic
-            // route's terminal geometry, not about #2760's iso-κ search, and it
-            // wants its own issue and its own investigation rather than being
-            // smuggled in as a side effect. The isotropic lane — the one this
-            // issue is about, and the one whose arms this repair had to turn
-            // green — takes the curvature now.
+            // the right direction, and it is a real finding about this lane's
+            // terminal geometry. It is not, however, #2760's defect, and #2760's
+            // repair does not need it: the ladder is green at all five rungs
+            // WITHOUT the restoration, because what fixed the line search was
+            // retiring the ψ-Gram surrogate at the polish, not the mint's
+            // curvature. Restoring curvature was the INSTRUMENT that found the
+            // surrogate — the value-agreement guard only fires when the mint
+            // asks for the analytic lane — and an instrument is not a fix.
+            //
+            // So it stays off here, with the measurement written down, and the
+            // indefinite-curvature question gets its own issue rather than
+            // arriving as a side effect of this one.
             DeclaredHessianForm::Either
         } else {
             DeclaredHessianForm::Unavailable
