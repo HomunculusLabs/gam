@@ -968,7 +968,7 @@ mod amortized_encoder_tests {
             let gamma = match part {
                 0 => t.logdet_theta_adjoint(&r, &cache, &solver).unwrap(),
                 1 => t
-                    .coordinate_block_logdet_theta_adjoint(&r, &cache)
+                    .coordinate_block_logdet_theta_adjoint(&r, &cache, EvidenceOperator::Majorizer, None)
                     .unwrap(),
                 _ => {
                     let rc = t
@@ -1152,7 +1152,7 @@ mod amortized_encoder_tests {
             .expect("gamma_joint");
         {
             let gtt = term
-                .coordinate_block_logdet_theta_adjoint(&rho, &cache)
+                .coordinate_block_logdet_theta_adjoint(&rho, &cache, EvidenceOperator::Majorizer, None)
                 .expect("gamma_tt");
             gamma_eff.t -= &gtt.t;
             gamma_eff.beta -= &gtt.beta;
@@ -1217,7 +1217,7 @@ mod amortized_encoder_tests {
                     .logdet_theta_adjoint(&r, &cache, &solver)
                     .expect("gamma_joint");
                 let gtt = t
-                    .coordinate_block_logdet_theta_adjoint(&r, &cache)
+                    .coordinate_block_logdet_theta_adjoint(&r, &cache, EvidenceOperator::Majorizer, None)
                     .expect("gamma_tt");
                 g.t -= &gtt.t;
                 g.beta -= &gtt.beta;

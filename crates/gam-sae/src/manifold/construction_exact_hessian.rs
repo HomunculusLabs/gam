@@ -2777,7 +2777,12 @@ impl SaeManifoldTerm {
         // the gradient does (construction_exact_hessian.rs analytic assembler).
         let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
         let mut gamma_eff = self.logdet_theta_adjoint(rho, cache, &solver)?;
-        let gamma_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache)?;
+        let gamma_tt = self.coordinate_block_logdet_theta_adjoint(
+            rho,
+            cache,
+            EvidenceOperator::Majorizer,
+            None,
+        )?;
         gamma_eff.t -= &gamma_tt.t;
         gamma_eff.beta -= &gamma_tt.beta;
         gamma_eff.t.scaled_add(2.0, &rank_charge.theta.t);
@@ -3312,7 +3317,8 @@ impl SaeManifoldTerm {
                         evidence_cache,
                         probes,
                         sinv,
-                        evidence_operator.is_exact_a(),
+                        evidence_operator,
+                        Some(target),
                     )
                     .map_err(OuterGradientError::internal)?,
                 None => self
@@ -3324,7 +3330,12 @@ impl SaeManifoldTerm {
             // `A` joint with a `B` coordinate block is the same class of error the
             // geometry type exists to remove.
             let coordinate_gamma = self
-                .coordinate_block_logdet_theta_adjoint(rho, evidence_cache)
+                .coordinate_block_logdet_theta_adjoint(
+                    rho,
+                    evidence_cache,
+                    evidence_operator,
+                    Some(target),
+                )
                 .map_err(OuterGradientError::internal)?;
             gamma.t -= &coordinate_gamma.t;
             gamma.beta -= &coordinate_gamma.beta;
@@ -5266,7 +5277,7 @@ impl SaeManifoldTerm {
 #[cfg(test)]
 mod test_support {
     use super::{
-        ArrowFactorCache, DeflatedArrowSolver, SaeArrowVector, SaeManifoldRho,
+        ArrowFactorCache, DeflatedArrowSolver, EvidenceOperator, SaeArrowVector, SaeManifoldRho,
         ThetaAdjointDhChannel,
     };
     use ndarray::{Array1, s};
@@ -5355,7 +5366,12 @@ mod test_support {
                 None,
             )?;
             let prod_joint = self.logdet_theta_adjoint(rho, cache, &solver)?;
-            let prod_tt = self.coordinate_block_logdet_theta_adjoint(rho, cache)?;
+            let prod_tt = self.coordinate_block_logdet_theta_adjoint(
+                rho,
+                cache,
+                EvidenceOperator::Majorizer,
+                None,
+            )?;
             let max_diff = |a: &SaeArrowVector, b: &SaeArrowVector| -> f64 {
                 let t =
                     a.t.iter()

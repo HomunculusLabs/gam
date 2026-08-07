@@ -5119,10 +5119,24 @@ fn from_probes_exact_a_theta_adjoint_matches_dense_2515() {
     );
 
     let probes_exact = term
-        .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, true)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::ExactObservedInformation,
+            None,
+        )
         .expect("from-probes exact-A theta adjoint");
     let probes_majorizer = term
-        .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, false)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("from-probes majorizer-B theta adjoint");
 
     let worst = |x: &SaeArrowVector, y: &SaeArrowVector| -> f64 {

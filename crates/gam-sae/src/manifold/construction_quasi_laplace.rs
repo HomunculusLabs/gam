@@ -5540,7 +5540,17 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         solver: &DeflatedArrowSolver<'_>,
     ) -> Result<SaeArrowVector, String> {
-        self.logdet_theta_adjoint_for_block(rho, cache, solver, true)
+        // The joint leg of this entry point is the `B`-majorizer Γ by definition:
+        // the exact-A joint adjoint is owned by `logdet_theta_adjoint_dense` (with
+        // the priced pseudo-inverse) and by `logdet_theta_adjoint_from_probes`.
+        self.logdet_theta_adjoint_for_block(
+            rho,
+            cache,
+            solver,
+            true,
+            EvidenceOperator::Majorizer,
+            None,
+        )
     }
 
     /// `Γ_tt = ∂_theta Σ_i log|H_tt^(i)|`, the state derivative of the
@@ -5555,9 +5565,11 @@ impl SaeManifoldTerm {
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
+        operator: EvidenceOperator,
+        residual_target: Option<ArrayView2<'_, f64>>,
     ) -> Result<SaeArrowVector, String> {
         let solver = DeflatedArrowSolver::plain(cache);
-        self.logdet_theta_adjoint_for_block(rho, cache, &solver, false)
+        self.logdet_theta_adjoint_for_block(rho, cache, &solver, false, operator, residual_target)
     }
 
     fn logdet_theta_adjoint_for_block(
@@ -5566,7 +5578,15 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         solver: &DeflatedArrowSolver<'_>,
         joint_block: bool,
+        // #2515 — which operator's `∂H/∂θ` this differentiates. `Γ_joint − Γ_tt`
+        // is ONE difference; the dense exact-A route builds both legs with
+        // `exact_a = true` off the SAME eigensystem, so a coordinate leg left on
+        // the majorizer would desync the difference even when the joint leg is
+        // right.
+        operator: EvidenceOperator,
+        residual_target: Option<ArrayView2<'_, f64>>,
     ) -> Result<SaeArrowVector, String> {
+        let exact_a = operator.is_exact_a();
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let threshold_strength = match self.assignment.mode {
@@ -5595,6 +5615,23 @@ impl SaeManifoldTerm {
         let mut gamma_t = Array1::<f64>::zeros(total_t);
         let mut gamma_beta = Array1::<f64>::zeros(cache.k);
         let second_jets = self.atom_second_jets()?;
+        // #2330 Patch D residual-curvature legs on the exact-A arm (#2515). Same
+        // gating as `logdet_theta_adjoint_dense`: exact-A AND a target, else the
+        // pre-Patch-D behaviour bit-for-bit.
+        let patchd_residual = exact_a.then_some(residual_target).flatten();
+        let patchd_third_jets = if patchd_residual.is_some() {
+            Some(self.atom_third_jets()?)
+        } else {
+            None
+        };
+        let patchd_is_obb = matches!(
+            self.assignment.mode,
+            AssignmentMode::OrderedBetaBernoulli { .. }
+        );
+        let patchd_obb_inv_tau = match self.assignment.mode {
+            AssignmentMode::OrderedBetaBernoulli { temperature, .. } => 1.0 / temperature,
+            _ => 0.0,
+        };
         let border = self.border_channels_for_cache(cache)?;
         // #932 FRONT C: plain-arrow `(H⁻¹)_ββ = S⁻¹` formed once from the cached
         // Schur factor; gauge-deflated systems fall back to the per-β `solve`
@@ -5808,6 +5845,22 @@ impl SaeManifoldTerm {
             // the √w-scaled jets, and the ordered Beta--Bernoulli prior derivative
             // (`assignment_prior_hdiag_derivative_entry`) is left unweighted.
             let w_row_prior = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
+            // #2330 Patch D per-row residual context on the exact-A arm (#2515).
+            let patchd_error_metric: Option<Vec<f64>> = patchd_residual.map(|tgt| {
+                self.patchd_row_error_metric(row, w_row_prior, tgt, &assignments, whiten_row_jets)
+            });
+            let patchd_sqrt_w = w_row_prior.sqrt();
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> =
+                patchd_error_metric.as_deref().map(|em| PatchDResidualCtx {
+                    row,
+                    error_metric: em,
+                    sqrt_w: patchd_sqrt_w,
+                    assignments: &assignments,
+                    second_jets: &second_jets,
+                    third_jets: patchd_third_jets.as_deref(),
+                    is_obb: patchd_is_obb,
+                    inv_tau: patchd_obb_inv_tau,
+                });
             for w in 0..q {
                 let mut gamma = 0.0_f64;
                 // The active logit `w` differentiates against; `None` unless this
@@ -5838,6 +5891,19 @@ impl SaeManifoldTerm {
                                     + sae_dot(jets.first(a), jets.second(b, w))
                             }
                         };
+                        if exact_a {
+                            // #2330 Patch D (1a) on the coordinate block — the same
+                            // residual-curvature leg the joint routes carry.
+                            dh += sae_dot(jets.first(w), jets.second(a, b));
+                        }
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            dh += self.patchd_residual_third_leg(
+                                ctx,
+                                jets.vars[a],
+                                jets.vars[b],
+                                jets.vars[w],
+                            );
+                        }
                         // `∂D/∂z_w` is diagonal, so it contributes only when the two
                         // logit slots are the SAME atom (`atom_a == atom_b`).
                         if let (
@@ -5866,12 +5932,24 @@ impl SaeManifoldTerm {
                                 SaeLocalRowVar::Coord { atom, axis }
                                     if a == w && !ard_precisions[atom].is_empty() =>
                                 {
-                                    self.ard_majorized_hessian_derivative(
-                                        ard_precisions[atom][axis],
-                                        row,
-                                        atom,
-                                        axis,
-                                    )
+                                    // The majorizer writes `α·softplus_{τ₀}(cos κt)`
+                                    // into `H_tt`; `A` carries the unclamped
+                                    // `α·cos κt`.
+                                    if exact_a {
+                                        self.ard_exact_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
+                                    } else {
+                                        self.ard_majorized_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
+                                    }
                                 }
                                 _ => 0.0,
                             };
@@ -5897,8 +5975,19 @@ impl SaeManifoldTerm {
                 }
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
-                        let dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
+                        let mut dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
                             + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos));
+                        if exact_a {
+                            dh += sae_dot(jets.first(w), jets.beta_deriv(a, beta_pos));
+                        }
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            dh += self.patchd_residual_third_leg_beta(
+                                ctx,
+                                jets.vars[a],
+                                jets.vars[w],
+                                channel,
+                            );
+                        }
                         gamma += 2.0 * inv_vbeta[[a, channel.index]] * dh;
                     }
                 }
@@ -6031,8 +6120,14 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         probes: &[Array1<f64>],
         sinv_probes: &[Array1<f64>],
-        exact_a: bool,
+        operator: EvidenceOperator,
+        // #2330 Patch D — the data target, required ONLY for the exact-A
+        // residual-curvature legs. `None` reproduces the pre-Patch-D behaviour
+        // exactly (the third-derivative leg is skipped), matching
+        // `logdet_theta_adjoint_dense`'s own contract argument for argument.
+        residual_target: Option<ArrayView2<'_, f64>>,
     ) -> Result<SaeArrowVector, String> {
+        let exact_a = operator.is_exact_a();
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
         // Threshold-gate sparsity strength for the assignment-prior H-diagonal
@@ -6103,6 +6198,35 @@ impl SaeManifoldTerm {
             _ => None,
         };
 
+        // #2330 Patch D residual-curvature legs, ported from
+        // `logdet_theta_adjoint_dense` (#2515). Active only on the exact-A route
+        // WITH a target, exactly as there. The third jets are a per-row quantity
+        // and cost nothing this lane cannot pay.
+        let patchd_residual = exact_a.then_some(residual_target).flatten();
+        let patchd_third_jets = if patchd_residual.is_some() {
+            Some(self.atom_third_jets()?)
+        } else {
+            None
+        };
+        // The ordered-Beta–Bernoulli Patch-D channel is a CROSS-ROW adjoint and
+        // has no per-row arrow block; the streaming evidence lane refuses that
+        // family by name (#2509 Phase-2b) rather than pricing `B` and calling it
+        // `A`, so reaching here with it would mean the refusal was bypassed.
+        let patchd_is_obb = matches!(
+            self.assignment.mode,
+            AssignmentMode::OrderedBetaBernoulli { .. }
+        );
+        if patchd_residual.is_some() && patchd_is_obb {
+            return Err(
+                "logdet_theta_adjoint_from_probes: the exact-A Patch-D residual legs are not \
+                 modelled for ordered Beta--Bernoulli here — its prior-curvature adjoint couples \
+                 rows within an atom column and has no per-row arrow block. The streaming \
+                 evidence lane refuses this family upstream; refusing rather than emitting a \
+                 gradient short by that channel"
+                    .to_string(),
+            );
+        }
+        let patchd_obb_inv_tau = 0.0_f64;
         let mut assignments = Array1::<f64>::zeros(self.k_atoms());
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
             std::collections::VecDeque::new();
@@ -6161,6 +6285,27 @@ impl SaeManifoldTerm {
                 .deflation_row_spectra
                 .get(row)
                 .and_then(Option::as_ref);
+
+            // #2330 Patch D per-row residual context (#2515 port). `w_row_prior`
+            // is bound below for the majorizer legs; the residual weighting is the
+            // row's own design weight, read here through the one authority both
+            // routes share.
+            let patchd_w_row = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
+            let patchd_error_metric: Option<Vec<f64>> = patchd_residual.map(|tgt| {
+                self.patchd_row_error_metric(row, patchd_w_row, tgt, &assignments, whiten_row_jets)
+            });
+            let patchd_sqrt_w = patchd_w_row.sqrt();
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> =
+                patchd_error_metric.as_deref().map(|em| PatchDResidualCtx {
+                    row,
+                    error_metric: em,
+                    sqrt_w: patchd_sqrt_w,
+                    assignments: &assignments,
+                    second_jets: &second_jets,
+                    third_jets: patchd_third_jets.as_deref(),
+                    is_obb: patchd_is_obb,
+                    inv_tau: patchd_obb_inv_tau,
+                });
 
             if ordered_beta_bernoulli_channels.is_some() {
                 for (position, variable) in jets.vars.iter().enumerate() {
@@ -6276,11 +6421,25 @@ impl SaeManifoldTerm {
                             // #2330 Patch D (1a) — `A = B + ΔC` carries the residual
                             // curvature `ΔC_tt[a,b] = ⟨error_metric, ∂²f_ab⟩` the
                             // Gauss-Newton assembly drops, and that block moves with
-                            // `θ_w` too. `∂error_metric/∂θ_w` is `jets.first(w)` in
-                            // this jet convention, so the first leg is a plain jet
-                            // dot; the third-jet leg is the Patch-D piece this port
-                            // scopes out (see the docstring).
+                            // `θ_w` too:
+                            //   `∂ΔC_tt[a,b]/∂θ_w = ⟨∂error_metric/∂θ_w, ∂²f_ab⟩`
+                            //                      `+ ⟨error_metric, ∂³f_abw⟩`.
+                            // `∂error_metric/∂θ_w` is `jets.first(w)` in this jet
+                            // convention, so the first leg is a plain jet dot.
                             dh += sae_dot(jets.first(w), jets.second(a, b));
+                        }
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            // #2515 — the SECOND Patch-D leg `⟨error_metric, ∂³f_abw⟩`,
+                            // through the same helper the dense route calls. It was
+                            // previously scoped out of this port for want of
+                            // `atom_third_jets()`; that is a per-row quantity and is
+                            // built once above.
+                            dh += self.patchd_residual_third_leg(
+                                ctx,
+                                jets.vars[a],
+                                jets.vars[b],
+                                jets.vars[w],
+                            );
                         }
                         if let (
                             Some((a_soft, mm, scale, inv_tau, _atom_w)),
@@ -6358,13 +6517,21 @@ impl SaeManifoldTerm {
                     for (beta_pos, channel) in border.iter().enumerate() {
                         // #2330 Patch D (1a), t–β leg: `ΔC_tβ[a,β]` moves with
                         // `θ_w` through the residual exactly as the t–t block does.
-                        let dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
+                        let mut dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
                             + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos))
                             + if exact_a {
                                 sae_dot(jets.first(w), jets.beta_deriv(a, beta_pos))
                             } else {
                                 0.0
                             };
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            dh += self.patchd_residual_third_leg_beta(
+                                ctx,
+                                jets.vars[a],
+                                jets.vars[w],
+                                channel,
+                            );
+                        }
                         gamma += 2.0 * inv_vbeta[[a, channel.index]] * dh;
                     }
                 }

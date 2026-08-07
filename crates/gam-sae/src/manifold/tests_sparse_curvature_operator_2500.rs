@@ -663,7 +663,12 @@ fn threshold_gate_coordinate_block_theta_adjoint_matches_finite_difference_2500(
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let (_loss, cache) = frozen_cache(&term, &target, &rho);
         let coord = term
-            .coordinate_block_logdet_theta_adjoint(&rho, &cache)
+            .coordinate_block_logdet_theta_adjoint(
+                &rho,
+                &cache,
+                crate::manifold::EvidenceOperator::Majorizer,
+                None,
+            )
             .expect("coordinate-block theta adjoint");
         let base_deflated = deflated_direction_count(&term, &cache);
         let block_logdet = |t: &SaeManifoldTerm| -> (f64, usize) {

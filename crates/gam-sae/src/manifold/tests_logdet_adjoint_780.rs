@@ -2196,7 +2196,14 @@ fn assert_theta_adjoint_from_probes_matches_dense(
         })
         .collect();
     let mf = term
-        .logdet_theta_adjoint_from_probes(rho, cache, &probes, &sinv, false)
+        .logdet_theta_adjoint_from_probes(
+            rho,
+            cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("matrix-free theta-adjoint");
 
     assert_eq!(dense.t.len(), mf.t.len());

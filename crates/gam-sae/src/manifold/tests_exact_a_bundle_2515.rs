@@ -332,21 +332,43 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
     // Channel 3 — the #1006 envelope θ-adjoint Γ, with the exact-A operand switch
     // that `ac499b513` built and nothing wires.
     let dense_gamma = &dense.theta_adjoint;
-    for (label, cache, probes, sinv, exact_a) in [
-        ("A-cache/exact-A-operands", &a_cache, &a_probes, &a_sinv, true),
+    for (label, cache, probes, sinv, gamma_operator) in [
+        (
+            "A-cache/exact-A-operands",
+            &a_cache,
+            &a_probes,
+            &a_sinv,
+            EvidenceOperator::ExactObservedInformation,
+        ),
         (
             "A-cache/B-operands",
             &a_cache,
             &a_probes,
             &a_sinv,
-            false,
+            EvidenceOperator::Majorizer,
         ),
-        ("B-cache/B-operands", &b_cache, &b_probes, &b_sinv, false),
+        (
+            "B-cache/B-operands",
+            &b_cache,
+            &b_probes,
+            &b_sinv,
+            EvidenceOperator::Majorizer,
+        ),
     ] {
-        match term.logdet_theta_adjoint_from_probes(&rho, cache, probes, sinv, exact_a) {
+        // The residual target rides WITH the exact-A operand, exactly as the
+        // assembler pairs them: `patchd_residual = exact_a.then_some(target)`.
+        let gamma_target = gamma_operator.is_exact_a().then(|| target.view());
+        match term.logdet_theta_adjoint_from_probes(
+            &rho,
+            cache,
+            probes,
+            sinv,
+            gamma_operator,
+            gamma_target,
+        ) {
             Ok(mut gamma) => {
                 let coordinate_gamma = term
-                    .coordinate_block_logdet_theta_adjoint(&rho, cache)
+                    .coordinate_block_logdet_theta_adjoint(&rho, cache, gamma_operator, gamma_target)
                     .unwrap();
                 gamma.t -= &coordinate_gamma.t;
                 gamma.beta -= &coordinate_gamma.beta;
@@ -426,7 +448,14 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
         .fold(0.0_f64, f64::max);
     println!("[#2515 A-GEOMETRY] Patch-D residual third-derivative leg: max|Δt|={patchd:.6e}");
     let probes_exact = term
-        .logdet_theta_adjoint_from_probes(&rho, &a_cache, &a_probes, &a_sinv, true)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &a_cache,
+            &a_probes,
+            &a_sinv,
+            EvidenceOperator::ExactObservedInformation,
+            None,
+        )
         .unwrap();
     let against_none = probes_exact
         .t
