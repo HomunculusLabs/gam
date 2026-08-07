@@ -143,6 +143,8 @@ mod latent_measure;
 mod logslope_layout;
 mod newton_operators;
 mod primary_geometry;
+#[cfg(test)]
+mod probe_2766_tests;
 mod psi_terms;
 mod pullback;
 pub(crate) mod row_kernel;
