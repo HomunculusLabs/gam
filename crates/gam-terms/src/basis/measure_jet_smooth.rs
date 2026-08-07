@@ -124,7 +124,9 @@ use serde::{Deserialize, Serialize};
 
 use faer::Side;
 
-use gam_linalg::faer_ndarray::{FaerEigh, default_rrqr_rank_alpha, rrqr_nullspace_basis};
+use gam_linalg::faer_ndarray::{
+    FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_nullspace_basis,
+};
 
 use super::{
     AnisoBasisPsiDerivatives, AnisoPenaltyCrossProvider, BasisBuildResult, BasisError,
@@ -843,23 +845,54 @@ pub(crate) fn median_nearest_center_spacing(dist2: &Array2<f64>) -> Result<f64, 
 ///
 /// ## The section
 ///
-/// Whiten and truncate against the section's own center-value Gram
-/// `G = (K_cc Z)ᵀ(K_cc Z)`: keep the directions above `√ε · λ_max(G)` and
-/// rescale each by `λ^{-1/2}`, so the realized section satisfies `EᵀE = I` on
-/// the representer block.
+/// Whiten against the section's own center evaluation map,
+/// `E = K_cc Z = U Σ Vᵀ`: take `Z ← Z · V Σ⁻¹`, so the realized section
+/// satisfies `EᵀE = I` on the representer block, and drop only what the
+/// decomposition itself cannot resolve (`σ ≤ ε · σ_max · max(dim)`, the
+/// standard numerical-rank bar).
 ///
 /// * The rescaling is a pure change of coefficient chart. The profiled
 ///   criterion is invariant under an invertible reparameterization (`X → XT`,
 ///   `S → TᵀST` moves `log|XᵀWX + λS|` and `log|λS|₊` by the same
 ///   `2 ln|det T|`), so it changes no estimate — only the arithmetic.
-/// * The truncation is the honest reading, not a tuning dial: `√ε` is the
-///   half-mantissa bar, the point past which a direction cannot survive being
-///   squared into a Gram and inverted back out with any significant digits.
-///   The energy pullback squares `E`, so anything below it is a direction the
-///   penalty cannot report on.
+/// * **The whitening is what repairs the pullback, and it is exact — so there
+///   is nothing left below it to truncate.** With `EᵀE = I` the energy pullback
+///   is `S = UᵀQU` with `U` orthonormal, whose spectrum is bounded by `Q`'s;
+///   and `Q` is `ℓ`-INVARIANT (a form on center VALUES), so `cond(S)` stops
+///   being a function of the range at all. "The energy pullback squares `E`"
+///   is a true statement about an *unwhitened* section only: it does not
+///   survive its own remedy.
+/// * **The rank bar has to be read off `E`, not off `EᵀE`.** Forming the Gram
+///   squares the condition number, so an eigenvalue of `G` is meaningful only
+///   down to `ε·λ_max`, i.e. `σ/σ_max > √ε`; a `√ε·λ_max` cut on top of that is
+///   a *second* half-mantissa, admitting only `cond(E) ≤ ε^{-1/4} ≈ 8·10³`.
+///   Measured on the #2761 1-D-curve-in-3-D fixture at 16 centers, that deleted
+///   most of the span at the ranges REML actively selects:
 ///
-/// Realized ONCE per cold build and then frozen with the chart, so a ψ trial
-/// never re-decides it — the replay contract is unchanged.
+/// ```text
+///   ℓ/ℓ_seed  cond(E)    Gram cut: p  span floor    SVD cut: p  span floor
+///      1      3.0e+01        12        6.11e-2          12      6.11e-2
+///      2      2.8e+04        11        2.43e-2          12      1.94e-2
+///      4      4.2e+07         8        1.50e-2          12      2.10e-3
+///      8      9.1e+09         6        1.67e-2          12      1.81e-4   <- 92x
+///     16      2.7e+11         4        8.92e-2          12      3.54e-5
+/// ```
+///
+///   `span floor` is the least-squares residual RMSE of the NOISELESS truth on
+///   the realized design's own column span — the bound no `λ` can beat, since
+///   `λ` shrinks inside a span and never moves one. The `SVD cut` column
+///   reproduces an 80-digit projection of the same span to every printed digit,
+///   so double precision loses nothing that is being kept here. Note the Gram
+///   cut's floor going UP past `4×`: the truncated chart is worse than the seed
+///   it was meant to improve on.
+///
+///   The truncation also made `p` a STEP function of the `ln ℓ` dial
+///   (`12,11,8,6,4`) — the outer search's own model dimension moving underneath
+///   it — where the whitened section holds `p = 12`, `cond(E) = 1` and
+///   `log|S|₊ = 0.800` across that entire sweep.
+///
+/// Realized per cold build from `K_cc(ℓ)`, so the chart tracks the dial it is a
+/// chart for; a frozen-quadrature replay reuses the composed transform verbatim.
 fn condition_representer_section(
     k_cc: &Array2<f64>,
     z_rbf: &Array2<f64>,
@@ -868,36 +901,52 @@ fn condition_representer_section(
         return Ok(z_rbf.clone());
     }
     let evaluation = k_cc.dot(z_rbf);
-    let gram = gam_linalg::faer_ndarray::fast_ata(&evaluation);
-    let (values, vectors) = gam_linalg::faer_ndarray::strict_symmetric_eigh(&gram, Side::Lower)
-        .map_err(BasisError::LinalgError)?;
-    let leading = values.iter().copied().fold(0.0_f64, |acc, v| acc.max(v));
+    let (_, singular, right) = evaluation.svd(false, true).map_err(BasisError::LinalgError)?;
+    let leading = singular.iter().copied().fold(0.0_f64, f64::max);
     if !(leading.is_finite() && leading > 0.0) {
         return Ok(z_rbf.clone());
     }
-    let cut = leading * f64::EPSILON.sqrt();
-    let kept: Vec<usize> = (0..values.len()).filter(|&i| values[i] > cut).collect();
-    if kept.is_empty() {
+    // `right` is `Vᵀ`: row `i` is `σ_i`'s right singular vector, in the
+    // coefficient coordinates of `z_rbf`.
+    let right = right.ok_or_else(|| {
+        BasisError::LinalgError(gam_linalg::faer_ndarray::FaerLinalgError::SvdNoConvergence {
+            context: "measure-jet representer section: right singular vectors were not returned",
+        })
+    })?;
+    // The numerical-rank bar of the decomposition itself: singular values carry
+    // absolute error `O(ε·σ_max)` with the usual `max(rows, cols)` dimension
+    // factor. After the whitening this is the ONLY bound in force, because the
+    // pullback no longer squares anything.
+    let dimension_factor = evaluation.nrows().max(evaluation.ncols()) as f64;
+    let cut = leading * f64::EPSILON * dimension_factor;
+    let kept: Vec<usize> = (0..singular.len()).filter(|&i| singular[i] > cut).collect();
+    let kept = if kept.is_empty() {
         // Every representer direction is below the resolvable floor. Keep the
         // single strongest one rather than emitting an empty block: a term with
         // no representer columns is a different model, and that decision
         // belongs to the range screen, not to a conditioning step.
-        let strongest =
-            (0..values.len()).fold(
-                0usize,
-                |best, i| {
-                    if values[i] > values[best] { i } else { best }
-                },
-            );
-        let column = vectors.column(strongest).to_owned();
-        let scale = values[strongest].max(f64::MIN_POSITIVE).sqrt().recip();
-        return Ok(z_rbf.dot(&column).insert_axis(Axis(1)).mapv(|v| v * scale));
-    }
+        vec![(0..singular.len()).fold(0usize, |best, i| {
+            if singular[i] > singular[best] { i } else { best }
+        })]
+    } else {
+        kept
+    };
     let mut transform = Array2::<f64>::zeros((z_rbf.ncols(), kept.len()));
     for (column, &index) in kept.iter().enumerate() {
-        let inverse_root = values[index].sqrt().recip();
+        let inverse = singular[index].max(f64::MIN_POSITIVE).recip();
+        // Sign gauge: a singular vector is defined up to sign, and the sign a
+        // decomposition happens to return is not a property of the geometry.
+        // Pin it on the entry of largest magnitude so the realized chart is
+        // reproducible across faer revisions and platforms.
+        let mut pivot = 0usize;
+        for row in 1..z_rbf.ncols() {
+            if right[(index, row)].abs() > right[(index, pivot)].abs() {
+                pivot = row;
+            }
+        }
+        let sign = if right[(index, pivot)] < 0.0 { -1.0 } else { 1.0 };
         for row in 0..z_rbf.ncols() {
-            transform[(row, column)] = vectors[(row, index)] * inverse_root;
+            transform[(row, column)] = sign * right[(index, row)] * inverse;
         }
     }
     Ok(z_rbf.dot(&transform))
