@@ -23,8 +23,8 @@ use gam_models::survival::{
     survival_location_scale_time_wiggle_basis_authority,
 };
 use gam_models::transformation_normal::{
-    TRANSFORMATION_MONOTONICITY_EPS, TransformationNormalAloRowInput,
-    transformation_normal_alo_row_geometry,
+    CTN_LOCATION_COLUMNS, TRANSFORMATION_MONOTONICITY_EPS, TransformationNormalAloRowInput,
+    ctn_endpoint_bases, ctn_response_bases_at, transformation_normal_alo_row_geometry,
 };
 use gam_problem::{BlockRole, EstimationError, Gauge, ResponseFamily};
 use gam_solve::inference::alo::{
@@ -1591,51 +1591,30 @@ fn compute_saved_transformation_normal_alo(
         }
     }
     let knots = Array1::from_vec(knots.clone());
-    let (raw_value_basis, _) = create_basis::<Dense>(
+    // Response bases and endpoint bases come from the shared chart helpers, so
+    // the ALO replay assembles the transform the way the fit did rather than
+    // re-transcribing it: same location column, and endpoint bases stated
+    // STRUCTURALLY (`I_k(y_lo) = 0`, `I_k(y_hi) = 1` for an anchored I-spline)
+    // instead of re-evaluated at the boundary knots (gam#2680).
+    let (response_value_basis, response_derivative_basis) = ctn_response_bases_at(
         observations.response.view(),
-        KnotSource::Provided(knots.view()),
+        knots.view(),
         degree,
-        BasisOptions::i_spline(),
+        Some(&transform),
     )
     .map_err(|error| {
         invalid(format!(
-            "saved transformation-normal ALO value basis: {error}"
+            "saved transformation-normal ALO response basis: {error}"
         ))
     })?;
-    let raw_value_basis = raw_value_basis.as_ref();
-    let raw_derivative_basis =
-        create_ispline_derivative_dense(observations.response.view(), &knots, degree, 1).map_err(
-            |error| {
-                invalid(format!(
-                    "saved transformation-normal ALO derivative basis: {error}"
-                ))
-            },
-        )?;
-    if raw_value_basis.ncols() != transform.nrows()
-        || raw_derivative_basis.dim() != raw_value_basis.dim()
-    {
+    let response_dimension = transform_columns + CTN_LOCATION_COLUMNS;
+    if response_value_basis.ncols() != response_dimension || response_value_basis.nrows() != n {
         return Err(invalid(format!(
-            "saved transformation-normal ALO raw basis/transform mismatch: value={}x{}, derivative={}x{}, transform={}x{}",
-            raw_value_basis.nrows(),
-            raw_value_basis.ncols(),
-            raw_derivative_basis.nrows(),
-            raw_derivative_basis.ncols(),
-            transform.nrows(),
-            transform.ncols(),
+            "saved transformation-normal ALO response basis is {}x{}; the saved layout requires {n}x{response_dimension}",
+            response_value_basis.nrows(),
+            response_value_basis.ncols(),
         )));
     }
-    let shape_value = raw_value_basis.dot(&transform);
-    let shape_derivative = raw_derivative_basis.dot(&transform);
-    let response_dimension = transform_columns + 1;
-    let mut response_value_basis = Array2::<f64>::zeros((n, response_dimension));
-    response_value_basis.column_mut(0).fill(1.0);
-    response_value_basis
-        .slice_mut(s![.., 1..])
-        .assign(&shape_value);
-    let mut response_derivative_basis = Array2::<f64>::zeros((n, response_dimension));
-    response_derivative_basis
-        .slice_mut(s![.., 1..])
-        .assign(&shape_derivative);
 
     let lower_response = knots[0];
     let upper_response = knots[knots.len() - 1];
@@ -1644,36 +1623,7 @@ fn compute_saved_transformation_normal_alo(
             "saved transformation-normal ALO support is degenerate: lower={lower_response}, upper={upper_response}"
         )));
     }
-    let endpoints = Array1::from_vec(vec![lower_response, upper_response]);
-    let (raw_endpoint_basis, _) = create_basis::<Dense>(
-        endpoints.view(),
-        KnotSource::Provided(knots.view()),
-        degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|error| {
-        invalid(format!(
-            "saved transformation-normal ALO endpoints: {error}"
-        ))
-    })?;
-    if raw_endpoint_basis.ncols() != transform.nrows() {
-        return Err(invalid(format!(
-            "saved transformation-normal ALO endpoint basis has {} columns; transform requires {}",
-            raw_endpoint_basis.ncols(),
-            transform.nrows(),
-        )));
-    }
-    let endpoint_shape = raw_endpoint_basis.as_ref().dot(&transform);
-    let mut lower_basis = Array1::<f64>::zeros(response_dimension);
-    let mut upper_basis = Array1::<f64>::zeros(response_dimension);
-    lower_basis[0] = 1.0;
-    upper_basis[0] = 1.0;
-    lower_basis
-        .slice_mut(s![1..])
-        .assign(&endpoint_shape.row(0));
-    upper_basis
-        .slice_mut(s![1..])
-        .assign(&endpoint_shape.row(1));
+    let (lower_basis, upper_basis) = ctn_endpoint_bases(&transform);
 
     let fit = payload.fit_result.as_ref().ok_or_else(|| {
         invalid("saved transformation-normal ALO requires a canonical fit result")

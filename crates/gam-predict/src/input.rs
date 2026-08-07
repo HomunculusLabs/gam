@@ -348,9 +348,13 @@ impl SavedCtnChart {
         (self.knots[0], self.knots[self.knots.len() - 1])
     }
 
-    /// `[1, I_k(y)·T]` at arbitrary response values, on the frozen basis.
-    fn value_basis_at(&self, y: &Array1<f64>) -> Result<Array2<f64>, PredictInputError> {
-        let (value, _derivative) = ctn_response_bases_at(
+    /// `([1, I_k(y)·T], [0, M_k(y)·T])` at arbitrary response values, on the
+    /// frozen basis. Both are returned even where only `h` is consumed: the
+    /// chart evaluator computes `h'` alongside it, and handing it the value
+    /// basis in the derivative slot would make `CtnRowGeometry::h_prime` a
+    /// number that means nothing.
+    fn bases_at(&self, y: &Array1<f64>) -> Result<(Array2<f64>, Array2<f64>), PredictInputError> {
+        let (value, derivative) = ctn_response_bases_at(
             y.view(),
             self.knots.view(),
             self.degree,
@@ -367,7 +371,7 @@ impl SavedCtnChart {
                 ),
             });
         }
-        Ok(value)
+        Ok((value, derivative))
     }
 
     /// The coefficient matrix `A` (`p_resp × p_cov`) behind a saved fit.
@@ -463,7 +467,7 @@ fn transformation_normal_quantile_grid(
     let grid_y: Array1<f64> = Array1::from_shape_fn(GRID, |k| {
         y_lo + (y_hi - y_lo) * (k as f64) / ((GRID - 1) as f64)
     });
-    let grid_value = saved.value_basis_at(&grid_y)?;
+    let (grid_value, grid_derivative) = saved.bases_at(&grid_y)?;
 
     // The CTM latent that is calibrated to N(0,1) is the finite-support PIT
     // score, not the raw roughness transform `h` (see
@@ -479,6 +483,7 @@ fn transformation_normal_quantile_grid(
     // single latent scale.
     let saved_ref = &saved;
     let grid_value_ref = &grid_value;
+    let grid_derivative_ref = &grid_derivative;
     let grid_y_ref = &grid_y;
     let coefficients_ref = &coefficients;
     let cov_mat_ref = &cov_mat;
@@ -494,15 +499,15 @@ fn transformation_normal_quantile_grid(
             let mut endpoints: Option<(f64, f64)> = None;
             for k in 0..GRID {
                 let value_row = grid_value_ref.row(k);
+                let derivative_row = grid_derivative_ref.row(k);
                 let geometry = ctn_row_geometry(
                     saved_ref.chart,
                     &alpha,
                     CtnRowBases {
                         value: value_row.as_slice().expect("grid value row contiguous"),
-                        // `h'` is not consumed by the inversion grid; the value
-                        // basis is reused so the evaluator has a slice of the
-                        // right width for every component it computes.
-                        derivative: value_row.as_slice().expect("grid value row contiguous"),
+                        derivative: derivative_row
+                            .as_slice()
+                            .expect("grid derivative row contiguous"),
                         lower: saved_ref
                             .lower_basis
                             .as_slice()
@@ -616,7 +621,7 @@ fn transformation_normal_observed_scores(
     let saved = SavedCtnChart::from_model(model)?;
     let p_cov = design.design.ncols();
     let coefficients = saved.coefficient_matrix(model, p_cov)?;
-    let observed_value = saved.value_basis_at(response)?;
+    let (observed_value, observed_derivative) = saved.bases_at(response)?;
     let covariate_matrix =
         design
             .design
@@ -633,13 +638,15 @@ fn transformation_normal_observed_scores(
             let covariate_row = covariate_matrix.row(row_index);
             let alpha = saved_ref.alpha_row(coefficients_ref, covariate_row);
             let value_row = observed_value.row(row_index);
+            let derivative_row = observed_derivative.row(row_index);
             let geometry = ctn_row_geometry(
                 saved_ref.chart,
                 &alpha,
                 CtnRowBases {
                     value: value_row.as_slice().expect("value basis row contiguous"),
-                    // `h'` is not consumed by the PIT score.
-                    derivative: value_row.as_slice().expect("value basis row contiguous"),
+                    derivative: derivative_row
+                        .as_slice()
+                        .expect("derivative basis row contiguous"),
                     lower: saved_ref
                         .lower_basis
                         .as_slice()

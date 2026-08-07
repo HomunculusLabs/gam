@@ -205,7 +205,7 @@ fn reconstruct_transform(
         }
         h[i] = val + eps * (y[i] - median);
         h_prime[i] = hp + eps;
-        lower[i] = gamma0 + lower_floor;
+        lower[i] = alpha0 + lower_floor;
         upper[i] = up + upper_floor;
     }
     ReconstructedTransform {
