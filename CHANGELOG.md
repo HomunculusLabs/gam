@@ -145,6 +145,15 @@
   program's quadratic forms stay exact sums of squares with no runtime
   eigendecomposition and no PSD tolerance on this path.
 
+  The couplings are a weighted ridge and the innovation variances a
+  line-searched Fisher scoring of the Gaussian log-linear variance model —
+  damped rather than raw, because `Σ w A Aᵀ` is the EXPECTED information and the
+  undamped step overshoots. An earlier undamped loop that stopped when the step
+  norm failed to shrink was measured returning a `log d` 4.5 nats short of the
+  optimum, and it was an independent nonparametric oracle (bin the rows, compare
+  the fitted surface to each bin's own empirical second moments) that caught it,
+  at 3.42× the bin's sampling band before the fix and 0.63× after.
+
   **The escalation trigger is one robust Rao score test per score PAIR** on
   `ζ_j·ζ_k`, on the same centred conditioning span and at the same α the #2768
   gate uses: the statistic for the sentence the issue is titled with and nothing
