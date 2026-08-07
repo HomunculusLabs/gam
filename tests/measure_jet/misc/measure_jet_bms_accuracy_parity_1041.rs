@@ -257,7 +257,12 @@ fn measure_jet_bms_within_method_replication_noise_2754() {
         // Vary ONLY the draw: same generator, same truth, same bases, same
         // center count. The offset is the replicate index so the arms are
         // fixed before the run rather than chosen after it.
-        let off = (rep as u64) * 0x9E37_79B9_7F4A_7C15;
+        // SplitMix64's golden-gamma stride: the multiply is modular by
+        // construction (2·γ already exceeds u64::MAX), so it has to be spelled
+        // as a wrapping one. Written as `*` this test panicked on `rep = 2` in
+        // any debug build, which is why #2754's replication estimate has never
+        // been computed from more than two draws.
+        let off = (rep as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut rng = SplitMix64::new(0x1041_2026_0613_0001u64.wrapping_add(off));
         let mut x1 = vec![0.0; N_TRAIN];
         let mut x2 = vec![0.0; N_TRAIN];
