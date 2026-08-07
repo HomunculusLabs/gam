@@ -67,7 +67,7 @@ pub(crate) fn exact_a_witness_2515_at_alpha(alpha: f64) -> ExactAWitness2515 {
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("the #2515 witness atom is built from a well-formed periodic chart")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
@@ -75,8 +75,9 @@ pub(crate) fn exact_a_witness_2515_at_alpha(alpha: f64) -> ExactAWitness2515 {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("the #2515 witness assignment has one block and one manifold");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("one atom against a one-block assignment is a valid term");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![alpha.ln()]]);
     ExactAWitness2515 { term, target, rho }
 }
@@ -175,7 +176,11 @@ pub(crate) fn full_basis_probe_bundle(
         .collect();
     let sinv: Vec<Array1<f64>> = probes
         .iter()
-        .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
+        .map(|v| {
+            cache
+                .schur_inverse_apply(v.view())
+                .expect("the #2515 probe directions are in the cached Schur complement's domain")
+        })
         .collect();
     (probes, sinv)
 }
