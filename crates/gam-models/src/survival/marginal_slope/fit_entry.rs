@@ -222,8 +222,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
     let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
-    let pooled_score_covariance =
-        marginal_slope_covariance_from_scores(spec.z.view(), &spec.weights)?;
     // gam#2766: `Σ` in this family's defining identity is `Var(z | a)`, so the
     // pooled matrix above is only the right object when that conditional
     // covariance does not move. One robust Rao score test per score PAIR, on the
@@ -1825,7 +1823,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         z_normalization,
         latent_z_calibrations: latent_calibration.per_score,
         latent_conditioning_reproducible,
-        score_covariance: pooled_score_covariance.to_dense(),
+        score_covariance: score_covariance.pooled_covariance().to_dense(),
         conditional_score_covariance: score_covariance.model().cloned(),
         time_block_penalties_len: time_penalties_len,
         time_wiggle_knots: spec
