@@ -2542,19 +2542,52 @@ fn try_exact_joint_spatial_length_scale_optimization(
         },
         baseline_score.abs() * f64::EPSILON.sqrt(),
     );
+    // WARNS, and no longer REFUSES (gam#2760). The gate's own complaint is
+    // right — "the joint search is minimizing a different function than the one
+    // its result is graded against" — and the response to it is to grade the
+    // result on the function it will SHIP with, which this routine can do
+    // exactly (see the acceptance comparison after the accept-fit below), not
+    // to refuse a whole REML fit on a cross-route scalar comparison no fixed
+    // relative constant can denominate.
+    //
+    // Why no constant can. `joint_seed_value` and `baseline_score` are two
+    // INDEPENDENT assemblies of a REML criterion whose forward error is the
+    // `O(ε·κ)` conditioning family #2644 named, and `κ` here is the penalized
+    // Hessian's. MEASURED on the #2760 ladder, same fixture, five rungs:
+    //
+    //   n =  1000   gap = −1.386e-13 relative     baseline rho: one coordinate at −RHO_BOUND
+    //   n =  2000   gap = −1.667e-13 relative     one coordinate at −RHO_BOUND
+    //   n =  4000   gap = +5.475e-13 relative     one coordinate at −RHO_BOUND
+    //   n =  8000   gap = +5.965e-08 relative     TWO coordinates at −RHO_BOUND
+    //   n = 16000   gap = +5.968e-08 relative     TWO coordinates at −RHO_BOUND
+    //
+    // Five orders in one step, and the step is not in `n`: it is the rung at
+    // which a SECOND penalty block reaches `λ = e^−30 ≈ 9.4e-14` and stops
+    // contributing to `H = XᵀWX + S_λ` at working precision. `log|H|` is then a
+    // sum of logs across the raw Duchon Gram's ~1e15 spectrum and the two
+    // assemblies part company at exactly the scale `ε·κ` predicts. A `1e-8`
+    // relative demand cannot be met there by any correct implementation, and a
+    // constant loose enough to admit it would no longer catch the formula
+    // difference #2671 found (`5.047e-5` relative) that this gate exists for.
+    //
+    // So the number keeps its full decomposition and its loudness, and the
+    // REFUSAL moves to a comparison both sides of which come from ONE route.
     if (joint_seed_value - baseline_score).abs() > accept_tol {
-        return Err(EstimationError::RemlOptimizationFailed(format!(
-            "exact joint spatial optimization and the scalar-rho route disagree about the \
-             criterion AT THE SAME POINT theta0: joint_seed={joint_seed_value:.12e}, \
-             baseline={baseline_score:.12e}, gap={:.3e} ({:.3e} relative), \
-             agreement_tolerance={accept_tol:.3e}. The joint search is therefore minimizing a \
-             different function than the one its result is graded against; this is a criterion \
-             defect, not a solver failure (joint_final={joint_final_value:.12e}, \
-             theta_checkpoint={:?})",
+        log::warn!(
+            "[spatial-kappa] the joint and scalar-rho routes disagree about the criterion AT \
+             THE SAME POINT theta0: joint_seed={joint_seed_value:.12e}, \
+             baseline={baseline_score:.12e}, gap={:.3e} ({:.3e} relative) against a \
+             {accept_tol:.3e} agreement tolerance. Two independent assemblies of one \
+             criterion; their forward error is O(eps*kappa) in the penalized Hessian, so this \
+             is only evidence of a formula difference when it exceeds what the conditioning \
+             explains. The joint result is graded on the SHIPPED scalar-route score below, \
+             which is a like-for-like comparison; this line is the record that the two \
+             assemblies parted company (joint_final={joint_final_value:.12e}, \
+             theta_checkpoint={:?}).",
             joint_seed_value - baseline_score,
             (joint_seed_value - baseline_score) / baseline_score.abs().max(f64::MIN_POSITIVE),
             theta_star.to_vec(),
-        )));
+        );
     }
     // Descent contract. Measured on `b8745892a`, this is the half that actually
     // fires (`seed=6.613467e1, final=6.613469e1, initial=6.613467e1` on the
@@ -2635,6 +2668,30 @@ fn try_exact_joint_spatial_length_scale_optimization(
         family.clone(),
         options,
     )?;
+
+    // THE ACCEPTANCE COMPARISON (gam#2760). Both sides are `fit_score` of a
+    // scalar-route fit — the incumbent at `theta0` and the accept-fit at `θ*` —
+    // so this is the one comparison the two routes can make like for like, in
+    // one arithmetic, on the quantity that actually ships. The cross-route
+    // comparison at `theta0` above states whether the two assemblies agree; THIS
+    // states whether optimizing κ improved the fit, which is what the routine
+    // promises. A joint search that lands somewhere the shipped score does not
+    // like is a no-op, exactly as the descent contract above treats a search
+    // that lands above its own seed — and for the same reason: this routine
+    // holds both candidates and can simply return the better one.
+    let optimized_score = fit_score(&optimized.fit);
+    if optimized_score > baseline_score + accept_tol {
+        log::warn!(
+            "[spatial-kappa] joint kappa optimization did not improve the SHIPPED scalar-route \
+             score (baseline={baseline_score:.12e}, at theta_star={optimized_score:.12e}, \
+             regression={:.3e}, acceptance_tolerance={accept_tol:.3e}); keeping the incumbent \
+             fit and treating joint kappa optimization as a no-op for this fit. Both numbers \
+             are `fit_score` of a scalar-route fit, so unlike the theta0 cross-route line this \
+             comparison is like-for-like and a regression here is a real one.",
+            optimized_score - baseline_score,
+        );
+        return Ok(None);
+    }
 
     // Stamp reml_score with joint_final_value so downstream consumers see a
     // score consistent with the gate decision; the refit serves as a
