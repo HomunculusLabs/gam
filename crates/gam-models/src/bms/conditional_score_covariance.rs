@@ -593,9 +593,10 @@ impl ConditionalScoreCovariance {
             .fold(0.0_f64, f64::max);
         let innovation_floor =
             (128.0 * k as f64 * f64::EPSILON * score_scale).max(f64::MIN_POSITIVE);
+        // One MCD block per coordinate, in order: the triangular structure means
+        // coordinate `j` regresses on the CENTRED scores below it, not on their
+        // innovations, so no state carries between iterations.
         let mut coordinates = Vec::with_capacity(k);
-        // Column `j` of `innovations` is `ε_j`, needed by later coordinates only
-        // through their own regressions, but kept for the variance stage.
         for j in 0..k {
             let (autoregression, autoregression_range, residual) =
                 fit_autoregression(&centered, j, basis.view(), a_centered.view(), weights)?;
