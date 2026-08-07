@@ -524,6 +524,51 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         }
     }
 
+    /// Retire the certified ψ-Gram tensor and every piece of state keyed to it,
+    /// so that from here on this evaluator prices the EXACT streamed criterion.
+    ///
+    /// # Why this exists (gam#2760)
+    ///
+    /// The #1033b tensor is a certified n-free SURROGATE: `PSI_GRAM_CERT_RTOL`
+    /// (`1e-9`) on the Gram and `PSI_GRAM_SKIP_PROJ_ATOL` (`1e-7`) on the
+    /// reduced-basis subspace. Nothing in that certification bounds the CRITERION
+    /// the outer optimizer ranks, and the weakly-penalized inner solve
+    /// `β̂ = (G + λS)⁻¹r` amplifies a Gram residual by the radial-kernel
+    /// conditioning. MEASURED on the #2760 ladder (noiseless 1-D Duchon,
+    /// `n = 2000`, the search having driven `λ` to `e⁻³⁰`): the surrogate and the
+    /// exact lane price the criterion at the SAME θ as `-1.2781058170149880e4`
+    /// and `-1.2781006804748626e4` — a `5.137e-2` disagreement against a
+    /// `1.905e-4` roundoff envelope, `270×` over
+    /// [`crate::rho_optimizer::outer_value_agreement_bound`], i.e. `4e-6`
+    /// RELATIVE where `√ε` is the contract.
+    ///
+    /// Two consequences, both observed: a Strong-Wolfe line search whose value
+    /// probes cross a skip-eligibility boundary sees the criterion JUMP by more
+    /// than the decrease it is hunting, backtracks to `StepSizeTooSmall`, and
+    /// leaves the fit non-stationary; and the terminal certificate's own
+    /// value-agreement audit refuses the mint outright.
+    ///
+    /// So the surrogate is a SEARCH object, exactly as the staged-pilot
+    /// subsample is, and it needs the same exit: `begin_exact_polish` retires it
+    /// at the search's checkpoint and the optimizer continues, and certifies, on
+    /// the exact measure. `last_canonical_revision` is cleared so the next
+    /// evaluation takes the full slow path and rebuilds a faithful surface;
+    /// clearing the installed `GaussianFixedCache` matters because
+    /// `install_psi_gram_statistics` returns early with no tensor and would
+    /// otherwise leave the surrogate's Gram in place forever.
+    pub fn retire_psi_gram_tensor(&mut self) -> bool {
+        if self.psi_gram_tensor.is_none() {
+            return false;
+        }
+        self.psi_gram_tensor = None;
+        self.psi_gram_anchor_correction = None;
+        self.psi_gram_frozen_rows = None;
+        self.last_reset_psi = None;
+        self.last_canonical_revision = None;
+        self.reml_state.clear_gaussian_fixed_cache();
+        true
+    }
+
     /// Declare whether the design `cache` can rebuild `S(ψ)` exactly and n-free
     /// for the single spatial term (#1033, penalty lane). Set ONCE at setup from
     /// `cache.supports_nfree_penalty_rekey()`. When `true`, the design-revision

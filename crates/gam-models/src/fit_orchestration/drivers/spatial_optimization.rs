@@ -4274,11 +4274,47 @@ fn run_exact_joint_spatial_optimization(
     // is rebuilt at every psi, so the redundancy's coefficient
     // (`S_2 = c(psi) S_0`) moves and a snapshot would deflate a direction the
     // criterion is no longer flat along.
-    let mut obj = obj.with_criterion_invariance(
-        |ctx: &mut &mut SpatialJointContext<'_>, rho: &Array1<f64>| {
-            ctx.evaluator.criterion_invariant_directions(rho)
-        },
-    );
+    let mut obj = obj
+        .with_criterion_invariance(
+            |ctx: &mut &mut SpatialJointContext<'_>, rho: &Array1<f64>| {
+                ctx.evaluator.criterion_invariant_directions(rho)
+            },
+        )
+        // gam#2760: the #1033b ψ-Gram tensor is a certified n-free SURROGATE for
+        // the criterion, not the criterion. It is certified on the GRAM
+        // (`PSI_GRAM_CERT_RTOL = 1e-9`) and on the reduced-basis SUBSPACE
+        // (`PSI_GRAM_SKIP_PROJ_ATOL = 1e-7`); nothing in it bounds the scalar the
+        // optimizer ranks, and the weakly-penalized inner solve amplifies a Gram
+        // residual by the radial-kernel conditioning. MEASURED at `n = 2000` on
+        // the #2760 ladder, at the point the search stopped: the surrogate and
+        // the exact lane price the criterion as `-1.2781058170149880e4` and
+        // `-1.2781006804748626e4`, a `5.137e-2` gap against a `1.905e-4` roundoff
+        // envelope — `270×` `outer_value_agreement_bound`, `4e-6` relative where
+        // `√ε` is the contract.
+        //
+        // That makes the surrogate exactly the same KIND of object as the
+        // staged-pilot row subsample the sibling N-block driver already retires
+        // here: an optimization stage, never a certifiable measure. So it gets
+        // the same exit. `run_outer` calls this once, after the search has
+        // converged, and then re-runs the optimizer from that checkpoint on
+        // whatever measure the objective now prices — here the exact streamed
+        // criterion — before the mandatory analytic certificate. The n-free
+        // property is kept where it pays (every in-window TRIAL of the search)
+        // and dropped where it cannot be certified (the terminal polish).
+        .with_exact_polish(|ctx: &mut &mut SpatialJointContext<'_>| {
+            if !ctx.evaluator.retire_psi_gram_tensor() {
+                return false;
+            }
+            // Objective memoization is theta-only, so a surrogate value at the
+            // warm checkpoint must not alias the exact value at the same theta.
+            ctx.cache.invalidate_objective_memo();
+            log::info!(
+                "[KAPPA-PHASE-POLISH] the certified n-free psi-Gram surrogate is retired at \
+                 the search checkpoint; the optimizer continues and certifies on the exact \
+                 streamed criterion (gam#2760)"
+            );
+            true
+        });
 
     let run_label = match kind {
         SpatialHyperKind::Anisotropic => "aniso-psi joint REML",
