@@ -37,7 +37,10 @@ use gam_row_macros::row_program;
 /// represent that fit at all, so it is not a naming repair — it is a strictly
 /// smaller model. The zero crossing the name's absence permits is not a
 /// pathology either: it is the covariate value at which the score stops
-/// predicting.
+/// predicting, and the row program is analytic through it — `c = √(1 + s²g²Σ)`,
+/// `c′ = s²Σg/c` and `c″ = s²Σ/c³` are all smooth at `g = 0`, so nothing in the
+/// derivative tower has anything to notice about a crossing. (A log link, by
+/// contrast, pushes `g → −∞` there.)
 ///
 /// **The scale-invariance argument for penalising `log b` does not bite here.**
 /// Rescaling the latent score `z → z/κ` sends `g → κg` and `Σ → Σ/κ²`, and both
