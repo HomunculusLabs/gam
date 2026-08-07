@@ -400,21 +400,41 @@ fn kappa_iso_1d_convergence_diagnostic() {
 /// Duchon Gaussian fixture (gentle `y=sin(t)`, 12 centers, single penalty, tight
 /// bounds). n=600 converges; earlier runs showed n=1000 failing with a stuck
 /// `grad_norm≈1.9e3`. This sweep brackets the transition so the defect report
-/// carries an exact reproducer. Report-only (the printed sweep is the
-/// deliverable); the companion measurement stays gated until it is fixed.
+/// carries an exact reproducer.
+///
+/// GATED as of gam#2760, for the same reason as
+/// `kappa_iso_1d_convergence_diagnostic`: the transition it was written to
+/// bracket is gone, so "the printed sweep is the deliverable" no longer buys
+/// anything a pass/fail would not. There IS no threshold now — 600, 800, 1000
+/// and 1200 all converge — and that sentence is the claim worth defending. It
+/// is a cheap and sharp one: this sweep runs four fits in seconds, and each of
+/// them crosses the regime where the scalar-ρ incumbent falls outside the joint
+/// ±12 prior and where the ψ-Gram surrogate is armed, so a regression of either
+/// #2760 root cause reappears here as a rung going red rather than as a wall-
+/// clock mystery at 16k.
 #[test]
 fn kappa_iso_1d_n_threshold_sweep() {
     let bounds = (1e-2, 1e2);
     eprintln!("[kappa-nthresh] iso-1D hybrid Duchon, Gaussian, single penalty, bounds={bounds:?}");
+    let mut refusals = Vec::new();
     for &n in &[600usize, 800, 1000, 1200] {
         match run_fit(n, true, false, bounds) {
             Ok(timing) => eprintln!(
                 "[kappa-nthresh] n={n:>5}: CONVERGED in {:.1}s",
                 timing.wall_s
             ),
-            Err(reason) => eprintln!("[kappa-nthresh] n={n:>5}: FAILED — {reason}"),
+            Err(reason) => {
+                eprintln!("[kappa-nthresh] n={n:>5}: FAILED — {reason}");
+                refusals.push((n, reason));
+            }
         }
     }
+    assert!(
+        refusals.is_empty(),
+        "[kappa-nthresh] the iso-1D κ fit must converge at every rung of this sweep — there is \
+         no sample-size threshold left to bracket. Refused at: {:?}",
+        refusals.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+    );
 }
 
 /// #1033 FAST-READ companion to `kappa_outer_loop_is_n_independent`: the same
