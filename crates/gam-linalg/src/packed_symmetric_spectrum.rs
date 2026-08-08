@@ -133,6 +133,22 @@ pub fn packed_symmetric_spectrum_with_probe(
     }
 
     let (mut diagonal, mut offdiagonal) = tridiagonalize_packed_with_probe(n, packed, probe);
+    // The reduction is scale-invariant by construction and cannot manufacture a
+    // non-finite entry from finite input; this says so out loud rather than
+    // letting a NaN reach the QL sweep, where `NaN <= floor` is false forever
+    // and the failure is reported as a non-convergence at an index that means
+    // nothing. Costs `O(n)` against the `O(n³)` above.
+    let broken = diagonal
+        .iter()
+        .chain(offdiagonal.iter())
+        .chain(probe.iter())
+        .position(|value| !value.is_finite());
+    if let Some(index) = broken {
+        return Err(format!(
+            "packed symmetric spectrum: the Householder reduction of a finite {n}x{n} matrix \
+             produced a non-finite tridiagonal entry (flat index {index} over d, e, probe)"
+        ));
+    }
     implicit_ql_with_probe(&mut diagonal, &mut offdiagonal, probe)?;
     sort_spectrum_ascending(&mut diagonal, probe);
     Ok(diagonal)
@@ -173,28 +189,51 @@ fn tridiagonalize_packed_with_probe(
             continue;
         }
 
-        // LAPACK `dlarfg` on x = A[k, k+1..n]: choose `beta`, `tau` and a unit-
-        // leading reflector `v` with `(I - tau v vᵀ) x = beta e₁`.
+        // `dlarfg` on x = A[k, k+1..n]: choose `beta`, `tau` and a unit-leading
+        // reflector `v` with `(I - tau v vᵀ) x = beta e₁`.
+        //
+        // BUILT ON THE ROW NORMALIZED BY ITS OWN LARGEST ENTRY, which is not a
+        // refinement — the unscaled form produces NaN and it did. `tau` and `v`
+        // are invariant to a positive rescaling of `x`, but the intermediate
+        // `1/(alpha - beta)` is not: on a row whose entries have decayed to the
+        // denormal range — what the trailing block of a rank-deficient Gram
+        // becomes after a thousand reductions, and this cascade's design is 89%
+        // columns the data cannot pin — that reciprocal OVERFLOWS to infinity,
+        // and `0 · inf` on the row's exact zeros writes NaN into the reflector.
+        // The whole trailing block is NaN from there, the tridiagonal comes out
+        // NaN, and QL then spins to its sweep limit on an eigenvalue that never
+        // existed. Measured: `the_spectral_residual_carries_no_null_modes`, NaN
+        // at index 1454 of 1722, reported as a non-convergence.
+        //
+        // After normalization `|alpha_s - beta_s| = |alpha_s| + hypot(...) >= 1`
+        // by construction, so the reciprocal cannot overflow at any input scale,
+        // and every `v` entry is bounded by 1.
         let x = &tail[1..=m];
-        let alpha = x[0];
-        let tail_norm = vector_norm(&x[1..]);
-        let (beta, tau) = if tail_norm == 0.0 {
-            // Already in the required form; a zero `tau` is the exact identity
-            // reflector, so no update is applied at all below.
-            (alpha, 0.0)
+        let largest = x.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let (beta, tau) = if largest == 0.0 {
+            (0.0, 0.0)
         } else {
-            let magnitude = alpha.hypot(tail_norm);
-            // `beta` takes the sign OPPOSITE to `alpha` so that `alpha - beta`
-            // is an addition of like-signed quantities: the cancellation-free
-            // choice, and the reason `dlarfg` does the same.
-            let beta = if alpha >= 0.0 { -magnitude } else { magnitude };
-            let tau = (beta - alpha) / beta;
-            let scale = 1.0 / (alpha - beta);
-            reflector[0] = 1.0;
-            for i in 1..m {
-                reflector[i] = x[i] * scale;
+            let alpha = x[0] / largest;
+            let tail_norm = vector_norm_scaled(&x[1..], largest);
+            if tail_norm == 0.0 {
+                // Already in the required form; a zero `tau` is the exact
+                // identity reflector, so no update is applied at all below.
+                (x[0], 0.0)
+            } else {
+                let magnitude = alpha.hypot(tail_norm);
+                // `beta` takes the sign OPPOSITE to `alpha` so that
+                // `alpha - beta` is an addition of like-signed quantities: the
+                // cancellation-free choice, and the reason `dlarfg` does the
+                // same.
+                let beta = if alpha >= 0.0 { -magnitude } else { magnitude };
+                let tau = (beta - alpha) / beta;
+                let scale = 1.0 / (alpha - beta);
+                reflector[0] = 1.0;
+                for i in 1..m {
+                    reflector[i] = (x[i] / largest) * scale;
+                }
+                (beta * largest, tau)
             }
-            (beta, tau)
         };
         offdiagonal[k] = beta;
 
@@ -463,26 +502,15 @@ fn sort_spectrum_ascending(diagonal: &mut [f64], probe: &mut [f64]) {
     probe.copy_from_slice(&sorted_probe);
 }
 
-/// Euclidean norm, scaled so an intermediate square cannot overflow or flush a
-/// representable norm to zero.
-fn vector_norm(values: &[f64]) -> f64 {
-    let mut scale = 0.0_f64;
-    let mut sum_squares = 1.0_f64;
+/// `‖values / divisor‖`, with `divisor > 0`. Dividing first keeps the sum of
+/// squares inside the exponent range whatever the row's magnitude is.
+fn vector_norm_scaled(values: &[f64], divisor: f64) -> f64 {
+    let mut sum_squares = 0.0_f64;
     for &value in values {
-        if value == 0.0 {
-            continue;
-        }
-        let magnitude = value.abs();
-        if scale < magnitude {
-            let ratio = scale / magnitude;
-            sum_squares = 1.0 + sum_squares * ratio * ratio;
-            scale = magnitude;
-        } else {
-            let ratio = magnitude / scale;
-            sum_squares += ratio * ratio;
-        }
+        let scaled = value / divisor;
+        sum_squares += scaled * scaled;
     }
-    if scale == 0.0 { 0.0 } else { scale * sum_squares.sqrt() }
+    sum_squares.sqrt()
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -763,6 +791,53 @@ mod tests {
                 "scaled eigenvalue {got} vs {want}"
             );
         }
+    }
+
+    #[test]
+    fn a_denormal_scale_row_next_to_an_ordinary_one_does_not_reduce_to_nan() {
+        // The reflector's `1/(alpha - beta)` overflows on a row whose entries
+        // have decayed to the denormal range, and `0 · inf` on that row's exact
+        // zeros then writes NaN into the whole trailing block. This is that row,
+        // planted beside an ordinary-scale block so the matrix norm cannot be
+        // rescaled away by the caller — which is exactly the shape a
+        // rank-deficient Gram reduces to after a thousand Householder steps.
+        let n = 8;
+        let tiny = f64::MIN_POSITIVE * 4.0;
+        let mut dense = Array2::<f64>::zeros((n, n));
+        for i in 0..4 {
+            for j in i..4 {
+                let value = 1.0 / (1.0 + (i + j) as f64);
+                dense[(i, j)] = value;
+                dense[(j, i)] = value;
+            }
+        }
+        // Row 4 reaches into the denormal block with zeros interleaved: the
+        // zeros are what turn an overflowed scale into NaN rather than infinity.
+        for j in 5..n {
+            let value = if j % 2 == 0 { tiny } else { 0.0 };
+            dense[(4, j)] = value;
+            dense[(j, 4)] = value;
+        }
+        for i in 4..n {
+            dense[(i, i)] = tiny;
+        }
+        let w = Array1::from_shape_fn(n, |i| 1.0 + i as f64);
+        let (reference_values, reference_probe) = reference_spectrum(&dense, &w);
+        let mut packed = pack_upper(&dense);
+        let mut probe = w.to_vec();
+        let values = packed_symmetric_spectrum_with_probe(n, &mut packed, &mut probe)
+            .expect("a denormal-scale block must reduce, not refuse");
+        assert!(
+            values.iter().all(|v| v.is_finite()) && probe.iter().all(|v| v.is_finite()),
+            "reduction produced non-finite output: values {values:?} probe {probe:?}"
+        );
+        assert_spectral_measures_agree(
+            "denormal",
+            &values,
+            &probe,
+            &reference_values,
+            &reference_probe,
+        );
     }
 
     #[test]

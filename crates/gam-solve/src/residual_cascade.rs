@@ -143,9 +143,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use faer::Side;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat};
-use gam_linalg::faer_ndarray::FaerEigh;
+use gam_linalg::packed_symmetric_spectrum::{
+    packed_symmetric_spectrum_with_probe, packed_upper_len, packed_upper_row_offset,
+};
 use gam_math::score_opt::{
     AffineRemlProfile, ScoreJet, certified_ln_positive,
 };
@@ -154,7 +155,7 @@ use gam_linalg::sparse_exact::{
     sparse_spd_factor_nnz,
 };
 use gam_terms::grid_spline_2d::{chol_solve, cholesky_logdet};
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 
 /// Bump support radius as a multiple of the level's covering radius:
 /// `δ_l = OVERLAP·h_l`. Separation ≥ h_l caps the bumps covering a point at
@@ -199,25 +200,25 @@ const DENSE_GRAM_MAX: usize = 1536;
 /// (The former endpoint-jet/global-Lipschitz enclosure that tried to bridge that
 /// gap did not collapse in saturated tails and was removed; see
 /// [`CascadeRemlProfile::affine_view`].) The requirement is therefore ALL
-/// eigenvalues of the `rank × rank` whitened Schur complement together with its
-/// eigenvectors, one of which is projected onto the whitened response — a dense
-/// symmetric eigendecomposition, and no sparse route replaces it.
+/// eigenvalues of the `rank × rank` whitened Schur complement, together with the
+/// whitened response's coordinates in its eigenbasis — and NOT the eigenbasis
+/// itself, which is where this budget's history went wrong (#2758).
 ///
-/// So the bound is that eigendecomposition's LIVE MEMORY, and the width is
-/// DERIVED from it: `sqrt(CERTIFIED_SPECTRUM_BYTES / (blocks · 8))` = 2896
-/// columns at a 512 MiB peak over the [`CERTIFIED_SPECTRUM_BLOCKS`] `m × m`
-/// blocks the route was measured to hold, all freed as soon as the modes are
-/// extracted. Being a transient rather than a lifetime cache is why this budget
-/// sits 1.9× further out in columns (3.6× in memory) than [`DENSE_GRAM_MAX`]:
-/// past that cap the Gram is materialized from the CSR design for the duration
-/// of the decomposition and dropped, instead of being kept for the fit.
+/// So the bound is that decomposition's LIVE MEMORY, and the width is DERIVED
+/// from it: `sqrt(CERTIFIED_SPECTRUM_BYTES / bytes-per-m²)`, over the
+/// [`CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED`] the route was measured to
+/// hold, all freed as soon as the modes are extracted. Being a transient rather
+/// than a lifetime cache is why this budget reaches so much further in columns
+/// than [`DENSE_GRAM_MAX`]: the Schur complement is assembled from the CSR
+/// design for the duration of the decomposition and dropped, instead of being
+/// kept for the fit.
 ///
 /// Time is not the binding resource here and is not what the number is derived
 /// from: the decomposition is `O(rank³)` and is paid ONCE per cascade depth
 /// (`fit_reml` builds the profile once and the certified search then evaluates
 /// mode sums, `O(modes)` per trial, with no linear algebra at all).
 const CERTIFIED_SPECTRUM_MAX: usize =
-    (CERTIFIED_SPECTRUM_BYTES / (CERTIFIED_SPECTRUM_BLOCKS * size_of::<f64>())).isqrt();
+    (CERTIFIED_SPECTRUM_BYTES / CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED).isqrt();
 
 /// Live memory the certified spectral proof may hold at its peak. The largest
 /// transient this crate asks of a workstation; [`CERTIFIED_SPECTRUM_MAX`] is
@@ -225,34 +226,39 @@ const CERTIFIED_SPECTRUM_MAX: usize =
 /// the two cannot drift apart.
 const CERTIFIED_SPECTRUM_BYTES: usize = 512 * 1024 * 1024;
 
-/// `m × m` f64 blocks simultaneously resident at the certified route's peak.
+/// Bytes the certified route holds at its peak, per `m²` of design width.
 ///
-/// MEASURED, not counted. The obvious inventory is four — the upper Gram the
-/// Schur complement is assembled from, the Schur complement itself, the
-/// eigenvector matrix `eigh` returns, and one working copy — and that is wrong,
-/// because `eigh` is `faer`'s self-adjoint EVD behind `FaerEigh` and its
-/// tridiagonalization allocates workspace this crate never names.
+/// This used to be a count of whole `m × m` `f64` blocks, and it was **8** —
+/// measured at 6.41-6.84 and rounded up, because the inventory the file could
+/// see (the upper Gram, the Schur complement, the eigenvector matrix) was not
+/// what ran: `eigh` is `faer`'s self-adjoint EVD and its tridiagonalization
+/// allocates workspace this crate never named. Eight blocks is `64` bytes per
+/// `m²` and a `1/√8` factor on the admissible width — 2896 columns, against a
+/// 6000-row fixture that identifies 5997 penalized directions (#2758).
 ///
-/// Re-measured at `b8745892a` with each width in its own process, the marginal
-/// high-water mark over an `m = 891 -> 2038` step is **6.41 - 6.84** blocks
-/// (54.4-60.4 MiB -> 218.7-235.7 MiB), flat across `RAYON_NUM_THREADS` 1/2/4/8,
-/// so the declared count is the next power of two above it. The earlier reading
-/// of 7.44 blocks (79.4 MiB -> 270.1 MiB) was taken in a shared process and is
-/// superseded; see `zz_measure_certified_spectrum_peak_memory_2546` for why that
-/// distinction decides the number.
+/// Every one of those blocks was carrying something the criterion does not
+/// consume. It consumes `Θ` and `Vᵀβ`; the eigenbasis is read at exactly one
+/// site, to form that projection. So the route now holds:
 ///
-/// That test re-measures it and fails if it ever exceeds this, because a count
-/// below the realized one would let [`CERTIFIED_SPECTRUM_MAX`] admit a width
-/// that overruns [`CERTIFIED_SPECTRUM_BYTES`].
+/// ```text
+///   packed upper Schur triangle   rank(rank+1)/2 · 8 B   ->  4 B per m²
+///   cross block G01               q · rank · 8 B, q ≤ 4  ->  O(m)
+///   tridiagonal + working vectors O(rank)                ->  O(m)
+/// ```
 ///
-/// The count is measured NEAR the cap and is not claimed constant in `m`. It is
-/// not: with the cap lifted experimentally, the same refinement ladder reached
-/// `m = 8435` at 26 GB resident (≈46 blocks) and the next level past it at
-/// 198 GB before being stopped. So the budget holds where the cap admits and the
-/// growth past it is superlinear in the block count as well as in `m²` — which is
-/// the quantitative reason the cap is not simply raised to whatever a given
-/// fixture asks for.
-const CERTIFIED_SPECTRUM_BLOCKS: usize = 8;
+/// and nothing else: the `m × m` Gram is not assembled at all (the two blocks
+/// the Schur complement needs are accumulated straight from the CSR rows), the
+/// triangle is reduced IN PLACE, and `Vᵀβ` rides along one vector at a time
+/// through [`gam_linalg::packed_symmetric_spectrum`]. The declared number is
+/// therefore an INVENTORY again — one packed `f64` triangle, `8/2 = 4` bytes
+/// per `m²` — with the next integer of headroom for the allocator's own
+/// rounding.
+///
+/// `zz_measure_certified_spectrum_peak_memory_2546` re-measures it and fails if
+/// it is ever exceeded, because a figure below the realized one would let
+/// [`CERTIFIED_SPECTRUM_MAX`] admit a width that overruns
+/// [`CERTIFIED_SPECTRUM_BYTES`].
+const CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED: usize = 5;
 
 /// Memory budget for the exact sparse-direct factor of `A = X'WX + λD`, stated
 /// as nonzeros of `L`.
@@ -2057,12 +2063,8 @@ impl Core {
         // `projected` enters as `β` and leaves as `Vᵀβ`, in the same ascending
         // order as `eigenvalues`.
         let mut projected = whitened;
-        let eigenvalues = gam_linalg::packed_symmetric_spectrum::packed_symmetric_spectrum_with_probe(
-            rank,
-            &mut schur,
-            &mut projected,
-        )
-        .map_err(|error| {
+        let eigenvalues = packed_symmetric_spectrum_with_probe(rank, &mut schur, &mut projected)
+            .map_err(|error| {
             format!("residual cascade: Schur-complement eigendecomposition failed: {error}")
         })?;
         drop(schur);
@@ -2104,18 +2106,6 @@ impl Core {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        // The same null elimination and penalty whitening, applied to the
-        // right-hand side instead of to the Gram: `beta = D^(-1/2)(b1 - G10
-        // G00^(-1) b0)`, then projected onto the eigenbasis above.
-        let null_solved = chol_solve(null_chol, q, &self.rhs[..q]);
-        let mut whitened = vec![0.0_f64; rank];
-        for (i, value) in whitened.iter_mut().enumerate() {
-            let mut entry = self.rhs[q + i];
-            for (k, &coefficient) in null_solved.iter().enumerate() {
-                entry -= upper_gram_entry(gram, m, q + i, k) * coefficient;
-            }
-            *value = entry / self.pen_diag[q + i].sqrt();
-        }
         // A null mode carries NO response energy, exactly. The Schur complement
         // and the whitened right-hand side are built from the same design `Z`:
         // `B = Z'WZ` and `beta = Z'Wy`, so `Bv = 0` gives `Zv = 0` and hence
@@ -2131,18 +2121,8 @@ impl Core {
             if certified(eigenvalues[j]) == 0.0 {
                 continue;
             }
-            let mut projection = 0.0;
-            for (i, &value) in whitened.iter().enumerate() {
-                projection += eigenvectors[(i, j)] * value;
-            }
-            *square = projection * projection;
+            *square = projected[j] * projected[j];
         }
-        let anchor_energy = self.ytwy
-            - self.rhs[..q]
-                .iter()
-                .zip(null_solved.iter())
-                .map(|(&b, &c)| b * c)
-                .sum::<f64>();
         if !(anchor_energy.is_finite() && projected_square.iter().all(|v| v.is_finite())) {
             return Err(format!(
                 "residual cascade: non-finite spectral residual representation (anchor {anchor_energy})"
@@ -2612,9 +2592,8 @@ impl Core {
         // fits its memory budget — which is wider than the Gram cache, so a
         // design past `DENSE_GRAM_MAX` still gets the certifiable profile and
         // pays for the Gram only for the duration of the decomposition.
-        let (modes, residual) = if let Some(gram) = self.spectral_gram() {
-            let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol, &gram)?;
-            drop(gram);
+        let (modes, residual) = if self.certified_spectrum_available() {
+            let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol)?;
             (modes, CascadeResidualForm::Spectral(spectrum))
         } else {
             let modes = self.iterative_cascade_spectrum(&null_chol)?;
@@ -5685,9 +5664,11 @@ mod refinement_decision_tests {
         None
     }
 
-    /// Level counts whose `dense_fixture(45)` designs bracket the certified cap:
-    /// `m = 891` and `m = 2038`, the step the block count is differenced over.
-    const PEAK_MEMORY_LEVELS: [usize; 2] = [5, 6];
+    /// `(grid side, level count)` for the two widths the residency is
+    /// differenced over. One fixture in both arms so the per-process baseline
+    /// cancels; both designs PAST [`DENSE_GRAM_MAX`] so the persistent Gram
+    /// cache is absent from both readings rather than from one.
+    const PEAK_MEMORY_ARMS: [(usize, usize); 2] = [(70, 6), (70, 7)];
 
     /// Marker the per-width child prints its reading behind, and the gate finds
     /// it by. One definition so the writer and the reader cannot drift.
@@ -5698,22 +5679,34 @@ mod refinement_decision_tests {
     ///
     /// Printed rather than returned because the gate reads it from a CHILD
     /// process, which is what makes the reading attributable.
-    fn report_certified_spectrum_peak(levels: usize) {
+    fn report_certified_spectrum_peak(arm: (usize, usize)) {
+        let (side, levels) = arm;
         if read_hwm_bytes().is_none() {
             println!("{CHILD_READING_MARKER}levels={levels} vmhwm_unavailable");
             return;
         }
-        let (x1, x2, y) = dense_fixture(45);
+        let (x1, x2, y) = dense_fixture(side);
         let weights = vec![1.0; y.len()];
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
             .expect("cascade design");
         let m = design.core.m;
+        assert!(
+            design.core.dense_gram.is_none(),
+            "arm side={side} levels={levels} is m={m}, inside DENSE_GRAM_MAX={DENSE_GRAM_MAX}: \
+             its persistent cache would enter one reading and not the other, and the difference \
+             the gate takes would be biased downward by exactly the term it exists to bound"
+        );
+        let started = std::time::Instant::now();
         let profile = design.core.reml_profile().expect("spectral profile");
+        let elapsed = started.elapsed().as_secs_f64();
         let modes = profile.modes.len();
         drop(profile);
         let hwm = read_hwm_bytes().expect("VmHWM was readable a moment ago");
-        println!("{CHILD_READING_MARKER}levels={levels} m={m} modes={modes} vmhwm_bytes={hwm}");
+        println!(
+            "{CHILD_READING_MARKER}levels={levels} m={m} modes={modes} vmhwm_bytes={hwm} \
+             profile_seconds={elapsed:.2}"
+        );
     }
 
     /// Narrow arm of the peak-memory measurement. Run on its own it certifies
@@ -5721,23 +5714,28 @@ mod refinement_decision_tests {
     /// it is one of the two readings the gate differences.
     #[test]
     fn zz_child_certified_spectrum_peak_memory_narrow_2546() {
-        report_certified_spectrum_peak(PEAK_MEMORY_LEVELS[0]);
+        report_certified_spectrum_peak(PEAK_MEMORY_ARMS[0]);
     }
 
     /// Wide arm of the peak-memory measurement; see the narrow arm.
     #[test]
     fn zz_child_certified_spectrum_peak_memory_wide_2546() {
-        report_certified_spectrum_peak(PEAK_MEMORY_LEVELS[1]);
+        report_certified_spectrum_peak(PEAK_MEMORY_ARMS[1]);
     }
 
     /// Peak resident memory of the certified spectral profile against the width
-    /// it was built at, so [`CERTIFIED_SPECTRUM_BLOCKS`] is a measured number and
-    /// not an inventory of the allocations this file can see.
+    /// it was built at, so [`CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED`] — the
+    /// figure that converts a memory budget into a column cap — is checked
+    /// against what the route REALIZES rather than against what this file
+    /// believes it allocates.
     ///
-    /// The block count is what converts a memory budget into a column cap, and it
-    /// is NOT knowable from this file: `eigh` is `faer`'s self-adjoint EVD behind
-    /// `FaerEigh`, and its tridiagonalization allocates workspace this crate never
-    /// names.
+    /// Under `eigh` that distinction was the whole test: the decomposition was
+    /// `faer`'s self-adjoint EVD and its tridiagonalization allocated workspace
+    /// this crate never named, so the realized 6.41-6.84 `m²` blocks stood
+    /// against an inventory of three. The route now holds one packed `f64`
+    /// triangle it reduces in place (#2758), which IS an inventory this file can
+    /// state — and the measurement is kept precisely so that claim is audited
+    /// rather than asserted.
     ///
     /// Each width is measured in its OWN CHILD PROCESS, and that is the subject
     /// of this comment rather than an implementation note. `VmHWM` is a
@@ -5760,15 +5758,23 @@ mod refinement_decision_tests {
     /// 6.4-6.8 every time, flat across an 8x parallelism range. Process
     /// exclusivity is the variable. A shared-process reading over-attributes
     /// whatever else allocated between the two samples to this route, and the
-    /// 15.00 it produced would have condemned a correct constant — raising
-    /// [`CERTIFIED_SPECTRUM_BLOCKS`] to 16 cuts [`CERTIFIED_SPECTRUM_MAX`] from
-    /// 2896 to 2048 and narrows the exact width regime this budget exists to
-    /// open. A child process that builds one width and exits is exclusive by
-    /// construction, under either harness.
+    /// 15.00 it produced would have condemned a correct constant — doubling the
+    /// declared residency cuts [`CERTIFIED_SPECTRUM_MAX`] by `√2` and narrows
+    /// the exact width regime this budget exists to open. A child process that
+    /// builds one width and exits is exclusive by construction, under either
+    /// harness.
     ///
-    /// The gate is that the constant is not an UNDER-estimate: a block count
+    /// The gate is that the constant is not an UNDER-estimate: a residency
     /// smaller than the realized one would let the cap admit a width that
     /// overruns the budget it was derived from.
+    ///
+    /// BOTH ARMS ARE PAST [`DENSE_GRAM_MAX`], and that is load-bearing rather
+    /// than incidental. The narrow arm used to sit at `m = 891`, where the
+    /// design carries a persistent `dense_gram` cache — an `m²·8` term present
+    /// in one reading and absent in the other, which does not cancel in the
+    /// difference and biases the marginal DOWNWARD, i.e. in the direction that
+    /// makes an under-declared residency look fine. Both widths now assert they
+    /// have no cache before reporting.
     #[test]
     fn zz_measure_certified_spectrum_peak_memory_2546() {
         if read_hwm_bytes().is_none() {
@@ -5864,19 +5870,20 @@ mod refinement_decision_tests {
             wide > narrow,
             "the widths must increase for a high-water difference to mean anything"
         );
-        let square_growth =
-            (wide as f64 * wide as f64 - narrow as f64 * narrow as f64) * size_of::<f64>() as f64;
-        let blocks = (wide_hwm - narrow_hwm) / square_growth;
+        let square_growth = wide as f64 * wide as f64 - narrow as f64 * narrow as f64;
+        let bytes_per_square = (wide_hwm - narrow_hwm) / square_growth;
         println!(
-            "#2546 marginal blocks={blocks:.2} declared={CERTIFIED_SPECTRUM_BLOCKS} \
+            "#2546 marginal bytes_per_m2={bytes_per_square:.2} \
+             declared={CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED} \
              cap={CERTIFIED_SPECTRUM_MAX} budget_MiB={}",
             CERTIFIED_SPECTRUM_BYTES / (1024 * 1024)
         );
         assert!(
-            blocks <= CERTIFIED_SPECTRUM_BLOCKS as f64,
-            "the certified route grows by {blocks:.2} m-squared blocks against a declared \
-             {CERTIFIED_SPECTRUM_BLOCKS} (m {narrow} -> {wide}); the column cap derived from \
-             CERTIFIED_SPECTRUM_BYTES is therefore an under-estimate of the memory it admits"
+            bytes_per_square <= CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED as f64,
+            "the certified route grows by {bytes_per_square:.2} bytes per m-squared against a \
+             declared {CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED} (m {narrow} -> {wide}); the \
+             column cap derived from CERTIFIED_SPECTRUM_BYTES is therefore an under-estimate of \
+             the memory it admits"
         );
     }
 
@@ -6425,7 +6432,7 @@ mod refinement_decision_tests {
             }
             let (null_chol, _) = core.null_gram_factor().expect("null factor");
             let (modes, exact) = core
-                .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
+                .dense_cascade_spectrum(&null_chol)
                 .expect("dense spectrum");
             let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (spectrum, certificate) = core
@@ -6502,7 +6509,7 @@ mod refinement_decision_tests {
         );
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
+            .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
         let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (spectrum, certificate) = core
@@ -6820,7 +6827,7 @@ mod refinement_decision_tests {
 
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
+            .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
         let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
@@ -6879,7 +6886,7 @@ mod refinement_decision_tests {
         assert!(core.dense_gram.is_some());
         let (null_chol, _) = core.null_gram_factor().expect("null factor");
         let (modes, exact) = core
-            .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
+            .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
         let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
@@ -6991,7 +6998,7 @@ mod refinement_decision_tests {
             assert!(core.dense_gram.is_some());
             let (null_chol, _) = core.null_gram_factor().expect("null factor");
             let (modes, exact) = core
-                .dense_cascade_spectrum(&null_chol, &core.spectral_gram().expect("fixture is inside the certified spectrum budget"))
+                .dense_cascade_spectrum(&null_chol)
                 .expect("dense spectrum");
             let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
