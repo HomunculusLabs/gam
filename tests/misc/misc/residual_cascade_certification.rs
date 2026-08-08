@@ -1356,16 +1356,28 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
     let n = 800;
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
-    // Level 7 is where this shape's `4^level` column growth crosses
-    // `CERTIFIED_SPECTRUM_MAX` — past the width whose dense Schur
-    // eigendecomposition fits its memory budget, so there is no λ-independent
-    // spectrum to enclose the score with. Level 6 (m = 2134, measured) used to
-    // sit past the gate because the gate was the `DENSE_GRAM_MAX = 1536` Gram
-    // CACHE; #2546 separated the cache budget from the proof budget, and level 6
-    // now certifies, so the refusal this gate is about lives one level finer.
-    // The width is not asserted against a literal here: the refusal below carries
-    // the budget it was compared against, and that is the honest comparison.
-    let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 7).expect("build");
+    // Level 8 is where this shape's `4^level` column growth crosses
+    // `CERTIFIED_SPECTRUM_MAX` — past the width whose Schur reduction fits its
+    // memory budget, so there is no λ-independent spectrum to enclose the score
+    // with. The level this gate needs has moved twice, and both moves were a
+    // budget separating from something it had been conflated with:
+    //
+    //   * level 6 (m = 2134) sat past the gate while the gate WAS the
+    //     `DENSE_GRAM_MAX = 1536` Gram cache; #2546 separated the cache budget
+    //     from the proof budget and level 6 certified;
+    //   * level 7 (m = 7390) sat past the 2896-column proof budget while that
+    //     budget was spent holding an eigenvector matrix and a full `m × m`
+    //     Gram the criterion never reads; #2758 took the residency to one packed
+    //     triangle, the derived cap went to 10362, and level 7 certifies.
+    //
+    // At level 7 the design now refuses for a DIFFERENT and equally typed
+    // reason — 7387 penalized modes against 797 identifiable directions, so the
+    // profiled residual interpolates and the score is flat by rank deficiency —
+    // which is `wendland_fixture_names_underresolution_before_rank_deficient_score_search`'s
+    // subject, not this one's. The width is not asserted against a literal here:
+    // the refusal below carries the budget it was compared against, and that is
+    // the honest comparison.
+    let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 8).expect("build");
 
     let (lo, hi) = design.log_lambda_domain().expect("spectrum-derived domain");
     assert!(
