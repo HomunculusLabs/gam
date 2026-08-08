@@ -344,16 +344,21 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
                 p.mean
             );
 
-            // And the published p-value is the EXACT tail of that spectrum,
-            // recomputed here from the weights alone through `gam-math` rather
-            // than through the report's own accessor.
-            let independent =
+            // And the published p-value is the exact tail of that spectrum, to
+            // the accuracy the report itself CERTIFIES. The driver resolves the
+            // tail only as finely as `W` is known (see
+            // `tail_probability_with_bound`), so the right comparison is against
+            // `gam-math`'s own strict default THROUGH the published bound: the
+            // bound has to be honest, not decorative.
+            let strict =
                 gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_lr);
             assert!(
-                (r.p_value_uncorrected - independent).abs() <= 1e-9,
-                "{formula} [{family}]: published p {} is not P(Σ w_j χ²₁ > W) = \
-                 {independent} for W = {}",
+                (r.p_value_uncorrected - strict).abs() <= r.p_value_bound + 1e-12,
+                "{formula} [{family}]: published p {} differs from the strictly \
+                 integrated P(Σ w_j χ²₁ > W) = {strict} by more than the accuracy the \
+                 report certifies ({}). W = {}",
                 r.p_value_uncorrected,
+                r.p_value_bound,
                 r.statistic_lr
             );
             checked += 1;
@@ -362,49 +367,75 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
     assert!(checked >= 10, "the sweep must actually run: {checked} cells");
 }
 
-/// The exact reference and the two-moment summary of the SAME spectrum must
-/// separate on a real fit, and separate in one direction: the summary reports a
-/// smaller tail (rejects more readily) than the law does.
+/// #2672: where the two-moment summary is exact, the exact lane must agree with
+/// it — and where it is not, the disagreement must have one sign.
 ///
-/// This is the measurement that says the change is not cosmetic. It is stated on
-/// the shrunk (null-true) arm because that is where a penalized spectrum is most
-/// spread — one unpenalized direction and a geometric tail — and therefore where
-/// a distribution matched on two moments is furthest from the one the statistic
-/// has.
+/// This is the pair of claims that says the change is neither cosmetic nor
+/// reckless, and the first half is the one I had backwards before measuring.
+///
+/// * A term REML has shrunk to its null space collapses to ONE weight of order
+///   one over a tail of dust (measured: `w = (0.322, 5.9e-7, 7.1e-8, …)` on a
+///   null-true `k = 12` fit). A single distinct weight IS a scaled chi-square,
+///   so the surrogate is exact there and the exact lane must reproduce it. The
+///   shrunk regime — the one a null-simulation grid spends all its time in — is
+///   therefore not where the two references can differ, which is why the
+///   `size@.05` grid could never have detected this.
+/// * At moderate shrinkage several weights are comparable and unequal, and the
+///   surrogate reports a SMALLER tail than the law — one-signed,
+///   anti-conservative, growing with the depth of the tail.
 #[test]
-fn the_two_moment_summary_and_the_exact_law_separate_on_a_real_fit_2672() {
+fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
     init_parallelism();
-    let data = dataset(200, 20_672, 0.0);
-    let r = report("y ~ x + s(z, k=12)", &data);
-    let p = &r.ref_df_provenance;
-    assert_eq!(p.source, SmoothLrReferenceSource::NullSpectrum);
 
-    // Deep in the tail, where the difference matters and where a user reading a
-    // p-value is making a claim.
-    let mut separated = false;
-    for multiple in [4.0_f64, 8.0, 16.0, 32.0] {
+    // Shrunk arm: null-true smooth, spectrum collapses to one weight.
+    let shrunk = report("y ~ x + s(z, k=12)", &dataset(200, 20_672, 0.0));
+    let p = &shrunk.ref_df_provenance;
+    assert_eq!(p.source, SmoothLrReferenceSource::NullSpectrum);
+    let dust: f64 = p.weights.iter().skip(1).sum();
+    assert!(
+        dust < 1e-4 * p.weights[0],
+        "the null-true arm is supposed to be the collapsed one: {:?}",
+        p.weights
+    );
+    for multiple in [1.0_f64, 4.0, 16.0] {
         let statistic = multiple * p.mean;
         let exact = gam_math::probability::weighted_chi_square_sf(&p.weights, statistic);
         let summary =
             gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
         assert!(
-            summary <= exact + 1e-12,
-            "at W = {multiple}·Σw the two-moment summary ({summary}) reports a LARGER \
-             tail than the law ({exact}); the summary's error is one-signed the other \
-             way. Spectrum: {:?}",
+            (exact - summary).abs() <= 1e-6 * exact.max(1e-12),
+            "on a collapsed spectrum the two references must agree (they are the same \
+             scaled chi-square): exact {exact} vs summary {summary} at W = {multiple}·Σw. \
+             Spectrum: {:?}",
             p.weights
         );
-        if exact > 0.0 && summary < 0.5 * exact {
-            separated = true;
-        }
     }
+
+    // Signal arm: a fitted smooth with real effective d.f., so several weights
+    // are comparable and unequal.
+    let signal = report("y ~ x + s(z, k=12)", &dataset(300, 20_673, 0.9));
+    let q = &signal.ref_df_provenance;
+    assert_eq!(q.source, SmoothLrReferenceSource::NullSpectrum);
     assert!(
-        separated,
-        "the exact law and its two-moment summary never differed by more than a \
-         factor of two anywhere in the tail on this fit — the fixture is not \
-         exercising a spread spectrum. Spectrum: {:?}, ν={}, g={}",
-        p.weights, p.chi_square_df, p.scale
+        q.chi_square_df > 1.5,
+        "the signal arm must carry a spread spectrum for the sign claim to say \
+         anything; ν = {} on {:?}",
+        q.chi_square_df,
+        q.weights
     );
+    for multiple in [2.0_f64, 4.0, 8.0] {
+        let statistic = multiple * q.mean;
+        let exact = gam_math::probability::weighted_chi_square_sf(&q.weights, statistic);
+        let summary =
+            gam_math::probability::chi_square_sf(statistic / q.scale, q.chi_square_df);
+        assert!(
+            summary <= exact + 1e-12,
+            "at W = {multiple}·Σw the two-moment summary ({summary}) reports a LARGER \
+             tail than the law ({exact}); its error is one-signed the other way. \
+             Spectrum: {:?}",
+            q.weights
+        );
+    }
 }
 
 /// The `s(z)` LR report for one formula/family on one dataset.

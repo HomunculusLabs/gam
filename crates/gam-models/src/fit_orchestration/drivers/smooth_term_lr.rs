@@ -56,11 +56,23 @@ pub enum SmoothLrReferenceSource {
     /// coefficient-influence matrix was, so only the first two *moments* of the
     /// spectrum are recoverable (`tr A` and `tr A²` for `A = 2F_jj − F_jj²`,
     /// both traces of powers of one block). The reference is then the
-    /// two-moment match `g·χ²_ν`, exact whenever the weights are equal and
-    /// accurate to a percent at `α = 0.05`, drifting anti-conservative deeper
-    /// into the tail (measured: 1.11× at `α = 0.01`, 1.31× at `10⁻³`, 1.61× at
-    /// `10⁻⁴` on a `k = 20` second-difference spectrum). It is a surrogate for
-    /// the lane above, not a different claim about the statistic.
+    /// two-moment match `g·χ²_ν`.
+    ///
+    /// It is EXACT at both ends of the shrinkage range and wrong in between,
+    /// which is worth stating precisely because the ends are where the intuition
+    /// goes. An unpenalized term has `w ≡ 1` and the match is the textbook
+    /// `χ²_q`; a term REML has shrunk to its null space has one weight of order
+    /// one over a tail of dust — measured on a null-true `k = 12` fit, `w =
+    /// (0.322, 5.9e-7, 7.1e-8, …)` — and a single distinct weight is a scaled
+    /// chi-square exactly. The gap opens at moderate shrinkage, where several
+    /// weights are comparable and unequal: on `f_j = 1/(1 + λγ_j)` for a
+    /// second-difference penalty at `λ = 0.01`, `k = 20`, the size delivered at
+    /// a nominal `α` is `1.02×` at `0.05`, `1.11×` at `0.01`, `1.31×` at `10⁻³`
+    /// and `1.61×` at `10⁻⁴` — one-signed, anti-conservative, and worse the
+    /// deeper the tail.
+    ///
+    /// It is a surrogate for the lane above, not a different claim about the
+    /// statistic.
     SpectralMomentMatch,
     /// Neither the spectrum nor its moments were recoverable, so the reference
     /// falls back to the classical unit-weight shape
@@ -123,7 +135,15 @@ pub enum SmoothLrReferenceSource {
 /// ```
 ///
 /// i.e. it is fine where the test is least discriminating and up to 61%
-/// anti-conservative where it is most. Nothing about the statistic requires that
+/// anti-conservative where it is most.
+///
+/// Where the gap lives matters as much as its size, and it is not where the
+/// intuition puts it. The surrogate is exact at BOTH ends of the shrinkage
+/// range — `w ≡ 1` unpenalized, and a single distinct weight once REML has
+/// shrunk a term to its null space (measured on a null-true `k = 12` fit:
+/// `w = (0.322, 5.9e-7, 7.1e-8, …)`, where the two references agree to eight
+/// figures). It opens in the middle, at moderate shrinkage, which is exactly
+/// where a smooth term carrying real signal sits. Nothing about the statistic requires that
 /// trade: the weights are the parameters of an exactly invertible
 /// characteristic function, and [`gam_math::probability::weighted_chi_square_sf`]
 /// inverts it (Imhof) with a *returned* truncation bound of `1e-11` — eight
@@ -208,7 +228,35 @@ pub struct SmoothLrReferenceDf {
     pub null_dim: usize,
     /// Which lane supplied the reference.
     pub source: SmoothLrReferenceSource,
+    /// The relative resolution of the statistic this reference will be asked
+    /// about — the fit's own outer convergence tolerance (`FitOptions::tol`).
+    ///
+    /// `W = 2(ℓ_full − ℓ_null)` is a difference of two SEPARATELY converged
+    /// optimizations, so it is not known better than that, and a p-value cannot
+    /// be more accurate than the statistic it is read from. See
+    /// [`Self::tail_probability_with_bound`] for what this is used for and why
+    /// it is not a numerical-accuracy knob.
+    pub statistic_resolution: f64,
 }
+
+/// Accumulated-roundoff floor on the requested tail accuracy.
+///
+/// The Imhof value is assembled as `0.5 + I/π` over `N` panels, so its own
+/// arithmetic error is about `ε√N` — at the `10⁵`-panel scale this reference
+/// reaches, `1e-13`. Asking the quadrature for a bound below that buys panels,
+/// not digits.
+const SMOOTH_LR_TAIL_ROUNDOFF_FLOOR: f64 = 1e-13;
+
+/// Ceiling on the requested tail accuracy.
+///
+/// The derived request degenerates in one place: as `W → 0` the reference's
+/// density diverges for `ν < 2`, so "how far does the p-value move when `W`
+/// moves by its own resolution" becomes unbounded — while the p-value there is
+/// within `1e-3` of one and nothing depends on it. This rail is the statement
+/// that a probability is reported to at least three decimals whatever the
+/// derivation says; it binds nowhere else, because `density · ΔW` falls below it
+/// as soon as `W` leaves the origin.
+const SMOOTH_LR_TAIL_COARSEST: f64 = 1e-3;
 
 impl SmoothLrReferenceDf {
     /// `P(W > statistic)` under this reference.
@@ -222,13 +270,63 @@ impl SmoothLrReferenceDf {
     /// LR statistic is `NaN` exactly when the null refit did not produce a finite
     /// log-likelihood, and there is no p-value for a test that was not run.
     pub fn tail_probability(&self, statistic: f64) -> f64 {
+        self.tail_probability_with_bound(statistic).0
+    }
+
+    /// [`Self::tail_probability`] with the certified absolute bound the
+    /// quadrature achieved on it.
+    ///
+    /// # How accurately the tail is resolved, and why that is derived
+    ///
+    /// Imhof's truncation point grows like `ε^{-2/(2+m)}` in the number `m` of
+    /// weights active at it. A shrunk penalized smooth has ONE weight of order
+    /// one over a tail of tiny ones, so `m = 1` across the whole useful range
+    /// and the cost is `ε^{-2/3}`: at `gam-math`'s default `ε = 1e-11` a single
+    /// p-value on a realistic spectrum measures **0.13 s to 3.3 s**. That is not
+    /// an accuracy anyone asked for — it is the library's default standing in
+    /// for a statement about what this particular answer is for.
+    ///
+    /// The statement is available. `W = 2(ℓ_full − ℓ_null)` is a difference of
+    /// two separately-converged optimizations, so it is known to about
+    /// `ΔW = tol · (W + E[W])` — the fit's own convergence tolerance on the
+    /// natural scale of the statistic. A p-value is a deterministic function of
+    /// `W`, so it is known to `|S(W) − S(W + ΔW)|` no matter how well the
+    /// integral is done. **That** is what the quadrature is asked for, and it is
+    /// evaluated through the two-moment summary — the distribution that used to
+    /// BE the reference, which costs nothing and is within a factor of 1.6 of
+    /// the exact tail everywhere it was measured, so it is an excellent scale
+    /// for a derivative it is not being asked to be the value of.
+    ///
+    /// Resolving finer than this is arithmetic on the fit's own noise; resolving
+    /// coarser would add some. The achieved bound is returned rather than
+    /// assumed, so a consumer can see the accuracy instead of inheriting it.
+    pub fn tail_probability_with_bound(&self, statistic: f64) -> (f64, f64) {
         if !statistic.is_finite() {
-            return f64::NAN;
+            return (f64::NAN, f64::NAN);
         }
+        let summary =
+            |w: f64| gam_math::probability::chi_square_sf(w / self.scale, self.chi_square_df);
         if self.weights.is_empty() {
-            return gam_math::probability::chi_square_sf(statistic / self.scale, self.chi_square_df);
+            // The summary IS the reference on the two degraded lanes, and it is
+            // a closed form: no truncation, so no bound to report.
+            return (summary(statistic), 0.0);
         }
-        gam_math::probability::weighted_chi_square_sf(&self.weights, statistic)
+        let tolerance = if self.statistic_resolution.is_finite() && self.statistic_resolution > 0.0 {
+            let delta = self.statistic_resolution * (statistic.abs() + self.mean.abs());
+            (summary(statistic) - summary(statistic + delta))
+                .abs()
+                .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST)
+        } else {
+            // A reference built without a fit behind it (a unit test, a
+            // hand-assembled spectrum) has no statistic resolution to derive
+            // from, so it gets `gam-math`'s own default rather than a guess.
+            gam_math::probability::WEIGHTED_CHI_SQUARE_TOLERANCE
+        };
+        gam_math::probability::weighted_chi_square_sf_to_tolerance(
+            &self.weights,
+            statistic,
+            tolerance,
+        )
     }
 }
 
@@ -288,6 +386,18 @@ pub struct SmoothTermLrInference {
     pub material: bool,
     /// Which statistic the corrected p-value is built from.
     pub correction: SmoothLrCorrection,
+    /// Certified absolute accuracy of the two published p-values — the larger of
+    /// the two truncation bounds the tail quadrature achieved (#2672).
+    ///
+    /// `0.0` on the closed-form lanes (a degraded reference, or a spectrum whose
+    /// weights are all equal) because there is no truncation to bound. On the
+    /// Imhof lane it is what the sweep reached against the accuracy
+    /// [`SmoothLrReferenceDf::tail_probability_with_bound`] derived from the
+    /// fit's own convergence tolerance, so a consumer reads the accuracy rather
+    /// than inheriting it. A value large enough to matter means the quadrature
+    /// hit its panel backstop, which is a statement about the spectrum's spread
+    /// and not a defect in the p-value's derivation.
+    pub p_value_bound: f64,
 }
 
 /// The materiality threshold for [`SmoothTermLrInference::material`] (#939
@@ -528,6 +638,7 @@ pub fn smooth_term_lr_inference_forspec(
             &coeff_range,
             edf,
             null_dim,
+            options.tol,
         );
         let ref_df = reference.mean;
         if !(ref_df.is_finite()
@@ -580,7 +691,7 @@ pub fn smooth_term_lr_inference_forspec(
             _ => (f64::NAN, None),
         };
 
-        let p_uncorrected = reference.tail_probability(statistic_lr);
+        let (p_uncorrected, mut p_bound) = reference.tail_probability_with_bound(statistic_lr);
 
         // Magic Bartlett correction: only when the LR statistic is finite, the
         // family has closed-form jets, n is in the resolvable regime, and the
@@ -651,7 +762,10 @@ pub fn smooth_term_lr_inference_forspec(
                     // the same operation on this reference — the law is exactly
                     // scale-equivariant — so the correction composes with the
                     // scaled reference without a second convention.
-                    p_corrected = reference.tail_probability(statistic_corrected);
+                    let (corrected, corrected_bound) =
+                        reference.tail_probability_with_bound(statistic_corrected);
+                    p_corrected = corrected;
+                    p_bound = p_bound.max(corrected_bound);
                 }
             }
         }
@@ -690,6 +804,7 @@ pub fn smooth_term_lr_inference_forspec(
             p_value_corrected: p_corrected,
             material,
             correction,
+            p_value_bound: p_bound,
         });
     }
     Ok(out)
@@ -761,6 +876,7 @@ fn lr_null_reference(
     coeff_range: &Range<usize>,
     edf: f64,
     null_dim: usize,
+    statistic_resolution: f64,
 ) -> SmoothLrReferenceDf {
     let from_moments = |mean: f64, second_moment: f64, source| SmoothLrReferenceDf {
         weights: Vec::new(),
@@ -772,6 +888,7 @@ fn lr_null_reference(
         edf,
         null_dim,
         source,
+        statistic_resolution,
     };
     let unit_weight = || {
         let df = edf.max(null_dim as f64).max(1.0);
@@ -802,6 +919,7 @@ fn lr_null_reference(
                 edf,
                 null_dim,
                 source: SmoothLrReferenceSource::NullSpectrum,
+                statistic_resolution,
             };
         }
     }
@@ -1089,6 +1207,7 @@ mod lr_null_reference_tests {
             &(0..q),
             0.0,
             q,
+            0.0,
         );
         assert_eq!(reference.source, SmoothLrReferenceSource::NullSpectrum);
         assert_eq!(reference.weights, vec![1.0; q]);
@@ -1126,8 +1245,9 @@ mod lr_null_reference_tests {
                 &(0..q),
                 f * q as f64,
                 0,
+                0.0,
             ),
-            lr_null_reference(Some(&influence), None, None, &(0..q), f * q as f64, 0),
+            lr_null_reference(Some(&influence), None, None, &(0..q), f * q as f64, 0, 0.0),
         ] {
             assert!((reference.chi_square_df - q as f64).abs() < 1e-12);
             assert!((reference.scale - w).abs() < 1e-12);
@@ -1171,8 +1291,9 @@ mod lr_null_reference_tests {
             &(0..q),
             0.0,
             1,
+            0.0,
         );
-        let summary = lr_null_reference(Some(&influence), None, None, &(0..q), 0.0, 1);
+        let summary = lr_null_reference(Some(&influence), None, None, &(0..q), 0.0, 1, 0.0);
         assert_eq!(exact.source, SmoothLrReferenceSource::NullSpectrum);
         assert_eq!(summary.source, SmoothLrReferenceSource::SpectralMomentMatch);
         // Same spectrum, so the two moments agree to roundoff; only the shape
@@ -1240,6 +1361,7 @@ mod lr_null_reference_tests {
                 &(0..q),
                 f * q as f64,
                 0,
+                0.0,
             );
             // A statistic drawn at the reference's own mean.
             let tail = reference.tail_probability(reference.mean);
@@ -1276,6 +1398,7 @@ mod lr_null_reference_tests {
             &(0..q),
             2.0,
             1,
+            0.0,
         );
         assert_eq!(exact.source, SmoothLrReferenceSource::NullSpectrum);
         assert_eq!(exact.weights.len(), q);
@@ -1283,7 +1406,7 @@ mod lr_null_reference_tests {
         // No `H⁻¹` (or no penalty): the moments off `F`, and NO weights — which
         // is exactly the condition `tail_probability` switches on.
         for degraded in [
-            lr_null_reference(Some(&influence), None, Some(&penalty), &(0..q), 2.0, 1),
+            lr_null_reference(Some(&influence), None, Some(&penalty), &(0..q), 2.0, 1, 0.0),
             lr_null_reference(
                 Some(&influence),
                 Some(&hessian_inverse),
@@ -1291,6 +1414,7 @@ mod lr_null_reference_tests {
                 &(0..q),
                 2.0,
                 1,
+                0.0,
             ),
         ] {
             assert_eq!(degraded.source, SmoothLrReferenceSource::SpectralMomentMatch);
@@ -1299,18 +1423,18 @@ mod lr_null_reference_tests {
         }
 
         // Nothing at all: the unit-weight shape with its `max(edf, null_dim, 1)`.
-        let fallback = lr_null_reference(None, None, None, &(0..q), 2.5, 1);
+        let fallback = lr_null_reference(None, None, None, &(0..q), 2.5, 1, 0.0);
         assert_eq!(fallback.source, SmoothLrReferenceSource::UnitWeightFallback);
         assert!(fallback.weights.is_empty());
         assert_eq!(fallback.chi_square_df, 2.5);
         assert_eq!(fallback.scale, 1.0);
         // The `max(edf, null_dim, 1)` shape is retained only on this lane.
         assert_eq!(
-            lr_null_reference(None, None, None, &(0..4), 0.01, 3).chi_square_df,
+            lr_null_reference(None, None, None, &(0..4), 0.01, 3, 0.0).chi_square_df,
             3.0
         );
         assert_eq!(
-            lr_null_reference(None, None, None, &(0..4), 0.01, 0).chi_square_df,
+            lr_null_reference(None, None, None, &(0..4), 0.01, 0, 0.0).chi_square_df,
             1.0
         );
     }

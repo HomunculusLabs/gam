@@ -1719,6 +1719,10 @@ struct SmoothTermLrRow {
     /// should be at roundoff; it is published rather than assumed because both
     /// of its inputs have been published in the wrong basis before.
     reference_moment_residual: Option<f64>,
+    /// Certified absolute accuracy of the two p-values below: the truncation
+    /// bound the tail quadrature actually achieved. `0.0` on the closed-form
+    /// lanes.
+    p_value_bound: f64,
     /// Lawley LR Bartlett factor `c = 1 + Δε/d` (1.0 when uncorrected).
     bartlett_factor: f64,
     /// Fixed-λ conditional Lawley factor when the applied factor also includes
@@ -1935,6 +1939,7 @@ fn smooth_term_lr_inference_dataset_json_impl(
             reference_chi_square_df: r.ref_df_provenance.chi_square_df,
             reference_scale: r.ref_df_provenance.scale,
             reference_moment_residual: r.ref_df_provenance.moment_residual,
+            p_value_bound: r.p_value_bound,
             bartlett_factor: r.bartlett_factor,
             bartlett_factor_conditional: r.bartlett_factor_conditional,
             rho_variation_shift: r.rho_variation_shift,

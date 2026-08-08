@@ -437,6 +437,47 @@ pub fn weighted_chi_square_sf(weights: &[f64], statistic: f64) -> f64 {
 /// or below [`WEIGHTED_CHI_SQUARE_TOLERANCE`] unless the panel backstop
 /// [`IMHOF_MAX_PANELS`] bound first.
 pub fn weighted_chi_square_sf_with_bound(weights: &[f64], statistic: f64) -> (f64, f64) {
+    weighted_chi_square_sf_to_tolerance(weights, statistic, WEIGHTED_CHI_SQUARE_TOLERANCE)
+}
+
+/// [`weighted_chi_square_sf_with_bound`] at a caller-chosen absolute accuracy.
+///
+/// # Why this is a parameter and not a constant
+///
+/// The truncation point `U` needed for a bound `ε` grows like `ε^{-2/(2+m)}` in
+/// the number `m` of weights *active* there, and the panel count like `U·x/4π`.
+/// With one dominant weight over a tail of small ones — which is the shape of a
+/// shrunk penalized smooth, not a corner case — `m = 1` over the whole useful
+/// range and the cost is `ε^{-2/3}`. Measured on `w = 1 − p²` for
+/// `p = (0, 10⁻³, 10⁻⁵, 10⁻⁷, 10⁻⁹)` at `x = 3Σw`:
+///
+/// ```text
+/// ε = 1e-11    467,919 panels   1.73 s
+/// ε = 1e-9      74,433 panels   237 ms
+/// ε = 1e-7      10,519 panels    46 ms
+/// ```
+///
+/// with the three answers agreeing to `1.0e-9` absolute — i.e. the certified
+/// bound is two orders pessimistic, and the top row buys nothing but time. A
+/// caller that knows what its answer is *for* can say so, and one that does not
+/// still gets [`WEIGHTED_CHI_SQUARE_TOLERANCE`] through the entry point above.
+///
+/// A non-positive or non-finite `absolute_tolerance` is treated as
+/// [`WEIGHTED_CHI_SQUARE_TOLERANCE`]: the contract is "at least this accurate",
+/// and a caller that asks for nonsense gets the strictest answer rather than the
+/// loosest. The returned bound is always the one actually achieved, which may be
+/// tighter than requested (the sweep stops at a panel boundary) or looser (the
+/// [`IMHOF_MAX_PANELS`] backstop bound first).
+pub fn weighted_chi_square_sf_to_tolerance(
+    weights: &[f64],
+    statistic: f64,
+    absolute_tolerance: f64,
+) -> (f64, f64) {
+    let tolerance = if absolute_tolerance.is_finite() && absolute_tolerance > 0.0 {
+        absolute_tolerance
+    } else {
+        WEIGHTED_CHI_SQUARE_TOLERANCE
+    };
     if statistic.is_nan() {
         return (f64::NAN, f64::NAN);
     }
@@ -462,10 +503,10 @@ pub fn weighted_chi_square_sf_with_bound(weights: &[f64], statistic: f64) -> (f6
     if positive.iter().all(|&w| w == first) {
         return (chi_square_sf(statistic / first, positive.len() as f64), 0.0);
     }
-    imhof_survival(&positive, statistic)
+    imhof_survival(&positive, statistic, tolerance)
 }
 
-/// Absolute accuracy [`weighted_chi_square_sf`] certifies on its Imhof
+/// Default absolute accuracy [`weighted_chi_square_sf`] certifies on its Imhof
 /// truncation. It is four orders below the smallest probability any consumer
 /// of a survival function resolves in practice and eleven below one, so the
 /// truncation is never the term that limits a reported tail.
@@ -544,7 +585,7 @@ fn imhof_phase_slack(weights: &[f64], u: f64) -> f64 {
 /// that corner can see it instead of inferring it.
 pub const IMHOF_MAX_PANELS: usize = 1 << 21;
 
-fn imhof_survival(weights: &[f64], statistic: f64) -> (f64, f64) {
+fn imhof_survival(weights: &[f64], statistic: f64, tolerance: f64) -> (f64, f64) {
     // A panel has to resolve the WHOLE phase, not just the `−xu/2` half. The
     // total phase rate is bounded by `|θ'(u)| = |φ'(u) − x/2| ≤ (Σ w_j + x)/2`
     // — `φ'` is largest at the origin, where it is `½ Σ w_j` — so a panel of
@@ -575,7 +616,7 @@ fn imhof_survival(weights: &[f64], statistic: f64) -> (f64, f64) {
         // loop simply keeps integrating.
         if imhof_phase_slack(weights, lower) <= 0.25 * statistic {
             bound = 16.0 / (statistic * lower * imhof_log_rho(weights, lower).exp());
-            if bound <= WEIGHTED_CHI_SQUARE_TOLERANCE {
+            if bound <= tolerance {
                 break;
             }
         }
