@@ -346,6 +346,34 @@
   falls under `DIRECTIONAL_DECREASE_REL_FLOOR × merit` is exhausted — a proof of
   termination, not a cap.
 
+  **The merit is the gate's currency, and the ambient residual is an
+  invariant.** The gate is `raw ≤ tol OR quotient ≤ tol` with the quotient norm
+  clamped at or below the raw one, so the gate IS the quotient bound and the
+  quotient merit `½‖Π⊥gauge g‖²` is what this phase descends. That distinction
+  is not cosmetic: on the `zz2015` witness the terminal state carries
+  `gauge_share = 0.76`, so the ambient merit is 94% orbit and sits at its own
+  floor while the gate is still 28x out — a 784x improvement in the quantity the
+  gate reads registers as a 6% move in the ambient one. A projected norm can
+  also fall without the residual falling, so acceptance additionally requires the
+  ambient merit not to GROW: one acceptance currency, plus the invariant that
+  quotient progress may never be bought by pumping residual into the orbit.
+
+  **The budget is spent only while the phase is on track to finish.** A step
+  costs one dense materialization + eigendecomposition of `A` — measured 13.4 s
+  at `dim = 519`, against 0.14 s of assembly and 0.30 s for the entire damping
+  ladder — so the step COUNT is the whole cost of this phase and a fixed cap
+  prices every entry at the worst case. At the contraction the accepted step
+  actually delivered, the band is `ln(tol/gate)/ln(contraction)` steps away; if
+  that exceeds the steps left, the phase stops on its trajectory rather than on
+  its budget. The test reads the system the accepted trial already assembled, so
+  it costs nothing and fires one whole eigendecomposition earlier than the next
+  loop top could. Stopping is neither a refusal nor final: the merit is
+  monotone, so everything gained is kept, and the refine loop may re-arm the
+  phase and re-measure. Measured on `zz2015`, whose inner solve fails in both
+  arms: the refusal moves from `‖Π⊥gauge g‖ = 8.24` (`4660x` over the band) to
+  `4.93e-2` (`27.7x`) — a 168x better terminal state, and `intensive_over_bound`
+  falls 21 orders, `2.1e24 → 5.8e3`.
+
   Properties, not hopes: every accepted step strictly decreases the quantity the
   refusal is denominated in, so this phase **cannot leave the state worse than
   it found it**, which is measurably what it did before. The merit is monotone

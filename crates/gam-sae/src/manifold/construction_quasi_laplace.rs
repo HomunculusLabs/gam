@@ -2294,6 +2294,29 @@ impl SaeManifoldTerm {
     /// re-enters the refine loop, whose existing raw/quotient KKT gate +
     /// idempotence certificate remain the SOLE acceptance authority — this
     /// phase mints nothing).
+    /// A residual measured in the two currencies the inner gate speaks: the
+    /// gauge-QUOTIENT merit `½‖Π⊥gauge r‖²` — which is what
+    /// [`Self::quasi_laplace_kkt_stationary`] is a bound on, since the quotient
+    /// norm is clamped at or below the raw one — and the AMBIENT merit `½‖r‖²`.
+    ///
+    /// Returned together because the polish accepts on the first and holds the
+    /// second as an invariant: a step may not buy quotient progress by pumping
+    /// residual into the gauge orbit, which is the only way a projected norm can
+    /// fall without the residual falling.
+    fn residual_merits(&self, residual: &SaeArrowVector, penalized_gram_scale: &[f64]) -> (f64, f64) {
+        let ambient_norm_sq =
+            residual.t.dot(&residual.t) + residual.beta.dot(&residual.beta);
+        let quotient_norm_sq = self
+            .quotient_gradient_norm_sq(
+                residual.t.view(),
+                residual.beta.view(),
+                ambient_norm_sq,
+                penalized_gram_scale,
+            )
+            .unwrap_or(ambient_norm_sq);
+        (0.5 * quotient_norm_sq, 0.5 * ambient_norm_sq)
+    }
+
     fn terminal_exact_newton_polish(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -2448,7 +2471,13 @@ impl SaeManifoldTerm {
             };
             let smallest_damping = curvature_min * curvature_min;
             let largest_damping = curvature_max * curvature_max;
-            let pre_merit = 0.5 * grad_norm_sq;
+            // The gate is `raw ≤ tol OR quotient ≤ tol`, and the quotient norm
+            // is clamped at or below the raw one, so the gate IS the quotient
+            // bound and the quotient merit is the phase's currency. The ambient
+            // merit is carried alongside as the invariant, not as a second
+            // acceptance test (see `residual_merits`).
+            let pre_merit = 0.5 * quotient_grad_norm * quotient_grad_norm;
+            let pre_ambient_merit = 0.5 * grad_norm_sq;
             // Round-off floor on the MODEL's predicted reduction, in the merit's
             // own units — the same relative floor the majorized Armijo lane
             // applies to its directional decrease. A prediction below it is
@@ -2457,7 +2486,8 @@ impl SaeManifoldTerm {
             let snapshot = self.snapshot_mutable_state();
             let backtrack_started = std::time::Instant::now();
             let mut trials = 0usize;
-            let mut accepted: Option<(f64, f64, DampedResidualStep)> = None;
+            let mut accepted: Option<(f64, f64, DampedResidualStep, Option<ArrowSchurSystem>)> =
+                None;
             let mut nu = damping;
             loop {
                 let damped = match geometry.damped_residual_step(&residual, nu) {
@@ -2469,7 +2499,9 @@ impl SaeManifoldTerm {
                         break;
                     }
                 };
-                let predicted_decrease = pre_merit - damped.model_merit;
+                let (model_merit, _model_ambient) =
+                    self.residual_merits(&damped.model_residual, lambda_smooth);
+                let predicted_decrease = pre_merit - model_merit;
                 if !(predicted_decrease.is_finite() && predicted_decrease > predicted_floor) {
                     // The model's predicted reduction decreases monotonically in
                     // ν, so no larger damping on this ladder can clear the floor
@@ -2483,40 +2515,77 @@ impl SaeManifoldTerm {
                     break;
                 }
                 trials += 1;
-                let trial_merit = if self
+                let (trial_merit, trial_ambient_merit, trial_system) = if self
                     .apply_newton_step(damped.step.t.view(), damped.step.beta.view(), 1.0)
                     .is_ok()
                 {
                     match self.assemble_arrow_schur(target, rho_fixed, registry) {
-                        Ok(trial_sys) => 0.5 * Self::system_grad_norm_sq(&trial_sys),
-                        Err(_) => f64::INFINITY,
+                        Ok(trial_sys) => {
+                            let ambient_sq = Self::system_grad_norm_sq(&trial_sys);
+                            let quotient = self.quotient_gradient_norm_from_system(
+                                &trial_sys,
+                                ambient_sq,
+                                lambda_smooth,
+                            );
+                            (
+                                0.5 * quotient * quotient,
+                                0.5 * ambient_sq,
+                                Some(trial_sys),
+                            )
+                        }
+                        Err(_) => (f64::INFINITY, f64::INFINITY, None),
                     }
                 } else {
-                    f64::INFINITY
+                    (f64::INFINITY, f64::INFINITY, None)
                 };
                 let sufficient = SAE_MANIFOLD_ARMIJO_C1 * predicted_decrease;
+                // Acceptance: a measured reduction of the GATE's currency worth
+                // at least the shared Armijo fraction of what this step's own
+                // model predicted. Invariant, not a second currency: the ambient
+                // residual may not GROW, so quotient progress can never be
+                // bought by pumping residual into the gauge orbit — which is the
+                // only way a projected norm falls while the residual does not.
                 if trial_merit.is_finite()
+                    && trial_ambient_merit.is_finite()
                     && pre_merit - trial_merit
                         >= sufficient - opt::armijo_roundoff_cushion(pre_merit)
+                    && trial_ambient_merit
+                        <= pre_ambient_merit + opt::armijo_roundoff_cushion(pre_ambient_merit)
                 {
-                    accepted = Some((nu, trial_merit, damped));
+                    accepted = Some((nu, trial_merit, damped, trial_system));
                     break;
                 }
                 self.restore_mutable_state(&snapshot)?;
-                nu = if nu > 0.0 {
+                let next = if nu > 0.0 {
                     nu * opt::constants::RIDGE_GROWTH
                 } else {
                     smallest_damping
                 };
-                if nu > largest_damping {
+                if next > largest_damping {
                     log::debug!(
-                        "terminal Newton: damping ladder exhausted at ν={nu:.6e} — past \
+                        "terminal Newton: damping ladder exhausted at ν={next:.6e} — past \
                          λ_max²={largest_damping:.6e}, where every direction is already damped"
                     );
                     break;
                 }
+                // A rung that does not strictly advance is not a rung. `λ_min²`
+                // underflows to zero once the retained spectrum is below
+                // `1e-154`, and without this the ν = 0 trial would be retried
+                // forever; the exhaustion floor above cannot catch it, because
+                // the undamped model can predict a large reduction while
+                // delivering none. Termination is a property of the ladder, so
+                // it is enforced on the ladder.
+                if !(next > nu) {
+                    log::debug!(
+                        "terminal Newton: damping ladder cannot advance past ν={nu:.6e} \
+                         (λ_min²={smallest_damping:.6e} is not representable above it)"
+                    );
+                    break;
+                }
+                nu = next;
             }
-            let Some((accepted_nu, accepted_merit, accepted_step)) = accepted else {
+            let Some((accepted_nu, accepted_merit, accepted_step, accepted_system)) = accepted
+            else {
                 log::debug!(
                     "terminal Newton bail: no damping on [{smallest_damping:.6e}, \
                      {largest_damping:.6e}] bought a sufficient measured decrease of the \
@@ -2525,6 +2594,71 @@ impl SaeManifoldTerm {
                 break;
             };
             made_progress = true;
+            let gate_norm = quotient_grad_norm;
+            // #2762 — SPEND THE BUDGET ONLY WHILE THE PHASE IS ON TRACK TO FINISH.
+            //
+            // A step here costs one dense eigendecomposition of `A` — measured
+            // 13.4 s at `dim = 519` on the `zz2015` witness, against 0.14 s of
+            // assembly and 0.28 s for the whole damping ladder. The step COUNT
+            // is therefore the entire cost of this phase, and a fixed cap prices
+            // every entry at the worst case.
+            //
+            // The gate this phase is trying to reach bounds
+            // `min(‖g‖, ‖Π⊥gauge g‖)`, so that is the quantity to extrapolate,
+            // and it is read off the system the accepted trial already
+            // assembled — the test costs nothing and fires one whole
+            // eigendecomposition earlier than it could at the next loop top. At
+            // the contraction the step actually delivered, the band is
+            // `ln(tol/gate)/ln(contraction)` steps away; if that exceeds the
+            // steps left, this phase cannot finish on its current trajectory and
+            // every further step is one it will not be paid for. Measured on
+            // `zz2015`: steps 1-4 take `‖g‖ 14.54 → 0.724`, and steps 5-64 buy
+            // 15% for 60 x 13.4 s.
+            //
+            // Stopping here is neither a refusal nor final. The merit is
+            // monotone, so everything gained is kept; `made_progress` is already
+            // true, so the refine loop takes another window and may re-arm this
+            // phase, and the trajectory is re-measured from scratch when it does.
+            if let Some(system) = accepted_system.as_ref() {
+                let after_sq = Self::system_grad_norm_sq(system);
+                let after_gate =
+                    self.quotient_gradient_norm_from_system(system, after_sq, lambda_smooth);
+                if Self::quasi_laplace_kkt_stationary(
+                    after_sq.sqrt(),
+                    after_gate,
+                    grad_tolerance,
+                ) {
+                    // The step landed in the band. Say so without paying for the
+                    // next loop top's assembly to rediscover it.
+                    log::debug!(
+                        "SAE terminal Newton reached the KKT band at step {}: gate norm \
+                         {gate_norm:.6e} → {after_gate:.6e} against tol {grad_tolerance:.6e}",
+                        step + 1,
+                    );
+                    return Ok(true);
+                }
+                let contraction = if gate_norm > 0.0 {
+                    after_gate / gate_norm
+                } else {
+                    f64::INFINITY
+                };
+                let remaining = (max_steps - step - 1) as f64;
+                let projected_steps = if contraction > 0.0 && contraction < 1.0 {
+                    (grad_tolerance / after_gate).ln() / contraction.ln()
+                } else {
+                    f64::INFINITY
+                };
+                if !(projected_steps <= remaining) {
+                    log::debug!(
+                        "terminal Newton: stopping on trajectory, not on budget — step {} \
+                         contracted the gate norm by {contraction:.6e} ({gate_norm:.6e} → \
+                         {after_gate:.6e}), which puts the {grad_tolerance:.6e} band \
+                         {projected_steps:.1} steps away against {remaining:.0} remaining",
+                        step + 1,
+                    );
+                    break;
+                }
+            }
             // Walk back toward the undamped Newton step: a damping under
             // `λ_min²` cannot move the flattest resolved direction, so it IS the
             // undamped step and is carried as exactly that.

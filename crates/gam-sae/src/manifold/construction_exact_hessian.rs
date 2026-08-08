@@ -123,7 +123,13 @@ struct ExactHessianSpectralBlock {
 pub(crate) struct DampedResidualStep {
     /// `Δ(ν)`.
     pub(crate) step: SaeArrowVector,
-    /// `½‖g + AΔ(ν)‖²` — the linear model's residual merit at the trial point.
+    /// `g + AΔ(ν)` — the linear model's residual AT the trial point, in the
+    /// same arrow layout as the residual handed in. The caller measures it in
+    /// whatever currency its gate is denominated in; this type stays ignorant of
+    /// which one that is.
+    pub(crate) model_residual: SaeArrowVector,
+    /// `½‖g + AΔ(ν)‖²` — the AMBIENT model merit, reported for telemetry beside
+    /// whatever the caller's own currency says.
     pub(crate) model_merit: f64,
     /// `‖Δ(ν)‖²`.
     pub(crate) step_norm_sq: f64,
@@ -186,27 +192,34 @@ impl ExactHessianSpectralBlock {
         let coefficients = self.eigenvectors.t().dot(&flat);
         let null_band = self.rank_floor * self.rank_floor;
         let mut step_coefficients = Array1::<f64>::zeros(spectral_dim);
+        let mut model_coefficients = Array1::<f64>::zeros(spectral_dim);
         let mut model_residual_norm_sq = 0.0_f64;
         let mut retained_rank = 0usize;
         for index in 0..spectral_dim {
             let lambda = self.eigenvalues[index];
             let denominator = lambda * lambda + nu;
             let coefficient = coefficients[index];
-            if denominator > null_band {
+            let surviving = if denominator > null_band {
                 // Δ solves `(A² + ν) Δ = −A g` in this direction.
                 step_coefficients[index] = -lambda * coefficient / denominator;
-                let surviving = coefficient * nu / denominator;
-                model_residual_norm_sq += surviving * surviving;
                 retained_rank += 1;
+                coefficient * nu / denominator
             } else {
-                model_residual_norm_sq += coefficient * coefficient;
-            }
+                coefficient
+            };
+            model_coefficients[index] = surviving;
+            model_residual_norm_sq += surviving * surviving;
         }
         let solution = self.eigenvectors.dot(&step_coefficients);
+        let model = self.eigenvectors.dot(&model_coefficients);
         Ok(DampedResidualStep {
             step: SaeArrowVector {
                 t: solution.slice(s![..total_t]).to_owned(),
                 beta: solution.slice(s![total_t..]).to_owned(),
+            },
+            model_residual: SaeArrowVector {
+                t: model.slice(s![..total_t]).to_owned(),
+                beta: model.slice(s![total_t..]).to_owned(),
             },
             model_merit: 0.5 * model_residual_norm_sq,
             step_norm_sq: solution.dot(&solution),
