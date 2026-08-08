@@ -1357,6 +1357,29 @@ impl MultinomialFamily {
     /// have identical wiggliness, and the two per-class metrics are
     /// proportional (only `λ_0 + λ_1` would be identified). The shared
     /// centered spec is the correct model there, so this builder returns it.
+    /// The number of smoothing coordinates the OUTER search actually has.
+    ///
+    /// This is the length of the joint penalty spec list, and it is NOT
+    /// `(K − 1) · n_penalties`. Under the equivariant carrier (#1587) each
+    /// penalty component emits ONE spec PER CLASS (`s = t·K + c`), so a `K = 3`
+    /// model carries `3·n_penalties` coordinates, not `2·n_penalties`; the
+    /// `K ≤ 2` arm emits one shared centered spec per component. Any policy
+    /// keyed on "how many ρ are there" — the exact-outer-curvature dimension
+    /// gate, a cost estimate, a box — must read THIS and not the per-block
+    /// count the pre-#1587 layout had, which is a different number for every
+    /// `K > 2` model.
+    ///
+    /// Computed from the shapes alone, so a caller deciding a policy does not
+    /// have to materialize `n_penalties · K` dense `(m·p)²` matrices to find out
+    /// how many there will be.
+    pub fn joint_smoothing_dimension(&self) -> usize {
+        if self.total_classes <= 2 {
+            self.penalties.len()
+        } else {
+            self.penalties.len().saturating_mul(self.total_classes)
+        }
+    }
+
     pub fn equivariant_class_penalty_specs(
         &self,
     ) -> Result<Vec<gam_problem::JointPenaltySpec>, String> {
@@ -4576,6 +4599,78 @@ mod tests {
                 })
                 .collect();
             Ok(out)
+        }
+    }
+
+    fn toy_family_with_penalties(
+        n_obs: usize,
+        p: usize,
+        k: usize,
+        n_penalties: usize,
+    ) -> MultinomialFamily {
+        let y = {
+            let mut y = Array2::<f64>::zeros((n_obs, k));
+            for i in 0..n_obs {
+                y[[i, i % k]] = 1.0;
+            }
+            y
+        };
+        let weights = Array1::<f64>::ones(n_obs);
+        let design = Arc::new(Array2::<f64>::from_shape_fn((n_obs, p), |(i, j)| {
+            ((i + j + 1) as f64).sin()
+        }));
+        let penalties = Arc::new(
+            (0..n_penalties)
+                .map(|t| {
+                    crate::custom_family::PenaltyMatrix::Dense(Array2::<f64>::from_shape_fn(
+                        (p, p),
+                        |(i, j)| {
+                            if i == j && i >= t.min(p.saturating_sub(1)) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        );
+        MultinomialFamily::new(y, weights, k, design, penalties)
+            .expect("toy MultinomialFamily must construct")
+    }
+
+    /// #2612: the outer search's coordinate count is the joint SPEC count, not
+    /// `(K − 1) · n_penalties`.
+    ///
+    /// The equivariant carrier (#1587) emits one spec per class per penalty
+    /// component when `K > 2`, and one shared centered spec per component when
+    /// `K ≤ 2`. Any policy keyed on "how many ρ are there" that computes the
+    /// pre-#1587 per-block product classifies every `K > 2` model as smaller
+    /// than it is — by 50% at `K = 3`, which is where the four-smooth penguin
+    /// fixture sits. This asserts the declared dimension against the specs the
+    /// family actually emits, so the two cannot drift again.
+    #[test]
+    fn joint_smoothing_dimension_equals_the_specs_emitted_2612() {
+        for (k, n_penalties) in [(3usize, 8usize), (3, 1), (2, 8), (4, 3)] {
+            let family = toy_family_with_penalties(24, k, 5, n_penalties);
+            let emitted = family
+                .equivariant_class_penalty_specs()
+                .expect("equivariant specs")
+                .len();
+            assert_eq!(
+                family.joint_smoothing_dimension(),
+                emitted,
+                "K={k}, {n_penalties} penalty components: declared dimension must equal the \
+                 number of joint specs the carrier emits"
+            );
+            let pre_1587_product = (k - 1) * n_penalties;
+            if k > 2 {
+                assert_ne!(
+                    emitted, pre_1587_product,
+                    "K={k} is exactly where the pre-#1587 product and the real coordinate \
+                     count differ; if they agree here this test has stopped discriminating"
+                );
+            }
         }
     }
 

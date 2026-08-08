@@ -159,17 +159,19 @@ fn ratio_predictive_matches_the_exact_posterior_where_the_gaussian_does_not_2612
         x_new[[row, 1]] = *x;
     }
 
-    // The module refines the base mode itself, so a zero start is legitimate and
-    // keeps the test free of a second mode-finder.
-    let start = Array1::<f64>::zeros(2);
+    // The mode and its Laplace width, computed here so the Gaussian arm is the
+    // one the shipped route would build and the ratio arm is handed exactly the
+    // coefficients a saved model would carry. `predictive_moments` refuses a
+    // start that is not a stationary point of the objective it integrates —
+    // that is the guard against publishing a probability from a different
+    // posterior than the published mode belongs to — so a zero start is not a
+    // legitimate call, and this test exercises the contract as callers meet it.
+    let (mode, precision) = newton_mode(&design, &labels);
+    let covariance = invert_two_by_two(&precision);
+    let start = Array1::from_vec(vec![mode[0], mode[1]]);
     let moments = model
         .predictive_moments(start.view(), x_new.view(), true)
         .expect("ratio predictive moments");
-
-    // The mode and its Laplace width, recomputed here so the Gaussian arm is the
-    // one the shipped route would build.
-    let (mode, precision) = newton_mode(&design, &labels);
-    let covariance = invert_two_by_two(&precision);
 
     let (exact, edge_mass) = exact_posterior_means(
         &design,

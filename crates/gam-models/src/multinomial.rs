@@ -195,7 +195,23 @@ fn multinomial_formula_penalty_scale(n_classes: usize) -> f64 {
 /// (#1082). ARC observes the same exact curvature and can halt through the
 /// bound-aware cost-stall guard once the REML surface stops making useful
 /// progress.
-const MULTINOMIAL_EXACT_OUTER_HESSIAN_MAX_DIM: usize = 16;
+///
+/// CORRECTED 2026-08-08 (#2612), 16 -> 24, WITHOUT MOVING THE CALIBRATION POINT.
+/// The value above was chosen so the four-smooth penguin fixture lands on the
+/// exact path, and the `D = 16` it quotes for that fixture was computed as
+/// `(K-1) * n_penalties`. That has not been the number of outer coordinates
+/// since #1587: `equivariant_class_penalty_specs` emits one spec per class per
+/// penalty component whenever `K > 2`, so the same fixture is `8 * 3 = 24`, not
+/// `2 * 8 = 16` — confirmed against the refusal's own `last_evaluated_rho`,
+/// which carries 24 entries. The gate now reads
+/// `MultinomialFamily::joint_smoothing_dimension()`, and the threshold is the
+/// SAME fixture re-read with a corrected ruler rather than a new number: at
+/// `K = 3` the classification is unchanged (`3n <= 24` and `2n <= 16` are both
+/// `n <= 8` components), and where it differs at other `K` it differs by
+/// admitting MORE exact curvature, which is the side this constant's own
+/// rationale says is safe ("medium-D formula fits need exact curvature to keep
+/// lambda selection away from over-smoothed caps").
+const MULTINOMIAL_EXACT_OUTER_HESSIAN_MAX_DIM: usize = 24;
 
 fn multinomial_formula_use_outer_hessian(total_rho_dim: usize) -> bool {
     total_rho_dim <= MULTINOMIAL_EXACT_OUTER_HESSIAN_MAX_DIM
@@ -2775,7 +2791,6 @@ pub(crate) fn penalized_multinomial_formula_parts(
     // shared λ had to over-smooth a rough term while under-smoothing a smooth
     // one — biasing any multi-term class-probability surface.
     let k = y_one_hot.ncols();
-    let m = k - 1;
     let n_obs = y_one_hot.nrows();
     let penalty_scale = multinomial_formula_penalty_scale(k);
     let per_term_penalties: Vec<PenaltyMatrix> = design
@@ -2839,11 +2854,21 @@ pub(crate) fn penalized_multinomial_formula_parts(
     }
 
     // ── Outer-derivative policy: dimension-gated exact curvature ────────────
-    // The total smoothing-parameter dimension is `D = (K−1) · n_terms`.
     // Medium-D formula fits need exact curvature to keep lambda selection away
-    // from over-smoothed caps, while smooth-by-factor `D = 8` models still avoid
-    // the O(D²) dense Hessian path.
-    let total_rho_dim = m.saturating_mul(penalties_arc.len());
+    // from over-smoothed caps, while smooth-by-factor models still avoid the
+    // O(D²) dense Hessian path.
+    //
+    // `D` is the number of coordinates the OUTER search actually has, which is
+    // the joint penalty spec count and NOT `(K−1) · n_penalties`. Under the
+    // equivariant carrier (#1587) each penalty component emits one spec PER
+    // CLASS, so a `K = 3` model carries `3·n_penalties` coordinates; the
+    // per-block product this used to compute has not been the outer dimension
+    // for any `K > 2` model since that landing. On the four-smooth penguin
+    // fixture the two differ by 50% (`8·3 = 24` against `2·8 = 16`), which put
+    // it on the opposite side of the threshold from the one
+    // `MULTINOMIAL_EXACT_OUTER_HESSIAN_MAX_DIM`'s own doc block says it was
+    // chosen to keep it on.
+    let total_rho_dim = family.joint_smoothing_dimension();
     let use_outer_hessian = multinomial_formula_use_outer_hessian(total_rho_dim);
 
     // ── Inner-vs-outer control split (#715 non-convergence root cause) ────────
@@ -4224,27 +4249,30 @@ mod fisher_override_tests {
 
     #[test]
     fn formula_outer_route_uses_exact_curvature_for_medium_d() {
-        // The 2-smooth reference formula fit (K = 3, double-penalty terms) is
-        // D = (K-1) * 2 terms * 2 penalties = 8 and needs exact curvature to
-        // avoid over-smoothed lambda caps (#715 arm (a)).
+        // The 2-smooth reference formula fit (K = 3, double-penalty terms)
+        // carries 2 terms x 2 penalties = 4 components, and the equivariant
+        // carrier gives each component one coordinate PER CLASS: D = 4 x 3 = 12.
+        // It needs exact curvature to avoid over-smoothed lambda caps
+        // (#715 arm (a)).
         assert!(
             multinomial_formula_use_outer_hessian(8),
             "D=8 loaded multinomial fits need exact curvature to avoid over-smoothed lambda caps"
         );
         assert!(
             multinomial_formula_use_outer_hessian(12),
-            "D=12 (3 double-penalty smooth terms, K=3) stays on exact curvature"
+            "D=12 (2 double-penalty smooth terms, K=3) stays on exact curvature"
         );
     }
 
     #[test]
-    fn formula_outer_route_uses_exact_curvature_for_d16_penguin_fixture() {
-        // Four k=10 penguin smooths (K = 3) are D = 16 under double-penalty
-        // terms. They must reach the exact ARC route so the #1082 cost-stall
-        // halt is available on the near-separable lambda-to-zero ridge.
+    fn formula_outer_route_uses_exact_curvature_for_the_penguin_fixture() {
+        // Four k=10 penguin smooths (K = 3) are 8 double-penalty components and
+        // therefore D = 8 x 3 = 24 outer coordinates. They must reach the exact
+        // ARC route so the #1082 cost-stall halt is available on the
+        // near-separable lambda-to-zero ridge.
         assert!(
-            multinomial_formula_use_outer_hessian(16),
-            "D=16 multinomial fits need exact ARC curvature for the #1082 stall halt"
+            multinomial_formula_use_outer_hessian(24),
+            "the four-smooth penguin fixture needs exact ARC curvature for the #1082 stall halt"
         );
     }
 
