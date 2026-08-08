@@ -2210,6 +2210,44 @@ fn joint_rho_search_box(
     (lower, upper)
 }
 
+/// What the joint `[rho, psi]` spatial route did, as three answers rather than
+/// two (#2748).
+///
+/// The route used to return `Option<FittedTermCollectionWithSpec>`, and `None`
+/// carried two facts that call for opposite responses:
+///
+/// * the route could not be BUILT — no `psi` hyper-directions exist for these
+///   terms, so a caller that requires kappa optimisation has nothing; and
+/// * the route RAN, produced a candidate, graded it against the shipped
+///   scalar-route score and correctly DECLINED it. Its own log line says
+///   "keeping the incumbent fit and treating joint kappa optimization as a
+///   no-op for this fit" -- a successful decision, taken by the one routine
+///   that holds both candidates.
+///
+/// The sole caller mapped `None` to
+/// `"spatial kappa optimization is unavailable for one or more eligible spatial
+/// terms"` and failed the whole fit, so the second case killed fits the route
+/// had just decided were fine. Measured on `geo_disease_eas_matern_k6`,
+/// `papuan_oce4_matern_k6` and `papuan_oce_matern_k12`: after #2748 cleared the
+/// rho-Hessian refusal, this is what they died of instead.
+///
+/// Same species as #2578 (a verdict channel whose absence-of-observation was
+/// read as an observation) and #2737 (a timeout branch and an error branch that
+/// both ended in a bare `exit 1`): one channel, two verdicts, and the consumer
+/// reading the wrong one.
+enum JointSpatialKappaOutcome {
+    /// The joint route ran and its candidate improved the shipped score.
+    Optimized(Box<FittedTermCollectionWithSpec>),
+    /// The joint route ran to completion and declined its own candidate. The
+    /// incumbent scalar-route fit is the better of the two, and is what ships.
+    DeclinedKeepIncumbent {
+        baseline_score: f64,
+        optimized_score: f64,
+    },
+    /// The joint route could not be built for these terms at all.
+    Unavailable,
+}
+
 fn try_exact_joint_spatial_length_scale_optimization(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
@@ -2221,9 +2259,9 @@ fn try_exact_joint_spatial_length_scale_optimization(
     options: &FitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
     spatial_terms: &[usize],
-) -> Result<Option<FittedTermCollectionWithSpec>, EstimationError> {
+) -> Result<JointSpatialKappaOutcome, EstimationError> {
     if spatial_terms.is_empty() {
-        return Ok(None);
+        return Ok(JointSpatialKappaOutcome::Unavailable);
     }
     // Fail loud on nonsensical κ options rather than letting them propagate
     // silent NaNs (e.g. inverted min/max inverts the BFGS window, negative
@@ -2242,7 +2280,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
                  κ̂ comes from a NON-joint path"
             );
         }
-        return Ok(None);
+        return Ok(JointSpatialKappaOutcome::Unavailable);
     }
     if !constant_curvature_term_indices(resolvedspec).is_empty() {
         log::info!(
@@ -2690,7 +2728,10 @@ fn try_exact_joint_spatial_length_scale_optimization(
              comparison is like-for-like and a regression here is a real one.",
             optimized_score - baseline_score,
         );
-        return Ok(None);
+        return Ok(JointSpatialKappaOutcome::DeclinedKeepIncumbent {
+            baseline_score,
+            optimized_score,
+        });
     }
 
     // Stamp reml_score with joint_final_value so downstream consumers see a
@@ -2706,7 +2747,9 @@ fn try_exact_joint_spatial_length_scale_optimization(
         kappa_timing: Some(kappa_timing),
     };
 
-    Ok(Some(optimized_result))
+    Ok(JointSpatialKappaOutcome::Optimized(Box::new(
+        optimized_result,
+    )))
 }
 
 /// Coordinate kind for the exact joint spatial hyperparameter optimizer.
@@ -8570,7 +8613,7 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
             "spatial kappa optimization received a non-finite initial profiled score"
         );
     }
-    let exact_joint = try_exact_joint_spatial_length_scale_optimization(
+    let exact_joint = match try_exact_joint_spatial_length_scale_optimization(
         data,
         y.view(),
         weights.view(),
@@ -8581,13 +8624,49 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
         options,
         kappa_options,
         &spatial_terms,
-    )?
-    .ok_or_else(|| {
-        EstimationError::RemlOptimizationFailed(
-            "spatial kappa optimization is unavailable for one or more eligible spatial terms"
-                .to_string(),
-        )
-    })?;
+    )? {
+        JointSpatialKappaOutcome::Optimized(optimized) => *optimized,
+        JointSpatialKappaOutcome::DeclinedKeepIncumbent {
+            baseline_score,
+            optimized_score,
+        } => {
+            // The route ran, graded its own candidate against the shipped
+            // score and declined it. Shipping the incumbent is what the
+            // decline MEANS -- its own log line promises exactly that -- so
+            // the fit continues at the incumbent κ, which is the same thing
+            // that happens when there is no eligible spatial term at all
+            // (the branch above). It is not an unavailability, and turning it
+            // into one killed fits the route had just decided were fine
+            // (#2748).
+            log::info!(
+                "[spatial-kappa] joint kappa optimization DECLINED its own candidate                  (incumbent={baseline_score:.12e}, candidate={optimized_score:.12e},                  regression={:.3e}); shipping the incumbent scalar-route fit at the                  incumbent κ, which is what the decline means. Not an unavailability.",
+                optimized_score - baseline_score,
+            );
+            let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+                data,
+                y.view(),
+                weights.view(),
+                offset.view(),
+                &resolvedspec,
+                best.fit.lambdas.as_slice(),
+                family,
+                options,
+            )?;
+            return Ok(FittedTermCollectionWithSpec {
+                fit: fitted.fit,
+                design: fitted.design,
+                resolvedspec,
+                adaptive_diagnostics: fitted.adaptive_diagnostics,
+                kappa_timing: None,
+            });
+        }
+        JointSpatialKappaOutcome::Unavailable => {
+            return Err(EstimationError::RemlOptimizationFailed(
+                "spatial kappa optimization is unavailable for one or more eligible spatial                  terms"
+                    .to_string(),
+            ));
+        }
+    };
     let exact_score = fit_score(&exact_joint.fit);
     let exact_joint = require_successful_spatial_optimization_result(
         initial_score,
