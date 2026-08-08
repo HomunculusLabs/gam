@@ -3430,6 +3430,55 @@ mod weighted_chi_square_tests {
         }
     }
 
+    /// A caller that asks for less accuracy must get less WORK and still get a
+    /// number that is inside the bound it was handed — the bound is the contract,
+    /// not the tolerance.
+    ///
+    /// This is the property `gam-models` leans on: it derives an accuracy from
+    /// the resolution of the statistic being scored, which on a shrunk smooth is
+    /// four orders looser than [`WEIGHTED_CHI_SQUARE_TOLERANCE`], and the
+    /// difference is the difference between a millisecond and a second.
+    #[test]
+    fn a_looser_tolerance_is_certified_at_what_it_asked_for() {
+        // One weight of order one over a tail of dust — the shape a REML-shrunk
+        // penalized smooth actually produces, and the one where Imhof's
+        // truncation is most expensive.
+        let spectrum: &[f64] = &[1.0, 1e-3, 1e-5, 1e-7, 1e-9];
+        let mean: f64 = spectrum.iter().sum();
+        for scale in [0.5_f64, 3.0, 10.0] {
+            let x = scale * mean;
+            let (strict, strict_bound) = weighted_chi_square_sf_with_bound(spectrum, x);
+            assert!(strict_bound <= WEIGHTED_CHI_SQUARE_TOLERANCE);
+            for tolerance in [1e-9_f64, 1e-7, 1e-5] {
+                let (loose, bound) = weighted_chi_square_sf_to_tolerance(spectrum, x, tolerance);
+                assert!(
+                    bound <= tolerance,
+                    "x={x} tol={tolerance:.0e}: achieved bound {bound:.3e} exceeds the request"
+                );
+                assert!(
+                    (loose - strict).abs() <= bound + strict_bound,
+                    "x={x} tol={tolerance:.0e}: {loose} is outside the strict value {strict} \
+                     by more than the two certified bounds ({bound:.3e} + {strict_bound:.3e})"
+                );
+            }
+        }
+    }
+
+    /// A tolerance that is not a positive finite number is not an instruction to
+    /// stop early: the contract is "at least this accurate", so nonsense gets the
+    /// strict default rather than the first panel.
+    #[test]
+    fn a_nonsense_tolerance_gets_the_strict_default() {
+        let spectrum: &[f64] = &[1.0, 0.3, 0.02];
+        let x = 3.0;
+        let (want, _) = weighted_chi_square_sf_with_bound(spectrum, x);
+        for tolerance in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            let (got, bound) = weighted_chi_square_sf_to_tolerance(spectrum, x, tolerance);
+            assert_eq!(got, want, "tolerance {tolerance} did not fall back to the default");
+            assert!(bound <= WEIGHTED_CHI_SQUARE_TOLERANCE);
+        }
+    }
+
     /// Domain errors are `NaN`, not a silently plausible probability.
     #[test]
     fn invalid_inputs_are_not_answered() {
