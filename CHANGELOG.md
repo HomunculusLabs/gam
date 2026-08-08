@@ -1,5 +1,81 @@
 ## Unreleased
 
+- **The certified cascade held seven `m²` blocks to deliver two objects that
+  need one, and the admissible design width is DERIVED from that residency
+  (#2758).** `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
+  refused with `CertifiedSpectrumCapacity`: a 6000-row cascade identifies 5997
+  penalized directions and the certified route stopped at 2893, because
+  `CERTIFIED_SPECTRUM_MAX = isqrt(BYTES / (BLOCKS·8))` over a measured
+  `BLOCKS = 8`. Raising `CERTIFIED_SPECTRUM_BYTES` was ruled out on the issue and
+  is not what happened; it is untouched at 512 MiB.
+
+  The measurement was honest and the constant was not the defect. What the route
+  SPENT it on was. The criterion consumes `Θ` and `Vᵀβ` — every eigenvalue of the
+  penalty-whitened Schur complement, and the whitened response in its eigenbasis.
+  `eigenvectors` was read at exactly ONE site, to form that projection, and
+  `eigh` cannot hand it over without building all of `V` plus faer's
+  tridiagonalization workspace. On top of it a full `m × m` upper `X'WX` was
+  assembled, of which only the `rank × rank` penalized block and a `q × rank`
+  cross block (`q ≤ 4`) are ever read.
+
+  ```text
+    before                                    after
+    m x m upper Gram          8 B / m^2       (not assembled at all)
+    rank x rank Schur         8 B / m^2       packed upper triangle   4 B / m^2
+    rank x rank eigenvectors  8 B / m^2       (never formed)
+    faer EVD workspace       ~40 B / m^2      (no EVD)
+    ----------------------------------        ----------------------------
+    measured  6.41-6.84 blocks = 51-55 B/m^2  measured 4.03 B/m^2
+    cap       2896 columns                    cap      10362 columns
+  ```
+
+  `V = QW` for the Householder `Q` and the QL `W`, so `Vᵀβ = Wᵀ(Qᵀβ)`. The new
+  `gam_linalg::packed_symmetric_spectrum` reduces the packed triangle IN PLACE,
+  applying each reflector to `β` as it is formed, then runs the implicit-shift QL
+  accumulating every Givens rotation into that same single vector instead of into
+  an `n × n` accumulator — the Golub–Welsch "keep one row of the eigenvector
+  matrix" device, with a general start vector rather than `e₁`. Neither factor is
+  ever formed. The mathematics is unchanged: all eigenvalues, the exact
+  projection, the same roundoff floor, the same dropped null modes.
+
+  `CERTIFIED_SPECTRUM_BLOCKS` is replaced by
+  `CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED = 5`, an INVENTORY again rather
+  than a black box: one packed `f64` triangle is `8/2 = 4` bytes per `m²`, plus
+  the next integer of headroom. `5997 < 10362`, so the binding constraint on that
+  fixture returns to identifiability.
+
+  **Two defects in the new reduction, both found by measurement rather than
+  review.** The classical relative deflation test `|e_i| ⩽ ε(|d_i|+|d_{i+1}|)`
+  DOES NOT TERMINATE on a rank-deficient Gram: on `F Fᵀ` with `F` 296×148
+  standard normal, `‖T‖ ≈ 9e2` while the 148 null directions arrive as
+  `d ≈ e ≈ 1e-13`, so the test asks for `4e-29` against rotations that re-inject
+  `ε‖T‖ ≈ 2e-13` every sweep. The absolute floor `ε‖T‖_∞` is taken alongside it.
+  And the reflector produced NaN — `τ` and `v` are invariant to a rescaling of
+  `x` but `1/(α − β)` is not, so a row decayed into the denormal range (what a
+  rank-deficient trailing block becomes after a thousand steps) OVERFLOWED it and
+  `0·inf` on that row's exact zeros wrote NaN; the whole trailing block followed,
+  and the QL reported it as a 30-sweep non-convergence at an index that meant
+  nothing. The reflector is now built on `x / max|x|`, where `|α_s − β_s| ⩾ 1`
+  holds at every input scale, and an `O(n)` finiteness check between the
+  reduction and the sweep names a reduction defect as one.
+
+  **Two gates moved with the design, stated rather than quietly retuned.** The
+  peak-memory arms are now BOTH past `DENSE_GRAM_MAX` and assert it: the narrow
+  arm sat at `m = 891`, where the design carries a persistent `dense_gram` cache
+  — an `m²·8` term present in one reading and absent in the other, which does not
+  cancel in the difference and biases the differenced marginal DOWNWARD, i.e. in
+  the direction that makes an under-declared residency look fine. And
+  `spectral_and_solved_residual_forms_agree` charged its comparator bound to ONE
+  of two INDEPENDENT computations of the same quantity, treating the
+  decomposition as exact: at `m = 20` and `cond(A) = 1.005` that is `4.46e-15`
+  against a measured `4.60e-15`, so the gate failed on the last bit the moment
+  the rounding differed. Both comparands are charged now — two equal terms, not a
+  factor chosen to admit a number.
+
+  Timing at the new widths, measured so it is not rediscovered: a rank-6795
+  profile builds in 46.2 s (9.1 GFLOP/s through the packed symv/spr2 on 4 cores),
+  rank 1922 in 1.16 s.
+
 - **`ln S` was seven approximations wearing one name, and its error was a step
   function of `(mu, sigma)` (#2714).** The latent-survival / frailty inner solve
   stalled at `stationarity_residual = 1.741e-2` against a `3.6e-10` tolerance

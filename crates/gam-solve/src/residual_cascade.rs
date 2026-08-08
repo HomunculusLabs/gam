@@ -62,14 +62,19 @@
 //! safeguarded root refinement.
 //!
 //! Which designs get that proof is set by `CERTIFIED_SPECTRUM_MAX`, NOT by the
-//! dense Gram cache. The exact spectrum is a dense symmetric eigendecomposition
-//! of the `rank × rank` Schur complement, so its bound is that
-//! decomposition's transient memory; the Gram cache's bound (`DENSE_GRAM_MAX`)
-//! is a much tighter LIFETIME budget for a per-design array. Past the cache the
-//! Schur source is assembled from the CSR rows for the duration of the
-//! decomposition and dropped, so certification continues well past it — which
-//! is what lets a cascade whose refinement crosses 1536 columns finish at all
-//! (#2546). Past the SPECTRUM budget the route deliberately refuses automatic
+//! dense Gram cache. The exact spectrum is a symmetric reduction of the
+//! `rank × rank` Schur complement, so its bound is that reduction's transient
+//! memory; the Gram cache's bound (`DENSE_GRAM_MAX`) is a much tighter LIFETIME
+//! budget for a per-design array. Past the cache the Schur complement is
+//! accumulated straight from the CSR rows into ONE packed upper triangle for the
+//! duration of the reduction and dropped, so certification continues well past
+//! it — which is what lets a cascade whose refinement crosses 1536 columns
+//! finish at all (#2546). What the criterion consumes is `Θ` and `Vᵀβ`, never
+//! the eigenbasis, so the triangle is reduced in place and `β` rides along
+//! through the reflectors and rotations (`gam_linalg::packed_symmetric_spectrum`,
+//! #2758); the transient is one `m²/2` array rather than the seven-plus `m²`
+//! blocks a general eigendecomposition holds, and the derived width moves with
+//! it. Past the SPECTRUM budget the route deliberately refuses automatic
 //! λ selection: a fixed-probe SLQ log-determinant has no exact-real outer
 //! enclosure, and neither does an exact factorization, which returns a number at
 //! one λ and no enclosure over a λ cell. Closing the separate β-seeded
