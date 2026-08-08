@@ -164,6 +164,11 @@ include!("constant_curvature_profile.rs");
 // shape as the κ profile above, and kept out of the driver file for the same
 // reason.
 include!("measure_jet_range_seed.rs");
+// #1063/#2672: the per-term smooth likelihood-ratio test — the constrained
+// refit, the Lawley Bartlett factor and the null law the statistic is scored
+// against. A self-contained inference subsystem that only ever consumed the
+// driver's fit; same reason as the three above.
+include!("smooth_term_lr.rs");
 
 #[cfg(test)]
 mod test_support {

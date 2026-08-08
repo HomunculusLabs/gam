@@ -189,7 +189,7 @@ fn the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672() {
     let unconditioned = report("y ~ s(z)", &data);
 
     for (label, r) in [("y ~ x + s(z)", &conditioned), ("y ~ s(z)", &unconditioned)] {
-        let p = r.ref_df_provenance;
+        let p = &r.ref_df_provenance;
         assert_eq!(
             p.source,
             SmoothLrReferenceSource::NullSpectrum,
@@ -225,7 +225,7 @@ fn the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672() {
         // `ν ≤ q` and `g ≤ 1`, with equality exactly when every weight is one
         // (an unpenalized block). Both bounds are analytic, so a violation is an
         // assembly error rather than a fixture accident.
-        let block = r.ref_df_provenance;
+        let block = &r.ref_df_provenance;
         assert!(
             block.scale > 0.0 && block.scale <= 1.0 + 1e-12,
             "{label}: the reference scale g = Σw²/Σw must lie in (0, 1]; got {}",
@@ -262,4 +262,177 @@ fn the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672() {
             block.tail_probability(r.statistic_corrected)
         );
     }
+}
+
+/// #2672: the two independent routes to the null spectrum must agree on REAL
+/// fits, and the published p-value must be the exact weighted-chi-square tail of
+/// the spectrum the report carries.
+///
+/// The spectrum is assembled from `[H⁻¹]_jj S_jj`; the moments the previous
+/// reference used are assembled from traces of powers of the influence block.
+/// `(I − F)_jj = [H⁻¹]_jj S_jj` is an identity — but only if the penalty is
+/// block-diagonal by term AND `Vb`, `F` and `S(λ)` are published in ONE
+/// coefficient basis. Both halves of that have been wrong in this exact code
+/// path before: the influence matrix was dropped rather than mapped through the
+/// conditioning similarity, the retained first-order correction was left in the
+/// internal basis while its Gram was carried out, and the tested window was
+/// indexed block-locally into a global object. None of those is visible by
+/// reading; all three move this residual off roundoff.
+///
+/// So the driver measures it on every fit and publishes it, and this pins the
+/// published number. The fixtures span both shrinkage regimes (null-true and
+/// signal-bearing), both conditioning states (with and without a parametric
+/// block), and both scale conventions (`poisson`, whose IRLS weight already
+/// carries the dispersion, and `gaussian`, whose coefficient covariance carries
+/// `σ̂²` — the multiplier that has to be divided back out of `Vb` before it can
+/// be multiplied by a penalty).
+#[test]
+fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
+    init_parallelism();
+    let mut checked = 0usize;
+    for amplitude in [0.0_f64, 0.9] {
+        for &(formula, family) in &[
+            ("y ~ s(z)", "poisson"),
+            ("y ~ x + s(z)", "poisson"),
+            ("y ~ x + w + v + s(z)", "poisson"),
+            ("y ~ x + s(z)", "gaussian"),
+            ("y ~ x + s(z, k=12)", "poisson"),
+        ] {
+            let data = dataset(200, 90_672 + (amplitude * 10.0) as u64, amplitude);
+            let r = report_for(formula, family, &data);
+            let p = &r.ref_df_provenance;
+            assert_eq!(
+                p.source,
+                SmoothLrReferenceSource::NullSpectrum,
+                "{formula} [{family}] amplitude={amplitude}: the exact lane must be \
+                 reachable on an ordinary fit. Falling back means `beta_covariance()`, \
+                 its scale, or the penalty block was unavailable. Provenance: {p:?}"
+            );
+            let residual = p.moment_residual.unwrap_or_else(|| {
+                panic!(
+                    "{formula} [{family}] amplitude={amplitude}: both routes were \
+                     available on this fit, so the identity between them must have \
+                     been MEASURED. Provenance: {p:?}"
+                )
+            });
+            assert!(
+                residual < 1e-8,
+                "{formula} [{family}] amplitude={amplitude}: the spectrum from \
+                 `[H⁻¹]_jj S_jj` and the moments from the influence block disagree by \
+                 a relative {residual:.3e}. That is a basis or block-structure \
+                 defect, not a tolerance: the two are the same object. \
+                 Provenance: {p:?}"
+            );
+
+            // The spectrum is a spectrum: `q` weights in `[0,1]`, descending,
+            // summing to the published mean.
+            assert!(!p.weights.is_empty());
+            assert!(
+                p.weights.iter().all(|w| (-1e-12..=1.0 + 1e-12).contains(w)),
+                "{formula} [{family}]: weights outside [0,1]: {:?}",
+                p.weights
+            );
+            assert!(
+                p.weights.windows(2).all(|pair| pair[0] >= pair[1] - 1e-15),
+                "{formula} [{family}]: weights not descending: {:?}",
+                p.weights
+            );
+            let sum: f64 = p.weights.iter().sum();
+            assert!(
+                (sum - p.mean).abs() <= 1e-9 * p.mean.abs().max(1.0),
+                "{formula} [{family}]: Σw = {sum} but the published mean is {}",
+                p.mean
+            );
+
+            // And the published p-value is the EXACT tail of that spectrum,
+            // recomputed here from the weights alone through `gam-math` rather
+            // than through the report's own accessor.
+            let independent =
+                gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_lr);
+            assert!(
+                (r.p_value_uncorrected - independent).abs() <= 1e-9,
+                "{formula} [{family}]: published p {} is not P(Σ w_j χ²₁ > W) = \
+                 {independent} for W = {}",
+                r.p_value_uncorrected,
+                r.statistic_lr
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 10, "the sweep must actually run: {checked} cells");
+}
+
+/// The exact reference and the two-moment summary of the SAME spectrum must
+/// separate on a real fit, and separate in one direction: the summary reports a
+/// smaller tail (rejects more readily) than the law does.
+///
+/// This is the measurement that says the change is not cosmetic. It is stated on
+/// the shrunk (null-true) arm because that is where a penalized spectrum is most
+/// spread — one unpenalized direction and a geometric tail — and therefore where
+/// a distribution matched on two moments is furthest from the one the statistic
+/// has.
+#[test]
+fn the_two_moment_summary_and_the_exact_law_separate_on_a_real_fit_2672() {
+    init_parallelism();
+    let data = dataset(200, 20_672, 0.0);
+    let r = report("y ~ x + s(z, k=12)", &data);
+    let p = &r.ref_df_provenance;
+    assert_eq!(p.source, SmoothLrReferenceSource::NullSpectrum);
+
+    // Deep in the tail, where the difference matters and where a user reading a
+    // p-value is making a claim.
+    let mut separated = false;
+    for multiple in [4.0_f64, 8.0, 16.0, 32.0] {
+        let statistic = multiple * p.mean;
+        let exact = gam_math::probability::weighted_chi_square_sf(&p.weights, statistic);
+        let summary =
+            gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
+        assert!(
+            summary <= exact + 1e-12,
+            "at W = {multiple}·Σw the two-moment summary ({summary}) reports a LARGER \
+             tail than the law ({exact}); the summary's error is one-signed the other \
+             way. Spectrum: {:?}",
+            p.weights
+        );
+        if exact > 0.0 && summary < 0.5 * exact {
+            separated = true;
+        }
+    }
+    assert!(
+        separated,
+        "the exact law and its two-moment summary never differed by more than a \
+         factor of two anywhere in the tail on this fit — the fixture is not \
+         exercising a spread spectrum. Spectrum: {:?}, ν={}, g={}",
+        p.weights, p.chi_square_df, p.scale
+    );
+}
+
+/// The `s(z)` LR report for one formula/family on one dataset.
+fn report_for(
+    formula: &str,
+    family: &str,
+    data: &gam::data::EncodedDataset,
+) -> gam::smooth::SmoothTermLrInference {
+    let cfg = FitConfig {
+        family: Some(family.to_string()),
+        ..FitConfig::default()
+    };
+    let mat = materialize(formula, data, &cfg).expect("materialize");
+    let FitRequest::Standard(req) = mat.request else {
+        panic!("expected a standard fit request for {formula}");
+    };
+    let reports = smooth_term_lr_inference_forspec(
+        req.data.view(),
+        req.y.view(),
+        req.weights.view(),
+        req.offset.view(),
+        &req.spec,
+        req.family,
+        &req.options,
+    )
+    .expect("smooth-term LR inference");
+    reports
+        .into_iter()
+        .find(|r| r.name.contains('z'))
+        .unwrap_or_else(|| panic!("no s(z) report for {formula} [{family}]"))
 }

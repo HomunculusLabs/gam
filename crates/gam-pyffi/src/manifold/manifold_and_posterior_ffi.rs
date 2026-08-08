@@ -1694,12 +1694,31 @@ struct SmoothTermLrRow {
     /// denominated in — NOT a chi-square degrees of freedom. See
     /// `reference_chi_square_df` / `reference_scale` for the reference itself.
     ref_df: f64,
-    /// Shape of the reference the p-values are read from: `ν = (Σw)²/Σw²`.
+    /// The null spectrum itself, `w_j ∈ [0, 1]` sorted descending: the p-values
+    /// are `P(Σ_j w_j χ²_1 > W)`, so this is the whole reference and not a
+    /// summary of it. Empty when the fit could not supply the spectrum, which is
+    /// exactly when `reference_source` is not `"null_spectrum"` and the
+    /// `(ν, g)` pair below is what was used instead.
+    reference_weights: Vec<f64>,
+    /// Which lane supplied the reference: `"null_spectrum"` (exact),
+    /// `"spectral_moment_match"` (the two-moment summary `g·χ²_ν`), or
+    /// `"unit_weight_fallback"` (`χ²_{max(edf, null_dim, 1)}`). The three are
+    /// not interchangeable and their errors have different signs and sizes.
+    reference_source: &'static str,
+    /// Shape of the two-moment summary, `ν = (Σw)²/Σw²`. It is the reference
+    /// only on the two non-exact lanes; on the exact lane it is a published
+    /// descriptor of the spectrum's shape.
     reference_chi_square_df: f64,
-    /// Scale of that reference: `g = Σw²/Σw`, so `p = P(χ²_ν > W/g)`. It is
-    /// exactly `1.0` for an unpenalized block (`w ≡ 1`), which is what makes the
-    /// penalized test degenerate to the classical `χ²_q` rather than resemble it.
+    /// Scale of that summary: `g = Σw²/Σw`. It is exactly `1.0` for an
+    /// unpenalized block (`w ≡ 1`), which is what makes the penalized test
+    /// degenerate to the classical `χ²_q` rather than resemble it.
     reference_scale: f64,
+    /// Measured agreement between the two independent routes to the spectrum
+    /// (`[H⁻¹]_jj S_jj` and the influence block's trace identities), when the fit
+    /// supplied both. It is an algebraic identity, so this is a number that
+    /// should be at roundoff; it is published rather than assumed because both
+    /// of its inputs have been published in the wrong basis before.
+    reference_moment_residual: Option<f64>,
     /// Lawley LR Bartlett factor `c = 1 + Δε/d` (1.0 when uncorrected).
     bartlett_factor: f64,
     /// Fixed-λ conditional Lawley factor when the applied factor also includes
@@ -1905,8 +1924,17 @@ fn smooth_term_lr_inference_dataset_json_impl(
             term_idx: r.term_idx,
             statistic_lr: r.statistic_lr,
             ref_df: r.ref_df,
+            reference_weights: r.ref_df_provenance.weights.clone(),
+            reference_source: match r.ref_df_provenance.source {
+                gam::families::fit_orchestration::drivers::SmoothLrReferenceSource::NullSpectrum => "null_spectrum",
+                gam::families::fit_orchestration::drivers::SmoothLrReferenceSource::SpectralMomentMatch => {
+                    "spectral_moment_match"
+                }
+                gam::families::fit_orchestration::drivers::SmoothLrReferenceSource::UnitWeightFallback => "unit_weight_fallback",
+            },
             reference_chi_square_df: r.ref_df_provenance.chi_square_df,
             reference_scale: r.ref_df_provenance.scale,
+            reference_moment_residual: r.ref_df_provenance.moment_residual,
             bartlett_factor: r.bartlett_factor,
             bartlett_factor_conditional: r.bartlett_factor_conditional,
             rho_variation_shift: r.rho_variation_shift,

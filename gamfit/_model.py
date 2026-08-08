@@ -596,23 +596,31 @@ class Model:
         :math:`W^* = W / c`, :math:`c = 1 + \\Delta\\varepsilon / d`.
 
         The reference :math:`W` is scored against is the statistic's own null
-        law rather than a chi-square fitted to its mean. At fixed
+        law, not a distribution fitted to some of its moments. At fixed
         :math:`\\lambda` the penalized LR is exactly
         :math:`W = \\sum_j w_j \\chi^2_1` with
         :math:`w = \\mathrm{eig}(2F_{jj} - F_{jj}^2)` on the tested block of the
         influence matrix, so :math:`\\sum_j w_j` is Wood's ``edf1`` *and* the
-        statistic's null mean, while the shape comes from the second moment:
-        :math:`p = P(\\chi^2_\\nu > W/g)` with
-        :math:`\\nu = (\\sum w)^2 / \\sum w^2` and
-        :math:`g = \\sum w^2 / \\sum w`. For an unpenalized block every
+        statistic's null mean — and the p-value is
+        :math:`P(\\sum_j w_j \\chi^2_1 > W)` itself, obtained by Imhof inversion
+        of the characteristic function. For an unpenalized block every
         :math:`w_j = 1` and this is exactly the textbook :math:`\\chi^2_q`.
+
+        ``reference_source`` says which lane produced it: ``"null_spectrum"``
+        (the exact law above, with ``reference_weights`` carrying :math:`w`),
+        ``"spectral_moment_match"`` (the fit could supply only the spectrum's
+        first two moments, so the reference is the two-moment
+        :math:`P(\\chi^2_\\nu > W/g)`, :math:`\\nu = (\\sum w)^2/\\sum w^2`,
+        :math:`g = \\sum w^2/\\sum w` — accurate to a percent at
+        :math:`\\alpha = 0.05` and up to 1.6x anti-conservative at
+        :math:`10^{-4}`), or ``"unit_weight_fallback"``.
 
         For each penalized (shape-unconstrained) smooth term it returns
         ``statistic_lr`` (the raw :math:`W`), ``ref_df`` (the null mean
         :math:`d = \\sum_j w_j`, which is what the Bartlett factor is
         denominated in — *not* a chi-square degrees of freedom),
-        ``reference_chi_square_df`` :math:`\\nu` and ``reference_scale``
-        :math:`g` (the reference the p-values are read from),
+        ``reference_weights``/``reference_source``, ``reference_chi_square_df``
+        :math:`\\nu` and ``reference_scale`` :math:`g` (the two-moment summary),
         ``bartlett_factor``
         :math:`c`, ``statistic_corrected`` :math:`W^*`, ``p_value_uncorrected``,
         ``p_value_corrected`` (the magic-by-default value), ``material`` (the
