@@ -60,10 +60,20 @@
 //!
 //! One warm-started Newton solve per (row, class) — the augmented objective is
 //! strictly convex, so Newton with backtracking is unconditionally safe — plus
-//! `K(K+1)/2` more per row when second moments are requested.  That is *cheaper*
-//! than the adaptive Smolyak integration it replaces, whose level requirement
-//! grows with exactly the posterior width that makes the Gaussian wrong in the
-//! first place.
+//! `K(K+1)/2` more per row when second moments are requested.  Each Newton
+//! iteration is `O(n·M²·P²)` for the curvature (as `M(M+1)/2` GEMMs) and
+//! `O(d³)` for the factorisation, so the whole predictive is
+//! `O(R·K·iters·(n M² P² + d³))`.
+//!
+//! On the fixture this exists for that is a large improvement, not a cost: the
+//! Smolyak integrator it replaces spent ~930 s on one penguins prediction
+//! block, because its level requirement grows with exactly the posterior width
+//! that makes the Gaussian wrong in the first place, while the same block here
+//! is `n = 228`, `P = 37`, `M = 2` — under a second. The scaling is different
+//! in kind, though, and worth stating plainly: this method's cost grows with
+//! the TRAINING size, which the Gaussian route's did not, because evaluating a
+//! posterior away from its mode is what the Gaussian route was avoiding by
+//! being wrong.
 
 use crate::model_types::EstimationError;
 use gam_linalg::faer_ndarray::FaerCholesky;
