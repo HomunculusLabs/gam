@@ -1,5 +1,89 @@
 ## Unreleased
 
+- **The multinomial posterior mean was being computed by a method that is not
+  an approximation of it (#2612).** `predict_multinomial_formula` publishes
+  `E[softmax(x'β) | data]`. It computed that by approximating the coefficient
+  posterior with the Laplace Gaussian `N(β̂, H⁻¹)` and integrating `softmax`
+  against it. The `O(n⁻¹)` correction to a posterior mean has a curvature half
+  and a skewness half; integrating a nonlinear functional over the Gaussian
+  keeps the first and drops the second. On a well-conditioned fit both are
+  small and nobody notices. On a (quasi-)separated softmax they are neither
+  small nor same-signed — the likelihood is flat toward more separation and
+  steep away from it, so the true posterior is skewed toward larger `|η|` while
+  the symmetric Gaussian puts half its mass where the likelihood has already
+  excluded the coefficient — and `softmax`'s concavity turns that misplaced
+  mass into under-confidence at unchanged argmax. That is the penguin signature
+  exactly: right class, flattened probabilities.
+
+  The estimand is fine and stays. What replaces the method is the ratio form,
+  which for a POSITIVE functional has the two Laplace errors cancel
+  (`O(n⁻²)` rather than `O(n⁻¹)`), and which for a class probability is not a
+  device but an identity — the extra row's likelihood factor IS the quantity
+  being averaged:
+
+  ```text
+  E[p_c(x)]         = Z(D ∪ {(x, c)}) / Z(D)
+  E[p_c(x)·p_d(x)]  = Z(D ∪ {(x, c), (x, d)}) / Z(D)
+  ```
+
+  Measured against an MCMC posterior on a `K = 3`, `p = 10` asymmetric
+  quasi-separated fixture (an importance sampler was tried first and rejected:
+  ESS ≈ 800 of 200000 in that skewed 20-dimensional posterior is a Monte Carlo
+  error larger than the accuracy being certified):
+
+  ```text
+  max |Gaussian − exact| = 2.121e-1        max |ratio − exact| = 4.39e-3
+  max |ratio E[p_c p_d] − exact|           = 3.89e-3
+  ```
+
+  and across basis widths, with the exact posterior tracking the plug-in at
+  every width while only the Gaussian diverges — monotonically in the number of
+  nearly-unconstrained directions, which is the amplifier that separates a
+  four-smooth fixture from a two-parameter reduction:
+
+  ```text
+    p   max sd(eta)   plug-in   Gaussian     exact   Gaussian/exact
+    2        8.08     0.05503   0.05753    0.05603       1.027
+    8       15.88     0.05498   0.07039    0.05608       1.255
+   16       26.49     0.05259   0.09452    0.05349       1.767
+  ```
+
+  Consequences worth stating:
+
+  * **The saved model now carries its rows.** A Laplace summary cannot produce
+    a posterior mean — that summary IS the quadratic model whose inadequacy is
+    the defect — so `MultinomialSavedModel` stores the raw training design, the
+    class index, the weights and the coupled joint penalty `S_λ`. This is the
+    same choice `mgcv` makes in keeping the model frame with the fitted object,
+    and it is required rather than optional: a payload without it cannot answer
+    the question `predict` is asked.
+  * **The Smolyak accuracy/level control is gone rather than ignored.** It
+    existed because the old mechanism was a quadrature whose answer could be
+    bought with more nodes. The new one's accuracy is a property of the
+    expansion. What replaces it needs no configuring: `Σ_c E[p_c] = 1` is an
+    identity of the estimand, so the computed sum's deviation from one is the
+    error at that row, and a row past that tolerance is refused rather than
+    published.
+  * **The Gaussian-integrated quantity keeps its place and loses its name.**
+    `MultinomialFitOutputs::predict_probabilities_with_se` is now
+    `logistic_normal_softmax_moments`: the exact moments of `softmax` under a
+    STATED Gaussian are a well-defined object with their own uses, and naming
+    them for the Gaussian rather than for the posterior is what keeps the two
+    from being confused again.
+
+- **The multinomial outer-curvature gate was handed a count `#1587` stopped
+  producing (#2612).** The exact-outer-curvature route was selected from
+  `(K − 1) · n_penalties`. Since #1587, `equivariant_class_penalty_specs` emits
+  one spec PER CLASS per penalty component whenever `K > 2`, so the four-smooth
+  penguin fixture carries `8 × 3 = 24` outer coordinates and the gate was handed
+  `2 × 8 = 16` — confirmed against the refusal's own `last_evaluated_rho`, which
+  has 24 entries. The gate now reads
+  `MultinomialFamily::joint_smoothing_dimension()`, and
+  `MULTINOMIAL_EXACT_OUTER_HESSIAN_MAX_DIM` moves `16 → 24` without moving its
+  calibration point: the same fixture, re-read with a corrected ruler. At
+  `K = 3` the classification is unchanged (`3n ≤ 24` and `2n ≤ 16` are both
+  `n ≤ 8` components).
+
 - **`λ̂` is CHOSEN, and the smooth-term LR reference was pricing it as given
   (#2672).** The pooled size of this issue's own null-simulation grid, measured
   at main for the first time since `7dbd1dc43` landed: `size@.05 = 0.0962`
