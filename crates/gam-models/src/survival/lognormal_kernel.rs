@@ -14,9 +14,8 @@
 use crate::model_types::EstimationError;
 use crate::probability::{log1mexp_positive, signed_log_sum_exp};
 use crate::quadrature::{
-    IntegratedExpectationMode, QuadratureContext,
-    cloglog_log_survival_mu_derivative_gumbel_quadrature,
-    cloglog_log_survival_uses_gumbel_quadrature, lognormal_laplace_unit_log_term_shared,
+    IntegratedExpectationMode, QuadratureContext, log_survival_jet,
+    lognormal_laplace_unit_log_term_shared,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -529,13 +528,17 @@ pub fn log_kernel_bundle(
 
 /// The `σ^j ∂_a^j K_0` tower for one bundle, or `None` when it must not be used.
 ///
-/// `None` is returned unless `ln S(a,σ)` is itself routed through the
-/// Gumbel-mixing quadrature. That condition is not a tuning knob: the tower is
-/// the μ-derivative of exactly that quadrature, so requesting it where the value
-/// came from a different branch would hand a consumer a derivative and a value
-/// off two different approximation surfaces. `None` also covers any entry that
-/// fails to come back as a finite signed magnitude, so a caller either gets the
-/// whole tower or falls back to the rung basis — never a partial mix.
+/// The tower and the value `ln S(a,σ)` come off the same log-space survival
+/// panel by construction (#2714), so there is no longer any question of a
+/// derivative and a value living on two approximation surfaces — that used to
+/// be gated by "is the value routed through the Gumbel-mixing quadrature",
+/// i.e. by `σ ≥ 8`. What is left to decide is only whether the direct tower is
+/// better conditioned than the rung basis here, and the quadrature answers that
+/// itself: [`LogSurvivalJet::certified_scaled_mu_derivatives`] admits the tower
+/// exactly when its measured signed-sum cancellation says it is accurate.
+///
+/// `None` also covers a non-finite `log_k0`, so a caller either gets the whole
+/// tower or falls back to the rung basis — never a partial mix.
 fn log_scaled_a_derivative_tower(
     quadctx: &QuadratureContext,
     a: f64,
@@ -543,9 +546,11 @@ fn log_scaled_a_derivative_tower(
     max_k: usize,
     log_k0: f64,
 ) -> Option<Vec<KernelSignedLog>> {
-    if !cloglog_log_survival_uses_gumbel_quadrature(a, sigma) || !log_k0.is_finite() {
+    if !log_k0.is_finite() {
         return None;
     }
+    let jet = log_survival_jet(quadctx, a, sigma, max_k);
+    let certified = jet.certified_scaled_mu_derivatives(max_k)?;
     let mut tower = Vec::with_capacity(max_k + 1);
     // Entry 0 is the kernel itself, taken verbatim from the value path so a
     // `k = 0` term list evaluates identically on either basis.
@@ -553,13 +558,11 @@ fn log_scaled_a_derivative_tower(
         log_abs: log_k0,
         sign: 1.0,
     });
-    for order in 1..=max_k {
-        let (log_abs, sign) =
-            cloglog_log_survival_mu_derivative_gumbel_quadrature(quadctx, a, sigma, order);
-        if !(log_abs.is_finite() && (sign == 1.0 || sign == -1.0)) {
-            return None;
-        }
-        tower.push(KernelSignedLog { log_abs, sign });
+    for entry in &certified[1..] {
+        tower.push(KernelSignedLog {
+            log_abs: entry.log_abs,
+            sign: entry.sign,
+        });
     }
     Some(tower)
 }

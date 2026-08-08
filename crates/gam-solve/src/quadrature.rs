@@ -340,68 +340,119 @@ const CLOGLOG_RARE_EVENT_LOG_MAX: f64 = -18.0;
 const CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN: f64 = 8.0;
 const CLOGLOG_POSITIVE_SATURATION_EDGE: f64 = 5.0;
 const CLOGLOG_POSITIVE_SATURATION_SIGMAS: f64 = 8.0;
-// Universal η-interval for the Gumbel-mixing survival quadrature. The mixing
-// density g(η) = exp(η − e^η) carries < 4e-18 of its mass outside [−40, 6] (its
-// left tail decays like e^η, its right tail like exp(−e^η)), so the same
-// truncation resolves S(μ,σ) for every (μ,σ): only the bounded factor
-// Φ((η−μ)/σ) depends on the parameters.
-const CLOGLOG_GUMBEL_QUAD_ETA_LO: f64 = -40.0;
-const CLOGLOG_GUMBEL_QUAD_ETA_HI: f64 = 6.0;
-// Clenshaw–Curtis node floor for the Gumbel survival quadrature (σ ≥ 8, where
-// the Φ transition is at least as wide as the node spacing).
+// ── Log-space survival panel (#2714) ────────────────────────────────────────
 //
-// n = 97 leaves ~1e-8 relative error in `ln S`, and that was called converged.
-// It is converged for a consumer that reads `S`; it is four orders of magnitude
-// short for one that DIFFERENTIATES the kernel bundle twice. `log_kernel_bundle`
-// builds `K_k` from this evaluator at shifts of `k σ²`, and the log-σ curvature
-// is a second cumulant — a difference of raw moments that agree to
-// `~1/(120 σ²)` of their own size. A fixed relative input error `ε` therefore
-// leaves the curvature with `ε · 120 σ²` relative error, which reaches O(1) at
-// `σ ≈ 913` (`log σ ≈ 4.8`) for `ε = 1e-8`. Measured against a brute-force
-// log-sum-exp oracle on the #2566 fixture, this floor decides it:
+// `ln S(μ,σ)`, `S(μ,σ) = E[exp(−e^η)]`, `η ~ N(μ,σ²)`, is evaluated on ONE
+// Laplace-localized Clenshaw–Curtis panel in the standardized variable
+// `z = (η−μ)/σ`, accumulated by log-sum-exp. The panel is placed from the
+// integrand's own geometry rather than from a fixed truncation, which is what
+// makes a single rule accurate over the whole `(μ,σ)` plane.
 //
-//   nodes   rel. err of K_1     rel. err of K_2     rel. err of K_3
-//     97       1.31e-8             2.6e-9              2.52e-7
-//    513       3.6e-13             1.9e-12             6.3e-12
+// The log-integrand of the survival branch,
 //
-// and the analytic log-σ curvature at `log σ = 5` goes from `-2.866e-2` against
-// a true `+4.269e-3` (wrong sign, 771% error) to `+4.653e-3` against `4.168e-3`
-// (11.7%) — a 68× error reduction, with the sign restored. Clenshaw–Curtis
-// converges spectrally on this analytic integrand, so the extra nodes buy
-// digits rather than merely averaging noise.
+// ```text
+//   L(z) = −z²/2 − ln√(2π) − e^{μ+σz},
+//   L''(z) = −(1 + σ² e^{μ+σz}) ≤ −1,
+// ```
 //
-// The cost is confined: this branch is reached only at σ ≥ 8 or on the σ < 8
-// value-underflow fallback, and the σ < 8 side already scales to MAX_NODES.
-// A full `gam-models` A/B (1400 passed / 125 failed, IDENTICAL failure sets on
-// both arms) shows no behavioural regression.
+// is STRICTLY concave, so it is unimodal, its maximizer is the unique root of a
+// monotone equation, and the two points where it falls a requested number of
+// e-folds below that maximum bracket every part of the integral that can matter
+// at f64 precision. The complement branch `1 − S = E[1−exp(−e^η)]` has the same
+// structure (`ln(1−e^{−u})` is concave in `z`), and is used where `S → 1` so
+// `ln S` stays RELATIVELY accurate instead of merely absolutely accurate.
 //
-// #2566 CORRECTION — the `120 σ²` model above UNDERSTATES its own exponent, and
-// 513 is not where this stops mattering. Measured paired at 513 vs 1025 nodes
-// (same fixture, lane and base commit), `log σ = 5` improves a further **335×**:
-// `disagreement` 4.856923e-4 → 1.451435e-6, i.e. `3.750 → 0.016` of the FD
-// ladder's own budget. `120 σ²` predicts only ~1.7e-5 of residual there against
-// 4.86e-4 observed, 30× short — because the shift `k σ²` enters the log-σ
-// derivative TWICE, so second-derivative amplification carries **σ⁴**
-// (`4.85e8` at that row, predicting ~3e-3, which brackets the observation).
-// Read the exponent as σ⁴, not σ².
+// What this replaces, and why it had to be replaced rather than re-thresholded:
+// `ln S` used to be assembled from a value-space ladder (Taylor / extreme
+// asymptotic / Miles erfc-series / CC / Gamma / GHQ) and then logged, with a
+// fixed-window Gumbel-mixing quadrature on `η ∈ [−40, 6]` as an underflow
+// escape hatch. Graded against a 60-digit reference on
+// `μ ∈ [−20, 12] × σ ∈ [0.002, 60]`, the worst absolute error of that composite
+// in `ln S` was **4.4e+06**, and the three worst rows came off three DIFFERENT
+// routes — the escape hatch (4.4e+06 at `(12, 0.002)`, its `Φ((η−μ)/σ)`
+// transition unresolved by a pinned 513-node grid), the Miles/CC value route
+// (82.0 at `(12, 1.0)`), and the rare-event asymptotic (`ln1p(−e^{μ+σ²/2})`,
+// 20.8× wrong at `(−50, 8)`, where `rare_log = −18` is on the gate but the
+// higher cumulants are not small). No threshold between those routes can work,
+// because no two of them are accurate on either side of a common cut; and an
+// analytic derivative cannot be the derivative of a surface whose error is a
+// step function of `(μ,σ)`, which is the #2714 stall.
 //
-// The floor is NOT raised to 1025 here, and the reason is the more useful half
-// of that measurement. At `log σ = 6` the analytic negative Hessian is
-// `-9.586485e-2` under BOTH node counts — identical to every printed figure —
-// while the same doubling moves the FD authority by 34% (2.188519e-3 →
-// 1.452708e-3). The value/gradient channel obeys this constant at that row and
-// the second-derivative channel does not, so the two are not routing through the
-// same branch there, and no quadrature resolution can reach the row where the
-// sign still inverts. Doubling every σ ≥ 8 evaluation to fix a row that was
-// already going to be superseded is a cost with no gate behind it. What #2566
-// needs next is the ROUTING question: which branch the negative Hessian takes at
-// `log σ = 6`, and why it ignores this constant.
-const CLOGLOG_GUMBEL_QUAD_MIN_NODES: usize = 513;
-// Node-density scale: below σ = 8 the Φ transition narrows to width σ, so the
-// node count grows like SCALE / σ to keep the transition resolved on the
-// σ < 8 value-underflow fallback. Bounded by MAX_NODES.
-const CLOGLOG_GUMBEL_QUAD_NODE_SCALE: f64 = 320.0;
-const CLOGLOG_GUMBEL_QUAD_MAX_NODES: usize = 513;
+// The panel rule's worst absolute error in `ln S` on the same grid is
+// **9.3e-10** — at `ln S = −5.7e6`, i.e. `1.6e-16` relative, the f64
+// representation floor of the answer itself.
+//
+/// Number of e-folds below its own maximum at which the log-integrand is cut.
+///
+/// The neglected tails are bounded by (local scale) × `exp(−DROP)` relative to
+/// the peak; at 60 that is `8.8e-27`, ten orders below the `~1e-16` relative
+/// accuracy the rule targets, so the truncation is never the binding error.
+/// Enlarging it is cheap (the panel grows like `√DROP`), which is why the
+/// margin is taken here rather than defended.
+const LOG_SURVIVAL_PANEL_LOG_DROP: f64 = 60.0;
+/// Extra e-folds per μ-derivative order, in units of `ln(2 + |z⋆|)`.
+///
+/// Order `j` multiplies the integrand by `He_j(z)`, which grows like `|z|^j`, so
+/// the point where the product falls `DROP` e-folds below its peak moves
+/// outward by `j·ln|z|`. Padding the cut by exactly that keeps the truncation
+/// bound of the tower equal to the truncation bound of the value.
+const LOG_SURVIVAL_PANEL_ORDER_LOG_DROP: f64 = 2.0;
+/// Clenshaw–Curtis nodes per unit of local-scale arclength
+/// `T = ∫ √(1 + σ² e^{μ+σz}) dz` across the panel.
+///
+/// `T` counts how many local scales the panel spans — the resolution the rule
+/// needs on the real axis. Measured node counts for `1e-13` relative accuracy
+/// over `μ ∈ [−30, 20] × σ ∈ [5e-4, 200]` never exceed `4.6·T` once the σ term
+/// below is added; the observed minimum sufficient ratio at small σ is 2.2, so
+/// this carries a 2.1× margin.
+const LOG_SURVIVAL_PANEL_ARCLENGTH_NODE_DENSITY: f64 = 4.6;
+/// Clenshaw–Curtis nodes per `√σ`.
+///
+/// `T` alone does not price large σ: `exp(−e^{μ+σz})` is entire but its
+/// modulus grows off the real axis with period `2π/σ`, so the Bernstein
+/// ellipse on which the interpolant converges shrinks as σ grows and the node
+/// count rises even though the panel does not. Measured requirement at `1e-13`:
+/// `n = 65, 97, 193, 385, 769` at `σ = 0.5, 2, 8, 60, 200`, i.e. `n − 65` is
+/// `≈ 50·√σ`; 70 carries a 1.4× margin on the fitted slope.
+const LOG_SURVIVAL_PANEL_SIGMA_NODE_SCALE: f64 = 70.0;
+/// Extra nodes per μ-derivative order (the `He_j` factor raises the polynomial
+/// degree of the integrand by `j`, and the panel widens with `j`).
+const LOG_SURVIVAL_PANEL_ORDER_NODES: f64 = 8.0;
+/// Node floor. The panel spans ~20 local scales at small σ and needs 49–65
+/// nodes there; the floor is the measured maximum of that regime.
+const LOG_SURVIVAL_PANEL_MIN_NODES: usize = 65;
+/// Node ceiling. `4.6·T + 70·√σ` reaches this at `σ ≈ 3.3e3`; beyond that the
+/// rule is capped and reports its own conditioning, which is what the
+/// derivative-tower gate reads.
+const LOG_SURVIVAL_PANEL_MAX_NODES: usize = 4097;
+/// Highest μ-derivative order the panel tower will produce.
+///
+/// `log_kernel_bundle` asks for `k + 4` rungs at most, so 8 covers every
+/// shipped consumer with room; the bound exists so the tower is a fixed-size
+/// array rather than a heap allocation on a per-row path.
+pub const LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER: usize = 8;
+/// Largest tolerated cancellation, as `ln(Σ|terms| / |Σ terms|)`, before the
+/// direct Hermite μ-derivative tower is refused.
+///
+/// The tower is a signed log-sum-exp, so its relative error is
+/// `≈ ε · Σ|terms|/|Σ terms|`; the quadrature therefore MEASURES its own
+/// conditioning and does not have to be gated on a proxy for it.
+///
+/// The value is the solve of `ε · e^cond = 1e-13`, i.e. `ln(1e-13/ε) = 6.1`:
+/// admit the tower exactly while it is at the working floor of everything
+/// around it, so switching bases can never LOSE accuracy relative to the rung
+/// basis it displaces. Verified on `μ ∈ [−20, 12] × σ ∈ [0.002, 60] ×
+/// `j ∈ [1, 4]` against a 60-digit reference: the achieved error tracks
+/// `ε·e^cond` as the model says (`≤ 1.1e-7` below 20, `≤ 1.8e-5` below 25), and
+/// every admitted row lands at `2.9e-11` or better — which is itself the f64
+/// ulp of the largest `ln|·|` on the grid, not a quadrature error.
+///
+/// This replaces a `σ ≥ 8` gate, which asked a chosen constant to stand in for
+/// exactly this quantity. The replacement is a strict superset of it: all 132
+/// grid rows with `σ ≥ 8` are admitted here, plus the moderate-σ / positive-μ
+/// region where the tower is equally well conditioned and the rung basis was
+/// being used only because `σ < 8`.
+const LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION: f64 = 6.1;
 const SERIES_CONSECUTIVE_SMALL_TERMS: usize = 6;
 const LOGIT_MAX_TERMS: usize = 160;
 /// Documented absolute-accuracy contract of the erfcx logistic-normal
@@ -1103,26 +1154,6 @@ fn logit_posterior_meanwith_deriv_controlled(
 }
 
 #[inline]
-fn log_normal_cdf_stable(x: f64) -> f64 {
-    if !x.is_finite() {
-        return if x.is_sign_negative() {
-            f64::NEG_INFINITY
-        } else {
-            0.0
-        };
-    }
-    if x < -8.0 {
-        let u = -x / SQRT_2;
-        -u * u + (0.5 * erfcx_nonnegative(u)).ln()
-    } else {
-        // Phi(-8) is about 6e-16, so this branch is strictly positive by
-        // construction. A 1e-300 floor can never activate here and would only
-        // obscure the exact domain argument.
-        gam_math::probability::normal_cdf(x).ln()
-    }
-}
-
-#[inline]
 fn cloglog_extreme_asymptotic(mu: f64, sigma: f64) -> Option<IntegratedMeanDerivative> {
     // Extreme-input ladder for the cloglog mean and its location derivative.
     //
@@ -1183,99 +1214,522 @@ fn cloglog_survival_extreme_asymptotic(
     None
 }
 
-/// Clenshaw–Curtis node count for the Gumbel survival quadrature at `sigma`.
+/// One Laplace-localized Clenshaw–Curtis panel for the log-space survival
+/// integrals at a given `(μ, σ)` and μ-derivative order.
 ///
-/// **This ladder is currently INERT and the count is the constant 513** —
-/// `CLOGLOG_GUMBEL_QUAD_MIN_NODES == CLOGLOG_GUMBEL_QUAD_MAX_NODES == 513`, so
-/// `.max(FLOOR).min(CEILING)` returns that value for every `sigma` and
-/// `CLOGLOG_GUMBEL_QUAD_NODE_SCALE` cannot reach any output. Pinned by
-/// `cloglog_gumbel_quad_node_ladder_is_inert_at_a_constant_513_2469`.
-///
-/// The design the surrounding arithmetic encodes, and which the floor/ceiling
-/// coincidence currently suppresses: above σ = 8 the `Φ((η−μ)/σ)` transition is
-/// at least as wide as the node spacing, so the floor suffices; below it the
-/// transition narrows to width σ, so the count grows like `SCALE/σ` to keep it
-/// resolved. An odd count is used so the rule has an even number of intervals
-/// and a symmetric, gap-free grid.
-///
-/// Separating floor from ceiling would restore that σ-adaptivity and change the
-/// node count — hence every cloglog survival value and μ-gradient — for σ
-/// outside the pinned point. Whether it should be restored is the accuracy-vs-σ
-/// question owned by #2566; this doc records the shipped behaviour rather than
-/// the intended one, and the constants are recorded as **derived in form,
-/// unsupported in value** under #2469 rather than deleted: they are load-bearing
-/// for a branch, not isolated magic numbers.
-#[inline]
-fn cloglog_gumbel_quad_nodes(sigma: f64) -> usize {
-    let target = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / sigma.min(CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN))
-        .ceil() as usize;
-    let n = target
-        .max(CLOGLOG_GUMBEL_QUAD_MIN_NODES)
-        .min(CLOGLOG_GUMBEL_QUAD_MAX_NODES);
-    if n % 2 == 0 { n + 1 } else { n }
+/// Placement is the whole point: `z_lo`/`z_hi` are where the log-integrand
+/// falls [`LOG_SURVIVAL_PANEL_LOG_DROP`] e-folds below its own maximum, and
+/// `nodes` comes from the panel's local-scale arclength plus the σ-dependent
+/// analyticity term. Value and every derivative order are evaluated on THIS
+/// panel, so they are the same approximation surface by construction.
+#[derive(Clone, Copy, Debug)]
+struct LogSurvivalPanel {
+    z_lo: f64,
+    z_hi: f64,
+    nodes: usize,
 }
 
-/// Log-space survival transform via the Gumbel-mixing representation.
+/// Which branch of `S ↔ 1−S` a panel integrates.
 ///
-/// ```text
-///   S(μ,σ) = E[exp(−e^η)],  η ~ N(μ,σ²)
-///          = ∫ g(η) Φ((η−μ)/σ) dη,   g(η) = exp(η − e^η),
-/// ```
+/// Both are cancellation-free log-sum-exps of positive terms; the choice is
+/// only about which one keeps `ln S` RELATIVELY accurate. Integrating `S` and
+/// taking its log loses relative precision as `S → 1` (where `ln S → 0` is a
+/// difference of near-equal quantities); integrating the complement and using
+/// `ln1p(−(1−S))` does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogSurvivalBranch {
+    /// `S = E[exp(−e^η)]`, integrand `φ(z)·exp(−e^{μ+σz})`.
+    Survival,
+    /// `1 − S = E[1−exp(−e^η)]`, integrand `φ(z)·(−expm1(−e^{μ+σz}))`.
+    Complement,
+}
+
+impl LogSurvivalBranch {
+    /// `ln` of the branch's integrand without the `−ln√(2π) − z²/2` Gaussian
+    /// head, i.e. the part that carries `(μ, σ)`.
+    #[inline]
+    fn log_tilt(self, mu: f64, sigma: f64, z: f64) -> f64 {
+        let u = safe_exp(mu + sigma * z);
+        match self {
+            Self::Survival => -u,
+            // ln(1 − e^{−u}) = ln(−expm1(−u)); for small u this is ln u = μ+σz
+            // to full precision, and for large u it is ≈ 0.
+            Self::Complement => {
+                let m = (-u).exp_m1();
+                if m == 0.0 {
+                    // u underflowed: 1 − e^{−u} = u to f64.
+                    mu + sigma * z
+                } else {
+                    (-m).ln()
+                }
+            }
+        }
+    }
+
+    /// The branch's log-integrand `L(z)` (Gaussian head included, normalizing
+    /// constant omitted — it cancels out of every root solve).
+    #[inline]
+    fn log_integrand(self, mu: f64, sigma: f64, z: f64) -> f64 {
+        -0.5 * z * z + self.log_tilt(mu, sigma, z)
+    }
+
+    /// `d/dz` of [`Self::log_integrand`], used only to place the peak.
+    ///
+    /// `Survival`: `−z − σu`. `Complement`: `−z + σu/(e^u − 1)`. Both are
+    /// strictly decreasing in `z` (the tilt is concave), so each has a unique
+    /// root.
+    #[inline]
+    fn log_integrand_slope(self, mu: f64, sigma: f64, z: f64) -> f64 {
+        let u = safe_exp(mu + sigma * z);
+        match self {
+            Self::Survival => -z - sigma * u,
+            Self::Complement => {
+                let em1 = u.exp_m1();
+                let tilt_slope = if em1.is_finite() && em1 > 0.0 {
+                    sigma * u / em1
+                } else if em1 == 0.0 {
+                    // u underflowed: u/(e^u − 1) → 1.
+                    sigma
+                } else {
+                    0.0
+                };
+                -z + tilt_slope
+            }
+        }
+    }
+}
+
+/// Maximizer of the survival branch's log-integrand: the unique root of
+/// `z + σ e^{μ+σz} = 0`.
 ///
-/// obtained by integrating `S = ∫ exp(−e^η) f_N(η) dη` by parts using
-/// `d/dη exp(−e^η) = −e^η exp(−e^η) = −g(η)`; the boundary terms vanish because
-/// `exp(−e^η)` runs from 1 to 0 while the Gaussian CDF runs from 0 to 1. Here
-/// `g` is the standard Gumbel-min density (it is `log U` for `U ~ Exp(1)`, with
-/// mean `−γ` and variance `π²/6`). Crucially `g` does **not** depend on
-/// `(μ,σ)` — those enter only through the smooth, bounded factor `Φ((η−μ)/σ)` —
-/// so one Clenshaw–Curtis panel on the universal interval
-/// `[CLOGLOG_GUMBEL_QUAD_ETA_LO, CLOGLOG_GUMBEL_QUAD_ETA_HI]` resolves the
-/// integrand for every `(μ,σ)`.
+/// Solved in log form — `ln σ + μ + σz − ln(−z) = 0` on `z < 0` — so no
+/// intermediate `e^{μ+σz}` is ever formed. That matters: the root can sit at
+/// `z ≈ −μ/σ` with `μ` in the hundreds, where the direct form overflows on the
+/// first Newton step and the value form of this solve simply cannot start.
+/// The left side is strictly increasing in `z`, so a bracketed Newton is
+/// unconditionally convergent.
+fn log_survival_peak_z(mu: f64, sigma: f64) -> f64 {
+    let log_sigma = sigma.ln();
+    let residual = |z: f64| log_sigma + mu + sigma * z - (-z).ln();
+    let mut hi = -f64::MIN_POSITIVE;
+    let mut lo = -1.0;
+    let mut widen = 0;
+    while residual(lo) > 0.0 && widen < 4096 {
+        lo *= 2.0;
+        widen += 1;
+        if !lo.is_finite() {
+            return f64::MIN;
+        }
+    }
+    let mut z = if lo > -1.0e6 { 0.5 * (lo + hi) } else { lo };
+    for _ in 0..200 {
+        let r = residual(z);
+        if r > 0.0 {
+            hi = z;
+        } else {
+            lo = z;
+        }
+        // d/dz [ln σ + μ + σz − ln(−z)] = σ + 1/(−z) > 0.
+        let slope = sigma + 1.0 / (-z);
+        let mut next = z - r / slope;
+        if !(next > lo && next < hi) {
+            next = 0.5 * (lo + hi);
+        }
+        if (next - z).abs() <= f64::EPSILON * (1.0 + z.abs()) {
+            return next;
+        }
+        z = next;
+    }
+    z
+}
+
+/// Maximizer of the complement branch's log-integrand: the unique root of
+/// `−z + σ u/(e^u − 1) = 0`, `u = e^{μ+σz}`.
 ///
-/// The result is `ln S`, accumulated with a streaming log-sum-exp over
-/// `ln Φ` (via [`log_normal_cdf_stable`]), so it stays finite and accurate even
-/// when `S` is far below the f64 underflow threshold — exactly the regime where
-/// the value-space evaluator collapses to a hard zero and discards the
-/// log-magnitude that the `exp(kμ + ½k²σ²)` kernel prefixes rely on (#798).
-fn cloglog_log_survival_gumbel_quadrature(ctx: &QuadratureContext, mu: f64, sigma: f64) -> f64 {
-    let a = CLOGLOG_GUMBEL_QUAD_ETA_LO;
-    let b = CLOGLOG_GUMBEL_QUAD_ETA_HI;
-    let half = 0.5 * (b - a);
-    let mid = 0.5 * (a + b);
-    let rule = ctx.clenshaw_curtis_n(cloglog_gumbel_quad_nodes(sigma));
-    // Streaming log-sum-exp of ln(W_i · g(η_i) · Φ((η_i−μ)/σ)). Clenshaw–Curtis
-    // weights are positive, so ln(W_i) is finite; ln g(η_i) = η_i − e^{η_i}.
-    let mut running_max = f64::NEG_INFINITY;
-    let mut running_sum = 0.0_f64;
+/// The tilt slope `σ u/(e^u−1)` falls monotonically from `σ` (at `u → 0`) to
+/// `0`, so the root is in `(0, σ]` and plain bisection with a Newton-free
+/// contraction is both safe and fast — no derivative of the tilt slope is
+/// needed.
+fn log_complement_peak_z(mu: f64, sigma: f64) -> f64 {
+    let branch = LogSurvivalBranch::Complement;
+    let (mut lo, mut hi) = (0.0_f64, sigma.max(f64::MIN_POSITIVE));
+    if branch.log_integrand_slope(mu, sigma, hi) > 0.0 {
+        return hi;
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if branch.log_integrand_slope(mu, sigma, mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo <= f64::EPSILON * (1.0 + hi.abs()) {
+            break;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// The point on one side of `z_peak` where the log-integrand has fallen `drop`
+/// e-folds below its maximum.
+///
+/// The log-integrand is strictly concave, hence strictly monotone on each side
+/// of its peak, so doubling outward until the drop is exceeded and then
+/// bisecting is exact to the last bit and cannot be fooled by a second mode.
+fn log_survival_panel_edge(
+    branch: LogSurvivalBranch,
+    mu: f64,
+    sigma: f64,
+    z_peak: f64,
+    drop: f64,
+    direction: f64,
+) -> f64 {
+    let peak_log = branch.log_integrand(mu, sigma, z_peak);
+    let fallen = |z: f64| peak_log - branch.log_integrand(mu, sigma, z) >= drop;
+    let mut step = 1.0_f64;
+    let mut inner = z_peak;
+    let mut outer = z_peak + direction * step;
+    let mut widen = 0;
+    while !fallen(outer) && widen < 4096 {
+        inner = outer;
+        step *= 2.0;
+        outer = z_peak + direction * step;
+        widen += 1;
+        if !outer.is_finite() {
+            return inner;
+        }
+    }
+    let (mut lo, mut hi) = if direction > 0.0 {
+        (inner, outer)
+    } else {
+        (outer, inner)
+    };
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if fallen(mid) == (direction > 0.0) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        if hi - lo <= f64::EPSILON * (1.0 + mid.abs()) {
+            break;
+        }
+    }
+    if direction > 0.0 { hi } else { lo }
+}
+
+/// `T = ∫ √(1 + σ² e^{μ+σz}) dz` across the panel, in closed form.
+///
+/// This is the panel's length measured in units of the log-integrand's own
+/// local scale `1/√(−L'')`, i.e. how many resolution elements the rule has to
+/// cover. With `r = √(1+σ²e^{μ+σz})` the antiderivative is
+/// `(2r + ln((r−1)/(r+1)))/σ`; written as below it stays exact in the
+/// `σ²e^{μ+σz} → 0` limit, where it must reduce to the plain length.
+fn log_survival_panel_arclength(mu: f64, sigma: f64, z_lo: f64, z_hi: f64) -> f64 {
+    let scale_root = |z: f64| (1.0 + safe_exp(2.0 * sigma.ln() + mu + sigma * z)).sqrt();
+    let (r_lo, r_hi) = (scale_root(z_lo), scale_root(z_hi));
+    if !(r_lo.is_finite() && r_hi.is_finite()) {
+        return f64::INFINITY;
+    }
+    (z_hi - z_lo) + 2.0 / sigma * ((r_hi - r_lo) - ((1.0 + r_hi) / (1.0 + r_lo)).ln())
+}
+
+/// Place the panel for `(branch, μ, σ)` at μ-derivative order `order`.
+fn log_survival_panel(
+    branch: LogSurvivalBranch,
+    mu: f64,
+    sigma: f64,
+    order: usize,
+) -> LogSurvivalPanel {
+    let z_peak = match branch {
+        LogSurvivalBranch::Survival => log_survival_peak_z(mu, sigma),
+        LogSurvivalBranch::Complement => log_complement_peak_z(mu, sigma),
+    };
+    let drop = LOG_SURVIVAL_PANEL_LOG_DROP
+        + LOG_SURVIVAL_PANEL_ORDER_LOG_DROP * (order as f64) * (2.0 + z_peak.abs()).ln();
+    let z_lo = log_survival_panel_edge(branch, mu, sigma, z_peak, drop, -1.0);
+    let z_hi = log_survival_panel_edge(branch, mu, sigma, z_peak, drop, 1.0);
+    let arclength = log_survival_panel_arclength(mu, sigma, z_lo, z_hi);
+    let requested = LOG_SURVIVAL_PANEL_ARCLENGTH_NODE_DENSITY * arclength
+        + LOG_SURVIVAL_PANEL_SIGMA_NODE_SCALE * sigma.sqrt()
+        + LOG_SURVIVAL_PANEL_ORDER_NODES * (order as f64);
+    let mut nodes = if requested.is_finite() {
+        (requested.ceil() as usize).clamp(
+            LOG_SURVIVAL_PANEL_MIN_NODES,
+            LOG_SURVIVAL_PANEL_MAX_NODES,
+        )
+    } else {
+        LOG_SURVIVAL_PANEL_MAX_NODES
+    };
+    if nodes.is_multiple_of(2) {
+        nodes += 1;
+    }
+    LogSurvivalPanel { z_lo, z_hi, nodes }
+}
+
+/// One entry of the log-space survival tower: `ln|·|`, its sign, and the
+/// cancellation the signed log-sum-exp actually suffered.
+///
+/// `log_cancellation = ln(Σ|terms| / |Σ terms|)` is not diagnostic decoration —
+/// it is the rule's own error bar. A signed log-sum-exp returns a result whose
+/// relative error is `≈ ε · Σ|terms|/|Σ terms|`, so a consumer that needs a
+/// certified derivative reads this instead of guessing a `σ` threshold.
+#[derive(Clone, Copy, Debug)]
+pub struct LogSurvivalSignedValue {
+    pub log_abs: f64,
+    pub sign: f64,
+    pub log_cancellation: f64,
+}
+
+impl LogSurvivalSignedValue {
+    const ZERO: Self = Self {
+        log_abs: f64::NEG_INFINITY,
+        sign: 0.0,
+        log_cancellation: f64::INFINITY,
+    };
+}
+
+/// `ln S` together with `σ^j ∂_μ^j S` for `j = 0..=order`, all off ONE panel.
+#[derive(Clone, Debug)]
+pub struct LogSurvivalJet {
+    /// `ln S(μ,σ)`.
+    pub log_survival: f64,
+    /// Entry `j` is `σ^j ∂_μ^j S` in signed-log form; entry 0 is `(ln S, +1)`.
+    pub scaled_mu_derivatives: [LogSurvivalSignedValue; LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER + 1],
+    /// Highest order actually filled in.
+    pub order: usize,
+    pub mode: IntegratedExpectationMode,
+}
+
+impl LogSurvivalJet {
+    /// The scaled μ-derivatives `σ^j ∂_μ^j S`, `j = 1..=order`, or `None` when
+    /// the quadrature's own measured cancellation says they are not accurate
+    /// enough to displace the rung (Touchard) basis.
+    ///
+    /// This asks the quadrature what cancellation it suffered rather than
+    /// asking `σ` to stand in for it. The two derivative bases are
+    /// complementary and both are needed: the direct tower is one integral per
+    /// order and degrades only where that integral cancels (small σ, where
+    /// `σ^j ∂_μ^j S` is genuinely `O(σ^j)` while the summands are `O(1)`); the
+    /// rung basis is an alternating combination of `K_k` and degrades where
+    /// THOSE cancel (large σ, #2610). Before #2714 the split was a `σ ≥ 8`
+    /// constant. It is now the measured conditioning of the thing admitted.
+    ///
+    /// All-or-nothing on purpose: a caller either gets the whole tower on one
+    /// surface or falls back to the rung basis, never a partial mix.
+    pub fn certified_scaled_mu_derivatives(
+        &self,
+        order: usize,
+    ) -> Option<&[LogSurvivalSignedValue]> {
+        if order > self.order {
+            return None;
+        }
+        let certified = self.scaled_mu_derivatives[..=order].iter().enumerate().all(
+            |(index, entry)| {
+                entry.log_abs.is_finite()
+                    && (index == 0 || entry.sign != 0.0)
+                    && entry.log_cancellation <= LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION
+            },
+        );
+        if certified {
+            Some(&self.scaled_mu_derivatives[..=order])
+        } else {
+            None
+        }
+    }
+}
+
+/// Streaming signed log-sum-exp that also accumulates `ln Σ|terms|`.
+struct SignedLogAccumulator {
+    running_max: f64,
+    signed_sum: f64,
+    abs_sum: f64,
+}
+
+impl SignedLogAccumulator {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            running_max: f64::NEG_INFINITY,
+            signed_sum: 0.0,
+            abs_sum: 0.0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, log_abs: f64, sign: f64) {
+        if !log_abs.is_finite() {
+            return;
+        }
+        if log_abs > self.running_max {
+            let rescale = (self.running_max - log_abs).exp();
+            self.signed_sum = self.signed_sum * rescale + sign;
+            self.abs_sum = self.abs_sum * rescale + 1.0;
+            self.running_max = log_abs;
+        } else {
+            let weight = (log_abs - self.running_max).exp();
+            self.signed_sum += sign * weight;
+            self.abs_sum += weight;
+        }
+    }
+
+    #[inline]
+    fn finish(self) -> LogSurvivalSignedValue {
+        if self.running_max == f64::NEG_INFINITY || self.signed_sum == 0.0 {
+            return LogSurvivalSignedValue::ZERO;
+        }
+        LogSurvivalSignedValue {
+            log_abs: self.running_max + self.signed_sum.abs().ln(),
+            sign: self.signed_sum.signum(),
+            log_cancellation: (self.abs_sum / self.signed_sum.abs()).ln().max(0.0),
+        }
+    }
+}
+
+/// Evaluate `∫ He_j(z) φ(z) · tilt(z) dz` for `j = 0..=order` on one panel.
+///
+/// Every order reads the SAME nodes and the SAME tilt values; only the Hermite
+/// factor differs. That is what makes the value and its derivative tower one
+/// approximation surface rather than two that happen to agree in the middle.
+fn log_survival_panel_moments(
+    ctx: &QuadratureContext,
+    branch: LogSurvivalBranch,
+    mu: f64,
+    sigma: f64,
+    order: usize,
+) -> ([LogSurvivalSignedValue; LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER + 1], usize) {
+    let panel = log_survival_panel(branch, mu, sigma, order);
+    let rule = ctx.clenshaw_curtis_n(panel.nodes);
+    let half = 0.5 * (panel.z_hi - panel.z_lo);
+    let mid = 0.5 * (panel.z_hi + panel.z_lo);
+    let log_gaussian_norm = -0.5 * (2.0 * std::f64::consts::PI).ln();
+    let mut accumulators: Vec<SignedLogAccumulator> =
+        (0..=order).map(|_| SignedLogAccumulator::new()).collect();
     for (&node, &weight) in rule.nodes.iter().zip(rule.weights.iter()) {
-        let eta = half * node + mid;
-        let summand = (weight * half).ln()
-            + (eta - safe_exp(eta))
-            + log_normal_cdf_stable((eta - mu) / sigma);
-        if !summand.is_finite() {
+        let z = half * node + mid;
+        let base = (weight * half).ln() + log_gaussian_norm - 0.5 * z * z
+            + branch.log_tilt(mu, sigma, z);
+        if !base.is_finite() {
             continue;
         }
-        if summand > running_max {
-            running_sum = running_sum * (running_max - summand).exp() + 1.0;
-            running_max = summand;
-        } else {
-            running_sum += (summand - running_max).exp();
+        for (j, accumulator) in accumulators.iter_mut().enumerate() {
+            let hermite = hermite_he(j, z);
+            if hermite == 0.0 {
+                continue;
+            }
+            accumulator.push(base + hermite.abs().ln(), hermite.signum());
         }
     }
-    if running_max == f64::NEG_INFINITY {
-        f64::NEG_INFINITY
+    let mut out = [LogSurvivalSignedValue::ZERO; LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER + 1];
+    for (slot, accumulator) in out.iter_mut().zip(accumulators.into_iter()) {
+        *slot = accumulator.finish();
+    }
+    (out, panel.nodes)
+}
+
+/// The canonical log-space survival object: `ln S(μ,σ)` and its scaled
+/// μ-derivative tower, on one panel, for every `(μ, σ)`.
+///
+/// The tower identity is Gaussian integration by parts in the standardized
+/// variable: with `f(z) = exp(−e^{μ+σz})`, `∂_μ f = σ^{-1} ∂_z f`, so
+///
+/// ```text
+///   σ^j ∂_μ^j S = ∫ He_j(z) φ(z) f(z) dz,
+/// ```
+///
+/// because `(−∂_z)^j φ = He_j φ`. Order 0 is `S` itself, which is why the
+/// value and the tower cannot come off different surfaces here even in
+/// principle — they are the same sum with different Hermite weights.
+///
+/// Sign convention: entries are `σ^j ∂_μ^j S`, so odd orders are negative for
+/// the survival branch (`S` decreases in `μ`).
+pub fn log_survival_jet(
+    ctx: &QuadratureContext,
+    mu: f64,
+    sigma: f64,
+    order: usize,
+) -> LogSurvivalJet {
+    let order = order.min(LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER);
+    if !(mu.is_finite() && sigma.is_finite()) || sigma <= CLOGLOG_SIGMA_DEGENERATE {
+        // σ = 0: S = exp(−e^μ) and σ^j ∂_μ^j S = 0 for j ≥ 1 (the SCALED
+        // derivative carries a σ^j that annihilates the finite ∂_μ^j S).
+        let mut scaled = [LogSurvivalSignedValue::ZERO;
+            LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER + 1];
+        let log_survival = -safe_exp(mu);
+        scaled[0] = LogSurvivalSignedValue {
+            log_abs: log_survival,
+            sign: 1.0,
+            log_cancellation: 0.0,
+        };
+        return LogSurvivalJet {
+            log_survival,
+            scaled_mu_derivatives: scaled,
+            order,
+            mode: IntegratedExpectationMode::ExactClosedForm,
+        };
+    }
+
+    let (survival, _) =
+        log_survival_panel_moments(ctx, LogSurvivalBranch::Survival, mu, sigma, order);
+    // `ln S` from the survival branch is accurate ABSOLUTELY; as S → 1 that is
+    // not the same as accurate relatively, because ln S → 0 is then the log of
+    // a number whose distance from 1 carries the information. Past S ≈ 0.6 the
+    // complement branch — an independent, equally cancellation-free panel —
+    // supplies 1 − S directly and `ln1p` keeps every digit. Both branches are
+    // at the f64 floor where they meet, so the handover is smooth to ~1e-16.
+    let use_complement = survival[0].sign > 0.0 && survival[0].log_abs > -0.5;
+    if !use_complement {
+        let log_survival = if survival[0].sign > 0.0 {
+            survival[0].log_abs
+        } else {
+            f64::NEG_INFINITY
+        };
+        return LogSurvivalJet {
+            log_survival,
+            scaled_mu_derivatives: survival,
+            order,
+            mode: IntegratedExpectationMode::ControlledAsymptotic,
+        };
+    }
+
+    let (complement, _) =
+        log_survival_panel_moments(ctx, LogSurvivalBranch::Complement, mu, sigma, order);
+    let mut scaled = survival;
+    // `log_abs < 0` is guaranteed by the handover test above (it fires only for
+    // S > 0.6, hence 1 − S < 0.4) and is checked rather than assumed, because
+    // `ln1p` of anything ≤ −1 is not a number.
+    let log_survival = if complement[0].sign > 0.0 && complement[0].log_abs < 0.0 {
+        (-safe_exp(complement[0].log_abs)).ln_1p()
     } else {
-        running_max + running_sum.ln()
+        survival[0].log_abs
+    };
+    scaled[0] = LogSurvivalSignedValue {
+        log_abs: log_survival,
+        sign: 1.0,
+        log_cancellation: complement[0].log_cancellation,
+    };
+    // For j ≥ 1, ∂_μ^j S = −∂_μ^j (1−S) exactly, and the complement integrand
+    // is the one that stays away from a constant in this regime, so it is the
+    // better-conditioned of the two. Take whichever reports less cancellation;
+    // both are the same quantity to their own accuracy.
+    for j in 1..=order {
+        let flipped = LogSurvivalSignedValue {
+            log_abs: complement[j].log_abs,
+            sign: -complement[j].sign,
+            log_cancellation: complement[j].log_cancellation,
+        };
+        if flipped.sign != 0.0 && flipped.log_cancellation < scaled[j].log_cancellation {
+            scaled[j] = flipped;
+        }
+    }
+    LogSurvivalJet {
+        log_survival,
+        scaled_mu_derivatives: scaled,
+        order,
+        mode: IntegratedExpectationMode::ControlledAsymptotic,
     }
 }
 
-/// Probabilists' Hermite polynomial `He_n(x)` from the three-term recurrence
-/// `He_{n+1}(x) = x·He_n(x) − n·He_{n−1}(x)`.
-///
-/// This is the polynomial factor in the Gaussian derivatives
-/// `φ^{(n)}(x) = (−1)^n He_n(x) φ(x)`, which is what carries a μ-derivative of
-/// the Gumbel-mixing survival integral back into an integral against the SAME
-/// mixing density (#2610).
 #[inline]
 fn hermite_he(n: usize, x: f64) -> f64 {
     let mut previous = 1.0_f64;
@@ -1291,57 +1745,17 @@ fn hermite_he(n: usize, x: f64) -> f64 {
     current
 }
 
-/// Whether `ln S(μ,σ)` is routed through the Gumbel-mixing quadrature.
+/// `σ^j ∂^j S/∂μ^j` in signed-log coordinates, off the same panel that
+/// [`log_survival_jet`] uses for `ln S`.
 ///
-/// Mirrors `cloglog_log_survival_term_controlled`'s routing predicate so a
-/// consumer of [`cloglog_log_survival_mu_derivative_gumbel_quadrature`] can ask
-/// whether the derivative it is about to request comes off the SAME
-/// approximation surface as the value. Reading the derivatives from one branch
-/// while the value came from another is the mixing this predicate exists to
-/// prevent.
-#[inline]
-pub fn cloglog_log_survival_uses_gumbel_quadrature(mu: f64, sigma: f64) -> bool {
-    mu.is_finite()
-        && sigma.is_finite()
-        && sigma > CLOGLOG_SIGMA_DEGENERATE
-        && mu + 0.5 * sigma * sigma > CLOGLOG_RARE_EVENT_LOG_MAX
-        && sigma >= CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN
-}
-
-/// `σ^j · ∂^j S/∂μ^j` in signed-log coordinates, off the same Gumbel-mixing
-/// quadrature that `cloglog_log_survival_gumbel_quadrature` uses for `ln S`.
-///
-/// The whole point is WHICH factor carries the parameters. In
-///
-/// ```text
-///   S(μ,σ) = ∫ g(η) Φ((η−μ)/σ) dη,   g(η) = exp(η − e^η),
-/// ```
-///
-/// the mixing density `g` is parameter-free, so every μ-derivative lands
-/// entirely on the Gaussian factor:
-///
-/// ```text
-///   σ^j ∂_μ^j S = (−1)^j ∫ g(η) φ^{(j−1)}((η−μ)/σ) dη
-///               = −∫ g(η) He_{j−1}((η−μ)/σ) φ((η−μ)/σ) dη,
-/// ```
-///
-/// using `φ^{(n)} = (−1)^n He_n φ`. Both signs collapse to the single leading
-/// minus. The integral is over the SAME universal η-interval and the SAME rule
-/// as the value, so no new convergence question is opened.
-///
-/// Why this matters (#2610): the rung recurrence reaches the same derivative as
-/// an alternating sum over `m^k K_k`, e.g. `∂_a^4 K_0 = −mK_1 + 7m²K_2 − 6m³K_3
-/// + m⁴K_4`. Each summand is `O(1/σ)` while the sum is `O(1/σ^5)`, so at
-/// `log σ ≈ 5.4` the result is pure roundoff and the log-σ curvature changes
-/// SIGN between adjacent samples. Here the same quantity is ONE quadrature whose
-/// integrand is already the small thing: `He_{j−1}((η−μ)/σ)φ((η−μ)/σ)` is
-/// `O(1/σ)` pointwise for even `j`, so nothing large is ever subtracted.
+/// Kept as a scalar entry point for callers that want one order; it evaluates
+/// the whole tower up to `order` because the panel is shared and the extra
+/// Hermite weights are the cheap part of the sum.
 ///
 /// Returns `(ln|·|, sign)` with `(−∞, 0)` for an exact zero, so the magnitude
 /// survives value-space underflow exactly as the `ln S` path does (#798).
-/// `order` must be at least 1; order 0 is `ln S` itself, which
-/// `cloglog_log_survival_gumbel_quadrature` already returns.
-pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
+/// `order` must be at least 1; order 0 is `ln S` itself.
+pub fn log_survival_scaled_mu_derivative(
     ctx: &QuadratureContext,
     mu: f64,
     sigma: f64,
@@ -1349,46 +1763,12 @@ pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
 ) -> (f64, f64) {
     assert!(
         order >= 1,
-        "the Gumbel-mixing mu-derivative quadrature starts at order 1; \
-         order 0 is ln S, which cloglog_log_survival_gumbel_quadrature returns"
+        "the log-space survival mu-derivative tower starts at order 1; \
+         order 0 is ln S, which log_survival_jet returns"
     );
-    let low = CLOGLOG_GUMBEL_QUAD_ETA_LO;
-    let high = CLOGLOG_GUMBEL_QUAD_ETA_HI;
-    let half = 0.5 * (high - low);
-    let mid = 0.5 * (low + high);
-    let rule = ctx.clenshaw_curtis_n(cloglog_gumbel_quad_nodes(sigma));
-    let log_gaussian_norm = -0.5 * (2.0 * std::f64::consts::PI).ln();
-    // Signed streaming log-sum-exp: the running sum carries a sign because the
-    // Hermite factor changes sign inside the interval. Clenshaw-Curtis weights
-    // are positive, so ln(W_i) is finite.
-    let mut running_max = f64::NEG_INFINITY;
-    let mut running_sum = 0.0_f64;
-    for (&node, &weight) in rule.nodes.iter().zip(rule.weights.iter()) {
-        let eta = half * node + mid;
-        let standardized = (eta - mu) / sigma;
-        let hermite = hermite_he(order - 1, standardized);
-        if hermite == 0.0 {
-            continue;
-        }
-        let summand = (weight * half).ln() + (eta - safe_exp(eta)) + log_gaussian_norm
-            - 0.5 * standardized * standardized
-            + hermite.abs().ln();
-        if !summand.is_finite() {
-            continue;
-        }
-        let sign = -hermite.signum();
-        if summand > running_max {
-            running_sum = running_sum * (running_max - summand).exp() + sign;
-            running_max = summand;
-        } else {
-            running_sum += sign * (summand - running_max).exp();
-        }
-    }
-    if running_max == f64::NEG_INFINITY || running_sum == 0.0 {
-        (f64::NEG_INFINITY, 0.0)
-    } else {
-        (running_max + running_sum.abs().ln(), running_sum.signum())
-    }
+    let jet = log_survival_jet(ctx, mu, sigma, order);
+    let entry = jet.scaled_mu_derivatives[order.min(jet.order)];
+    (entry.log_abs, entry.sign)
 }
 
 /// Canonical log-space survival evaluator: returns `ln S(μ,σ)` with its routing
@@ -1399,41 +1779,22 @@ pub fn cloglog_log_survival_mu_derivative_gumbel_quadrature(
 /// kernel bundle — must form the product in log space through this function, so
 /// the genuine (but f64-unrepresentable) magnitude of `S` is preserved instead
 /// of underflowing to a hard zero that zeroes the derivative (#798).
+///
+/// It is ONE surface (#2714). There is deliberately no `.ln()` of a value-space
+/// result here and no threshold between competing approximations: `ln S` is
+/// accumulated in log space on the panel of [`log_survival_jet`] at every
+/// `(μ, σ)` with `σ > 0`, and the only other branch is the exact `σ = 0` closed
+/// form. What used to live here — a rare-event asymptotic, a value-route
+/// logarithm, and a fixed-window quadrature as an underflow escape — disagreed
+/// with each other by up to `4.4e+06` in `ln S`, and their disagreement was a
+/// step function of `(μ, σ)`, which no analytic derivative can follow.
 pub(crate) fn cloglog_log_survival_term_controlled(
     ctx: &QuadratureContext,
     mu: f64,
     sigma: f64,
 ) -> (f64, IntegratedExpectationMode) {
-    if !(mu.is_finite() && sigma.is_finite()) || sigma <= CLOGLOG_SIGMA_DEGENERATE {
-        // S = exp(−e^μ); ln S = −e^μ (→ −∞ only when e^μ overflows, i.e. S = 0).
-        return (-safe_exp(mu), IntegratedExpectationMode::ExactClosedForm);
-    }
-    let rare_log = mu + 0.5 * sigma * sigma;
-    if rare_log <= CLOGLOG_RARE_EVENT_LOG_MAX {
-        // S = 1 − E[1−exp(−e^η)] ≈ 1 − e^{rare_log}; ln S = ln1p(−e^{rare_log})
-        // retains full precision when S is extremely close to 1.
-        return (
-            (-safe_exp(rare_log)).ln_1p(),
-            IntegratedExpectationMode::ControlledAsymptotic,
-        );
-    }
-    if sigma >= CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN {
-        return (
-            cloglog_log_survival_gumbel_quadrature(ctx, mu, sigma),
-            IntegratedExpectationMode::ControlledAsymptotic,
-        );
-    }
-    let (value, mode) = cloglog_survival_term_controlled(ctx, mu, sigma);
-    if value > 0.0 {
-        (value.ln(), mode)
-    } else {
-        // Value-space underflow (deep positive tail at moderate σ): recover the
-        // log-magnitude from the Gumbel quadrature rather than collapsing to −∞.
-        (
-            cloglog_log_survival_gumbel_quadrature(ctx, mu, sigma),
-            IntegratedExpectationMode::QuadratureFallback,
-        )
-    }
+    let jet = log_survival_jet(ctx, mu, sigma, 0);
+    (jet.log_survival, jet.mode)
 }
 
 // ── Exact Gumbel survival primitives ─────────────────────────────────────
@@ -1778,13 +2139,13 @@ fn cloglog_survival_term_controlled(
         return out;
     }
     if sigma >= CLOGLOG_LARGE_SIGMA_ASYMPTOTIC_MIN {
-        // Accurate large-σ survival from the log-space Gumbel-mixing quadrature,
+        // Accurate large-σ survival from the log-space survival panel,
         // replacing the leading-order "sharp transition" split that was biased
         // low by 2–7% across σ ∈ [8, 20] (#799). Exponentiating ln S here loses
         // nothing on the value path (S is consumed as a probability); the
         // log-magnitude that the kernel derivative path needs is taken straight
-        // from cloglog_log_survival_term_controlled.
-        let log_s = cloglog_log_survival_gumbel_quadrature(ctx, mu, sigma);
+        // from cloglog_log_survival_term_controlled, which reads the same panel.
+        let log_s = log_survival_jet(ctx, mu, sigma, 0).log_survival;
         return (
             safe_exp(log_s).clamp(0.0, 1.0),
             IntegratedExpectationMode::ControlledAsymptotic,
@@ -7073,77 +7434,277 @@ mod tests {
 }
 
 #[cfg(test)]
-mod cloglog_gumbel_quad_node_ladder_2469_tests {
+mod log_survival_panel_2714_tests {
     use super::{
-        CLOGLOG_GUMBEL_QUAD_MAX_NODES, CLOGLOG_GUMBEL_QUAD_MIN_NODES,
-        CLOGLOG_GUMBEL_QUAD_NODE_SCALE, cloglog_gumbel_quad_nodes,
+        LOG_SURVIVAL_PANEL_MAX_NODES, LOG_SURVIVAL_PANEL_MIN_NODES, LogSurvivalBranch,
+        QuadratureContext, log_survival_jet, log_survival_panel,
     };
 
-    /// #2469: the σ-adaptive node ladder is INERT — floor and ceiling coincide
-    /// at 513, so the count is constant and `CLOGLOG_GUMBEL_QUAD_NODE_SCALE`
-    /// reaches no output.
+    /// `(mu, sigma, ln S)` — 60-digit mpmath reference for
+    /// `S(mu,sigma) = E[exp(-e^eta)]`, `eta ~ N(mu, sigma^2)`.
     ///
-    /// This pins the SHIPPED behaviour, not the intended one. The arithmetic
-    /// reads as a live `SCALE/σ` ladder and the constants read as live policy;
-    /// they are not. Without this test, separating the floor from the ceiling
-    /// would silently change the node count — and therefore every cloglog
-    /// survival value and μ-gradient — at every σ outside the pinned point,
-    /// with nothing to report it: neither constant is referenced anywhere
-    /// outside its own definition and this one function, and no other test pins
-    /// the count.
-    ///
-    /// It is deliberately a two-sided statement. `assert_eq!(nodes, 513)` alone
-    /// would keep passing if someone raised the ceiling AND the floor together;
-    /// asserting that the two constants are equal names the actual cause, so a
-    /// future change fails on the mechanism rather than on a number.
-    ///
-    /// Disposition under #2469: **record as unsupported**, not delete. The
-    /// one-build probe settles it — deleting the consumer branch makes the
-    /// compiler report the constants themselves as unused, which means they are
-    /// load-bearing for a branch rather than isolated magic numbers, and
-    /// removing them is a change to behaviour + constants + tests together.
-    /// That choice is the accuracy-vs-σ measurement owned by #2566.
-    #[test]
-    fn cloglog_gumbel_quad_node_ladder_is_inert_at_a_constant_513_2469() {
-        // The cause, named directly: a clamp whose floor equals its ceiling.
-        assert_eq!(
-            CLOGLOG_GUMBEL_QUAD_MIN_NODES, CLOGLOG_GUMBEL_QUAD_MAX_NODES,
-            "#2469: the cloglog Gumbel node ladder is inert only because its \
-             floor and ceiling coincide. They now differ, so the `SCALE/σ` \
-             ladder is live again and the node count varies with σ — which \
-             changes every cloglog survival value and μ-gradient. That is the \
-             accuracy-vs-σ decision owned by #2566 and it needs its measurement, \
-             not just this test updated."
-        );
+    /// Computed with the Laplace peak factored out (integrate
+    /// `exp(L(z) - L(z*))`, add `L(z*)` back), which is what makes the
+    /// reference accurate ABSOLUTELY in `ln S` even where `ln S = -1.3e5`.
+    /// The naive un-shifted high-precision integral is itself wrong by `8.7e-3`
+    /// at `(8, 0.005)` and must not be used as an oracle here.
+    const LOG_SURVIVAL_REFERENCE: &[(f64, f64, f64)] = &[
+        (-30.0, 0.05, -9.369_327_311_241_221e-14),
+        (-20.0, 0.002, -2.061_157_744_749_916_5e-9),
+        (-20.0, 2.0, -1.522_997_352_870_166_6e-8),
+        (-8.0, 0.15, -3.392_565_812_965_201_6e-4),
+        (-8.0, 8.0, -1.981_213_453_495_813_4e-1),
+        (-3.0, 0.02, -4.979_653_073_925_083_3e-2),
+        (-3.0, 1.0, -7.722_156_176_750_611e-2),
+        (-1.0, 0.005, -3.678_823_479_542_769_3e-1),
+        (0.0, 0.05, -9.999_992_216_748_937e-1),
+        (0.0, 20.0, -7.163_521_358_485_562e-1),
+        (1.0, 0.15, -2.668_055_285_814_174_4e0),
+        (1.8, 0.15, -5.742_720_404_435_083e0),
+        (1.8, 0.5, -4.257_254_029_226_836e0),
+        (3.2, 0.005, -2.452_531_812_111_085_3e1),
+        (3.2, 0.15, -2.014_631_867_969_775_7e1),
+        (3.2, 4.0, -1.691_825_149_278_477e0),
+        (5.0, 0.02, -1.442_777_351_752_632_2e2),
+        (5.0, 1.0, -1.128_111_355_370_178_3e1),
+        (8.0, 0.002, -2.963_400_229_027_156e3),
+        (8.0, 0.05, -1.113_594_437_164_973_2e3),
+        (8.0, 0.5, -7.097_988_851_759_84e1),
+        (8.0, 60.0, -8.137_859_923_376_214e-1),
+        (12.0, 0.002, -1.289_824_339_085_843_7e5),
+        (12.0, 0.15, -1.181_338_131_091_633_2e3),
+        (12.0, 1.0, -5.819_669_561_598_102e1),
+        (20.0, 0.05, -3.135_653_820_340_577_3e4),
+        (-50.0, 8.0, -7.328_008_793_232_462e-10),
+        (-18.0, 0.001, -1.522_998_735_970_428_8e-8),
+    ];
 
-        // ... and the consequence, over a σ range spanning ten decades and
-        // straddling the σ = 8 asymptotic switch. `target = SCALE/min(σ, 8)`
-        // ranges from 40 (σ ≥ 8) to 3.2e7 (σ = 1e-5), i.e. the ladder is asked
-        // for counts both far below and far above the pinned value and returns
-        // the pinned value regardless.
-        let expected = CLOGLOG_GUMBEL_QUAD_MIN_NODES;
-        for &sigma in &[
-            1.0e-5, 1.0e-3, 0.1, 0.624, 0.8, 1.0, 2.0, 3.3, 8.0, 64.0, 1.0e3, 1.0e5,
-        ] {
-            let nodes = cloglog_gumbel_quad_nodes(sigma);
-            assert_eq!(
-                nodes, expected,
-                "#2469: the node count must be the constant {expected} at every σ \
-                 while floor == ceiling (σ = {sigma:e} gave {nodes})"
+    /// #2714, the accuracy half: `ln S` on one panel is at the f64 relative
+    /// floor everywhere, including the corners where the ladder it replaced was
+    /// wrong by `4.4e+06`.
+    ///
+    /// The bar is RELATIVE (`1e-13` of `|ln S|`, floored at `1e-13` absolute so
+    /// the near-1 rows are not graded on a vanishing denominator). That is the
+    /// right axis: `ln S` is consumed as an additive contribution to a log
+    /// likelihood and as the argument of exponentiated differences, so what
+    /// must be small is its error against its own magnitude.
+    ///
+    /// Rows carried deliberately, with what each one would catch:
+    /// * `(12, 0.002)` / `(8, 0.002)` — the fixed-window Gumbel escape hatch,
+    ///   whose `Phi((eta-mu)/sigma)` transition was unresolved by 513 nodes.
+    /// * `(12, 1.0)` / `(8, 0.5)` — the Miles/CC value route, `.ln()`-ed.
+    /// * `(3.2, 0.15)` — the exact point #2714's diagnosis names.
+    /// * `(-50, 8)` — the rare-event asymptotic `ln1p(-e^{mu+sigma^2/2})` at
+    ///   its own gate `rare_log = -18`, where it is 20.8x wrong because the
+    ///   higher cumulants are not small when sigma is large.
+    /// * `(-30, 0.05)` / `(-18, 0.001)` — `S -> 1`, which is the complement
+    ///   branch, i.e. relative accuracy where `ln S -> 0`.
+    #[test]
+    fn log_survival_matches_a_high_precision_reference_2714() {
+        let ctx = QuadratureContext::new();
+        let mut worst = 0.0_f64;
+        let mut worst_at = (f64::NAN, f64::NAN);
+        for &(mu, sigma, expected) in LOG_SURVIVAL_REFERENCE {
+            let got = log_survival_jet(&ctx, mu, sigma, 0).log_survival;
+            let error = (got - expected).abs() / expected.abs().max(1.0);
+            if error > worst {
+                worst = error;
+                worst_at = (mu, sigma);
+            }
+            assert!(
+                error <= 1.0e-13,
+                "#2714: ln S({mu}, {sigma}) = {got:.17e} against reference \
+                 {expected:.17e} (relative {error:.3e}); one log-space panel has \
+                 to hold the f64 floor at every (mu, sigma), because a routed \
+                 surface whose error is a step function of (mu, sigma) is the \
+                 defect this replaced"
             );
         }
-
-        // NON-VACUITY: the ladder must genuinely be ASKING for something other
-        // than the pinned value, or the constancy above is trivial rather than a
-        // suppressed ladder. At σ = 1e-5 the request is ~3.2e7 nodes; at σ ≥ 8
-        // it is 40. Both are clamped away.
-        let small_sigma_request = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / 1.0e-5).ceil() as usize;
-        let large_sigma_request = (CLOGLOG_GUMBEL_QUAD_NODE_SCALE / 8.0).ceil() as usize;
+        // NON-VACUITY: the reference must actually be exercised, i.e. the grid
+        // has to contain rows the evaluator does not reproduce for free.
         assert!(
-            small_sigma_request > expected && large_sigma_request < expected,
-            "#2469: the ladder must straddle the pinned count for this to pin a \
-             SUPPRESSED ladder rather than a coincidence (σ=1e-5 asks {small_sigma_request}, \
-             σ≥8 asks {large_sigma_request}, pinned {expected})"
+            worst > 0.0,
+            "#2714: every reference row reproduced bit-exactly, which means the \
+             table is not testing the quadrature"
         );
+        let (mu, sigma) = worst_at;
+        println!("[2714] worst relative ln S error {worst:.3e} at (mu={mu}, sigma={sigma})");
+    }
+
+    /// #2714, the consistency half: the analytic `sigma^j d^j S/d mu^j` tower is
+    /// the derivative of the `ln S` this module returns.
+    ///
+    /// This is the assertion whose absence let the defect live. Every earlier
+    /// gate scored an analytic derivative against ITS OWN value function; the
+    /// stall came from the derivative being right about the true `S` while the
+    /// value came off a different approximation. A central difference of the
+    /// shipped `ln S` against the shipped tower cannot be satisfied by two
+    /// implementations that agree with each other and not with the truth.
+    #[test]
+    fn log_survival_tower_is_the_derivative_of_the_value_2714() {
+        let ctx = QuadratureContext::new();
+        let mut worst = 0.0_f64;
+        for &(mu, sigma) in &[
+            (-8.0, 0.15),
+            (-3.0, 0.5),
+            (0.0, 1.0),
+            (1.8, 0.15),
+            (3.2, 0.15),
+            (3.2, 2.0),
+            (5.0, 1.0),
+            (8.0, 4.0),
+            (0.0, 8.0),
+            (-3.0, 20.0),
+        ] {
+            let jet = log_survival_jet(&ctx, mu, sigma, 1);
+            let first = jet.scaled_mu_derivatives[1];
+            // d/dmu ln S = (d S/d mu)/S = sign * exp(log|sigma dS/dmu| - ln S)/sigma
+            let analytic = first.sign * (first.log_abs - jet.log_survival).exp() / sigma;
+            let step = (f64::EPSILON.cbrt()) * (1.0 + mu.abs());
+            let up = log_survival_jet(&ctx, mu + step, sigma, 0).log_survival;
+            let down = log_survival_jet(&ctx, mu - step, sigma, 0).log_survival;
+            let numeric = (up - down) / (2.0 * step);
+            let error = (analytic - numeric).abs() / analytic.abs().max(1.0e-3);
+            worst = worst.max(error);
+            assert!(
+                error <= 1.0e-7,
+                "#2714: d/dmu ln S at (mu={mu}, sigma={sigma}) is {analytic:.12e} \
+                 analytically and {numeric:.12e} by central difference of the \
+                 shipped value (relative {error:.3e}). A tower that is not the \
+                 derivative of the value it ships with is what collapses the \
+                 joint-Newton trust region."
+            );
+        }
+        println!("[2714] worst |analytic - FD| / |analytic| = {worst:.3e}");
+    }
+
+    /// #2714, the smoothness half: `ln S` has no step in it.
+    ///
+    /// The stall was not caused by `ln S` being inaccurate in the abstract — it
+    /// was caused by the error being a DISCONTINUOUS function of `(mu, sigma)`,
+    /// so that a step the model predicted from a gradient was scored by an
+    /// objective that had jumped onto a different approximation in between.
+    /// The instrument is Richardson agreement of the second difference at `h`
+    /// and `2h`. For a smooth `f` both estimate `f''` and differ by
+    /// `-h^2 f''''/4`, which for this family is a fixed `h^2/4 = 2.5e-7` of
+    /// `f''` regardless of `mu` (`ln S ~ -e^mu`, so every derivative has the
+    /// same magnitude). A routing step of size `d` instead moves the `h`
+    /// estimate by `d/h^2` and the `2h` estimate by `d/4h^2`, so it cannot
+    /// cancel: the pair disagrees by `0.75 d/h^2 = 7.5e5 d`. That is why the
+    /// test compares two stencils rather than bounding one — the bound would
+    /// have to know `f''`, and the disagreement does not.
+    #[test]
+    fn log_survival_has_no_routing_step_in_it_2714() {
+        let ctx = QuadratureContext::new();
+        let step = 1.0e-3_f64;
+        for &sigma in &[0.05_f64, 0.15, 0.5, 1.0, 4.0, 8.0, 20.0] {
+            let mut worst = 0.0_f64;
+            let mut worst_mu = f64::NAN;
+            let value = |mu: f64| log_survival_jet(&ctx, mu, sigma, 0).log_survival;
+            let mut index = -100_i32;
+            while index <= 100 {
+                let mu = f64::from(index) * 0.1;
+                let mid = value(mu);
+                let fine =
+                    (value(mu - step) - 2.0 * mid + value(mu + step)) / (step * step);
+                let coarse = (value(mu - 2.0 * step) - 2.0 * mid + value(mu + 2.0 * step))
+                    / (4.0 * step * step);
+                let disagreement = (fine - coarse).abs() / (1.0 + fine.abs());
+                if disagreement > worst {
+                    worst = disagreement;
+                    worst_mu = mu;
+                }
+                index += 1;
+            }
+            assert!(
+                worst <= 2.0e-6,
+                "#2714: the h and 2h second differences of ln S(., sigma={sigma}) \
+                 disagree by {worst:.3e} (relative) near mu={worst_mu}, i.e. a jump \
+                 of about {:.3e} in the value. The surface must be smooth across \
+                 every internal routing decision, because that is precisely what \
+                 the joint-Newton accept test differentiates.",
+                worst * step * step / 0.75
+            );
+            println!("[2714] sigma={sigma}: worst Richardson disagreement {worst:.3e}");
+        }
+    }
+
+    /// #2714 / #2469: the node ladder is LIVE, and bounded.
+    ///
+    /// This is the successor to `..._node_ladder_is_inert_at_a_constant_513`,
+    /// which pinned the opposite property: floor and ceiling coincided at 513,
+    /// so `cloglog_gumbel_quad_nodes` returned a constant and the `SCALE/sigma`
+    /// arithmetic around it reached no output. That inertness is exactly why the
+    /// escape-hatch quadrature was wrong by `4.4e+06` at small sigma — it could
+    /// not buy the resolution its own transition needed.
+    ///
+    /// The panel rule has no such suppressed dial: the count follows the
+    /// integrand's local-scale arclength plus a `sqrt(sigma)` analyticity term,
+    /// and both halves are load-bearing. The assertion is two-sided so a future
+    /// change that re-pins the count fails on the mechanism.
+    #[test]
+    fn log_survival_panel_node_count_is_live_and_bounded_2714() {
+        let mut counts = Vec::new();
+        for &sigma in &[1.0e-4_f64, 1.0e-2, 0.15, 1.0, 8.0, 60.0, 1.0e3] {
+            let panel = log_survival_panel(LogSurvivalBranch::Survival, 1.8, sigma, 0);
+            assert!(
+                panel.nodes >= LOG_SURVIVAL_PANEL_MIN_NODES
+                    && panel.nodes <= LOG_SURVIVAL_PANEL_MAX_NODES,
+                "#2714: node count {} at sigma={sigma} is outside \
+                 [{LOG_SURVIVAL_PANEL_MIN_NODES}, {LOG_SURVIVAL_PANEL_MAX_NODES}]",
+                panel.nodes
+            );
+            assert!(
+                !panel.nodes.is_multiple_of(2),
+                "#2714: the Clenshaw-Curtis panel needs an odd node count so the \
+                 grid is symmetric and gap-free (sigma={sigma} gave {})",
+                panel.nodes
+            );
+            assert!(
+                panel.z_lo < panel.z_hi,
+                "#2714: degenerate panel at sigma={sigma}"
+            );
+            counts.push(panel.nodes);
+        }
+        let (low, high) = (
+            *counts.iter().min().expect("non-empty"),
+            *counts.iter().max().expect("non-empty"),
+        );
+        assert!(
+            high >= 4 * low,
+            "#2714: the node ladder must actually MOVE with sigma — it spans \
+             {low}..{high} over sigma in [1e-4, 1e3], and a ladder that does not \
+             move is the #2469 inertness that made the escape-hatch quadrature \
+             unable to resolve its own transition"
+        );
+    }
+
+    /// The panel is placed by the integrand, so it must bracket the peak and
+    /// carry the requested number of e-folds on both sides. If it did not, the
+    /// accuracy gate above could still pass by luck at the sampled points.
+    #[test]
+    fn log_survival_panel_brackets_its_own_peak_2714() {
+        for &(mu, sigma) in &[
+            (-20.0, 0.002),
+            (-3.0, 0.15),
+            (0.0, 1.0),
+            (3.2, 0.15),
+            (12.0, 0.002),
+            (0.0, 60.0),
+        ] {
+            for branch in [LogSurvivalBranch::Survival, LogSurvivalBranch::Complement] {
+                let panel = log_survival_panel(branch, mu, sigma, 0);
+                let mid = 0.5 * (panel.z_lo + panel.z_hi);
+                let at_mid = branch.log_integrand(mu, sigma, mid);
+                let at_lo = branch.log_integrand(mu, sigma, panel.z_lo);
+                let at_hi = branch.log_integrand(mu, sigma, panel.z_hi);
+                assert!(
+                    at_lo < at_mid && at_hi < at_mid,
+                    "#2714: {branch:?} panel at (mu={mu}, sigma={sigma}) does not \
+                     bracket its own maximum: L(lo)={at_lo:.6e}, L(mid)={at_mid:.6e}, \
+                     L(hi)={at_hi:.6e}"
+                );
+            }
+        }
     }
 }
