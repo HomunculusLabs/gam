@@ -2090,7 +2090,7 @@ mod exact_stationarity_solve_1418_tests {
         let options = ArrowSolveOptions::direct()
             .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
             .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
-        let residual_norm = |term: &SaeManifoldTerm| -> f64 {
+        let residual_norm = |term: &mut SaeManifoldTerm| -> f64 {
             let system = term
                 .assemble_arrow_schur(target.view(), &rho, None)
                 .expect("arrow-Schur assembly at the polish entry state");
@@ -2101,7 +2101,7 @@ mod exact_stationarity_solve_1418_tests {
             .expect("penalized objective")
             .abs()
             + 1.0;
-        let before = residual_norm(&term);
+        let before = residual_norm(&mut term);
         let mut best_seen = None;
         // Tolerance `0`: `quasi_laplace_kkt_stationary` cannot fire, so the
         // phase runs its budget instead of handing straight back.
@@ -2118,7 +2118,7 @@ mod exact_stationarity_solve_1418_tests {
                 &mut best_seen,
             )
             .expect("the polish degrades every internal failure to Ok(false)");
-        let after = residual_norm(&term);
+        let after = residual_norm(&mut term);
         assert!(
             after <= before,
             "the polish raised the KKT residual it is judged on: {before:.6e} -> {after:.6e} \
