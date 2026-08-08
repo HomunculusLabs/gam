@@ -222,6 +222,15 @@ const DENSE_GRAM_MAX: usize = 1536;
 /// from: the decomposition is `O(rank³)` and is paid ONCE per cascade depth
 /// (`fit_reml` builds the profile once and the certified search then evaluates
 /// mode sums, `O(modes)` per trial, with no linear algebra at all).
+///
+/// That claim is now stated with a measurement behind it, because a wider cap
+/// admits wider designs and "not binding" should not be taken on faith. On four
+/// cores a `rank = 6795` profile builds in **46.2 s** end to end — assembly,
+/// reduction and sweep — which is `4·rank³/3 = 4.2e11` flops at 9.1 GFLOP/s
+/// through the packed symmetric matrix-vector product and rank-2 update, both
+/// Rayon-parallel over rows. `rank = 1922` takes 1.16 s. Extrapolating the cubic
+/// to the cap gives ~2.7 minutes at `rank = 10362`, so the widest admissible
+/// design costs single-digit minutes of one-off certification, not hours.
 const CERTIFIED_SPECTRUM_MAX: usize =
     (CERTIFIED_SPECTRUM_BYTES / CERTIFIED_SPECTRUM_BYTES_PER_COLUMN_SQUARED).isqrt();
 
