@@ -1999,9 +1999,47 @@ pub(crate) fn interior_curvature_floor_clearance(
     let cleared = certificate_hessian_is_psd_off_railed_above_gradient_floor(
         hessian, excluded, gradient, invariance,
     ) == Some(true);
+    // The eigenvalue the verdict was ACTUALLY taken on: the same
+    // `H + diag(|g|)`, on the same judged subspace, that
+    // `certificate_hessian_is_psd_off_railed_above_gradient_floor` tests
+    // (#2748). The two fields above are the ends of the Weyl sandwich
+    // `λ_min(H) + min|g| ≤ λ_min(H + diag|g|) ≤ λ_min(H) + max|g|`, and a
+    // reader given only the ends cannot tell why a curvature well inside
+    // `max_k|g_k|` refused.
+    let mut floored = hessian.clone();
+    for k in 0..n {
+        floored[[k, k]] += gradient[k].abs();
+    }
+    let floored_block = match invariance
+        .filter(|basis| basis.nrows() == n && basis.ncols() > 0)
+        .and_then(|basis| {
+            crate::penalty_invariance::judged_subspace_basis(n, excluded, Some(basis))
+        }) {
+        Some(judged) => crate::penalty_invariance::compress_to_judged_subspace(&floored, &judged),
+        None => {
+            let mut block = Array2::<f64>::zeros((m, m));
+            for (i, &ri) in interior.iter().enumerate() {
+                for (j, &rj) in interior.iter().enumerate() {
+                    block[[i, j]] = 0.5 * (floored[[ri, rj]] + floored[[rj, ri]]);
+                }
+            }
+            block
+        }
+    };
+    let floored_min_eigenvalue = if floored_block.nrows() == 0 {
+        0.0
+    } else {
+        floored_block
+            .eigh(Side::Lower)
+            .ok()?
+            .0
+            .iter()
+            .fold(f64::INFINITY, |acc, v| acc.min(*v))
+    };
     Some(CurvatureFloorClearance {
         interior_min_eigenvalue,
         gradient_floor,
+        floored_min_eigenvalue,
         cleared,
     })
 }

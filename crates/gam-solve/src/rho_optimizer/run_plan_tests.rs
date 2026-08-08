@@ -5769,6 +5769,10 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         curvature_floor: Some(CurvatureFloorClearance {
             interior_min_eigenvalue: -0.05,
             gradient_floor: 0.1,
+            // `-0.05 + 0.1` if every gradient component were `0.1`; the point
+            // of the fixture is `cleared: true`, so the deciding eigenvalue is
+            // non-negative.
+            floored_min_eigenvalue: 0.05,
             cleared: true,
         }),
     };

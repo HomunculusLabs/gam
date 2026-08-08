@@ -914,6 +914,21 @@ pub struct CurvatureFloorClearance {
     /// negative curvature the floor can absorb:
     /// `λ_min(H) + min|g| ≤ λ_min(H + diag|g|) ≤ λ_min(H) + max|g|`.
     pub gradient_floor: f64,
+    /// Smallest eigenvalue of `H + diag(|g|)` on the judged sub-block — the
+    /// matrix whose sign actually decides `cleared` (#2748).
+    ///
+    /// The two fields above are the ENDS of the Weyl sandwich, not the
+    /// quantity in it. A refusal reporting `interior lambda_min = -8.533e-7`
+    /// beside `gradient_floor = 3.870e-5` reads as a curvature 45x INSIDE its
+    /// own floor and yet refused, because the floor is `max_k |g_k|` while the
+    /// binding end of the sandwich is `min_k |g_k|`: the deciding matrix's
+    /// eigenvalue was never on the record at all. It is now.
+    ///
+    /// `#[serde(default)]` so a certificate serialized before this field
+    /// existed still deserializes; those carry no measurement here, which is
+    /// honest — none was taken.
+    #[serde(default)]
+    pub floored_min_eigenvalue: f64,
     /// Whether `H + diag(|g|)` is positive semidefinite on that sub-block.
     pub cleared: bool,
 }
@@ -1532,8 +1547,11 @@ impl std::fmt::Display for CertificationRefusal {
                 if let Some(clearance) = floor {
                     write!(
                         f,
-                        " [interior lambda_min={:.3e}, gradient_floor={:.3e}]",
-                        clearance.interior_min_eigenvalue, clearance.gradient_floor
+                        " [interior lambda_min={:.3e}, gradient_floor={:.3e}, \
+                         floored lambda_min={:.3e} (this is the one the verdict was taken on)]",
+                        clearance.interior_min_eigenvalue,
+                        clearance.gradient_floor,
+                        clearance.floored_min_eigenvalue
                     )?;
                 }
                 Ok(())
