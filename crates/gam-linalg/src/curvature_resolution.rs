@@ -205,17 +205,55 @@ pub fn finite_difference_error_bound(
     4.0 * evaluation_error / (step * step) + step * step * fourth_derivative / 12.0
 }
 
+/// One **measured** component of `‖δH‖₂`, carrying the name of the identity
+/// that measured it.
+///
+/// Law 2 supplies no value for `‖δH‖₂`; a site obtains it by evaluating a
+/// quantity that is exactly zero in exact arithmetic and reading what came
+/// back. Different identities probe different parts of the error — an
+/// eigensolver residual probes the *decomposition*, an invariance residual
+/// probes the *assembly* — so a component without its provenance is not
+/// interpretable, and this type refuses to carry one.
+///
+/// See [`CurvatureResolution::analytic_weyl_from_components`] for how several
+/// are combined.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasuredHessianError {
+    /// What was measured, in words a refusal message can print — e.g.
+    /// `"eigensolver backward error"`.
+    pub source: &'static str,
+    /// The measured value, a certified lower bound on `‖δH‖₂`.
+    pub value: f64,
+}
+
+impl MeasuredHessianError {
+    /// A named measured component.
+    pub fn new(source: &'static str, value: f64) -> Self {
+        Self { source, value }
+    }
+}
+
+impl std::fmt::Display for MeasuredHessianError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}={:.6e}", self.source, self.value)
+    }
+}
+
 /// The smallest curvature a comparison may treat as nonzero, together with the
 /// law that produced it.
 ///
-/// Construct with [`CurvatureResolution::finite_difference`] or
-/// [`CurvatureResolution::analytic_weyl`]; there is deliberately no
-/// constructor that takes a bare number without naming a law.
+/// Construct with [`CurvatureResolution::finite_difference`],
+/// [`CurvatureResolution::analytic_weyl`] or
+/// [`CurvatureResolution::analytic_weyl_from_components`]; there is
+/// deliberately no constructor that takes a bare number without naming a law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurvatureResolution {
     law: CurvatureLaw,
     resolution: f64,
     optimal_step: Option<f64>,
+    /// Which measured component set the resolution, when it came from a set of
+    /// them. `None` for the single-component and finite-difference paths.
+    dominant_source: Option<&'static str>,
 }
 
 impl CurvatureResolution {
@@ -250,6 +288,7 @@ impl CurvatureResolution {
             law: CurvatureLaw::FiniteDifferenceOfValues,
             resolution,
             optimal_step: Some(optimal_step),
+            dominant_source: None,
         })
     }
 
@@ -269,7 +308,60 @@ impl CurvatureResolution {
             law: CurvatureLaw::AnalyticWeyl,
             resolution: hessian_error_2norm,
             optimal_step: None,
+            dominant_source: None,
         })
+    }
+
+    /// Law 2 from SEVERAL measured components of `‖δH‖₂`: the resolution is
+    /// their **maximum**, and the component that set it is remembered.
+    ///
+    /// # Why the maximum, and not the sum
+    ///
+    /// Each component is obtained by evaluating an identity that is exactly
+    /// zero in exact arithmetic, so each is a **certified lower bound** on the
+    /// true `‖δH‖₂` — never an estimate of the whole of it, and never an
+    /// independent additive contribution that could be summed. The largest
+    /// lower bound is the strongest fact available, and using it is the
+    /// least-conservative honest choice: it widens nothing beyond what one of
+    /// the measurements has already demonstrated the assembly does.
+    ///
+    /// # Why several are needed
+    ///
+    /// The components answer different questions and are routinely orders
+    /// apart. An eigensolver's residual answers *"given this matrix, how wrong
+    /// is `σ`?"*; it says nothing whatsoever about how wrong the matrix is, and
+    /// on an assembled criterion Hessian it under-reports the truth by many
+    /// orders (measured: `7.4e-16` against an assembly inconsistency of
+    /// `9.9e-8` on the same fixture, #2748). A site that has only the first has
+    /// not measured `‖δH‖₂`; it has measured the eigensolver.
+    ///
+    /// Empty input is an error rather than a zero resolution: a caller with no
+    /// measurement has no resolution, which is this module's standing rule.
+    pub fn analytic_weyl_from_components(
+        components: &[MeasuredHessianError],
+    ) -> Result<Self, CurvatureResolutionError> {
+        let mut dominant: Option<MeasuredHessianError> = None;
+        for component in components {
+            if component.value.is_nan() || component.value < 0.0 {
+                return Err(CurvatureResolutionError::HessianError(component.value));
+            }
+            if dominant.is_none_or(|current| component.value > current.value) {
+                dominant = Some(*component);
+            }
+        }
+        let dominant = dominant.ok_or(CurvatureResolutionError::HessianError(f64::NAN))?;
+        Ok(Self {
+            law: CurvatureLaw::AnalyticWeyl,
+            resolution: dominant.value,
+            optimal_step: None,
+            dominant_source: Some(dominant.source),
+        })
+    }
+
+    /// The measured component that set this resolution, when it was built from
+    /// a named set of them.
+    pub fn dominant_source(&self) -> Option<&'static str> {
+        self.dominant_source
     }
 
     /// Which law produced this resolution.
@@ -305,12 +397,15 @@ impl CurvatureResolution {
 
 impl std::fmt::Display for CurvatureResolution {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{:.6e} [{}]",
-            self.resolution,
-            self.law.label()
-        )
+        match self.dominant_source {
+            Some(source) => write!(
+                formatter,
+                "{:.6e} [{}; set by {source}]",
+                self.resolution,
+                self.law.label()
+            ),
+            None => write!(formatter, "{:.6e} [{}]", self.resolution, self.law.label()),
+        }
     }
 }
 

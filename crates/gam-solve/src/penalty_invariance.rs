@@ -276,6 +276,34 @@ impl PenaltyMapInvariance {
         let null_columns: Vec<usize> = (0..k)
             .filter(|&index| eigenvalues[index] <= resolution)
             .collect();
+        // The one number that decides whether the curvature certificate gets to
+        // deflate anything, printed with the bar it was decided against. Without
+        // this line a `cos = 1.000000` redundancy warning and a `structural_zero
+        // = 0` classification sit in the same log with nothing connecting them,
+        // which is exactly the state #2748 was found in.
+        log::debug!(
+            "[PENALTY-INVARIANCE] k={k} gram_eigenvalues={:?} resolution={resolution:.6e} \
+             certified_nullity={} gram_diagonal={:?} min_offdiag_defect={:.6e} \
+             (a column is certified null when its Gram eigenvalue is at or under the \
+             resolution)",
+            eigenvalues.as_slice().unwrap_or(&[]),
+            null_columns.len(),
+            (0..k).map(|i| gram[[i, i]]).collect::<Vec<_>>(),
+            (0..k)
+                .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                .map(|(i, j)| {
+                    // 1 - cos(S_i, S_j): zero exactly when the two operators are
+                    // proportional, so this is the scale the Gram's null eigenvalue
+                    // is set by.
+                    let denominator = (gram[[i, i]] * gram[[j, j]]).sqrt();
+                    if denominator > 0.0 {
+                        1.0 - gram[[i, j]] / denominator
+                    } else {
+                        f64::INFINITY
+                    }
+                })
+                .fold(f64::INFINITY, f64::min),
+        );
         let mut basis = Array2::<f64>::zeros((k, null_columns.len()));
         for (target, &source) in null_columns.iter().enumerate() {
             basis
@@ -531,6 +559,87 @@ pub fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Option<Arra
         removed.column_mut(column).assign(&eigenvectors.column(source));
     }
     Some(removed)
+}
+
+/// The **measured** `‖δH_ρ‖₂` this site is entitled to, read off the one
+/// identity the penalty map guarantees is exactly zero (#2748).
+///
+/// # The identity
+///
+/// Let `T` have orthonormal columns lying inside the criterion's certified
+/// invariance, lifted to `ρ` (the subspace [`PenaltyMapInvariance`] certifies
+/// and [`judged_subspace_basis`] deflates). Along any `t` in it the criterion
+/// is exactly constant in `λ`, so with `w = diag(λ)t` and `ρ(s) = log(λ + sw)`
+///
+/// ```text
+///     0 = d²/ds² V(ρ(s)) = t' H_ρ t + g_ρ · ρ''(0),   ρ''(0)_k = -t_k²
+/// ```
+///
+/// and the same argument on a mixed second difference gives the full block
+/// statement
+///
+/// ```text
+///     T' H_ρ T  -  T' diag(g_ρ) T  =  0      EXACTLY, at every ρ.
+/// ```
+///
+/// # What its residual therefore is
+///
+/// Whatever comes back is error, and only error: no property of the data, the
+/// family or the fit can move it off zero. It is a **certified lower bound on
+/// `‖δH_ρ‖₂` for the (Hessian, gradient) pair as evaluated here**, which is
+/// exactly the currency the ρ-curvature gate spends — that gate compares a
+/// Hessian eigenvalue against a gradient-built floor, so an inconsistency
+/// between the two evaluations is precisely its resolution limit.
+///
+/// Measured on `geo_disease_eas_matern_k6` (#2748): `9.872e-8`, against an
+/// eigensolver backward error of `8.342e-19` on the same matrix at the same ρ
+/// — eleven orders apart, because the two answer different questions. The
+/// curvature the gate refused there was `-2.010e-8`, i.e. **inside** the
+/// assembly's own demonstrated inconsistency.
+///
+/// Returns `None` when there is nothing to measure (no directions, a shape
+/// mismatch, a gradient of the wrong length) or when the residual is not
+/// finite: an absent measurement must stay absent rather than become a zero,
+/// which would silently assert that the assembly is exact.
+pub fn invariance_residual_2norm(
+    hessian_rho: &Array2<f64>,
+    outer_gradient: &Array1<f64>,
+    directions: &Array2<f64>,
+) -> Option<f64> {
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let n = hessian_rho.nrows();
+    if n == 0 || hessian_rho.ncols() != n || directions.nrows() != n {
+        return None;
+    }
+    let d = directions.ncols();
+    if d == 0 || outer_gradient.len() != n {
+        return None;
+    }
+    // `T'(H - diag(g))T`, formed as `T'HT - T'diag(g)T` so the large `H` product
+    // is a single GEMM pair and the diagonal term costs `O(n·d²)`.
+    let mut residual = directions.t().dot(hessian_rho).dot(directions);
+    for row in 0..d {
+        for col in 0..d {
+            let mut chain_rule = 0.0_f64;
+            for k in 0..n {
+                chain_rule += outer_gradient[k] * directions[[k, row]] * directions[[k, col]];
+            }
+            residual[[row, col]] -= chain_rule;
+        }
+    }
+    gam_linalg::matrix::symmetrize_in_place(&mut residual);
+    if residual.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    // Spectral norm of a symmetric block: the largest eigenvalue magnitude.
+    // `d` is the certified nullity of the penalty map — 1 or 2 in practice — so
+    // this eigendecomposition is free.
+    let (eigenvalues, _) = residual.eigh(faer::Side::Lower).ok()?;
+    let norm = eigenvalues
+        .iter()
+        .fold(0.0_f64, |accumulated, value| accumulated.max(value.abs()));
+    norm.is_finite().then_some(norm)
 }
 
 /// Compress a symmetric matrix onto the judged subspace: `Z' H Z`.

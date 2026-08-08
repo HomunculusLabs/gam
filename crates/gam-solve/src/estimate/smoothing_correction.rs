@@ -635,14 +635,6 @@ pub(crate) fn invert_identified_rho_hessian(
     let (judged_eigenvalues, judged_eigenvectors) = work
         .eigh(faer::Side::Lower)
         .map_err(|error| format!("rho-Hessian eigendecomposition failed: {error}"))?;
-    // `hessian_rho` is an ANALYTIC Hessian, so the applicable curvature law is
-    // Weyl's `‖δH‖₂` (#2690), not the finite-difference `(2/√3)·√(ε_f·M₄)`.
-    // The distinction is load-bearing: the two are orders apart on this
-    // criterion, and `ε_f` — the value-level evaluation error the FD law needs
-    // — bounds the error of a separately-coded second derivative not at all.
-    let curvature_resolution =
-        eigenpair_backward_error_bound(work, &judged_eigenvalues, &judged_eigenvectors)?;
-    let zero_bound = curvature_resolution.resolution();
 
     // Every direction, in ρ coordinates and in one order: the deflated
     // invariance first (its Rayleigh quotient reported as measured, never
@@ -656,6 +648,58 @@ pub(crate) fn invert_identified_rho_hessian(
     let removed = judged
         .as_ref()
         .and_then(|basis| crate::penalty_invariance::deflated_directions(n, basis));
+
+    // `hessian_rho` is an ANALYTIC Hessian, so the applicable curvature law is
+    // Weyl's `‖δH‖₂` (#2690), not the finite-difference `(2/√3)·√(ε_f·M₄)`.
+    // The distinction is load-bearing: the two are orders apart on this
+    // criterion, and `ε_f` — the value-level evaluation error the FD law needs
+    // — bounds the error of a separately-coded second derivative not at all.
+    //
+    // ‖δH‖₂ is MEASURED, per site, and this site has two measurements of it
+    // that answer different questions (#2748):
+    //
+    // * the eigensolver's residual — *"given this matrix, how wrong is σ?"*.
+    //   It is a statement about the decomposition and says nothing about the
+    //   assembly;
+    // * the penalty map's invariance residual — *"how wrong is this matrix?"*.
+    //   On the certified invariance `T` the identity
+    //   `T'H_ρT = T'diag(g_ρ)T` holds EXACTLY, so its residual is error and
+    //   only error, measured in situ on this ρ, on this (H_ρ, g_ρ) pair, and
+    //   in exactly the currency the tests below spend (a Hessian eigenvalue
+    //   against a gradient-built floor).
+    //
+    // Measured on `geo_disease_eas_matern_k6`: `8.342e-19` and `9.872e-8`.
+    // Refusing a `-2.010e-8` curvature on the first is refusing on the
+    // eigensolver while the assembly is demonstrably eleven orders worse.
+    let assembly_inconsistency = removed.as_ref().and_then(|directions| {
+        crate::penalty_invariance::invariance_residual_2norm(
+            hessian_rho,
+            outer_gradient,
+            directions,
+        )
+    });
+    let eigensolver_backward_error =
+        eigenpair_backward_error_bound(work, &judged_eigenvalues, &judged_eigenvectors)?
+            .resolution();
+    let mut measured_hessian_error = vec![gam_linalg::curvature_resolution::MeasuredHessianError::new(
+        "eigensolver backward error",
+        eigensolver_backward_error,
+    )];
+    if let Some(value) = assembly_inconsistency {
+        measured_hessian_error.push(
+            gam_linalg::curvature_resolution::MeasuredHessianError::new(
+                "penalty-map invariance residual |T'(H_rho - diag(g_rho))T|_2",
+                value,
+            ),
+        );
+    }
+    let curvature_resolution =
+        gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl_from_components(
+            &measured_hessian_error,
+        )
+        .map_err(|error| error.to_string())?;
+    let zero_bound = curvature_resolution.resolution();
+
     let mut eigenvalues = Array1::<f64>::zeros(n);
     let mut eigenvectors = Array2::<f64>::zeros((n, n));
     for column in 0..deflated_dimension {
@@ -680,9 +724,10 @@ pub(crate) fn invert_identified_rho_hessian(
         }
     }
 
-    // Per-direction resolution floor: the eigensolver's own backward error, or
-    // the outer certificate's gradient floor along this eigenvector, whichever
-    // admits more. Both are measurements, not tolerances chosen by hand.
+    // Per-direction resolution floor: the measured curvature resolution
+    // `‖δH‖₂`, or the outer certificate's gradient floor along this
+    // eigenvector, whichever admits more. Both are measurements, not tolerances
+    // chosen by hand.
     let direction_floor = |i: usize| -> f64 {
         if outer_gradient.is_empty() {
             return zero_bound;
@@ -699,15 +744,21 @@ pub(crate) fn invert_identified_rho_hessian(
         let sigma = eigenvalues[i];
         let floor = direction_floor(i);
         if sigma < -floor {
+            let components = measured_hessian_error
+                .iter()
+                .map(|component| component.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(format!(
                 "rho Hessian has negative curvature {sigma:.3e} below the outer certificate's own \
                  chain-rule gradient floor {floor:.3e} on that direction (that floor is an EXACT \
                  chain-rule term of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, \
                  not a resolution; the curvature resolution of an analytically-formed eigenvalue \
-                 is Weyl's ||dH||_2, of which the eigensolver backward error {} is one measured \
-                 component -- #2690); the outer loop certified this point as a minimum, so this \
-                 is a genuine contradiction rather than an unresolvable direction",
-                curvature_resolution
+                 is Weyl's ||dH||_2, measured here as {curvature_resolution} from [{components}] \
+                 -- #2690, #2748); the outer loop certified this point as a minimum, and the \
+                 curvature is larger than everything this assembly's own exactly-zero identities \
+                 say it could have got wrong, so this is a genuine contradiction rather than an \
+                 unresolvable direction"
             ));
         }
     }
