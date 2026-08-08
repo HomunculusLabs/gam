@@ -1492,6 +1492,36 @@ pub(crate) fn compute_smoothing_correction(
     let symmetrization_defect = gam_linalg::matrix::symmetrization_defect_2norm(&hessian_rho);
     gam_linalg::matrix::symmetrize_in_place(&mut hessian_rho);
 
+    // The THIRD exactly-zero identity available here, and the one that measures
+    // the pair rather than either half (#2748).
+    //
+    // The gate below compares an eigenvalue of `hessian_rho` against a floor
+    // built from `outer_gradient`, but those two are not one evaluation:
+    // `outer_gradient` is the residual gradient the OUTER SEARCH carried out of
+    // its own last step, and `hessian_rho` was just assembled here from a fresh
+    // evaluation bundle at the same rho. Re-evaluating the gradient against the
+    // same objective at the same point must return the same vector -- it is the
+    // same function of the same argument -- so any difference is the
+    // inconsistency between the two evaluations, which is exactly the currency
+    // a "sigma versus a gradient-built floor" comparison spends.
+    //
+    // `max_k |dg_k|` bounds the per-direction term `sum_k |dg_k| v_k^2` the
+    // floor would have moved by, so it enters as one more measured component of
+    // the resolution rather than as a change to the floor itself.
+    //
+    // Absent when the gradient cannot be re-evaluated, or when the outer
+    // gradient was not supplied at all: an absent measurement stays absent.
+    let gradient_reevaluation_defect = (!outer_gradient.is_empty())
+        .then(|| reml_state.compute_gradient(final_rho).ok())
+        .flatten()
+        .filter(|fresh| fresh.len() == outer_gradient.len())
+        .map(|fresh| {
+            (0..fresh.len()).fold(0.0_f64, |worst, k| {
+                worst.max((fresh[k] - outer_gradient[k]).abs())
+            })
+        })
+        .filter(|value| value.is_finite());
+
     // Step 3: invert the exact, unperturbed Hessian on its explicitly
     // identified spectral subspace. A diagonal ridge would change V_rho and
     // therefore the covariance estimand while being invisible in the result.
@@ -1500,10 +1530,22 @@ pub(crate) fn compute_smoothing_correction(
         structural_nullity,
         outer_gradient,
         lifted_invariance.as_ref(),
-        &[gam_linalg::curvature_resolution::MeasuredHessianError::new(
-            "rho-Hessian symmetrization defect |(H - H')/2|_2",
-            symmetrization_defect,
-        )],
+        &{
+            let mut components =
+                vec![gam_linalg::curvature_resolution::MeasuredHessianError::new(
+                    "rho-Hessian symmetrization defect |(H - H')/2|_2",
+                    symmetrization_defect,
+                )];
+            if let Some(defect) = gradient_reevaluation_defect {
+                components.push(
+                    gam_linalg::curvature_resolution::MeasuredHessianError::new(
+                        "outer-gradient re-evaluation defect max_k |g_fresh - g_outer|",
+                        defect,
+                    ),
+                );
+            }
+            components
+        },
     ) {
         Ok(inverse) => inverse,
         Err(error) => {
