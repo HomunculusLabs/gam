@@ -593,6 +593,7 @@ pub(crate) fn invert_identified_rho_hessian(
     expected_structural_nullity: usize,
     outer_gradient: &Array1<f64>,
     invariance: Option<&Array2<f64>>,
+    caller_measured_hessian_error: &[gam_linalg::curvature_resolution::MeasuredHessianError],
 ) -> Result<InvertedRhoHessian, String> {
     let n = hessian_rho.nrows();
     if expected_structural_nullity > n {
@@ -685,6 +686,12 @@ pub(crate) fn invert_identified_rho_hessian(
         "eigensolver backward error",
         eigensolver_backward_error,
     )];
+    // Whatever the caller measured on the SAME matrix at the same point. The
+    // assembly's own error is not visible from inside this function -- it only
+    // ever sees the finished matrix -- so a caller that holds an exactly-zero
+    // identity about the assembly (the symmetrization defect, say) hands it in
+    // here rather than throwing it away.
+    measured_hessian_error.extend_from_slice(caller_measured_hessian_error);
     if let Some(value) = assembly_inconsistency {
         measured_hessian_error.push(
             gam_linalg::curvature_resolution::MeasuredHessianError::new(
@@ -1475,7 +1482,14 @@ pub(crate) fn compute_smoothing_correction(
         }
     };
 
-    // Symmetrize the Hessian
+    // The skew part this symmetrization is about to discard is EXACTLY zero in
+    // exact arithmetic (a Hessian is symmetric, Clairaut), and `H[i,j]` and
+    // `H[j,i]` are separate accumulations of the same mixed partial through the
+    // same implicit-function assembly. So whatever survives is that assembly's
+    // error, measured in situ on this very matrix -- a certified `‖δH‖₂`
+    // component by Weyl, obtained for free at a site that was already averaging
+    // the transpose and throwing the difference away (#2748).
+    let symmetrization_defect = gam_linalg::matrix::symmetrization_defect_2norm(&hessian_rho);
     gam_linalg::matrix::symmetrize_in_place(&mut hessian_rho);
 
     // Step 3: invert the exact, unperturbed Hessian on its explicitly
@@ -1486,6 +1500,10 @@ pub(crate) fn compute_smoothing_correction(
         structural_nullity,
         outer_gradient,
         lifted_invariance.as_ref(),
+        &[gam_linalg::curvature_resolution::MeasuredHessianError::new(
+            "rho-Hessian symmetrization defect |(H - H')/2|_2",
+            symmetrization_defect,
+        )],
     ) {
         Ok(inverse) => inverse,
         Err(error) => {

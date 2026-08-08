@@ -67,7 +67,7 @@ fn build_with_spectrum(eigenvalues: &[f64]) -> (Array2<f64>, Array2<f64>) {
 #[test]
 fn spd_case_returns_full_rank_inverse_no_repair() {
     let (a, _q) = build_with_spectrum(&[10.0, 5.0, 2.0, 1.0]);
-    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None).expect("invert");
+    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]).expect("invert");
     assert_eq!(inv.active_rank, 4);
     assert_eq!(inv.structural_zero, 0);
     assert!(!inv.used_structural_pseudoinverse);
@@ -89,7 +89,7 @@ fn spd_case_returns_full_rank_inverse_no_repair() {
 fn saddle_is_rejected_instead_of_salvaged() {
     let evals = [10.0, 5.0, 2.0, -0.066];
     let (a, _) = build_with_spectrum(&evals);
-    let error = invert_identified_rho_hessian(&a, 0, &no_gradient(), None).unwrap_err();
+    let error = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]).unwrap_err();
     assert!(error.contains("negative curvature") || error.contains("positive definite"));
 }
 
@@ -97,7 +97,7 @@ fn saddle_is_rejected_instead_of_salvaged() {
 fn structurally_certified_zero_direction_uses_pseudoinverse() {
     let evals = [10.0, 5.0, 2.0, 0.0];
     let (a, q) = build_with_spectrum(&evals);
-    let inv = invert_identified_rho_hessian(&a, 1, &no_gradient(), None).expect("invert");
+    let inv = invert_identified_rho_hessian(&a, 1, &no_gradient(), None, &[]).expect("invert");
     assert_eq!(inv.active_rank, 3, "expected three identified directions");
     assert_eq!(inv.structural_zero, 1);
     assert!(inv.used_structural_pseudoinverse);
@@ -125,14 +125,14 @@ fn structurally_certified_zero_direction_uses_pseudoinverse() {
 #[test]
 fn structural_nullity_must_match_penalty_map_certificate() {
     let (a, _) = build_with_spectrum(&[10.0, 5.0, 2.0, 0.0]);
-    let error = invert_identified_rho_hessian(&a, 2, &no_gradient(), None).unwrap_err();
+    let error = invert_identified_rho_hessian(&a, 2, &no_gradient(), None, &[]).unwrap_err();
     assert!(error.contains("penalty map certifies"));
 }
 
 #[test]
 fn every_positive_curvature_direction_is_retained() {
     let (a, _) = build_with_spectrum(&[10.0, 5.0, 2.0, 1.0e-9]);
-    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None).expect("small positive SPD inverse");
+    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]).expect("small positive SPD inverse");
     assert_eq!(inv.active_rank, 4);
     assert!(inv.inverse.iter().all(|value| value.is_finite()));
 }
@@ -141,12 +141,12 @@ fn every_positive_curvature_direction_is_retained() {
 fn non_finite_input_returns_none() {
     let mut a = Array2::<f64>::eye(4);
     a[[1, 1]] = f64::NAN;
-    let result = invert_identified_rho_hessian(&a, 0, &no_gradient(), None);
+    let result = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]);
     assert!(result.is_err(), "expected error for NaN-bearing input matrix");
 
     let mut a = Array2::<f64>::eye(4);
     a[[2, 2]] = f64::INFINITY;
-    let result = invert_identified_rho_hessian(&a, 0, &no_gradient(), None);
+    let result = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]);
     assert!(result.is_err(), "expected error for Inf-bearing input matrix");
 }
 
@@ -155,7 +155,7 @@ fn non_finite_input_returns_none() {
 #[test]
 fn structural_path_populates_eigenvalues_and_eigenvectors() {
     let (a, _q) = build_with_spectrum(&[10.0, 5.0, 2.0, 0.0]);
-    let inv = invert_identified_rho_hessian(&a, 1, &no_gradient(), None).expect("invert");
+    let inv = invert_identified_rho_hessian(&a, 1, &no_gradient(), None, &[]).expect("invert");
     assert!(inv.used_structural_pseudoinverse);
     assert_eq!(inv.eigenvalues.len(), 4);
     assert_eq!(inv.eigenvectors.shape(), &[4, 4]);
@@ -178,7 +178,7 @@ fn structural_path_populates_eigenvalues_and_eigenvectors() {
 #[test]
 fn spd_fast_path_still_reports_its_spectrum() {
     let (a, _q) = build_with_spectrum(&[10.0, 5.0, 2.0, 1.0]);
-    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None).expect("invert");
+    let inv = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]).expect("invert");
     assert!(!inv.used_structural_pseudoinverse);
     assert_eq!(inv.active_rank, 4);
     assert_eq!(inv.below_gradient_floor, 0);
@@ -212,7 +212,7 @@ fn curvature_under_the_outer_gradient_floor_is_dropped_not_called_a_saddle() {
     ]);
 
     // Without the floor this matrix is refused outright — the pre-#2428 verdict.
-    let refused = invert_identified_rho_hessian(&a, 0, &no_gradient(), None);
+    let refused = invert_identified_rho_hessian(&a, 0, &no_gradient(), None, &[]);
     assert!(
         refused.is_err(),
         "the eigensolver-backward-error standard alone must still refuse this matrix, \
@@ -220,7 +220,7 @@ fn curvature_under_the_outer_gradient_floor_is_dropped_not_called_a_saddle() {
     );
 
     // With the certificate's own floor it is one unresolvable direction.
-    let inv = invert_identified_rho_hessian(&a, 0, &gradient, None)
+    let inv = invert_identified_rho_hessian(&a, 0, &gradient, None, &[])
         .expect("a certified fit's rho-Hessian must invert on its identified subspace");
     assert_eq!(inv.active_rank, 3);
     assert_eq!(inv.below_gradient_floor, 1);
@@ -237,13 +237,13 @@ fn a_fully_saturated_rail_does_not_violate_the_structural_count() {
     let (a, _q) = build_with_spectrum(&[1.0, 0.5, 0.25, 0.0]);
     let gradient = Array1::from(vec![1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]);
     // The penalty map certifies NO structural zero, yet the Hessian has one.
-    let inv = invert_identified_rho_hessian(&a, 0, &gradient, None)
+    let inv = invert_identified_rho_hessian(&a, 0, &gradient, None, &[])
         .expect("an extra null direction is a saturated rail, not a penalty-map contradiction");
     assert_eq!(inv.active_rank, 3);
     assert_eq!(inv.structural_zero + inv.below_gradient_floor, 1);
 
     // Fewer nulls than certified is still a contradiction and still fails.
-    let error = invert_identified_rho_hessian(&a, 2, &gradient, None)
+    let error = invert_identified_rho_hessian(&a, 2, &gradient, None, &[])
         .expect_err("finding fewer nulls than the penalty map certifies must stay an error");
     assert!(error.contains("penalty map certifies"), "unexpected error: {error}");
 }
@@ -255,7 +255,7 @@ fn a_fully_saturated_rail_does_not_violate_the_structural_count() {
 fn negative_curvature_above_the_floor_is_still_a_hard_failure() {
     let (a, _q) = build_with_spectrum(&[1.19, 0.80, 0.45, -1.0e-3]);
     let gradient = Array1::from(vec![1.4e-7, 3.5e-6, 4.1e-7, 1.3e-6]);
-    let error = invert_identified_rho_hessian(&a, 0, &gradient, None)
+    let error = invert_identified_rho_hessian(&a, 0, &gradient, None, &[])
         .expect_err("resolvable negative curvature must not be absorbed by the floor");
     assert!(
         error.contains("negative curvature"),
@@ -287,7 +287,7 @@ fn any_matrix_the_outer_certificate_accepts_inverts_here() {
         let accepted = smallest_eigenvalue(&floored) >= 0.0;
         assert!(accepted, "fixture {spectrum:?} must be one the certificate accepts");
 
-        invert_identified_rho_hessian(&a, 0, &gradient, None).unwrap_or_else(|error| {
+        invert_identified_rho_hessian(&a, 0, &gradient, None, &[]).unwrap_or_else(|error| {
             panic!("certificate accepted {spectrum:?} but the correction refused it: {error}")
         });
     }
@@ -361,7 +361,7 @@ fn deflatable_fixture(
 #[test]
 fn without_the_assembly_measurement_the_knife_edge_curvature_refuses_2748() {
     let (hessian, gradient, _invariance) = deflatable_fixture(1.0e-8, 1.0e-7, 1.0e-9);
-    let error = invert_identified_rho_hessian(&hessian, 0, &gradient, None)
+    let error = invert_identified_rho_hessian(&hessian, 0, &gradient, None, &[])
         .expect_err("with no measured assembly error this direction is judged and refused");
     assert!(
         error.contains("negative curvature"),
@@ -390,7 +390,7 @@ fn the_assembly_s_own_exactly_zero_identity_resolves_the_knife_edge_2748() {
         "the invariance residual must recover the injected assembly error; got {measured:.6e}"
     );
 
-    let inverted = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+    let inverted = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance), &[])
         .expect("a curvature inside the assembly's own measured error is unresolved, not refuted");
     // One direction deflated (the invariance) and one unresolved (the -1e-8),
     // leaving exactly the `a = 1.0` direction identified and invertible.
@@ -422,7 +422,7 @@ fn the_assembly_s_own_exactly_zero_identity_resolves_the_knife_edge_2748() {
 #[test]
 fn curvature_above_the_measured_assembly_error_still_refuses_2748() {
     let (hessian, gradient, invariance) = deflatable_fixture(1.0e-6, 1.0e-7, 1.0e-9);
-    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance), &[])
         .expect_err("a curvature above the measured assembly error is a real contradiction");
     assert!(
         error.contains("negative curvature"),
@@ -441,7 +441,7 @@ fn curvature_above_the_measured_assembly_error_still_refuses_2748() {
 #[test]
 fn a_real_saddle_is_ten_orders_outside_the_measured_resolution_2748() {
     let (hessian, gradient, invariance) = deflatable_fixture(1.6e3, 1.0e-7, 1.0e-9);
-    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance), &[])
         .expect_err("a 1.6e3 saddle must refuse whatever the assembly's error is");
     assert!(
         error.contains("negative curvature"),
