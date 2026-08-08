@@ -611,4 +611,76 @@ mod tests {
         assert_eq!(finite_difference_error_bound(1.0e-8, 1.0, 0.0), f64::INFINITY);
         assert_eq!(finite_difference_error_bound(1.0e-8, 1.0, -1.0e-3), f64::INFINITY);
     }
+
+    /// Several measured components of `‖δH‖₂` combine by MAXIMUM, and the
+    /// resolution remembers which one set it. This is the #2748 repair's whole
+    /// arithmetic: an eigensolver residual and an assembly-inconsistency
+    /// residual are both certified lower bounds on the same quantity, and the
+    /// larger is the stronger fact.
+    #[test]
+    fn several_measured_components_resolve_to_the_largest() {
+        let resolution = CurvatureResolution::analytic_weyl_from_components(&[
+            MeasuredHessianError::new("eigensolver backward error", 8.342_439e-19),
+            MeasuredHessianError::new("penalty-map invariance residual", 9.872_016e-8),
+        ])
+        .expect("two non-negative components");
+        assert_eq!(resolution.resolution(), 9.872_016e-8);
+        assert_eq!(resolution.law(), CurvatureLaw::AnalyticWeyl);
+        assert_eq!(
+            resolution.dominant_source(),
+            Some("penalty-map invariance residual")
+        );
+        assert!(
+            resolution.to_string().contains("penalty-map invariance residual"),
+            "the display must name what decided: {resolution}"
+        );
+        // The curvature this refused at main is inside it; a decade more is not.
+        assert!(!resolution.resolves(-2.010_041e-8));
+        assert!(resolution.resolves(-2.010_041e-7));
+    }
+
+    /// One component is exactly the single-component constructor, so a site
+    /// that has only the eigensolver's measurement does not move by an ulp.
+    #[test]
+    fn one_component_is_bit_identical_to_the_single_measurement_law() {
+        let value = 7.414_101e-16_f64;
+        let from_one = CurvatureResolution::analytic_weyl_from_components(&[
+            MeasuredHessianError::new("eigensolver backward error", value),
+        ])
+        .expect("one non-negative component");
+        let direct = CurvatureResolution::analytic_weyl(value).expect("non-negative");
+        assert_eq!(from_one.resolution().to_bits(), direct.resolution().to_bits());
+        assert_eq!(from_one.law(), direct.law());
+    }
+
+    /// A caller with no measurement has no resolution — the module's standing
+    /// rule, enforced rather than defaulted to zero. A zero resolution would
+    /// silently assert that the assembly is exact.
+    #[test]
+    fn no_measured_component_is_an_error_not_a_zero_resolution() {
+        assert!(matches!(
+            CurvatureResolution::analytic_weyl_from_components(&[]),
+            Err(CurvatureResolutionError::HessianError(_))
+        ));
+    }
+
+    /// A negative or `NaN` component is rejected wherever it sits in the list,
+    /// not silently out-maxed by a larger sibling.
+    #[test]
+    fn a_negative_component_is_rejected_even_beside_a_larger_valid_one() {
+        assert_eq!(
+            CurvatureResolution::analytic_weyl_from_components(&[
+                MeasuredHessianError::new("valid", 1.0e-6),
+                MeasuredHessianError::new("invalid", -1.0e-9),
+            ]),
+            Err(CurvatureResolutionError::HessianError(-1.0e-9))
+        );
+        assert!(matches!(
+            CurvatureResolution::analytic_weyl_from_components(&[
+                MeasuredHessianError::new("valid", 1.0e-6),
+                MeasuredHessianError::new("invalid", f64::NAN),
+            ]),
+            Err(CurvatureResolutionError::HessianError(_))
+        ));
+    }
 }

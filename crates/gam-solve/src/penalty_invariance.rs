@@ -83,6 +83,45 @@
 use gam_terms::construction::CanonicalPenalty;
 use ndarray::{Array1, Array2};
 
+/// Neumaier (Kahan–Babuška) compensated summation.
+///
+/// A running sum of `m` terms accumulates `O(m·eps·Σ|term|)` of error under
+/// naive addition; this variant tracks the discarded low-order bits and returns
+/// a result whose error is `eps·Σ|term| + O(eps²)` — **independent of `m`**.
+///
+/// It is used where a decision is taken at the scale of the accumulation's own
+/// round-off: the penalty-map Gram (#2748), whose smallest eigenvalue decides
+/// whether the criterion has an exact invariance, is `O(1)` in size and is
+/// judged against `O(eps)`, so a length-dependent error term is the difference
+/// between reading an exact redundancy and reading none.
+///
+/// The Neumaier variant (rather than plain Kahan) is used because the terms
+/// here are not sorted and a later term can exceed the running sum, which is
+/// the case plain Kahan compensates in the wrong direction.
+#[derive(Clone, Copy, Debug, Default)]
+struct NeumaierSum {
+    sum: f64,
+    compensation: f64,
+}
+
+impl NeumaierSum {
+    fn add(&mut self, term: f64) {
+        let total = self.sum + term;
+        // Whichever operand is larger in magnitude is exactly representable in
+        // the difference, so the other one's lost low bits are recovered.
+        self.compensation += if self.sum.abs() >= term.abs() {
+            (self.sum - total) + term
+        } else {
+            (term - total) + self.sum
+        };
+        self.sum = total;
+    }
+
+    fn value(self) -> f64 {
+        self.sum + self.compensation
+    }
+}
+
 /// The exact null space of the penalty map, in `lambda` coordinates.
 ///
 /// Built from the canonical penalties alone. No tolerance is chosen: the rank
@@ -225,30 +264,56 @@ impl PenaltyMapInvariance {
 
         // Gram of the unscaled augmented maps. Positive lambdas only rescale
         // the columns of the map and therefore cannot change this rank.
+        //
+        // # Why the accumulation is compensated (#2748)
+        //
+        // The rank decision below is taken at `O(eps)` on entries of size
+        // `O(1)`, so the accumulation's own error IS the decision. Naive
+        // summation of `m = block^2` products carries `m*eps*sum|S_i S_j|`,
+        // which for a `23 x 23` block is `1.2e-13` — three orders above the
+        // bar and enough to make an EXACTLY proportional pair read as
+        // independent. Measured on the two `geo_disease_matern` cells this
+        // issue compares: `1 - cos` came out `1.11e-16` on one and
+        // `4.80e-14` on the other, from penalty pairs of the same structure —
+        // the spread is the summation, not the operators.
+        //
+        // Neumaier compensation removes the length dependence entirely: the
+        // error becomes `eps * sum|S_i S_j| <= eps * ||S_i||_F ||S_j||_F`, i.e.
+        // one rounding of the answer's own scale however long the sum. That is
+        // the repair — compute the quantity to the accuracy the decision needs
+        // — and NOT a wider bar, which would have admitted genuinely distinct
+        // penalties as redundant.
         let mut gram = Array2::<f64>::zeros((k, k));
         for i in 0..k {
             for j in i..k {
                 let start = canonical[i].col_range.start.max(canonical[j].col_range.start);
                 let end = canonical[i].col_range.end.min(canonical[j].col_range.end);
-                let mut inner = 0.0_f64;
+                let mut accumulator = NeumaierSum::default();
                 for global_row in start..end {
                     for global_col in start..end {
-                        inner += canonical[i].local[[
-                            global_row - canonical[i].col_range.start,
-                            global_col - canonical[i].col_range.start,
-                        ]] * canonical[j].local[[
-                            global_row - canonical[j].col_range.start,
-                            global_col - canonical[j].col_range.start,
-                        ]];
+                        accumulator.add(
+                            canonical[i].local[[
+                                global_row - canonical[i].col_range.start,
+                                global_col - canonical[i].col_range.start,
+                            ]] * canonical[j].local[[
+                                global_row - canonical[j].col_range.start,
+                                global_col - canonical[j].col_range.start,
+                            ]],
+                        );
                     }
                 }
                 // The two border blocks of A_i contribute 2 c_i . c_j, the
-                // corner contributes q_i q_j.
-                let mut border = 0.0_f64;
+                // corner contributes q_i q_j. Both enter the same compensated
+                // accumulator: they are terms of the same inner product, and
+                // splitting them off would reintroduce an uncompensated add at
+                // exactly the scale the decision is taken at.
+                let mut border = NeumaierSum::default();
                 for column in 0..centering.ncols() {
-                    border += centering[[i, column]] * centering[[j, column]];
+                    border.add(centering[[i, column]] * centering[[j, column]]);
                 }
-                inner += 2.0 * border + quadratic[i] * quadratic[j];
+                accumulator.add(2.0 * border.value());
+                accumulator.add(quadratic[i] * quadratic[j]);
+                let inner = accumulator.value();
                 gram[[i, j]] = inner;
                 gram[[j, i]] = inner;
             }

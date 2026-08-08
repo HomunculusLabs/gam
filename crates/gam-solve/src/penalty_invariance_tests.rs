@@ -329,3 +329,115 @@ fn disjoint_penalty_supports_have_no_invariance_2676() {
         "the general Gram path must agree with the disjoint-support shortcut"
     );
 }
+
+/// The instrument (#2748): on the certified invariance the residual of
+/// `T'H_ρT = T'diag(g_ρ)T` is EXACTLY zero in exact arithmetic, so whatever
+/// comes back is error and only error. Built on the same reduced-criterion
+/// fixture as the chain-rule gate above, so the (H_ρ, g_ρ) pair is genuinely
+/// consistent by construction rather than by assertion.
+#[test]
+fn the_invariance_residual_is_zero_on_a_consistent_assembly_2748() {
+    let (h_rho, g_rho, lifted) = reduced_criterion_fixture();
+    let residual =
+        invariance_residual_2norm(&h_rho, &g_rho, &lifted).expect("one certified direction");
+    let matrix_scale = h_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    assert!(
+        residual <= 64.0 * f64::EPSILON * matrix_scale,
+        "a consistent (H_rho, g_rho) pair must measure {residual:.6e} <= round-off of the \
+         matrix scale {matrix_scale:.6e}"
+    );
+}
+
+/// And it recovers an injected error exactly. `H_ρ + η·tt'` moves the identity
+/// by `η` and by nothing else, so the instrument reads `η` — that is what makes
+/// it a MEASUREMENT of `‖δH‖₂` rather than an estimate of it.
+#[test]
+fn the_invariance_residual_recovers_an_injected_assembly_error_2748() {
+    let (mut h_rho, g_rho, lifted) = reduced_criterion_fixture();
+    let t = lifted.column(0).to_owned();
+    let injected = 3.5e-7_f64;
+    for row in 0..3 {
+        for col in 0..3 {
+            h_rho[[row, col]] += injected * t[row] * t[col];
+        }
+    }
+    let residual =
+        invariance_residual_2norm(&h_rho, &g_rho, &lifted).expect("one certified direction");
+    // The tolerance is the arithmetic the instrument itself runs at — one
+    // rounding of the matrix scale — not a chosen relative fraction of the
+    // injected value, which would tighten as the injection shrinks and say
+    // nothing about the instrument.
+    let matrix_scale = h_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    assert!(
+        (residual - injected).abs() <= 64.0 * f64::EPSILON * matrix_scale,
+        "the instrument must read the injected {injected:.17e}; got {residual:.17e}"
+    );
+}
+
+/// The control that says the instrument measures the error WHERE THE IDENTITY
+/// IS, not everywhere: a perturbation confined to the judged complement leaves
+/// it at zero. Without this the residual could be read as a global matrix-error
+/// estimate, which it is not — it is a certified lower bound obtained from one
+/// subspace.
+#[test]
+fn a_perturbation_off_the_invariance_does_not_move_the_residual_2748() {
+    let (mut h_rho, g_rho, lifted) = reduced_criterion_fixture();
+    let t = lifted.column(0).to_owned();
+    let baseline =
+        invariance_residual_2norm(&h_rho, &g_rho, &lifted).expect("one certified direction");
+    // Any direction orthogonal to `t`, made so explicitly rather than assumed.
+    let mut u = Array1::from(vec![0.31_f64, -0.87, 0.42]);
+    let projection = u.dot(&t);
+    u.scaled_add(-projection, &t);
+    let norm = u.dot(&u).sqrt();
+    u.mapv_inplace(|value| value / norm);
+    for row in 0..3 {
+        for col in 0..3 {
+            h_rho[[row, col]] += 1.0e-3 * u[row] * u[col];
+        }
+    }
+    let perturbed =
+        invariance_residual_2norm(&h_rho, &g_rho, &lifted).expect("one certified direction");
+    let matrix_scale = h_rho.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
+    assert!(
+        (perturbed - baseline).abs() <= 64.0 * f64::EPSILON * matrix_scale,
+        "a 1e-3 perturbation confined to the judged complement moved the invariance \
+         residual from {baseline:.6e} to {perturbed:.6e}; the instrument must be blind to it"
+    );
+}
+
+/// The `(H_ρ, g_ρ, lifted invariance)` triple used by the #2748 instrument
+/// gates: a criterion that depends on `λ` only through `Λ = λ₀ + c·λ₂` and
+/// `λ₁`, assembled through the chain rule so the reparameterisation identity
+/// holds by construction.
+fn reduced_criterion_fixture() -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+    let scale = 0.75_f64;
+    let lambdas = Array1::from(vec![1.5_f64, 4.0, 2.25]);
+    let reduced = array![[0.8_f64, -0.2], [-0.2, 0.5]];
+    let jacobian = array![[1.0_f64, 0.0], [0.0, 1.0], [scale, 0.0]];
+    let h_lambda = jacobian.dot(&reduced).dot(&jacobian.t());
+    let g_reduced = Array1::from(vec![-3.0e-5_f64, 7.0e-6]);
+    let g_lambda = jacobian.dot(&g_reduced);
+    let g_rho = Array1::from(vec![
+        lambdas[0] * g_lambda[0],
+        lambdas[1] * g_lambda[1],
+        lambdas[2] * g_lambda[2],
+    ]);
+    let mut h_rho = Array2::<f64>::zeros((3, 3));
+    for i in 0..3 {
+        for j in 0..3 {
+            h_rho[[i, j]] = lambdas[i] * h_lambda[[i, j]] * lambdas[j];
+        }
+        h_rho[[i, i]] += g_rho[i];
+    }
+    let s0 = array![[2.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s1 = array![[0.0, 0.0, 0.0], [0.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+    let s2 = s0.mapv(|value| scale * value);
+    let bundle = vec![penalty(s0, 3), penalty(s1, 3), penalty(s2, 3)];
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 3).expect("gram decomposes");
+    let lifted = invariance
+        .theta_directions(&lambdas, 3, 0)
+        .expect("one lifted direction");
+    (h_rho, g_rho, lifted)
+}

@@ -300,3 +300,151 @@ fn smallest_eigenvalue(matrix: &Array2<f64>) -> f64 {
     let (eigenvalues, _) = matrix.eigh(faer::Side::Lower).expect("eigendecomposition");
     eigenvalues.iter().copied().fold(f64::INFINITY, f64::min)
 }
+
+/// The `#2748` acceptance, built from the identity rather than from a recorded
+/// spectrum: **the same matrix, the same gradient, the same curvature — refused
+/// when the only measured `‖δH‖₂` is the eigensolver's, admitted when the
+/// assembly's own exactly-zero identity is measured too.**
+///
+/// # The fixture
+///
+/// `t = (1,0,-1)/√2` stands for the penalty map's certified invariance, lifted
+/// to ρ. In the orthonormal eigenbasis `{u₁, u₂, t}` with
+/// `u₁ = (1,0,1)/√2`, `u₂ = (0,1,0)`:
+///
+/// ```text
+///     H_ρ = a·u₁u₁ᵀ + (−s)·u₂u₂ᵀ + β·t tᵀ,     β = Σ_k g_k t_k² + η
+/// ```
+///
+/// so that
+///
+/// * the judged complement `span{u₁, u₂}` carries curvature `−s` on `u₂`,
+///   against a chain-rule floor `Σ_k |g_k| (u₂)_k² = |g₁| = γ`;
+/// * the certified-null direction carries `tᵀH_ρt − Σ_k g_k t_k² = η`, which is
+///   **exactly zero in exact arithmetic** — so `η` is a measured `‖δH‖₂`, in
+///   situ, on this pair.
+///
+/// With `γ ≪ s ≪ η` the refusal is decided by a curvature the assembly has
+/// itself demonstrated it cannot resolve. That is the #2748 defect in one
+/// matrix.
+fn deflatable_fixture(
+    negative_curvature: f64,
+    assembly_error: f64,
+    gradient_scale: f64,
+) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+    let root_half = 0.5_f64.sqrt();
+    let t = Array1::from(vec![root_half, 0.0, -root_half]);
+    let u1 = Array1::from(vec![root_half, 0.0, root_half]);
+    let u2 = Array1::from(vec![0.0, 1.0, 0.0]);
+    // Every gradient component the same size and sign, so `Σ g_k v_k²` and
+    // `Σ |g_k| v_k²` differ only by that sign and the floor is unambiguous.
+    let gradient = Array1::from(vec![-gradient_scale, -gradient_scale, -gradient_scale]);
+    let chain_rule: f64 = (0..3).map(|k| gradient[k] * t[k] * t[k]).sum();
+    let a = 1.0_f64;
+    let beta = chain_rule + assembly_error;
+
+    let mut hessian = Array2::<f64>::zeros((3, 3));
+    for r in 0..3 {
+        for c in 0..3 {
+            hessian[[r, c]] = a * u1[r] * u1[c] - negative_curvature * u2[r] * u2[c]
+                + beta * t[r] * t[c];
+        }
+    }
+    let mut invariance = Array2::<f64>::zeros((3, 1));
+    invariance.column_mut(0).assign(&t);
+    (hessian, gradient, invariance)
+}
+
+/// BEFORE — the pre-#2748 standard, reproduced by withholding the invariance:
+/// with only the eigensolver's backward error as `‖δH‖₂`, a `-1e-8` curvature
+/// against a `1e-9` chain-rule floor is a hard refusal.
+#[test]
+fn without_the_assembly_measurement_the_knife_edge_curvature_refuses_2748() {
+    let (hessian, gradient, _invariance) = deflatable_fixture(1.0e-8, 1.0e-7, 1.0e-9);
+    let error = invert_identified_rho_hessian(&hessian, 0, &gradient, None)
+        .expect_err("with no measured assembly error this direction is judged and refused");
+    assert!(
+        error.contains("negative curvature"),
+        "unexpected error text: {error}"
+    );
+}
+
+/// AFTER — the same matrix and the same gradient, with the penalty map's
+/// certified invariance supplied. The invariance residual measures `‖δH‖₂ = 1e-7`
+/// on a direction whose exact answer is zero, the `-1e-8` curvature is inside
+/// it, and the direction is reported as unresolved instead of contradictory.
+#[test]
+fn the_assembly_s_own_exactly_zero_identity_resolves_the_knife_edge_2748() {
+    let (hessian, gradient, invariance) = deflatable_fixture(1.0e-8, 1.0e-7, 1.0e-9);
+
+    // The measurement itself, before the gate consumes it: the identity's
+    // residual is the injected error, to round-off.
+    let measured = crate::penalty_invariance::invariance_residual_2norm(
+        &hessian,
+        &gradient,
+        &invariance,
+    )
+    .expect("the certified invariance is one direction, so the residual is measurable");
+    assert!(
+        (measured - 1.0e-7).abs() < 1.0e-15,
+        "the invariance residual must recover the injected assembly error; got {measured:.6e}"
+    );
+
+    let inverted = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+        .expect("a curvature inside the assembly's own measured error is unresolved, not refuted");
+    // One direction deflated (the invariance) and one unresolved (the -1e-8),
+    // leaving exactly the `a = 1.0` direction identified and invertible.
+    assert_eq!(
+        inverted.active_rank, 1,
+        "only the well-resolved direction may be inverted; classes = {:?}",
+        inverted.classifications
+    );
+    assert!(
+        inverted.used_structural_pseudoinverse,
+        "an unresolved direction must route through the structural pseudoinverse"
+    );
+    assert!(
+        inverted
+            .classifications
+            .iter()
+            .filter(|class| !matches!(class, EigenClassification::Active))
+            .count()
+            == 2,
+        "the deflated and the unresolved direction are both non-active; got {:?}",
+        inverted.classifications
+    );
+}
+
+/// The control that keeps the repair from being a licence. Same construction,
+/// same measured `‖δH‖₂ = 1e-7`, but a curvature of `-1e-6` — an order ABOVE
+/// what the assembly has demonstrated it can get wrong. That is a genuine
+/// contradiction and must stay loud.
+#[test]
+fn curvature_above_the_measured_assembly_error_still_refuses_2748() {
+    let (hessian, gradient, invariance) = deflatable_fixture(1.0e-6, 1.0e-7, 1.0e-9);
+    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+        .expect_err("a curvature above the measured assembly error is a real contradiction");
+    assert!(
+        error.contains("negative curvature"),
+        "unexpected error text: {error}"
+    );
+    assert!(
+        error.contains("penalty-map invariance residual"),
+        "the refusal must name every measured component it judged against: {error}"
+    );
+}
+
+/// #2665's saddle, scaled into this fixture: `λ_min = -1.6e3` against the same
+/// `1e-7` measured assembly error is ten orders outside it and refuses exactly
+/// as before. The repair is a resolution, and a resolution cannot swallow a
+/// quantity ten orders above it.
+#[test]
+fn a_real_saddle_is_ten_orders_outside_the_measured_resolution_2748() {
+    let (hessian, gradient, invariance) = deflatable_fixture(1.6e3, 1.0e-7, 1.0e-9);
+    let error = invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance))
+        .expect_err("a 1.6e3 saddle must refuse whatever the assembly's error is");
+    assert!(
+        error.contains("negative curvature"),
+        "unexpected error text: {error}"
+    );
+}
