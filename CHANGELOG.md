@@ -1,5 +1,92 @@
 ## Unreleased
 
+- **`ln S` was seven approximations wearing one name, and its error was a step
+  function of `(mu, sigma)` (#2714).** The latent-survival / frailty inner solve
+  stalled at `stationarity_residual = 1.741e-2` against a `3.6e-10` tolerance
+  with the trust radius railed at `1e-12` and both terminal rejections coming
+  from the OBJECTIVE — the model and the likelihood accepted every step. The
+  diagnosis on that issue localized it to `cloglog_log_survival_term_controlled`
+  taking `value.ln()` of a value-space evaluator, and reasoned about the size of
+  that error with the representation-floor model `EPSILON/S`, which at the
+  failing point `(mu, sigma) = (3.2, 0.15)` predicts `6.9e-14` and therefore
+  cannot explain the measured `6.5e-2` disagreement between the analytic score
+  and a finite difference of the value.
+
+  Graded on the shipped path against a 60-digit reference (peak-shifted, so the
+  reference is accurate ABSOLUTELY in `ln S` even at `ln S = -1.3e5`; the naive
+  un-shifted high-precision integral is itself wrong by `8.7e-3` at
+  `(8, 0.005)`), the error at that point is **`1.242e-1`** — nine orders above
+  the model the thread was using. And it is not one bad branch:
+
+  ```text
+      mu     sigma    ln S (ref)        shipped err   route
+      12.0   0.002    -1.28982e5        4.371e+06     QuadratureFallback
+       8.0   0.002    -2.96340e3        4.975e+05     QuadratureFallback
+      12.0   1.000    -5.81967e1        8.201e+01     ExactSpecialFunction
+       8.0   0.500    -7.09799e1        3.693e+01     ExactSpecialFunction
+       3.2   0.150    -2.01463e1        1.242e-01     ControlledAsymptotic
+  ```
+
+  Three worst rows, three different routes — including the fixed-window
+  Gumbel-mixing escape hatch that #798 added FOR the underflow corner, whose
+  `Phi((eta-mu)/sigma)` transition is unresolved at small sigma by a node ladder
+  #2469 had pinned inert at a constant 513. A fourth defect sits in the
+  rare-event asymptotic `ln1p(-e^{mu+sigma^2/2})`: at `(-50, 8)`, exactly on its
+  own `rare_log = -18` gate, it is **20.8x** wrong, because its first-order
+  model needs the higher cumulants to be small and at `sigma = 8` they are not.
+
+  So no threshold repairs this — there is no pair of these routes accurate on
+  either side of a common cut, and an analytic derivative cannot be the
+  derivative of a surface whose error jumps.
+
+  **One surface.** `S` and `1 - S` are integrated in the standardized variable
+  `z = (eta - mu)/sigma` on a Clenshaw-Curtis panel placed by the integrand:
+  `L(z) = -z^2/2 - e^{mu+sigma z}` is strictly concave
+  (`L'' = -(1 + sigma^2 e^{mu+sigma z}) <= -1`), so it is unimodal, its peak is
+  the unique root of a monotone equation — solved in LOG form
+  (`ln sigma + mu + sigma z - ln(-z) = 0`) so no `e^{mu+sigma z}` is ever
+  materialized, which the value form cannot do when the root sits at
+  `z ~ -mu/sigma` — and the points 60 e-folds below the peak bracket everything
+  representable. Node count is the panel's local-scale arclength
+  `T = int sqrt(1 + sigma^2 e^{mu+sigma z}) dz` (closed form) times a measured
+  density, plus a `sqrt(sigma)` term for the Bernstein-ellipse shrinkage that
+  `T` does not price: `T` is nearly constant at ~22 across the plane while the
+  measured requirement walks `65, 97, 193, 385, 769` at
+  `sigma = 0.5, 2, 8, 60, 200`, because `exp(-e^{sigma z})` is entire but its
+  modulus grows off the real axis with period `2 pi / sigma`. Everything
+  accumulates by (signed) log-sum-exp, so there is no value-space underflow to
+  escape and no `.ln()` of a cancelled quantity. Past `S ~ 0.6` the complement
+  panel supplies `1 - S` and `ln1p` finishes it, which is what retires the
+  rare-event asymptotic instead of re-gating it.
+
+  Worst absolute error of the panel on the same grid: **`9.3e-10`**, at
+  `ln S = -5.7e6`, i.e. `1.6e-16` relative — the representation floor of the
+  answer.
+
+  **The `sigma >= 8` derivative gate is gone.** Gaussian integration by parts in
+  `z` gives `sigma^j d^j S/d mu^j = int He_j(z) phi(z) f(z) dz`, so order 0 IS
+  the value: the tower is the same sum with a different Hermite weight on the
+  same nodes, and value/derivative cannot be on two surfaces even in principle.
+  What remained was only which derivative BASIS is better conditioned — the
+  direct tower (degrades at small sigma, where the answer is genuinely
+  `O(sigma^j)` while the summands are `O(1)`) or the rung/Touchard combination
+  (degrades at large sigma, #2610). A signed log-sum-exp knows its own
+  cancellation `cond = ln(sum|terms| / |sum terms|)` and its relative error is
+  `eps * e^cond`, so the tower is admitted on the solve of `eps e^cond = 1e-13`,
+  `cond <= 6.1` — exactly while it is at the working floor of what it displaces.
+  All 132 grid rows with `sigma >= 8` clear it, so the measured gate is a strict
+  superset of the constant.
+
+  Gates, replacing `cloglog_gumbel_quad_node_ladder_is_inert_at_a_constant_513_2469`
+  (which pinned the inertness that caused the escape hatch's failure): a 28-row
+  high-precision accuracy table (`6.7e-16` worst, relative); the
+  value/derivative consistency assertion whose ABSENCE let this live, since
+  every earlier gate scored an analytic derivative against its own value
+  function (`9.8e-10` worst, against the `6.5e-2` that named the defect); a
+  Richardson two-stencil smoothness sweep that converts a jump of size `d` into
+  `0.75 d/h^2` and so bounds any residual step at ~1 ulp; and a two-sided
+  statement that the node ladder now moves with sigma.
+
 - **The outer gradient contracted an inverse that belonged to neither operator
   (#2515).** The Laplace criterion ranks `½log|A|` for the exact observed
   information `A = ∇²_θθ L`; `B` is the Gauss--Newton majorizer, the
