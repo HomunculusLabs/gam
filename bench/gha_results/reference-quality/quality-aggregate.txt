@@ -2,30 +2,32 @@ execution record: /tmp/quality-report/quality_results.tsv
 === #1561 whole-suite quality meta-gate ===
 category        n scored GAMwin REFwin   medlogR  p(1-sided)      p_BH
 factors         3      3      1      2    0.0170      0.9093    0.9782
-families       64     63     32     31   -0.0006      0.3269    0.4904
+families       64     63     32     31   -0.0006      0.3220    0.4830
 manifolds      15     14     11      2   -0.1652      0.0087    0.0525
 misc           38     38     10     26    0.0015      0.9782    0.9782
-smooths        40     40     20     20    0.0000      0.2749    0.4904
+smooths        40     40     20     20    0.0000      0.2749    0.4830
 survival       14     14     10      4   -0.0176      0.0450    0.1351
 ------------------------------------------------------------------------
-OVERALL       174    172     84     85    0.0000      0.1523 
+OVERALL       174    172     84     85    0.0000      0.1505 
 
-CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.1523, median log(gam/ref)=0.0000, wins 84 / losses 85)
+CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.1505, median log(gam/ref)=0.0000, wins 84 / losses 85)
 NOTE: 2 pair(s) dropped (nonfinite/nonpositive).
 
 --- execution vs emission (silent-attrition guard) ---
 category     executed  failed  emitting
 calibration         9       0         0
 factors             2       0         1
-families           96      21        41
+families           96      23        41
 manifolds          11       1         8
 misc              259      20        20
 smooths            50       7        27
 survival           27       6         7
 
-SILENT ATTRITION: 22 test(s) failed BEFORE emitting a pair (excluded from the significance set):
+SILENT ATTRITION: 24 test(s) failed BEFORE emitting a pair (excluded from the significance set):
   METRIC_OFF/quality_metric families::quality_vs_brute_force_loo_poisson_log::alo_loo_recovers_truth_and_matches_exact_brute_force_poisson_log
   METRIC_OFF/quality_metric families::quality_vs_sklearn_binomial_logit::gam_binomial_logit_generalizes_on_heldout_prostate
+  GAM_ERROR/gam_fit_failed families::quality_vs_statsmodels_multinomial::multinomial_coefficient_covariance_equals_observed_information_inverse
+  GAM_ERROR/gam_fit_failed families::quality_vs_statsmodels_multinomial::multinomial_per_class_probability_se_intervals_are_calibrated_over_refits
   REF_ERROR/reference_tool families::quality_vs_synthetic_multinomial_deviance_identity::multinomial_recovers_decision_boundary_on_held_out_split
   METRIC_OFF/quality_metric families::quality_vs_vgam_beta_logistic_link_parameterization::gam_beta_logistic_link_matches_vgam_beta_parameterization
   GAM_ERROR/gam_fit_failed misc::broad_sweep_batch_i::sphere_pseudo_with_small_n
@@ -95,7 +97,7 @@ DILUTION: 13 paired pair(s) remain unresolved — their sign is not established 
   smooths/quality_vs_mgcv_matern_smooth::test: -1.240% +- 0.462% (2.71 SEM over 10 folds)
 
 Top tests GAM loses (largest log(gam/ref) > 0):
-  +1.4778  families/quality_vs_vgam_multinomial_smooth_by_factor [simplex_rmse_to_truth] gam=0.3259 vs vgam=0.07435
+  +1.4777  families/quality_vs_vgam_multinomial_smooth_by_factor [simplex_rmse_to_truth] gam=0.32588 vs vgam=0.07435
   +0.7880  survival/quality_vs_lifelines_weibull_aft_by::linear_acceleration::truth_surface [survival_rmse_to_truth] gam=0.093819 vs lifelines=0.042663
   +0.6426  misc/quality_vs_scam_monotone_baseline [rmse_truth] gam=0.25461 vs scam=0.1339
   +0.5600  misc/quality_vs_mass_ordinal_polr::cum [cum_rmse] gam=0.019019 vs vgam=0.010864
