@@ -5773,6 +5773,7 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
             // of the fixture is `cleared: true`, so the deciding eigenvalue is
             // non-negative.
             floored_min_eigenvalue: 0.05,
+            measured_resolution: 0.0,
             cleared: true,
         }),
     };

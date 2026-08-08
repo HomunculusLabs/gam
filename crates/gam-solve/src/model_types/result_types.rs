@@ -929,6 +929,13 @@ pub struct CurvatureFloorClearance {
     /// honest — none was taken.
     #[serde(default)]
     pub floored_min_eigenvalue: f64,
+    /// The MEASURED curvature resolution `‖δH‖₂` the definiteness test was
+    /// taken at (#2748): the maximum of the identities that are exactly zero in
+    /// exact arithmetic (the symmetrization defect, the penalty-map invariance
+    /// residual). `0.0` when neither could be taken, in which case the
+    /// historical `√ε·max(1, max|H_ii|)` arithmetic shift is what decided.
+    #[serde(default)]
+    pub measured_resolution: f64,
     /// Whether `H + diag(|g|)` is positive semidefinite on that sub-block.
     pub cleared: bool,
 }
@@ -1548,10 +1555,12 @@ impl std::fmt::Display for CertificationRefusal {
                     write!(
                         f,
                         " [interior lambda_min={:.3e}, gradient_floor={:.3e}, \
-                         floored lambda_min={:.3e} (this is the one the verdict was taken on)]",
+                         floored lambda_min={:.3e} (this is the one the verdict was taken on), \
+                         measured resolution={:.3e}]",
                         clearance.interior_min_eigenvalue,
                         clearance.gradient_floor,
-                        clearance.floored_min_eigenvalue
+                        clearance.floored_min_eigenvalue,
+                        clearance.measured_resolution
                     )?;
                 }
                 Ok(())

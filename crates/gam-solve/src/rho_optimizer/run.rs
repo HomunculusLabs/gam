@@ -1755,12 +1755,39 @@ pub fn audit_stationary_point(
 /// margin cleanly separates a true negative direction from accumulated
 /// floating-point noise on a flat (near-semidefinite) valley.
 pub(crate) fn certificate_hessian_is_psd(hessian: &Array2<f64>) -> Option<bool> {
+    certificate_hessian_is_psd_at_resolution(hessian, 0.0)
+}
+
+/// [`certificate_hessian_is_psd`] with an explicit **measured** curvature
+/// resolution, which the shift is raised to when it is the larger (#2748).
+///
+/// The `√ε·max(1, max|H_ii|)` shift above is a statement about the *arithmetic*
+/// that assembled `H` — accumulated round-off at the matrix's own scale. It is
+/// not, and does not claim to be, a statement about the *assembly*: an outer
+/// criterion Hessian is a derivative of a quantity computed through an inner
+/// solve, a log-determinant and a trace contraction, and its error is not
+/// bounded by `√ε·‖H‖`. `gam_linalg::curvature_resolution` calls the second
+/// quantity `‖δH‖₂` and requires it to be MEASURED, per site, from an identity
+/// that is exactly zero in exact arithmetic.
+///
+/// `measured_resolution` is that measurement. `0.0` reproduces the historical
+/// shift bit for bit, and since the two are combined by `max` this can only
+/// ever admit a point the previous rule refused — never refuse one it admitted.
+pub(crate) fn certificate_hessian_is_psd_at_resolution(
+    hessian: &Array2<f64>,
+    measured_resolution: f64,
+) -> Option<bool> {
     let n = hessian.nrows();
     if n == 0 || hessian.ncols() != n || hessian.iter().any(|v| !v.is_finite()) {
         return None;
     }
     let max_diag = (0..n).fold(0.0_f64, |acc, j| acc.max(hessian[[j, j]].abs()));
-    let shift = f64::EPSILON.sqrt() * max_diag.max(1.0);
+    let arithmetic_shift = f64::EPSILON.sqrt() * max_diag.max(1.0);
+    let shift = if measured_resolution.is_finite() && measured_resolution > arithmetic_shift {
+        measured_resolution
+    } else {
+        arithmetic_shift
+    };
     let mut chol = hessian.clone();
     for j in 0..n {
         chol[[j, j]] += shift;
@@ -1821,10 +1848,21 @@ pub(crate) fn certificate_hessian_is_psd_off_railed(
     railed: &[usize],
     invariance: Option<&Array2<f64>>,
 ) -> Option<bool> {
+    certificate_hessian_is_psd_off_railed_at_resolution(hessian, railed, invariance, 0.0)
+}
+
+/// [`certificate_hessian_is_psd_off_railed`] carrying a **measured** curvature
+/// resolution down to the definiteness test (#2748).
+pub(crate) fn certificate_hessian_is_psd_off_railed_at_resolution(
+    hessian: &Array2<f64>,
+    railed: &[usize],
+    invariance: Option<&Array2<f64>>,
+    measured_resolution: f64,
+) -> Option<bool> {
     let n = hessian.nrows();
     let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
     if railed.is_empty() && deflate.is_none() {
-        return certificate_hessian_is_psd(hessian);
+        return certificate_hessian_is_psd_at_resolution(hessian, measured_resolution);
     }
     let judged = crate::penalty_invariance::judged_subspace_basis(n, railed, deflate);
     let Some(judged) = judged else {
@@ -1845,10 +1883,50 @@ pub(crate) fn certificate_hessian_is_psd_off_railed(
                 sub[[i, j]] = hessian[[ri, rj]];
             }
         }
-        return certificate_hessian_is_psd(&sub);
+        return certificate_hessian_is_psd_at_resolution(&sub, measured_resolution);
     }
     let compressed = crate::penalty_invariance::compress_to_judged_subspace(hessian, &judged);
-    certificate_hessian_is_psd(&compressed)
+    certificate_hessian_is_psd_at_resolution(&compressed, measured_resolution)
+}
+
+/// The curvature resolution this site is entitled to: `‖δH‖₂` MEASURED from the
+/// identities that are exactly zero in exact arithmetic (#2748), never assumed.
+///
+/// Two are available here and both are free:
+///
+/// * the **symmetrization defect** `‖(H − Hᵀ)/2‖₂`. A Hessian is symmetric for
+///   any twice-continuously-differentiable criterion, and `H[i,j]` and `H[j,i]`
+///   are separate accumulations of the same mixed partial, so whatever survives
+///   is the assembly's error;
+/// * the **penalty-map invariance residual** `‖T'(H − diag(g))T‖₂` on the
+///   directions this certificate deflates. Along them the criterion is exactly
+///   constant in λ, so `t'H t = Σ_k g_k t_k²` identically and the residual is
+///   error and only error — in exactly the currency a `H + diag(|g|)` gate
+///   spends.
+///
+/// Both are certified LOWER bounds on `‖δH‖₂`, so their maximum is the strongest
+/// available fact. Returns `0.0` when neither can be taken, which leaves the
+/// historical `√ε` shift in force unchanged.
+pub(crate) fn measured_outer_curvature_resolution(
+    hessian: &Array2<f64>,
+    railed: &[usize],
+    gradient: &Array1<f64>,
+    invariance: Option<&Array2<f64>>,
+) -> f64 {
+    let n = hessian.nrows();
+    if n == 0 || hessian.ncols() != n {
+        return 0.0;
+    }
+    let symmetrization = gam_linalg::matrix::symmetrization_defect_2norm(hessian);
+    let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    let invariance_residual = deflate
+        .and_then(|basis| crate::penalty_invariance::judged_subspace_basis(n, railed, Some(basis)))
+        .and_then(|judged| crate::penalty_invariance::deflated_directions(n, &judged))
+        .and_then(|removed| {
+            crate::penalty_invariance::invariance_residual_2norm(hessian, gradient, &removed)
+        })
+        .unwrap_or(0.0);
+    symmetrization.max(invariance_residual).max(0.0)
 }
 
 /// Interior-PSD verdict judged ABOVE the per-coordinate gradient-residue noise
@@ -1926,7 +2004,18 @@ pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
     for k in 0..n {
         floored[[k, k]] += gradient[k].abs();
     }
-    certificate_hessian_is_psd_off_railed(&floored, excluded, invariance)
+    // The resolution is measured on the UNFLOORED `H` against the UNFLOORED
+    // gradient: `diag(|g|)` is a deliberate softening of the test, not part of
+    // the assembly, and the identities that measure `‖δH‖₂` are identities
+    // about `(H, g)` as evaluated (#2748).
+    let measured_resolution =
+        measured_outer_curvature_resolution(hessian, excluded, gradient, invariance);
+    certificate_hessian_is_psd_off_railed_at_resolution(
+        &floored,
+        excluded,
+        invariance,
+        measured_resolution,
+    )
 }
 
 /// Measure the gradient-residue floor's clearance on the interior sub-block:
@@ -2040,6 +2129,9 @@ pub(crate) fn interior_curvature_floor_clearance(
         interior_min_eigenvalue,
         gradient_floor,
         floored_min_eigenvalue,
+        measured_resolution: measured_outer_curvature_resolution(
+            hessian, excluded, gradient, invariance,
+        ),
         cleared,
     })
 }
