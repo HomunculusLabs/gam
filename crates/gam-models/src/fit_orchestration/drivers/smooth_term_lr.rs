@@ -442,7 +442,17 @@ impl SmoothLrSelectionReplay {
         let axis: Vec<f64> = (0..per_axis)
             .map(|step| low + (high - low) * (step as f64) / ((per_axis - 1) as f64))
             .collect();
-        let points = per_axis.pow(scales as u32);
+        // The grid gets ONE extra point: the fitted `λ̂` itself, `ln t_i = 0` on
+        // every axis. It has to be there twice over. The selection must be able
+        // to choose the scale the fit chose — for the observed data it IS that
+        // scale, by construction — and the control variate's conditional arm has
+        // to be read AT it, not at whichever node happens to be nearest. With
+        // `441^(1/2) = 21` points over a span of `35` the nearest node can be
+        // `0.9` away in `ln λ`, a factor of 2.4, and the "conditional" sample
+        // would then be a different law from the one whose tail the shift is
+        // added to.
+        let points = per_axis.pow(scales as u32) + 1;
+        let fitted_index = points - 1;
 
         // Per grid point: the whitened total penalty's eigenbasis, the criterion's
         // data operator `p_j = Λ_j/(1+Λ_j)`, the statistic's `w_j = 2f_j − f_j²`,
@@ -451,22 +461,18 @@ impl SmoothLrSelectionReplay {
         let mut shares = Vec::<Vec<f64>>::with_capacity(points);
         let mut weights_grid = Vec::<Vec<f64>>::with_capacity(points);
         let mut offsets = Vec::<f64>::with_capacity(points);
-        let mut fitted_index = 0usize;
-        let mut fitted_distance = f64::INFINITY;
         for point in 0..points {
             let mut remainder = point;
             let mut total = Array2::<f64>::zeros((dimension, dimension));
-            let mut distance = 0.0_f64;
             for scale in 0..scales {
-                let step = remainder % per_axis;
-                remainder /= per_axis;
-                let log_t = axis[step];
-                distance += log_t * log_t;
+                let log_t = if point == fitted_index {
+                    0.0
+                } else {
+                    let step = remainder % per_axis;
+                    remainder /= per_axis;
+                    axis[step]
+                };
                 total.scaled_add(log_t.exp(), &whitened[scale]);
-            }
-            if distance < fitted_distance {
-                fitted_distance = distance;
-                fitted_index = point;
             }
             for row in 0..dimension {
                 for column in 0..row {
@@ -501,9 +507,6 @@ impl SmoothLrSelectionReplay {
         let mut normals = vec![0.0_f64; dimension];
         let mut projected = vec![0.0_f64; dimension];
         let mut stream = SelectionDrawStream::new(dimension, draws);
-        // The fitted point is `ln t = 0` on every axis; the grid's nearest point
-        // to it is what the conditional arm is read at, so the two arms differ
-        // only by the selection and not by a discretization.
         for _ in 0..draws {
             stream.fill_normals(&mut normals);
             let mut best = f64::INFINITY;
