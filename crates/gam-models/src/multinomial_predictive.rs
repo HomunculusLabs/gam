@@ -84,14 +84,28 @@ use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 ///
 /// This is not a fudge factor on the answer: the sum is an EXACT identity of the
 /// estimand, so its deviation is the approximation's own error, measured at the
-/// row being published. `1e-2` accepts the regime the approximation is designed
-/// for (the two-extra-row multinomial studies on quasi-separated data measure
-/// `1.4e-2` at the worst row of a deliberately extreme fixture and `< 5e-3`
-/// typically) while refusing a row where the two Laplace expansions have stopped
-/// describing the same posterior. A refusal here is a real statement — the
-/// posterior at that row is not Laplace-describable — and it is louder and more
-/// useful than publishing a number nobody can bound.
-pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 1.0e-2;
+/// row being published.
+///
+/// The value is set from what the defect is worth as a predictor of the error
+/// that survives renormalisation, which is measured rather than assumed. Two
+/// independent fixtures:
+///
+/// ```text
+///   K = 3, p = 10, asymmetric quasi-separated, MCMC truth
+///       worst-row defect 1.37e-2   worst-row error after normalising 4.4e-3   (3.1x)
+///   K = 2, p = 2,  quasi-separated, exact 2-D quadrature truth
+///       worst-row defect 4.93e-3   worst-row error after normalising 5.2e-4   (9.5x)
+/// ```
+///
+/// So the defect OVER-states the published error by roughly 3-10x, and a bar at
+/// `5e-2` refuses where the published probability would be wrong by more than
+/// about `1e-2` — the second decimal of a probability, which is the right place
+/// to stop publishing one. A tighter bar would refuse rows whose answers are
+/// good to four decimals; a looser one would publish a probability wrong in its
+/// first. A refusal here is a real statement — the posterior at that row is not
+/// described by either Laplace expansion well enough — and it is louder and more
+/// useful than a number nobody can bound.
+pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 5.0e-2;
 
 /// Convergence target for the augmented-mode Newton solve, stated as the NEWTON
 /// DECREMENT `½ gᵀH⁻¹g` — the quadratic model's own bound on how much
@@ -468,8 +482,9 @@ impl<'a> MultinomialPredictiveModel<'a> {
     /// Newton with backtracking on the strictly convex negative penalized
     /// log-posterior, warm-started at `start`.
     ///
-    /// Returns the mode, its precision, the log-posterior value there, and the
-    /// log-determinant of the precision.
+    /// Returns the mode, the objective value there, and the log-determinant of
+    /// the precision at that point — the three quantities a Laplace ratio needs
+    /// from one side of it.
     fn augmented_mode(
         &self,
         start: &[f64],
@@ -525,8 +540,9 @@ impl<'a> MultinomialPredictiveModel<'a> {
             if !accepted {
                 // A convex objective whose Newton direction admits no ascent at
                 // any step length is at its optimum to floating-point
-                // resolution; the gradient test above simply has not fired
-                // because the scale is set by round-off.
+                // resolution; the decrement test above has not fired only
+                // because the remaining gain is below what the objective can
+                // represent, which is the same statement.
                 return Ok((theta, value, logdet));
             }
         }
