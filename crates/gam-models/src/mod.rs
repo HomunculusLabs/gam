@@ -91,6 +91,7 @@ pub mod marginal_slope_orthogonal;
 pub mod marginal_slope_shared;
 pub mod multinomial;
 pub mod multinomial_posterior;
+pub mod multinomial_predictive;
 pub(crate) mod multinomial_reml;
 pub use multinomial_reml::{MultinomialFamily, MultinomialLogitRowProgram};
 pub mod outer_subsample;

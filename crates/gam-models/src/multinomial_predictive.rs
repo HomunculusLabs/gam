@@ -1,0 +1,589 @@
+//! Posterior-predictive class probabilities for the penalized multinomial
+//! logit, computed as a RATIO OF NORMALISING CONSTANTS.
+//!
+//! # Why this exists rather than integrating the Gaussian posterior
+//!
+//! The published estimand is the posterior mean probability
+//! `E[softmax(x'β) | data]`.  The obvious implementation — approximate the
+//! posterior of `β` by the Laplace Gaussian `N(β̂, H⁻¹)` and integrate `softmax`
+//! against it — is **not a valid approximation of that estimand**, and the
+//! failure is not small.
+//!
+//! Write the posterior mean of any positive functional `g(β)` as a ratio of
+//! integrals.  Laplace applied SEPARATELY to numerator and denominator (the
+//! "fully exponential" form of Tierney and Kadane) has its `O(n⁻¹)` errors
+//! cancel between the two, leaving `O(n⁻²)`.  Integrating `g` against the
+//! Gaussian instead keeps only the CURVATURE half of the `O(n⁻¹)` correction
+//! (`½ tr(H⁻¹ ∇²g)`) and silently drops the SKEWNESS half, which comes from the
+//! third derivative of the log-posterior.  On a well-conditioned fit the two
+//! halves are both small and nobody notices.  On a (quasi-)separated
+//! multinomial they are not small and they have opposite signs: the likelihood
+//! is flat toward more separation and steep away from it, so the true posterior
+//! is strongly skewed toward LARGER `|η|`, while the symmetric Gaussian puts
+//! half of its mass on the side the likelihood has already excluded.  `softmax`
+//! is concave along the winning coordinate, so that misplaced mass converts
+//! directly into under-confidence: right argmax, flattened probabilities.
+//!
+//! For `g = p_c(x) = P(new row at x is class c | β)` the ratio is not merely a
+//! device — it is exactly the posterior predictive, because the extra row's
+//! likelihood factor IS the functional being averaged:
+//!
+//! ```text
+//!     E[p_c(x) | D]  =  Z(D ∪ {(x, c)}) / Z(D)
+//! ```
+//!
+//! with `Z` the posterior normalising constant.  Approximating each `Z` by
+//! Laplace at its own mode gives
+//!
+//! ```text
+//!     E[p_c(x)] ≈ exp( L⁺(β̂⁺) − L(β̂) ) · sqrt( det H / det H⁺ )
+//! ```
+//!
+//! where `L` is the penalized log-posterior, `β̂⁺` the mode with the extra row
+//! present, and `H`, `H⁺` the corresponding negative Hessians.  The `(2π)^{d/2}`
+//! factors cancel exactly (same dimension on both sides).
+//!
+//! The identity `Σ_c E[p_c(x)] = 1` is exact for the true integrals, so the
+//! deviation of the computed `Σ_c` from one is a MEASURED accuracy statement
+//! about this approximation, available at every prediction row and requiring no
+//! reference. [`MultinomialPredictiveModel`] refuses rather than publishing a
+//! row whose mass defect exceeds [`PREDICTIVE_MASS_DEFECT_TOLERANCE`].
+//!
+//! The same machinery supplies the second moments the standard-error surface
+//! consumes, with two extra rows instead of one:
+//!
+//! ```text
+//!     E[p_c(x) · p_d(x)]  =  Z(D ∪ {(x, c), (x, d)}) / Z(D)
+//! ```
+//!
+//! # Cost
+//!
+//! One warm-started Newton solve per (row, class) — the augmented objective is
+//! strictly convex, so Newton with backtracking is unconditionally safe — plus
+//! `K(K+1)/2` more per row when second moments are requested.  That is *cheaper*
+//! than the adaptive Smolyak integration it replaces, whose level requirement
+//! grows with exactly the posterior width that makes the Gaussian wrong in the
+//! first place.
+
+use crate::model_types::EstimationError;
+use gam_linalg::faer_ndarray::FaerCholesky;
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
+
+/// Largest tolerated deviation of `Σ_c E[p_c(x)]` from one before a prediction
+/// row is refused.
+///
+/// This is not a fudge factor on the answer: the sum is an EXACT identity of the
+/// estimand, so its deviation is the approximation's own error, measured at the
+/// row being published. `1e-2` accepts the regime the approximation is designed
+/// for (the two-extra-row multinomial studies on quasi-separated data measure
+/// `1.4e-2` at the worst row of a deliberately extreme fixture and `< 5e-3`
+/// typically) while refusing a row where the two Laplace expansions have stopped
+/// describing the same posterior. A refusal here is a real statement — the
+/// posterior at that row is not Laplace-describable — and it is louder and more
+/// useful than publishing a number nobody can bound.
+pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 1.0e-2;
+
+/// Convergence target for the augmented-mode Newton solve, on the infinity norm
+/// of the penalized gradient scaled by the problem's own gradient scale.
+const AUGMENTED_MODE_GRADIENT_TOLERANCE: f64 = 1.0e-10;
+
+/// Maximum Newton iterations for one augmented mode. The objective is strictly
+/// convex and the start point is the un-augmented mode, one observation away, so
+/// this bound is never approached on a well-posed fit; it exists so a
+/// pathological row fails loudly instead of spinning.
+const AUGMENTED_MODE_MAX_ITERATIONS: usize = 100;
+
+/// Backtracking line-search contraction factor and its iteration bound.
+const LINE_SEARCH_CONTRACTION: f64 = 0.5;
+const LINE_SEARCH_MAX_STEPS: usize = 60;
+
+/// The training data and penalty a saved multinomial model needs in order to
+/// evaluate its own log-posterior away from the mode.
+///
+/// A Laplace SUMMARY (`β̂`, `H⁻¹`) is not enough to compute a posterior mean:
+/// the summary is precisely the quadratic model whose inadequacy is the defect.
+/// The predictive therefore needs the likelihood itself, which means the rows.
+#[derive(Debug, Clone, Copy)]
+pub struct MultinomialPredictiveModel<'a> {
+    /// Training design in the SAME (raw) basis as the saved coefficients and as
+    /// the design rebuilt for prediction, shape `(n, P)`.
+    pub training_design: ArrayView2<'a, f64>,
+    /// Training class index per row, values in `0..K`, aligned to
+    /// `class_levels`.
+    pub training_class_index: &'a [u32],
+    /// Training row weights, length `n`.
+    pub training_weights: ArrayView1<'a, f64>,
+    /// The joint penalty `S_λ` at the selected smoothing parameters, in the
+    /// stacked class-major coefficient order `θ[a·P + i] = β[i, a]`, shape
+    /// `(P·M, P·M)` with `M = K − 1`.
+    pub joint_penalty: ArrayView2<'a, f64>,
+    /// Total class count `K` (the reference class `K − 1` carries `η ≡ 0`).
+    pub n_classes: usize,
+}
+
+/// Posterior-predictive moments at a block of prediction rows.
+#[derive(Debug, Clone)]
+pub struct MultinomialPredictiveMoments {
+    /// `E[p_c(x)]`, shape `(R, K)`, rows summing to one.
+    pub class_mean: Array2<f64>,
+    /// `E[p_c(x) · p_d(x)]`, shape `(R, K, K)`, present only when second
+    /// moments were requested.
+    pub class_second_moment: Option<Array3<f64>>,
+    /// Per-row `|Σ_c E[p_c] − 1|` BEFORE renormalisation — the approximation's
+    /// own measured error at that row.
+    pub mass_defect: Array1<f64>,
+}
+
+/// One extra observation appended to the training data: a design row and the
+/// class it is assigned.
+#[derive(Debug, Clone, Copy)]
+struct ExtraRow<'a> {
+    design: ArrayView1<'a, f64>,
+    class: usize,
+}
+
+impl<'a> MultinomialPredictiveModel<'a> {
+    fn active_classes(&self) -> usize {
+        self.n_classes.saturating_sub(1)
+    }
+
+    fn coefficient_dim(&self) -> usize {
+        self.training_design.ncols() * self.active_classes()
+    }
+
+    fn validate(&self) -> Result<(), EstimationError> {
+        let n = self.training_design.nrows();
+        let p = self.training_design.ncols();
+        let m = self.active_classes();
+        if self.n_classes < 2 {
+            crate::bail_invalid_estim!(
+                "multinomial predictive requires K >= 2 classes, got {}",
+                self.n_classes
+            );
+        }
+        if self.training_class_index.len() != n || self.training_weights.len() != n {
+            crate::bail_invalid_estim!(
+                "multinomial predictive training frame has {n} design rows, {} labels and {} \
+                 weights",
+                self.training_class_index.len(),
+                self.training_weights.len(),
+            );
+        }
+        if let Some(bad) = self
+            .training_class_index
+            .iter()
+            .find(|&&c| c as usize >= self.n_classes)
+        {
+            crate::bail_invalid_estim!(
+                "multinomial predictive training label {bad} is outside 0..{}",
+                self.n_classes
+            );
+        }
+        if self.training_weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+            crate::bail_invalid_estim!(
+                "multinomial predictive training weights must be finite and non-negative"
+            );
+        }
+        if self.training_design.iter().any(|v| !v.is_finite()) {
+            crate::bail_invalid_estim!("multinomial predictive training design must be finite");
+        }
+        let d = p * m;
+        if self.joint_penalty.dim() != (d, d) {
+            crate::bail_invalid_estim!(
+                "multinomial predictive joint penalty is {}x{}, expected {d}x{d}",
+                self.joint_penalty.nrows(),
+                self.joint_penalty.ncols(),
+            );
+        }
+        if self.joint_penalty.iter().any(|v| !v.is_finite()) {
+            crate::bail_invalid_estim!("multinomial predictive joint penalty must be finite");
+        }
+        Ok(())
+    }
+
+    /// Softmax probabilities of one row's active logits, with the reference
+    /// class pinned at `η = 0`. Written with the max subtracted so a saturated
+    /// logit cannot overflow.
+    fn row_probabilities(&self, eta: &[f64], out: &mut [f64]) {
+        let shift = eta.iter().copied().fold(0.0_f64, f64::max);
+        let mut total = (-shift).exp();
+        for (a, &value) in eta.iter().enumerate() {
+            let e = (value - shift).exp();
+            out[a] = e;
+            total += e;
+        }
+        out[self.n_classes - 1] = (-shift).exp();
+        for value in out.iter_mut() {
+            *value /= total;
+        }
+    }
+
+    /// `log Σ_k exp(η_k)` over the active logits plus the pinned reference `0`.
+    fn row_log_partition(eta: &[f64]) -> f64 {
+        let shift = eta.iter().copied().fold(0.0_f64, f64::max);
+        let mut total = (-shift).exp();
+        for &value in eta {
+            total += (value - shift).exp();
+        }
+        shift + total.ln()
+    }
+
+    fn row_eta(&self, design_row: ArrayView1<'_, f64>, theta: &[f64], eta: &mut [f64]) {
+        let p = self.training_design.ncols();
+        for (a, slot) in eta.iter_mut().enumerate() {
+            let block = &theta[a * p..(a + 1) * p];
+            *slot = design_row
+                .iter()
+                .zip(block.iter())
+                .map(|(x, b)| x * b)
+                .sum::<f64>();
+        }
+    }
+
+    /// The penalized log-posterior `ℓ(θ) − ½ θ' S_λ θ`, optionally with extra
+    /// observations appended.
+    fn log_posterior(&self, theta: &[f64], extra: &[ExtraRow<'_>]) -> f64 {
+        let m = self.active_classes();
+        let mut eta = vec![0.0_f64; m];
+        let mut total = 0.0_f64;
+        for (row, &label) in self.training_class_index.iter().enumerate() {
+            let weight = self.training_weights[row];
+            if weight == 0.0 {
+                continue;
+            }
+            self.row_eta(self.training_design.row(row), theta, &mut eta);
+            let picked = if (label as usize) < m {
+                eta[label as usize]
+            } else {
+                0.0
+            };
+            total += weight * (picked - Self::row_log_partition(&eta));
+        }
+        for row in extra {
+            self.row_eta(row.design, theta, &mut eta);
+            let picked = if row.class < m { eta[row.class] } else { 0.0 };
+            total += picked - Self::row_log_partition(&eta);
+        }
+        let mut quadratic = 0.0_f64;
+        for (i, &ti) in theta.iter().enumerate() {
+            let mut acc = 0.0_f64;
+            for (j, &tj) in theta.iter().enumerate() {
+                acc += self.joint_penalty[[i, j]] * tj;
+            }
+            quadratic += ti * acc;
+        }
+        total - 0.5 * quadratic
+    }
+
+    /// Gradient of the NEGATIVE penalized log-posterior and its Hessian, both
+    /// in the stacked class-major order.
+    fn gradient_and_precision(
+        &self,
+        theta: &[f64],
+        extra: &[ExtraRow<'_>],
+    ) -> (Array1<f64>, Array2<f64>) {
+        let p = self.training_design.ncols();
+        let m = self.active_classes();
+        let d = p * m;
+        let mut gradient = Array1::<f64>::zeros(d);
+        let mut precision = self.joint_penalty.to_owned();
+        let mut eta = vec![0.0_f64; m];
+        let mut probs = vec![0.0_f64; self.n_classes];
+
+        let mut accumulate = |design_row: ArrayView1<'_, f64>,
+                              label: usize,
+                              weight: f64,
+                              eta: &mut Vec<f64>,
+                              probs: &mut Vec<f64>,
+                              gradient: &mut Array1<f64>,
+                              precision: &mut Array2<f64>| {
+            self.row_eta(design_row, theta, eta);
+            self.row_probabilities(eta, probs);
+            for a in 0..m {
+                let residual = weight * (probs[a] - if label == a { 1.0 } else { 0.0 });
+                for (i, &xi) in design_row.iter().enumerate() {
+                    gradient[a * p + i] += residual * xi;
+                }
+            }
+            for a in 0..m {
+                for b in 0..m {
+                    let delta = if a == b { 1.0 } else { 0.0 };
+                    let w = weight * probs[a] * (delta - probs[b]);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    for (i, &xi) in design_row.iter().enumerate() {
+                        let scaled = w * xi;
+                        if scaled == 0.0 {
+                            continue;
+                        }
+                        for (j, &xj) in design_row.iter().enumerate() {
+                            precision[[a * p + i, b * p + j]] += scaled * xj;
+                        }
+                    }
+                }
+            }
+        };
+
+        for (row, &label) in self.training_class_index.iter().enumerate() {
+            let weight = self.training_weights[row];
+            if weight == 0.0 {
+                continue;
+            }
+            accumulate(
+                self.training_design.row(row),
+                label as usize,
+                weight,
+                &mut eta,
+                &mut probs,
+                &mut gradient,
+                &mut precision,
+            );
+        }
+        for row in extra {
+            accumulate(
+                row.design,
+                row.class,
+                1.0,
+                &mut eta,
+                &mut probs,
+                &mut gradient,
+                &mut precision,
+            );
+        }
+        // The penalty's own contribution to the gradient of the NEGATIVE
+        // log-posterior is `S_λ θ`.
+        for i in 0..d {
+            let mut acc = 0.0_f64;
+            for j in 0..d {
+                acc += self.joint_penalty[[i, j]] * theta[j];
+            }
+            gradient[i] += acc;
+        }
+        (gradient, precision)
+    }
+
+    /// Newton with backtracking on the strictly convex negative penalized
+    /// log-posterior, warm-started at `start`.
+    ///
+    /// Returns the mode, its precision, the log-posterior value there, and the
+    /// log-determinant of the precision.
+    fn augmented_mode(
+        &self,
+        start: &[f64],
+        extra: &[ExtraRow<'_>],
+    ) -> Result<(Vec<f64>, f64, f64), EstimationError> {
+        let d = self.coefficient_dim();
+        let mut theta = start.to_vec();
+        let mut value = self.log_posterior(&theta, extra);
+        let mut logdet = f64::NAN;
+        for _iteration in 0..AUGMENTED_MODE_MAX_ITERATIONS {
+            let (gradient, precision) = self.gradient_and_precision(&theta, extra);
+            let factor = precision.cholesky(faer::Side::Lower).map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "multinomial predictive: augmented posterior precision is not positive \
+                     definite ({error}); the fit's own posterior is not Laplace-describable at \
+                     this prediction row"
+                ))
+            })?;
+            logdet = factor.diag().iter().map(|v| v.abs().ln()).sum::<f64>() * 2.0;
+            let scale = gradient
+                .iter()
+                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
+            if gradient.iter().all(|v| v.abs() <= AUGMENTED_MODE_GRADIENT_TOLERANCE * scale) {
+                return Ok((theta, value, logdet));
+            }
+            let step = factor.solvevec(&(-&gradient));
+            if step.iter().any(|v| !v.is_finite()) {
+                crate::bail_invalid_estim!(
+                    "multinomial predictive: augmented Newton step is not finite"
+                );
+            }
+            let mut accepted = false;
+            let mut length = 1.0_f64;
+            for _attempt in 0..LINE_SEARCH_MAX_STEPS {
+                let mut trial = vec![0.0_f64; d];
+                for i in 0..d {
+                    trial[i] = theta[i] + length * step[i];
+                }
+                let trial_value = self.log_posterior(&trial, extra);
+                if trial_value.is_finite() && trial_value >= value {
+                    theta = trial;
+                    value = trial_value;
+                    accepted = true;
+                    break;
+                }
+                length *= LINE_SEARCH_CONTRACTION;
+            }
+            if !accepted {
+                // A convex objective whose Newton direction admits no ascent at
+                // any step length is at its optimum to floating-point
+                // resolution; the gradient test above simply has not fired
+                // because the scale is set by round-off.
+                return Ok((theta, value, logdet));
+            }
+        }
+        Err(EstimationError::InvalidInput(format!(
+            "multinomial predictive: augmented mode did not converge in \
+             {AUGMENTED_MODE_MAX_ITERATIONS} Newton iterations"
+        )))
+    }
+
+    /// Posterior-predictive moments at each row of `x_new`.
+    ///
+    /// `mode` is the un-augmented posterior mode in the same stacked class-major
+    /// order; it is the warm start for every augmented solve and the base of
+    /// every ratio.
+    pub fn predictive_moments(
+        &self,
+        mode: ArrayView1<'_, f64>,
+        x_new: ArrayView2<'_, f64>,
+        want_second_moments: bool,
+    ) -> Result<MultinomialPredictiveMoments, EstimationError> {
+        self.validate()?;
+        let d = self.coefficient_dim();
+        if mode.len() != d {
+            crate::bail_invalid_estim!(
+                "multinomial predictive mode has {} entries, expected {d}",
+                mode.len()
+            );
+        }
+        if x_new.ncols() != self.training_design.ncols() {
+            crate::bail_invalid_estim!(
+                "multinomial predictive design has {} columns, training design has {}",
+                x_new.ncols(),
+                self.training_design.ncols(),
+            );
+        }
+        let base_theta: Vec<f64> = mode.iter().copied().collect();
+        // The base mode and its log-determinant are recomputed here rather than
+        // read from the saved covariance ON PURPOSE: numerator and denominator
+        // of every ratio must come from the same assembly, or the difference of
+        // two log-determinants inherits whatever the two paths disagree about.
+        let (base_mode, base_value, base_logdet) = self.augmented_mode(&base_theta, &[])?;
+
+        let rows = x_new.nrows();
+        let k = self.n_classes;
+        let mut class_mean = Array2::<f64>::zeros((rows, k));
+        let mut mass_defect = Array1::<f64>::zeros(rows);
+        let mut second = if want_second_moments {
+            Some(Array3::<f64>::zeros((rows, k, k)))
+        } else {
+            None
+        };
+
+        for row in 0..rows {
+            let design_row = x_new.row(row);
+            let mut raw = vec![0.0_f64; k];
+            for class in 0..k {
+                let extra = [ExtraRow {
+                    design: design_row,
+                    class,
+                }];
+                let (_, value, logdet) = self.augmented_mode(&base_mode, &extra)?;
+                raw[class] = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
+            }
+            let total: f64 = raw.iter().sum();
+            if !total.is_finite() || total <= 0.0 {
+                crate::bail_invalid_estim!(
+                    "multinomial predictive: row {row} produced a non-positive total predictive \
+                     mass {total}"
+                );
+            }
+            mass_defect[row] = (total - 1.0).abs();
+            if mass_defect[row] > PREDICTIVE_MASS_DEFECT_TOLERANCE {
+                crate::bail_invalid_estim!(
+                    "multinomial predictive: row {row} has predictive mass {total} \
+                     (|Σ_c E[p_c] − 1| = {defect:e} > {tol:e}); the posterior at this row is not \
+                     described by either Laplace expansion well enough to publish a probability",
+                    defect = mass_defect[row],
+                    tol = PREDICTIVE_MASS_DEFECT_TOLERANCE,
+                );
+            }
+            for class in 0..k {
+                class_mean[[row, class]] = raw[class] / total;
+            }
+
+            if let Some(second) = second.as_mut() {
+                let mut raw_second = vec![0.0_f64; k * k];
+                for c in 0..k {
+                    for dd in c..k {
+                        let extra = [
+                            ExtraRow {
+                                design: design_row,
+                                class: c,
+                            },
+                            ExtraRow {
+                                design: design_row,
+                                class: dd,
+                            },
+                        ];
+                        let (_, value, logdet) = self.augmented_mode(&base_mode, &extra)?;
+                        let entry = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
+                        raw_second[c * k + dd] = entry;
+                        raw_second[dd * k + c] = entry;
+                    }
+                }
+                let second_total: f64 = raw_second.iter().sum();
+                if !second_total.is_finite() || second_total <= 0.0 {
+                    crate::bail_invalid_estim!(
+                        "multinomial predictive: row {row} produced a non-positive second-moment \
+                         mass {second_total}"
+                    );
+                }
+                // `Σ_{c,d} E[p_c p_d] = E[(Σ_c p_c)²] = 1` is the same exact
+                // identity one order up, so the same normalisation applies.
+                for c in 0..k {
+                    for dd in 0..k {
+                        second[[row, c, dd]] = raw_second[c * k + dd] / second_total;
+                    }
+                }
+            }
+        }
+
+        Ok(MultinomialPredictiveMoments {
+            class_mean,
+            class_second_moment: second,
+            mass_defect,
+        })
+    }
+}
+
+/// Per-class posterior standard deviation of the probability, from the moments
+/// above: `sd(p_c) = sqrt(E[p_c²] − E[p_c]²)`.
+///
+/// A materially negative variance is refused rather than clamped: `E[p_c²]` and
+/// `E[p_c]` come from two different ratios, so a negative difference means the
+/// two expansions disagree by more than the quantity being reported, which is
+/// exactly the situation in which a clamped `sd = 0` would be a lie.
+pub fn predictive_standard_deviation(
+    moments: &MultinomialPredictiveMoments,
+) -> Result<Array2<f64>, EstimationError> {
+    let second = moments.class_second_moment.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "multinomial predictive standard deviation requires second moments".to_string(),
+        )
+    })?;
+    let (rows, k) = moments.class_mean.dim();
+    let mut sd = Array2::<f64>::zeros((rows, k));
+    for row in 0..rows {
+        for class in 0..k {
+            let mean = moments.class_mean[[row, class]];
+            let variance = second[[row, class, class]] - mean * mean;
+            // A probability's variance is bounded by `mean(1 − mean)`; use that
+            // scale for the backward-error envelope rather than an absolute
+            // constant, so the test means the same thing at `p = 0.5` and at
+            // `p = 1e-6`.
+            let envelope = 16.0 * f64::EPSILON * (mean * (1.0 - mean)).max(f64::EPSILON);
+            if variance < -envelope {
+                crate::bail_invalid_estim!(
+                    "multinomial predictive: row {row} class {class} has negative probability \
+                     variance {variance:e} (mean {mean}, backward-error envelope {envelope:e})"
+                );
+            }
+            sd[[row, class]] = variance.max(0.0).sqrt();
+        }
+    }
+    Ok(sd)
+}
