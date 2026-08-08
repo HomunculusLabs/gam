@@ -755,10 +755,12 @@ pub(crate) fn invert_identified_rho_hessian(
                  chain-rule term of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, \
                  not a resolution; the curvature resolution of an analytically-formed eigenvalue \
                  is Weyl's ||dH||_2, measured here as {curvature_resolution} from [{components}] \
-                 -- #2690, #2748); the outer loop certified this point as a minimum, and the \
-                 curvature is larger than everything this assembly's own exactly-zero identities \
-                 say it could have got wrong, so this is a genuine contradiction rather than an \
-                 unresolvable direction"
+                 -- #2690, #2748); the penalty map certified {expected_structural_nullity} null \
+                 direction(s) and {deflated_dimension} were deflated before judging, so the \
+                 direction above was judged; the outer loop certified this point as a minimum, \
+                 and the curvature is larger than everything this assembly's own exactly-zero \
+                 identities say it could have got wrong, so this is a genuine contradiction \
+                 rather than an unresolvable direction"
             ));
         }
     }
@@ -1192,10 +1194,12 @@ fn dump_indefinite_rho_hessian_diagnostic(
                 continue;
             }
             log::warn!(
-                "[INDEF-HESS] structural_redundancy_detected pair=({},{}) cos={:.6} antisym_proj={:.4e}",
+                "[INDEF-HESS] structural_redundancy_detected pair=({},{}) cos={:.6} \
+                 one_minus_cos={:.6e} antisym_proj={:.4e}",
                 p.i,
                 p.j,
                 p.cos,
+                1.0 - p.cos,
                 p.antisym_proj,
             );
             break;
@@ -1207,10 +1211,11 @@ fn dump_indefinite_rho_hessian_diagnostic(
     if n_pen <= INDEF_HESS_PAIR_DUMP_GRID_MAX_K {
         for p in &pairs {
             log::warn!(
-                "[INDEF-HESS] pair=({},{}) cos={:.6} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
+                "[INDEF-HESS] pair=({},{}) cos={:.6} one_minus_cos={:.6e} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
                 p.i,
                 p.j,
                 p.cos,
+                1.0 - p.cos,
                 tr_aa[p.i],
                 tr_aa[p.j],
                 p.antisym_proj,
