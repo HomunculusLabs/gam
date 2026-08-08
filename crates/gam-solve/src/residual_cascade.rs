@@ -5615,13 +5615,18 @@ mod refinement_decision_tests {
 
     #[test]
     fn auto_reml_refuses_past_the_certified_spectrum_budget() {
-        // One level finer than `auto_reml_certifies_past_the_dense_gram_cache`,
-        // which quadruples the finest box net and takes the design past the
-        // eigendecomposition's memory budget on the same tiny row set.
+        // Two levels finer than `auto_reml_certifies_past_the_dense_gram_cache`,
+        // which quadruples the finest box net twice over and takes the design
+        // past the decomposition's memory budget on the same tiny row set. It
+        // was ONE level finer while the budget admitted 2896 columns; #2758 took
+        // the residency from seven-plus `m²` blocks to one packed triangle, the
+        // derived cap moved with it, and level 7 (`m = 6704`, measured) now
+        // certifies. The width is not asserted against a literal — the premise
+        // below compares it to the budget itself.
         let (x1, x2, y) = dense_fixture(6);
         let weights = vec![1.0; y.len()];
         let axes: [&[f64]; 2] = [&x1, &x2];
-        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 7)
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 8)
             .expect("iterative-route cascade design");
         assert!(
             design.core.m > CERTIFIED_SPECTRUM_MAX,
@@ -6130,17 +6135,29 @@ mod refinement_decision_tests {
 
             let condition = (largest + lambda) / (smallest + lambda);
             // The three quadratic forms are sums of positive terms, so their
-            // relative error is the solve's own `O(m)·eps·cond(A)`. `R` is not:
-            // BOTH routes form it by subtracting a fitted energy from an anchor
-            // energy, so its relative error carries that cancellation's own
-            // condition number, `anchor/|R|`. Charging the sum of the two is the
-            // honest comparator bound.
+            // relative error is `O(m)·eps·cond(A)`. `R` is not: BOTH routes form
+            // it by subtracting a fitted energy from an anchor energy, so its
+            // relative error carries that cancellation's own condition number,
+            // `anchor/|R|`. Charging the sum of the two is the honest bound.
+            //
+            // AND IT IS CHARGED TWICE, once per comparand. This is a comparison
+            // of two INDEPENDENT computations of one quantity, so the gap it can
+            // legitimately show is the sum of both forward errors — the solve's,
+            // and the spectral route's own mode sum over the same spectrum with
+            // the same condition number. Charging one of them treated the
+            // spectral side as exact, which no decomposition is: at `m = 20` and
+            // `cond(A) = 1.005` the one-sided bound is `4.46e-15` and the
+            // measured gap `4.60e-15`, i.e. the gate was failing on the last
+            // bit of a perfectly conditioned 20-column problem the moment the
+            // decomposition's rounding differed. Two equal terms, not a factor
+            // chosen to admit a number.
             let cancellation = spectrum.anchor_energy[0] / rss.abs().max(f64::MIN_POSITIVE);
+            let comparands = 2.0;
             let bounds = [
-                core.m as f64 * f64::EPSILON * (condition + cancellation),
-                core.m as f64 * f64::EPSILON * condition,
-                core.m as f64 * f64::EPSILON * condition,
-                core.m as f64 * f64::EPSILON * condition,
+                comparands * core.m as f64 * f64::EPSILON * (condition + cancellation),
+                comparands * core.m as f64 * f64::EPSILON * condition,
+                comparands * core.m as f64 * f64::EPSILON * condition,
+                comparands * core.m as f64 * f64::EPSILON * condition,
             ];
             for (((&a, &b), name), bound) in
                 spectral.iter().zip(solved.iter()).zip(names).zip(bounds)
