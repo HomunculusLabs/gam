@@ -4230,7 +4230,12 @@ impl ResidualCascadeDesign {
         fit: &ResidualCascadeFit,
         exponent: f64,
     ) -> Result<NextLevelAssessment, String> {
-        Ok(self.plan_level_at_exponent(fit, exponent)?.assessment)
+        // The same threshold the refinement loop decides on, so the assessment
+        // a caller reads is the assessment the loop acted on rather than a
+        // differently-converged neighbour of it.
+        Ok(self
+            .plan_level_at_exponent(fit, exponent, Some(REFINE_TOL * fit.rss_pen))?
+            .assessment)
     }
 
     /// Assess the candidate level at `exponent` AND decide what the refinement
@@ -4257,6 +4262,7 @@ impl ResidualCascadeDesign {
         &self,
         fit: &ResidualCascadeFit,
         exponent: f64,
+        decision_threshold: Option<f64>,
     ) -> Result<NextLevelPlan, String> {
         let core = &self.core;
         if !Arc::ptr_eq(core, &fit.core) {
@@ -4309,11 +4315,22 @@ impl ResidualCascadeDesign {
                 g[j as usize] += wr * wendland(rad);
             });
         }
-        let g2: f64 = g.iter().map(|v| v * v).sum();
         let d_next = level_weight(exponent, core.sobolev_s, core.dim);
         let lambda = gam_problem::checked_exp_log_strength(fit.log_lambda)
             .map_err(|error| format!("residual cascade refinement: {error}"))?;
-        let gain_bound = g2 / (lambda * d_next);
+        let bracket = certified_refinement_gain(
+            core,
+            &CandidateLevel {
+                centers: &candidates,
+                grid: &grid,
+                delta,
+                ridge: lambda * d_next,
+            },
+            &g,
+            lambda,
+            decision_threshold,
+        )?;
+        let gain_bound = bracket.upper;
         let candidate_penalized_modes = net.len();
         let candidate_columns = core.nullity() + candidate_penalized_modes;
         let identifiable_directions = core.y.len().saturating_sub(core.nullity());
@@ -4322,7 +4339,7 @@ impl ResidualCascadeDesign {
         // level count.
         let extends_last = h == core.levels[next_l - 1].h;
         if !extends_last && next_l >= MAX_LEVELS {
-            return Ok(NextLevelPlan::exhausted(
+            return Ok(NextLevelPlan::exhausted_with(
                 NextLevelAssessment::CapacityExceeded {
                     obstruction: RefinementObstruction::LevelCapacity {
                         levels: next_l,
@@ -4330,6 +4347,7 @@ impl ResidualCascadeDesign {
                     },
                     gain_bound,
                 },
+                bracket,
             ));
         }
         // Penalized modes this design may still carry with the certified
@@ -4360,11 +4378,12 @@ impl ResidualCascadeDesign {
                     certified_spectrum_max: CERTIFIED_SPECTRUM_MAX,
                 }
             };
-            return Ok(NextLevelPlan::exhausted(
+            return Ok(NextLevelPlan::exhausted_with(
                 NextLevelAssessment::CapacityExceeded {
                     obstruction,
                     gain_bound,
                 },
+                bracket,
             ));
         }
         let candidate_count = candidates.len();
@@ -4389,6 +4408,7 @@ impl ResidualCascadeDesign {
         let complete = selection.len() == candidate_count;
         Ok(NextLevelPlan {
             assessment: NextLevelAssessment::GainBound(gain_bound),
+            gain: Some(bracket),
             selection,
             complete,
             extends_last,
@@ -4396,10 +4416,326 @@ impl ResidualCascadeDesign {
     }
 }
 
+/// The candidate level a refinement gain is being certified for: its centers,
+/// the hash grid that finds the rows each one supports, the bump radius, and the
+/// exact ridge `λ·d_{L+1}` its columns would carry.
+struct CandidateLevel<'a> {
+    centers: &'a [[f64; 3]],
+    grid: &'a HashGrid,
+    delta: f64,
+    ridge: f64,
+}
+
+impl CandidateLevel<'_> {
+    /// `X₂ v`, the candidate design applied to a coefficient vector.
+    fn apply(&self, core: &Core, v: &[f64], out: &mut [f64]) {
+        for (row, z) in core.z.iter().enumerate() {
+            let mut value = 0.0;
+            self.grid.for_neighbors(z, |j| {
+                let j = j as usize;
+                let radius = dist2(z, &self.centers[j], core.dim).sqrt() / self.delta;
+                value += wendland(radius) * v[j];
+            });
+            out[row] = value;
+        }
+    }
+
+    /// `X₂ᵀ u`, the candidate design's transpose applied to a row vector.
+    fn apply_transpose(&self, core: &Core, u: &[f64], out: &mut [f64]) {
+        out.fill(0.0);
+        for (row, z) in core.z.iter().enumerate() {
+            let value = u[row];
+            if value == 0.0 {
+                continue;
+            }
+            self.grid.for_neighbors(z, |j| {
+                let j = j as usize;
+                let radius = dist2(z, &self.centers[j], core.dim).sqrt() / self.delta;
+                out[j] += wendland(radius) * value;
+            });
+        }
+    }
+
+    /// `diag(X₂ᵀWX₂) + λ·d`, the Jacobi preconditioner for the Schur operator.
+    ///
+    /// It is the diagonal of an UPPER bound on the operator — `I − H ⪯ I`, so
+    /// `diag(S) ⩽ diag(X₂ᵀWX₂) + λd` — which is what a preconditioner is
+    /// allowed to be. Forming the true `diag(S)` would cost one cascade solve
+    /// per candidate.
+    fn jacobi_preconditioner(&self, core: &Core) -> Vec<f64> {
+        let mut diagonal = vec![self.ridge; self.centers.len()];
+        for (row, z) in core.z.iter().enumerate() {
+            let weight = core.w[row];
+            self.grid.for_neighbors(z, |j| {
+                let j = j as usize;
+                let radius = dist2(z, &self.centers[j], core.dim).sqrt() / self.delta;
+                let value = wendland(radius);
+                diagonal[j] += weight * value * value;
+            });
+        }
+        diagonal
+    }
+}
+
+/// Reusable buffers for one `S v`, so the conjugate-gradient loop allocates
+/// nothing per iteration.
+struct SchurWorkspace {
+    row: Vec<f64>,
+    fitted: Vec<f64>,
+    column: Vec<f64>,
+    /// Previous cascade solve, handed to the next as a warm start. The systems
+    /// differ only in their right-hand side, so this is free accuracy per
+    /// iteration and changes nothing about the solve's certified residual.
+    warm: Option<Vec<f64>>,
+}
+
+/// `S v = X2' W (I - H) X2 v + lambda*d*v`, with nothing dense formed.
+///
+/// One apply of the candidate design, ONE cascade solve for the hat matrix, one
+/// apply of the transpose back. The solve carries its own backward-error
+/// certificate (`CG_RTOL`), so the operator is exact to that relative accuracy
+/// and the bracket below inherits it.
+fn apply_candidate_schur(
+    core: &Core,
+    level: &CandidateLevel<'_>,
+    lambda: f64,
+    v: &[f64],
+    out: &mut [f64],
+    workspace: &mut SchurWorkspace,
+) -> Result<(), String> {
+    let rows = core.z.len();
+    level.apply(core, v, &mut workspace.row);
+    workspace.column.fill(0.0);
+    for row in 0..rows {
+        let weighted = core.w[row] * workspace.row[row];
+        for entry in core.row_ptr[row]..core.row_ptr[row + 1] {
+            workspace.column[core.col_idx[entry] as usize] += core.vals[entry] * weighted;
+        }
+    }
+    let (coeff, _, _) = core.solve_coeff(lambda, &workspace.column, workspace.warm.as_deref())?;
+    for row in 0..rows {
+        let mut value = 0.0;
+        for entry in core.row_ptr[row]..core.row_ptr[row + 1] {
+            value += core.vals[entry] * coeff[core.col_idx[entry] as usize];
+        }
+        workspace.fitted[row] = value;
+    }
+    workspace.warm = Some(coeff);
+    for row in 0..rows {
+        workspace.row[row] = core.w[row] * (workspace.row[row] - workspace.fitted[row]);
+    }
+    level.apply_transpose(core, &workspace.row, out);
+    for (target, &value) in out.iter_mut().zip(v.iter()) {
+        *target += level.ridge * value;
+    }
+    Ok(())
+}
+
+/// A rigorous two-sided bracket on the exact level-`(L+1)` gain, and the
+/// evidence for it.
+struct RefinementGainBracket {
+    /// `2xᵀg − xᵀSx` — a lower bound for EVERY `x`, exact at `x = S⁻¹g`.
+    lower: f64,
+    /// The certified upper bound the refinement decision is taken on.
+    upper: f64,
+    /// Conjugate-gradient steps spent closing the bracket.
+    iterations: usize,
+}
+
+/// The exact level-`(L+1)` gain `gᵀS⁻¹g`, bracketed.
+///
+/// # What the shipped bound was, and why it is the `x = 0` member of this family
+///
+/// Appending the candidate columns `X₂` with penalty `λd` decreases the
+/// penalized objective by exactly `gᵀS⁻¹g`, with
+///
+/// ```text
+///     g = X₂ᵀW r̂,     S = X₂ᵀW(I − H)X₂ + λd·I,     H = W^{1/2}X₁A⁻¹X₁ᵀW^{1/2}
+/// ```
+///
+/// The certificate bounded that by discarding the ENTIRE data term — `S ⪰ λd·I`
+/// gives `gᵀS⁻¹g ⩽ ‖g‖²/(λd)` — which is exactly this routine at `x = 0`. That
+/// step is not a small conservatism where it matters most: when the candidate
+/// level is redundant against the design already fitted, which is what the
+/// rank-maximal regime IS, `X₂ᵀW(I − H)X₂` is the dominant term (#2759).
+///
+/// # The bracket
+///
+/// For ANY `x`, writing `r = g − Sx`,
+///
+/// ```text
+///     2xᵀg − xᵀSx   ⩽   gᵀS⁻¹g   ⩽   2xᵀg − xᵀSx + ‖r‖²/(λd)
+/// ```
+///
+/// The left inequality is `(x − S⁻¹g)ᵀS(x − S⁻¹g) ⩾ 0`; the right one adds
+/// `rᵀS⁻¹r ⩽ ‖r‖²/λ_min(S)` and `λ_min(S) ⩾ λd` — the SAME structural fact the
+/// shipped bound rests on, and the only inequality used. Both ends are computed
+/// from an explicit `Sx`, never from a conjugate-gradient recurrence, so no
+/// statement here depends on the iteration having behaved.
+///
+/// The returned upper bound is additionally floored by `‖g‖²/(λd)`, so this
+/// certificate can never be LOOSER than the one it replaces, whatever the
+/// iteration does.
+///
+/// # The stopping rule is the decision, not a tolerance
+///
+/// Iteration stops as soon as the bracket lands entirely on one side of
+/// `decision_threshold = REFINE_TOL·rss_pen`: either the level provably cannot
+/// move the objective by that much, or it provably can. There is no accuracy
+/// constant to pick, because accuracy is not what is being asked for — a
+/// comparison is. The structural ceiling is the Krylov dimension, past which
+/// the answer is exact by construction; a stalled bracket (the gap not
+/// shrinking) is exactness reached early and stops too.
+fn certified_refinement_gain(
+    core: &Core,
+    level: &CandidateLevel<'_>,
+    g: &[f64],
+    lambda: f64,
+    decision_threshold: Option<f64>,
+) -> Result<RefinementGainBracket, String> {
+    let candidates = level.centers.len();
+    let ridge = level.ridge;
+    let energy: f64 = g.iter().map(|value| value * value).sum();
+    // The `x = 0` member: rigorous on its own, and the floor every later
+    // iterate is compared against.
+    let zeroth = energy / ridge;
+    if !(zeroth.is_finite() && zeroth > 0.0) || candidates == 0 {
+        return Ok(RefinementGainBracket {
+            lower: 0.0,
+            upper: zeroth.max(0.0),
+            iterations: 0,
+        });
+    }
+
+    let rows = core.z.len();
+    let mut workspace = SchurWorkspace {
+        row: vec![0.0_f64; rows],
+        fitted: vec![0.0_f64; rows],
+        column: vec![0.0_f64; core.m],
+        warm: None,
+    };
+    let preconditioner = level.jacobi_preconditioner(core);
+    let mut x = vec![0.0_f64; candidates];
+    let mut residual = g.to_vec();
+    let mut preconditioned = vec![0.0_f64; candidates];
+    let mut direction = vec![0.0_f64; candidates];
+    let mut operated = vec![0.0_f64; candidates];
+    let mut certify = vec![0.0_f64; candidates];
+    let mut rho = 0.0_f64;
+
+    // The Krylov space cannot exceed the rank of the operator's data term plus
+    // one, and that term factors through the `n` rows: `X₂ᵀW(I−H)X₂` has rank at
+    // most `n`. Past `min(candidates, n) + 1` steps the solution is exact and
+    // the bracket has closed by construction, so this is a structural ceiling
+    // rather than a budget — the same reading `residual_krylov_ceiling` takes.
+    let ceiling = candidates.min(rows) + 1;
+    let mut best = RefinementGainBracket {
+        lower: 0.0,
+        upper: zeroth,
+        iterations: 0,
+    };
+    for iteration in 0..ceiling {
+        for ((target, &value), &diagonal) in preconditioned
+            .iter_mut()
+            .zip(residual.iter())
+            .zip(preconditioner.iter())
+        {
+            *target = if diagonal > 0.0 { value / diagonal } else { value };
+        }
+        let rho_next: f64 = residual
+            .iter()
+            .zip(preconditioned.iter())
+            .map(|(&a, &b)| a * b)
+            .sum();
+        if !(rho_next.is_finite() && rho_next > 0.0) {
+            break;
+        }
+        if iteration == 0 {
+            direction.copy_from_slice(&preconditioned);
+        } else {
+            let beta = rho_next / rho;
+            for (target, &value) in direction.iter_mut().zip(preconditioned.iter()) {
+                *target = value + beta * *target;
+            }
+        }
+        rho = rho_next;
+        apply_candidate_schur(
+            core,
+            level,
+            lambda,
+            &direction,
+            &mut operated,
+            &mut workspace,
+        )?;
+        let curvature: f64 = direction
+            .iter()
+            .zip(operated.iter())
+            .map(|(&a, &b)| a * b)
+            .sum();
+        if !(curvature.is_finite() && curvature > 0.0) {
+            break;
+        }
+        let alpha = rho / curvature;
+        for (target, &value) in x.iter_mut().zip(direction.iter()) {
+            *target += alpha * value;
+        }
+        for (target, &value) in residual.iter_mut().zip(operated.iter()) {
+            *target -= alpha * value;
+        }
+
+        // CERTIFY FROM AN EXPLICIT `Sx`. The recurrence above is the search; it
+        // is not evidence, and a bound recurred through `alpha`/`beta` would
+        // inherit whatever the iteration drifted by.
+        apply_candidate_schur(core, level, lambda, &x, &mut certify, &mut workspace)?;
+        let mut linear = 0.0_f64;
+        let mut quadratic = 0.0_f64;
+        let mut defect = 0.0_f64;
+        for ((&xi, &gi), &si) in x.iter().zip(g.iter()).zip(certify.iter()) {
+            linear += xi * gi;
+            quadratic += xi * si;
+            let gap = gi - si;
+            defect += gap * gap;
+        }
+        let lower = 2.0 * linear - quadratic;
+        let upper = lower + defect / ridge;
+        if !(lower.is_finite() && upper.is_finite() && upper >= lower) {
+            break;
+        }
+        if upper < best.upper {
+            best = RefinementGainBracket {
+                lower: lower.max(0.0),
+                upper,
+                iterations: iteration + 1,
+            };
+        }
+        // The comparison is decided: either the whole bracket clears the
+        // tolerance, or none of it does.
+        if let Some(threshold) = decision_threshold
+            && (upper <= threshold || lower > threshold)
+        {
+            best.iterations = iteration + 1;
+            best.lower = lower.max(0.0);
+            best.upper = upper.min(zeroth);
+            return Ok(best);
+        }
+        // Exactness reached early: the residual has stopped shrinking, so no
+        // further step can move either end.
+        if defect <= f64::EPSILON * energy {
+            break;
+        }
+    }
+    best.upper = best.upper.min(zeroth);
+    Ok(best)
+}
+
 /// The next level's assessment together with the centers the refinement may
 /// take from it under the capacity budgets.
 struct NextLevelPlan {
     assessment: NextLevelAssessment,
+    /// The two-sided evidence behind the assessment's bound, when there was a
+    /// candidate set to certify at all. `None` for an empty net or a proposal
+    /// the center cap stopped before it was complete.
+    gain: Option<RefinementGainBracket>,
     /// Centers the refinement may add; empty exactly when nothing may be added.
     selection: Vec<[f64; 3]>,
     /// Whether the selection is the complete candidate set. A partial level is
@@ -4416,9 +4752,18 @@ impl NextLevelPlan {
     fn exhausted(assessment: NextLevelAssessment) -> Self {
         Self {
             assessment,
+            gain: None,
             selection: Vec::new(),
             complete: false,
             extends_last: false,
+        }
+    }
+
+    /// An exhausted plan that still carries the evidence its bound came from.
+    fn exhausted_with(assessment: NextLevelAssessment, gain: RefinementGainBracket) -> Self {
+        Self {
+            gain: Some(gain),
+            ..Self::exhausted(assessment)
         }
     }
 }
@@ -4956,7 +5301,8 @@ pub fn fit_residual_cascade(
         let mut certified_bound = 0.0_f64;
         let mut refinement: Option<(f64, bool, bool, Vec<[f64; 3]>)> = None;
         for exponent in pending {
-            let planned = design.plan_level_at_exponent(&fit, exponent)?;
+            let planned =
+                design.plan_level_at_exponent(&fit, exponent, Some(requested_tolerance))?;
             let (complete, extends_last) = (planned.complete, planned.extends_last);
             let selection = planned.selection;
             match decide_refinement(planned.assessment, requested_tolerance) {
@@ -5010,6 +5356,181 @@ mod refinement_decision_tests {
     use super::*;
 
     const TOLERANCE: f64 = 0.25;
+
+    /// The refinement gain bracket is checked against the gain ITSELF, obtained
+    /// by a route that shares no code with it: build the design with the
+    /// candidate level appended, solve at the SAME fixed λ, and difference the
+    /// two penalized objectives.
+    ///
+    /// This is the gate the whole of #2759 rests on. The shipped bound
+    /// `‖g‖²/(λd)` is the `x = 0` member of the same family, so the three
+    /// claims to establish are that the bracket CONTAINS the truth, that its
+    /// upper end never exceeds the shipped number, and that it is materially
+    /// tighter than it — a bound that merely reproduces `‖g‖²/(λd)` would leave
+    /// every fixture in this issue exactly where it was.
+    #[test]
+    fn the_refinement_gain_bracket_contains_the_objective_decrease_it_bounds_2759() {
+        let (x1, x2, y) = dense_fixture(24);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let metric = [1.0, 1.0];
+        let sobolev_s = 2.0;
+        let plan: Vec<LevelPlan> = (0..3)
+            .map(|level| LevelPlan {
+                exponent: level as f64,
+                centers: None,
+            })
+            .collect();
+        let design =
+            ResidualCascadeDesign::build_from_plan(&axes, &y, &weights, &metric, sobolev_s, &plan)
+                .expect("cascade design");
+        for log_lambda in [-4.0_f64, -1.0, 2.0] {
+            let fit = design.fit_at(log_lambda, None).expect("fixed-lambda fit");
+            let exponent = plan.len() as f64;
+            let planned = design
+                .plan_level_at_exponent(&fit, exponent, Some(REFINE_TOL * fit.rss_pen))
+                .expect("candidate level");
+            let bracket = planned.gain.as_ref().expect("a complete candidate certifies");
+            assert!(
+                planned.complete,
+                "the truth below is the COMPLETE candidate level; this fixture must not be \
+                 capacity-truncated"
+            );
+
+            // The independent route: the same cascade with the level appended.
+            let mut extended = plan.clone();
+            extended.push(LevelPlan {
+                exponent,
+                centers: None,
+            });
+            let refined = ResidualCascadeDesign::build_from_plan(
+                &axes,
+                &y,
+                &weights,
+                &metric,
+                sobolev_s,
+                &extended,
+            )
+            .expect("refined design");
+            let refined_fit = refined
+                .fit_at(log_lambda, None)
+                .expect("refined fixed-lambda fit");
+            let truth = fit.rss_pen - refined_fit.rss_pen;
+
+            // The solves on both sides carry `CG_RTOL` backward error, and the
+            // difference of two objectives near each other loses that
+            // cancellation's worth of digits; charge it rather than demand an
+            // exact inequality on a differenced quantity.
+            let slack = CG_RTOL * fit.rss_pen.abs().max(refined_fit.rss_pen.abs());
+            assert!(
+                truth >= -slack,
+                "adding a level cannot INCREASE the penalized objective: {truth} at \
+                 log lambda {log_lambda}"
+            );
+            assert!(
+                truth <= bracket.upper + slack,
+                "the certified bound is not an upper bound: truth {truth} exceeds \
+                 {} at log lambda {log_lambda}",
+                bracket.upper
+            );
+            assert!(
+                truth >= bracket.lower - slack,
+                "the bracket's lower end is not a lower bound: truth {truth} below {} at \
+                 log lambda {log_lambda}",
+                bracket.lower
+            );
+
+            // The shipped bound, recomputed here so the comparison is against a
+            // number and not against a memory.
+            let shipped = shipped_zeroth_order_gain_bound(&design, &fit, exponent);
+            assert!(
+                bracket.upper <= shipped * (1.0 + f64::EPSILON.sqrt()),
+                "the new certificate is looser than the one it replaces: {} against {shipped}",
+                bracket.upper
+            );
+
+            // Run to the closed bracket as well. The decision-driven bracket
+            // above stops the moment the comparison is settled, so how tight it
+            // happens to be there is a property of the threshold; what the
+            // machinery can REACH is the separate claim, and the only one worth
+            // a bar.
+            let closed = design
+                .plan_level_at_exponent(&fit, exponent, None)
+                .expect("candidate level")
+                .gain
+                .expect("a complete candidate certifies");
+            assert!(
+                truth <= closed.upper + slack && truth >= closed.lower - slack,
+                "the closed bracket [{}, {}] does not contain {truth} at log lambda \
+                 {log_lambda}",
+                closed.lower,
+                closed.upper
+            );
+            assert!(
+                closed.upper <= bracket.upper * (1.0 + f64::EPSILON.sqrt()),
+                "iterating further made the bound worse: {} against {}",
+                closed.upper,
+                bracket.upper
+            );
+            assert!(
+                closed.upper < shipped,
+                "the closed bracket did not tighten the shipped bound at log lambda \
+                 {log_lambda}: {} against {shipped} (truth {truth}, {} CG steps)",
+                closed.upper,
+                closed.iterations
+            );
+            // The closed bracket's own width is what says it converged; asking
+            // it to be near the truth would be asking the same question twice.
+            assert!(
+                closed.upper - closed.lower <= 0.05 * closed.upper.max(f64::MIN_POSITIVE),
+                "the bracket did not close at log lambda {log_lambda}: [{}, {}] after {} steps",
+                closed.lower,
+                closed.upper,
+                closed.iterations
+            );
+            println!(
+                "#2759 log_lambda={log_lambda} truth={truth:.6e} decided=[{:.6e}, {:.6e}]@{} \
+                 closed=[{:.6e}, {:.6e}]@{} shipped={shipped:.6e} tightening={:.2}x",
+                bracket.lower,
+                bracket.upper,
+                bracket.iterations,
+                closed.lower,
+                closed.upper,
+                closed.iterations,
+                shipped / closed.upper.max(f64::MIN_POSITIVE),
+            );
+        }
+    }
+
+    /// `‖X₂ᵀW r̂‖² / (λ·d)`: the bound this issue replaces, rebuilt from the
+    /// design so the comparison above is against a computed number.
+    fn shipped_zeroth_order_gain_bound(
+        design: &ResidualCascadeDesign,
+        fit: &ResidualCascadeFit,
+        exponent: f64,
+    ) -> f64 {
+        let core = &design.core;
+        let h = core.levels[0].h * 0.5_f64.powf(exponent);
+        let mut net = core.net.clone();
+        let candidates = extend_net(&mut net, &core.z, core.dim, h, &core.z_range);
+        let delta = OVERLAP * h;
+        let mut grid = HashGrid::new(delta, core.dim);
+        for (j, c) in candidates.iter().enumerate() {
+            grid.insert(j as u32, c);
+        }
+        let residual = core.residuals(&fit.coeff);
+        let mut g = vec![0.0_f64; candidates.len()];
+        for (i, zi) in core.z.iter().enumerate() {
+            let weighted = core.w[i] * residual[i];
+            grid.for_neighbors(zi, |j| {
+                let radius = dist2(zi, &candidates[j as usize], core.dim).sqrt() / delta;
+                g[j as usize] += weighted * wendland(radius);
+            });
+        }
+        let energy: f64 = g.iter().map(|value| value * value).sum();
+        let lambda = fit.log_lambda.exp();
+        energy / (lambda * level_weight(exponent, core.sobolev_s, core.dim))
+    }
 
     #[test]
     fn only_empty_or_passing_bound_converges() {
