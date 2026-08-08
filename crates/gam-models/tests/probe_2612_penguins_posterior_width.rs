@@ -368,7 +368,15 @@ fn zz_probe_2612_penguins_posterior_width() {
             .coefficient_influence()
             .map(|f| v.dot(&f.dot(&v)))
             .unwrap_or(1.0);
-        for t in [0.25_f64, 0.5, 1.0, 2.0] {
+        // BOTH signs. A Gaussian is symmetric by construction, so a one-sided
+        // walk cannot distinguish "the quadratic model is the wrong SCALE" from
+        // "the posterior is not symmetric at all". On a (quasi-)separated fit
+        // the second is the expected shape — the likelihood is flat toward more
+        // separation and steep away from it — and it is exactly the shape that
+        // makes an integrated softmax under-confident, because half the
+        // Gaussian's mass then sits where the likelihood has already ruled the
+        // coefficient out.
+        for t in [-2.0_f64, -1.0, -0.5, -0.25, 0.25, 0.5, 1.0, 2.0] {
             let mut walked = model.coefficients_flat.clone();
             for i in 0..p_per_class {
                 for a in 0..n_active {
