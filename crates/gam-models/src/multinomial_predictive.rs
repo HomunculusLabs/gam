@@ -697,11 +697,18 @@ pub fn predictive_standard_deviation(
         for class in 0..k {
             let mean = moments.class_mean[[row, class]];
             let variance = second[[row, class, class]] - mean * mean;
-            // A probability's variance is bounded by `mean(1 − mean)`; use that
-            // scale for the backward-error envelope rather than an absolute
-            // constant, so the test means the same thing at `p = 0.5` and at
-            // `p = 1e-6`.
-            let envelope = 16.0 * f64::EPSILON * (mean * (1.0 - mean)).max(f64::EPSILON);
+            // `E[p²]` and `E[p]²` are two different ratios, so their difference
+            // is only resolvable down to the accuracy of the ratios themselves —
+            // and that accuracy is MEASURED at this row by the mass defect, not
+            // guessed. A probability's variance is bounded by `mean(1 − mean)`,
+            // so the envelope is that scale times the row's own measured error,
+            // floored at round-off. Anything more negative than that is not
+            // cancellation: it is the two expansions disagreeing by more than the
+            // quantity being reported, which is exactly the case where a clamped
+            // `sd = 0` would be a lie.
+            let bound = (mean * (1.0 - mean)).max(f64::EPSILON);
+            let envelope =
+                bound * moments.mass_defect[row].max(16.0 * f64::EPSILON);
             if variance < -envelope {
                 crate::bail_invalid_estim!(
                     "multinomial predictive: row {row} class {class} has negative probability \

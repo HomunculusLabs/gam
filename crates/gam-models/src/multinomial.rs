@@ -621,7 +621,8 @@ pub struct MultinomialFitOutputs {
     /// class `a`'s `P` coefficients occupy rows/cols `a·P .. (a+1)·P`, indexed
     /// `θ[a·P + i] = β̂[i, a]`. This is the Laplace covariance from the factored
     /// penalized Hessian `XᵀWX + diag_a(λ_a)⊗S`; it drives the delta-method
-    /// per-class probability standard errors ([`Self::predict_probabilities_with_se`])
+    /// per-class probability standard errors
+    /// ([`Self::logistic_normal_softmax_moments`])
     /// on the fixed-λ inner-solve path.
     pub coefficient_covariance: Array2<f64>,
 }
