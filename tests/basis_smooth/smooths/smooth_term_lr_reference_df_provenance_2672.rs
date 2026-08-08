@@ -290,6 +290,7 @@ fn the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672() {
 fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
     init_parallelism();
     let mut checked = 0usize;
+    let mut largest_shift = 0.0_f64;
     for amplitude in [0.0_f64, 0.9] {
         for &(formula, family) in &[
             ("y ~ s(z)", "poisson"),
@@ -344,27 +345,63 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
                 p.mean
             );
 
-            // And the published p-value is the exact tail of that spectrum, to
-            // the accuracy the report itself CERTIFIES. The driver resolves the
-            // tail only as finely as `W` is known (see
-            // `tail_probability_with_bound`), so the right comparison is against
-            // `gam-math`'s own strict default THROUGH the published bound: the
-            // bound has to be honest, not decorative.
-            let strict =
-                gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_lr);
+            // The λ̂-selection replay must be REACHABLE on an ordinary fit —
+            // it is the difference between pricing `λ̂` as chosen and pricing it
+            // as given, and a model shape that cannot reach it silently gets
+            // the reference this issue measured at `size@.05 = 0.0962`.
+            let replay = p.selection.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "{formula} [{family}] amplitude={amplitude}: no selection replay on a \
+                     penalized smooth whose λ̂ the outer search chose. Provenance: {p:?}"
+                )
+            });
             assert!(
-                (r.p_value_uncorrected - strict).abs() <= r.p_value_bound + 1e-12,
-                "{formula} [{family}]: published p {} differs from the strictly \
-                 integrated P(Σ w_j χ²₁ > W) = {strict} by more than the accuracy the \
-                 report certifies ({}). W = {}",
-                r.p_value_uncorrected,
-                r.p_value_bound,
-                r.statistic_lr
+                !replay.generalized.is_empty()
+                    && replay.generalized.iter().all(|v| v.is_finite() && *v >= 0.0),
+                "{formula} [{family}]: the replay's generalized spectrum is not a \
+                 spectrum: {:?}",
+                replay.generalized
             );
+
+            // The CONDITIONAL half of the published p-value is the exact tail of
+            // the spectrum, to the accuracy the report itself certifies. The
+            // driver resolves that tail only as finely as `W` is known (see
+            // `tail_probability_with_bound`), so the comparison is against
+            // `gam-math`'s strict default THROUGH the published bound: the bound
+            // has to be honest, not decorative.
+            let strict = gam_math::probability::weighted_chi_square_sf(
+                &p.weights,
+                r.statistic_corrected,
+            );
+            assert!(
+                (r.p_value_conditional - strict).abs() <= r.p_value_bound + 1e-12,
+                "{formula} [{family}]: the published conditional p {} differs from the \
+                 strictly integrated P(Σ w_j χ²₁ > W*) = {strict} by more than the \
+                 accuracy the report certifies ({}). W* = {}",
+                r.p_value_conditional,
+                r.p_value_bound,
+                r.statistic_corrected
+            );
+            // And the selection is what separates the two published numbers.
+            let selection_shift = r.p_value_corrected - r.p_value_conditional;
+            assert!(
+                selection_shift.is_finite() && selection_shift.abs() <= 1.0,
+                "{formula} [{family}]: the selection shift {selection_shift} is not a \
+                 probability difference"
+            );
+            largest_shift = largest_shift.max(selection_shift.abs());
             checked += 1;
         }
     }
     assert!(checked >= 10, "the sweep must actually run: {checked} cells");
+    // The replay is not decoration: somewhere in this sweep it has to have moved
+    // a published p-value by more than its own Monte-Carlo noise. A replay that
+    // never moves anything is the conditional reference with extra steps.
+    assert!(
+        largest_shift > 1e-3,
+        "the λ̂-selection replay never moved a published p-value by more than \
+         {largest_shift} across {checked} fits — it is inert"
+    );
 }
 
 /// #2672: where the two-moment summary is exact, the exact lane must agree with
