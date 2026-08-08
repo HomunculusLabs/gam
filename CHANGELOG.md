@@ -1,5 +1,75 @@
 ## Unreleased
 
+- **The SAE terminal Newton polish is a Levenberg–Marquardt trust region on the
+  stationarity residual, judged in the currency its own gate reads (#2762).**
+  The phase accepted 100% of its steps while the raw KKT gradient rose 15x–107x
+  per accepted step. Two defects, stacked.
+
+  **The merit.** The acceptance test compared the TRIAL state's Newton decrement
+  in the MAJORIZER metric, `gᵀB(θ₊)⁻¹g(θ₊)`, against the PRE state's decrement in
+  the EXACT-Hessian metric, `gᵀA⁺g`. Same bilinear form, two different
+  operators, measured 67x apart on the witness — so the test was satisfiable by
+  any step at all. `gᵀB(θ)⁻¹g(θ)` is not a function of the state alone: it falls
+  whenever `B` stiffens, however far `g` rises, so it cannot referee a
+  comparison between two states. The merit is now `½‖g‖²`, which is the quantity
+  the KKT gate is a bound on and a function of the state alone.
+
+  **The step, and this is the one that decides convergence.** Making the merit
+  self-consistent does not converge this phase — measured at 482 accepted steps
+  / 0 rejected — and the reason is that the step is outside its own model. At
+  the `#2015` witness, `‖g‖ = 1.226522e-4` with the WHOLE residual inside the
+  operator's retained range, the undamped step is `‖Δ‖ = 4.416833e-1`; applying
+  it drives the merit `7.52e-9 → 6.07e0`, and an Armijo test on `½‖g‖²` first
+  passes at `α = 4.9e-4`, buying 0.03%. **The step's LENGTH is set entirely by
+  the near-null eigendirections of `A` while the residual is carried by the
+  well-conditioned ones**, and no scalar step length separates those: shrinking
+  the step to keep the flat direction inside the model shrinks the useful
+  directions by the same factor. Every earlier attempt on this issue traded one
+  fixture for another against that wall.
+
+  Damping separates them, and `A` is already materialized and diagonalized here,
+  so the entire Levenberg–Marquardt path — and the model residual it predicts —
+  is closed form at one diagonal pass per point:
+
+  ```text
+  Δ(ν) = Σ_i u_i λ_i (u_iᵀ rhs)/(λ_i² + ν)      g + AΔ(ν) = Σ_i u_i c_i ν/(λ_i² + ν)
+  ```
+
+  On the same state, sweeping ν and MEASURING each point:
+
+  ```text
+  ν=0        ‖Δ‖=4.42e-1  merit 7.52e-9 -> 6.07e0      ratio -8.1e8
+  ν=5.73e-8  ‖Δ‖=4.37e-3                -> 5.38e-8     ratio -6.2e0
+  ν=5.73e-7  ‖Δ‖=4.58e-4                -> 6.18e-11    ratio  0.9992
+  ```
+
+  `‖g‖ 1.23e-4 → 1.11e-5` against a `7.13e-5` tolerance, in one step, with the
+  objective falling too.
+
+  **Every number in the ladder is derived.** The first trial is `ν = 0` — the
+  step this phase has always taken — so the quadratic tail near a
+  well-conditioned root is unchanged and a state that never needed damping never
+  pays for one. The ladder then spans `λ_min²` to `λ_max²` over the RETAINED
+  spectrum by `RIDGE_GROWTH`: below `λ_min²` a damping cannot move the flattest
+  resolved direction, above `λ_max²` every direction is already flattened. A
+  trial is accepted when its MEASURED reduction is at least `ARMIJO_C1` of the
+  reduction its own model predicted, with the shared round-off cushion. The
+  accepted `ν` is carried to the next step divided by the same growth and
+  snapped to `0` under `λ_min²`, so a converging tail returns to pure Newton by
+  itself. Predicted reduction is monotone decreasing in `ν`, so a ladder that
+  falls under `DIRECTIONAL_DECREASE_REL_FLOOR × merit` is exhausted — a proof of
+  termination, not a cap.
+
+  Properties, not hopes: every accepted step strictly decreases the quantity the
+  refusal is denominated in, so this phase **cannot leave the state worse than
+  it found it**, which is measurably what it did before. The merit is monotone
+  across steps by construction, so the dual-currency cross-iteration contraction
+  bail is deleted rather than kept dead. A trial costs ONE assembly, where it
+  used to cost an assembly plus a full arrow factorization because the merit it
+  evaluated needed one. Indefiniteness needs no special case: `Δ(ν)` solves
+  `(A² + ν)Δ = −Ag`, positive semidefinite for every symmetric `A`, so a
+  resolved negative mode is descended rather than reflected.
+
 - **The smooth-term likelihood-ratio test is scored against its own null law,
   not against a distribution fitted to two of that law's moments (#2672).** At
   fixed `λ` the whole-term LR is exactly `W = Σ_j w_j χ²_1` with

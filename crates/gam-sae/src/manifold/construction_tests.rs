@@ -1899,6 +1899,270 @@ mod exact_stationarity_solve_1418_tests {
         assert_abs_diff_eq!(solved.beta[0], -3.0, epsilon = 1.0e-14);
     }
 
+    /// #2762 — `ν = 0` on the damped path IS the pseudoinverse step, including
+    /// the null-band classification.
+    ///
+    /// This is what lets the polish keep its quadratic tail while gaining a
+    /// trust region: its first trial at every step is the step it has always
+    /// taken, and a state that never needed damping never pays for one. Same
+    /// block, same rhs, same expected answer as
+    /// `dense_exact_stationarity_pseudoinverse_keeps_signed_range_and_drops_null_2653`
+    /// directly above — the two must not be allowed to drift apart.
+    #[test]
+    fn damped_residual_step_at_zero_damping_is_the_pseudoinverse_step_2762() {
+        let eigenvalues = Array1::from_vec(vec![4.0_f64, 1.0e-12, -2.0]);
+        let geometry = ExactHessianSpectralBlock {
+            operator: Array2::from_diag(&eigenvalues),
+            eigenvalues,
+            eigenvectors: Array2::from_diag(&Array1::ones(3)),
+            rank_floor: 1.0e-9,
+        };
+        // The damped path is stated in the RESIDUAL `g`; the pseudoinverse
+        // route is stated in `rhs = −g`.
+        let residual = SaeArrowVector {
+            t: Array1::from_vec(vec![-8.0, -3.0]),
+            beta: Array1::from_vec(vec![-6.0]),
+        };
+        let rhs = SaeArrowVector {
+            t: Array1::from_vec(vec![8.0, 3.0]),
+            beta: Array1::from_vec(vec![6.0]),
+        };
+        let pseudoinverse = geometry
+            .solve_stationarity(&rhs)
+            .expect("rank-revealing dense exact-stationarity solve");
+        let damped = geometry
+            .damped_residual_step(&residual, 0.0)
+            .expect("zero damping is the pseudoinverse point of the path");
+        assert_abs_diff_eq!(damped.step.t[0], pseudoinverse.t[0], epsilon = 1.0e-15);
+        assert_abs_diff_eq!(damped.step.t[1], pseudoinverse.t[1], epsilon = 1.0e-15);
+        assert_abs_diff_eq!(damped.step.beta[0], pseudoinverse.beta[0], epsilon = 1.0e-15);
+        // The `1e-12` direction is inside the null band, so its whole
+        // coefficient survives into the model residual and nothing else does:
+        // `½·3² = 4.5`.
+        assert_abs_diff_eq!(damped.model_merit, 4.5, epsilon = 1.0e-14);
+        assert_eq!(damped.retained_rank, 2);
+    }
+
+    /// #2762 — the model merit the damped path reports is the EXACT linear
+    /// residual `½‖g + AΔ(ν)‖²`, on a non-diagonal operator, at every damping.
+    ///
+    /// The polish's acceptance test measures an achieved reduction against this
+    /// number. If it were an approximation, the trust ratio would be measuring
+    /// the approximation rather than the state, so this is asserted against an
+    /// independent dense `A·Δ` — the operator the block carries — rather than
+    /// against the spectral algebra that produced it.
+    #[test]
+    fn damped_residual_step_model_merit_is_the_exact_linear_residual_2762() {
+        // A symmetric operator with a genuinely rotated eigenbasis, so the test
+        // cannot pass by coincidence of a diagonal layout.
+        let dim = 4usize;
+        let mut basis = Array2::<f64>::zeros((dim, dim));
+        let v = Array1::from_vec(vec![0.5_f64, -0.5, 0.5, -0.5]);
+        for row in 0..dim {
+            for column in 0..dim {
+                basis[[row, column]] =
+                    if row == column { 1.0 } else { 0.0 } - 2.0 * v[row] * v[column];
+            }
+        }
+        let eigenvalues = Array1::from_vec(vec![3.0_f64, -0.75, 1.0e-5, 0.25]);
+        let operator = basis.dot(&Array2::from_diag(&eigenvalues)).dot(&basis.t());
+        let geometry = ExactHessianSpectralBlock {
+            operator: operator.clone(),
+            eigenvalues,
+            eigenvectors: basis,
+            rank_floor: 1.0e-12,
+        };
+        let residual = SaeArrowVector {
+            t: Array1::from_vec(vec![0.7_f64, -1.3, 0.2]),
+            beta: Array1::from_vec(vec![0.9]),
+        };
+        let mut flat_residual = Array1::<f64>::zeros(dim);
+        flat_residual
+            .slice_mut(s![..3])
+            .assign(&residual.t);
+        flat_residual[3] = residual.beta[0];
+        let mut previous_reduction = f64::INFINITY;
+        for nu in [0.0_f64, 1.0e-10, 1.0e-6, 1.0e-2, 1.0, 1.0e3] {
+            let damped = geometry
+                .damped_residual_step(&residual, nu)
+                .expect("damped step on a well-posed block");
+            let mut flat_step = Array1::<f64>::zeros(dim);
+            flat_step.slice_mut(s![..3]).assign(&damped.step.t);
+            flat_step[3] = damped.step.beta[0];
+            let linear_residual = &flat_residual + &operator.dot(&flat_step);
+            let independent = 0.5 * linear_residual.dot(&linear_residual);
+            assert_abs_diff_eq!(
+                damped.model_merit,
+                independent,
+                epsilon = 1.0e-12 * independent.max(1.0)
+            );
+            // The ladder's termination proof: the model's predicted reduction is
+            // monotonically decreasing in the damping, so a rung that fails the
+            // round-off floor proves every later rung fails it too.
+            let reduction = 0.5 * flat_residual.dot(&flat_residual) - damped.model_merit;
+            assert!(
+                reduction <= previous_reduction + 1.0e-15,
+                "predicted reduction rose from {previous_reduction:.6e} to {reduction:.6e} at \
+                 ν={nu:.6e}"
+            );
+            previous_reduction = reduction;
+        }
+    }
+
+    /// #2762 — the property the whole fix rests on: damping separates a
+    /// near-null direction from a resolved one, and a scalar step length cannot.
+    ///
+    /// `A = diag(1, 1e-6)` with `g = (1, 1)`. The undamped step is `(-1, -1e6)`:
+    /// its LENGTH is entirely the flat direction, and any `α` small enough to
+    /// keep that component inside a local model shrinks the resolved component
+    /// by the same factor — which is exactly the measured `#2015` witness, where
+    /// `‖Δ‖ = 0.44` at `‖g‖ = 1.2e-4` and Armijo on `½‖g‖²` first passed at
+    /// `α = 4.9e-4` for a 0.03% reduction. At `ν = λ_flat·λ_resolved` the damped
+    /// step is `O(1)` in BOTH coordinates, kills the resolved direction's
+    /// residual entirely, and leaves the flat one — which is what a step is
+    /// allowed to do.
+    #[test]
+    fn damping_separates_a_flat_direction_from_a_resolved_one_2762() {
+        let eigenvalues = Array1::from_vec(vec![1.0_f64, 1.0e-6]);
+        let geometry = ExactHessianSpectralBlock {
+            operator: Array2::from_diag(&eigenvalues),
+            eigenvalues,
+            eigenvectors: Array2::from_diag(&Array1::ones(2)),
+            rank_floor: 1.0e-14,
+        };
+        let residual = SaeArrowVector {
+            t: Array1::from_vec(vec![1.0_f64]),
+            beta: Array1::from_vec(vec![1.0]),
+        };
+        let undamped = geometry
+            .damped_residual_step(&residual, 0.0)
+            .expect("undamped step");
+        let damped = geometry
+            .damped_residual_step(&residual, 1.0e-6)
+            .expect("damped step");
+        assert!(
+            undamped.step_norm_sq.sqrt() > 1.0e5 * damped.step_norm_sq.sqrt(),
+            "the undamped step must be dominated by the flat direction: ‖Δ(0)‖={:.6e} vs \
+             ‖Δ(ν)‖={:.6e}",
+            undamped.step_norm_sq.sqrt(),
+            damped.step_norm_sq.sqrt(),
+        );
+        assert!(
+            damped.step.t[0].abs() < 2.0 && damped.step.beta[0].abs() < 2.0,
+            "the damped step must be O(1) in both coordinates, got ({:.6e}, {:.6e})",
+            damped.step.t[0],
+            damped.step.beta[0],
+        );
+        // Model residual per direction: `c_i ν/(λ_i² + ν)`. The resolved
+        // direction is solved to `1e-6`; the flat one keeps essentially its
+        // whole coefficient. So `½‖g‖² = 1` falls to `½`, and it falls entirely
+        // in the direction that could move.
+        let resolved_leftover = 1.0e-6 / (1.0 + 1.0e-6);
+        let flat_leftover = 1.0e-6 / (1.0e-12 + 1.0e-6);
+        assert_abs_diff_eq!(
+            damped.model_merit,
+            0.5 * (resolved_leftover * resolved_leftover + flat_leftover * flat_leftover),
+            epsilon = 1.0e-14
+        );
+        assert!(resolved_leftover < 1.0e-5 && flat_leftover > 0.999);
+    }
+
+    /// #2762 — the polish may not leave the state with a LARGER KKT residual
+    /// than it found. Ever, at any budget.
+    ///
+    /// This is the property the shipped acceptance test could not enforce and
+    /// measurably violated: on both #2762 witnesses EVERY step was accepted
+    /// while the raw KKT gradient rose 15x and 107x, because acceptance was
+    /// carried by a comparison between the trial state's decrement in the
+    /// MAJORIZER metric and the pre-state's decrement in the EXACT-Hessian
+    /// metric. This drives the phase directly with a tolerance no state can
+    /// meet, so it must step rather than return at its own gate, and asserts the
+    /// merit it now descends — `½‖g‖²` — is monotone across the whole budget.
+    ///
+    /// The end-to-end witnesses (`planted_1e4_column_spread…`,
+    /// `reactive_entry_reseeds…`) pin the CONVERGENCE this buys; this pins the
+    /// safety property, which holds on states where nothing converges at all.
+    #[test]
+    fn terminal_polish_never_raises_the_kkt_residual_2762() {
+        let (mut term, target, rho, _cache) =
+            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let lambda_smooth = rho.lambda_smooth_vec().expect("smoothness strengths");
+        let options = ArrowSolveOptions::direct()
+            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        let residual_norm = |term: &SaeManifoldTerm| -> f64 {
+            let system = term
+                .assemble_arrow_schur(target.view(), &rho, None)
+                .expect("arrow-Schur assembly at the polish entry state");
+            SaeManifoldTerm::system_grad_norm_sq(&system).sqrt()
+        };
+        let objective_scale = term
+            .penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("penalized objective")
+            .abs()
+            + 1.0;
+        let before = residual_norm(&term);
+        let mut best_seen = None;
+        // Tolerance `0`: `quasi_laplace_kkt_stationary` cannot fire, so the
+        // phase runs its budget instead of handing straight back.
+        let moved = term
+            .terminal_exact_newton_polish(
+                target.view(),
+                &rho,
+                None,
+                &lambda_smooth,
+                0.0,
+                objective_scale,
+                &options,
+                8,
+                &mut best_seen,
+            )
+            .expect("the polish degrades every internal failure to Ok(false)");
+        let after = residual_norm(&term);
+        assert!(
+            after <= before,
+            "the polish raised the KKT residual it is judged on: {before:.6e} -> {after:.6e} \
+             (moved={moved})"
+        );
+        // Non-vacuity: an unreachable tolerance on a state with a live residual
+        // must make this phase actually step, or the assertion above is testing
+        // an early return.
+        assert!(
+            moved && after < before,
+            "the phase must commit at least one step at tolerance 0 on a state with a live \
+             residual: {before:.6e} -> {after:.6e} (moved={moved})"
+        );
+    }
+
+    /// #2762 — `retained_curvature_extremes` is the DERIVED span of the damping
+    /// ladder, and it reads the retained band only.
+    #[test]
+    fn retained_curvature_extremes_span_the_resolved_band_only_2762() {
+        let eigenvalues = Array1::from_vec(vec![-7.0_f64, 1.0e-12, 0.5, 2.0]);
+        let geometry = ExactHessianSpectralBlock {
+            operator: Array2::from_diag(&eigenvalues),
+            eigenvalues,
+            eigenvectors: Array2::from_diag(&Array1::ones(4)),
+            rank_floor: 1.0e-9,
+        };
+        let (smallest, largest) = geometry
+            .retained_curvature_extremes()
+            .expect("three directions clear the null band");
+        assert_abs_diff_eq!(smallest, 0.5, epsilon = 0.0);
+        assert_abs_diff_eq!(largest, 7.0, epsilon = 0.0);
+
+        // A block that is entirely inside its own null band has no ladder, and
+        // must say so rather than hand back a degenerate span.
+        let null_eigenvalues = Array1::from_vec(vec![1.0e-12_f64, -2.0e-12]);
+        let null_geometry = ExactHessianSpectralBlock {
+            operator: Array2::from_diag(&null_eigenvalues),
+            eigenvalues: null_eigenvalues,
+            eigenvectors: Array2::from_diag(&Array1::ones(2)),
+            rank_floor: 1.0e-9,
+        };
+        assert!(null_geometry.retained_curvature_extremes().is_none());
+    }
+
     /// `solve_exact_stationarity` returns the EXACT solve of `A x = rhs` (small
     /// `A`-residual), AND the surrogate solve `x_B = B⁻¹ rhs` leaves a LARGE
     /// `A`-residual — so the certificate is non-vacuous (`A ≠ B`) and the IFT
