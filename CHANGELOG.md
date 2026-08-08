@@ -1,5 +1,68 @@
 ## Unreleased
 
+- **A curvature gate was refusing on numbers smaller than its own instrument's
+  measured error, and nine `matern` benchmark scenarios died of it (#2748).**
+  `invert_identified_rho_hessian`'s entire `‖δH‖₂` was
+  `eigenpair_backward_error_bound` — the eigensolver's residual, which answers
+  *"given this matrix, how wrong is σ?"*. The question at a criterion-resolution
+  site is *"how wrong is this matrix?"*, and
+  `gam-linalg/src/curvature_resolution.rs` already says in its own module doc
+  that "a site that needs the second must not be handed the first".
+
+  The second is measurable in situ, with no new tolerance. On the penalty map's
+  certified invariance `T`, lifted to ρ, the criterion is exactly constant in
+  `λ`, so `ρ''(0)_k = −t_k²` gives
+
+  ```text
+      T' H_rho T  -  T' diag(g_rho) T  =  0        EXACTLY, at every rho
+  ```
+
+  and whatever its residual returns is error and only error — in exactly the
+  currency this gate spends, since it compares a Hessian eigenvalue against a
+  gradient-built floor. Measured at the refusing ρ of
+  `geo_disease_eas_matern_k6`:
+
+  ```text
+    eigensolver backward error                    8.342e-19
+    |T'(H_rho - diag(g_rho))T|_2                  9.872e-8      <- eleven orders larger
+    refused curvature                            -2.010e-8      <- INSIDE it, by 4.9x
+  ```
+
+  `CurvatureResolution::analytic_weyl_from_components` now takes several NAMED
+  measured components and resolves to their maximum — each is a certified lower
+  bound on `‖δH‖₂`, so the largest is the strongest available fact, and a sum
+  would not be derived from anything. Three components are supplied: the
+  eigensolver's backward error, the penalty-map invariance residual above, and
+  the rho-Hessian's **symmetrization defect** `‖(H − Hᵀ)/2‖₂`, which is exactly
+  zero for any twice-differentiable criterion and was being computed and thrown
+  away by the `symmetrize_in_place` call that precedes the gate.
+
+  Nothing was widened by hand. With one component the resolution is
+  `analytic_weyl` bit for bit, so a fit whose penalty map has no invariance does
+  not move by an ulp; #2665's `λ_min = −1.6e3` saddle is ten orders outside every
+  measured component and still refuses.
+
+  Two further defects in the same cluster, both "one channel, two verdicts":
+
+  * the penalty-map Gram was accumulated naively over `m = block²` products, so
+    its error was `m·ε·Σ|S_i S_j|` — three orders above the bar its own rank
+    decision is taken at, and enough to make an exactly proportional penalty pair
+    read as independent (measured: the same pair gave `1 − cos = 1.11e-16` in one
+    cell and `4.80e-14` in another). Neumaier compensation removes the length
+    dependence; the bar is untouched.
+  * `try_exact_joint_spatial_length_scale_optimization` returned `None` both when
+    the joint κ route could not be BUILT and when it ran, graded its own candidate
+    against the shipped scalar-route score and correctly DECLINED it. The caller
+    mapped both to `"spatial kappa optimization is unavailable"` and failed the
+    whole fit, so a route that had just decided the incumbent was better had that
+    decision converted into a fatal error. `JointSpatialKappaOutcome` now says
+    which, and a decline ships the incumbent — which is what its own log line
+    promises.
+
+  Measured end to end, one scenario per run, on a wheel built from the checkout:
+  `geo_disease_eas_matern_k6`, `geo_disease_eas_matern_k12` and
+  `papuan_oce_matern_k12` go from red to green.
+
 - **The multinomial posterior mean was being computed by a method that is not
   an approximation of it (#2612).** `predict_multinomial_formula` publishes
   `E[softmax(x'β) | data]`. It computed that by approximating the coefficient
