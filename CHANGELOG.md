@@ -1,5 +1,74 @@
 ## Unreleased
 
+- **The refinement certificate had ONE side, so "the cascade has remaining gain"
+  and "the bound is too loose to tell" were the same sentence (#2759).** Four
+  cascade fixtures refuse at the rank-maximal design, and the issue's own framing
+  put the closest one "inside the gain bound's own measured 1.30x slack". There
+  was no way to decide that from the certificate, because the certificate was
+  `‖g‖²/(λd)` and nothing else.
+
+  Appending the candidate columns `X₂` with penalty `λd` decreases the penalized
+  objective by exactly `gᵀS⁻¹g`, with `g = X₂ᵀW r̂` and
+  `S = X₂ᵀW(I − H)X₂ + λd·I`. The shipped bound discarded the ENTIRE data term —
+  `S ⪰ λd·I` — which is the `x = 0` member of a family no later member of which
+  had ever been evaluated. For ANY `x`, writing `r = g − Sx`:
+
+  ```text
+      2xᵀg − xᵀSx   ⩽   gᵀS⁻¹g   ⩽   2xᵀg − xᵀSx + ‖r‖²/(λd)
+  ```
+
+  Left is `(x − S⁻¹g)ᵀS(x − S⁻¹g) ⩾ 0`; right adds `rᵀS⁻¹r ⩽ ‖r‖²/λ_min(S)` with
+  `λ_min(S) ⩾ λd`, the same structural fact the shipped bound rests on and the
+  only inequality used. Both ends are computed from an explicit `Sx`, never from
+  a conjugate-gradient recurrence, and the upper end is floored by the shipped
+  number, so the certificate can never be looser than the one it replaces. `S` is
+  matrix-free: one apply of the candidate design through the hash grid the gain
+  vector already builds, ONE cascade solve for `(I − H)`, one apply back.
+
+  **The stopping rule is the decision, not a tolerance.** Iteration stops as soon
+  as the bracket lands entirely on one side of `REFINE_TOL·rss_pen`. There is no
+  accuracy constant to pick because accuracy is not what is being asked for — a
+  comparison is. The ceiling is the Krylov dimension, past which the answer is
+  exact by construction.
+
+  **The hypothesis this was built on is FALSIFIED, and it was ours.** The claim
+  was that discarding the data term "is not a small conservatism" in the
+  rank-maximal regime. Measured:
+
+  ```text
+    fixture                        lower        upper        tolerance    lower/tol  slack
+    cascade_state_rejects_corrupt  7.944884e-3  7.946538e-3  6.547001e-3   1.214x    1.024x
+    ..._roundtrip_reproduces_...   6.326893e-2  6.327000e-2  1.690929e-2   3.742x    1.018x
+    quasi_uniformity_guard_...     3.560937e-2  3.562072e-2  2.485628e-3  14.326x    1.063x
+    smoothness_ceiling_...         1.050801e-1  1.055257e-1  2.184455e-3  48.104x    1.223x
+  ```
+
+  The slack is 1.8% to 22%, the bracket has closed to four to six digits, and the
+  exact gain exceeds the tolerance by 1.21x to 48x. No tightening can pass these
+  fixtures because there is nothing left to tighten — and that is the answer the
+  issue asked for, now impossible to confuse with conservatism. `Underresolved`
+  and `RefinementCertificate` both carry the bracket, and `Display` says out loud
+  when the lower end is above tolerance.
+
+  Three of the four fixtures were then found to be gated on a certificate they do
+  not test — two persistence gates and a metric guard, all reaching a fit through
+  `fit_residual_cascade`. They take a fixed-depth design and `fit_reml` now, or
+  assert what they name. `smoothness_ceiling_...` is left RED with its assertion
+  standing: it IS about the certificate, and at `num_centers = 5997` on
+  `n = 6000` with `rss_pen = 2.1845` against a noise floor of `n·σ² = 2.4`, what a
+  finer level buys is interpolation inside a row space the design already spans,
+  not discretization bias. `REFINE_TOL·rss_pen` is a bias criterion being read
+  where more columns do not reduce bias. That is a criterion question, it is not
+  answered by moving `REFINE_TOL`, and a gate that says so is worth more than a
+  green one that does not.
+
+  Verified: the bracket is gated against the objective decrease it bounds by a
+  route sharing no code with it — build the design with the candidate level
+  appended, solve at the same fixed λ, difference the two penalized objectives —
+  reproducing the truth to every printed digit in 3-10 CG steps across a
+  six-decade λ sweep. `cargo test -p gam --test misc residual_cascade`: 25 of 26,
+  from 12 of 17 at the start of the run.
+
 - **The SAE terminal Newton polish is a Levenberg–Marquardt trust region on the
   stationarity residual, judged in the currency its own gate reads (#2762).**
   The phase accepted 100% of its steps while the raw KKT gradient rose 15x–107x
