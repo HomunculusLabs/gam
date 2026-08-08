@@ -448,3 +448,49 @@ fn a_real_saddle_is_ten_orders_outside_the_measured_resolution_2748() {
         "unexpected error text: {error}"
     );
 }
+
+/// The two bars are ADDED, not maxed, and that is what keeps this site from
+/// applying a strictly stronger standard than the certificate that admitted
+/// `ρ̂` (#2748, the #2428 invariant restated with a resolution in play).
+///
+/// The certificate accepts by testing `H + diag(|g|) ⪰ −r` for its measured
+/// resolution `r`; along an eigenvector that is `σ ≥ −(Σ_k|g_k|v_k² + r)`. The
+/// numbers below are `papuan_oce_matern_k12`'s, which sit between the two
+/// rules: `σ = −4.746e-7` against a chain-rule term of `4.407e-7` and a measured
+/// `‖δH‖₂` of `1.013e-7`. The maximum refuses it; the sum — which is what the
+/// certificate itself applied — does not.
+#[test]
+fn the_chain_rule_term_and_the_resolution_are_added_not_maxed_2748() {
+    let chain = 4.407e-7_f64;
+    let assembly = 1.013e-7_f64;
+    let curvature = 4.746e-7_f64;
+    assert!(
+        curvature > chain.max(assembly) && curvature < chain + assembly,
+        "the fixture must sit strictly between the two combination rules"
+    );
+
+    let (hessian, gradient, invariance) = deflatable_fixture(curvature, assembly, chain);
+    // The certificate's own acceptance test, verbatim, at the same measured
+    // resolution: `H + diag(|g|)` PSD to within `r`.
+    let mut floored = hessian.clone();
+    for k in 0..floored.nrows() {
+        floored[[k, k]] += gradient[k].abs();
+    }
+    use gam_linalg::faer_ndarray::FaerEigh;
+    let (eigenvalues, _) = floored.eigh(faer::Side::Lower).expect("eigendecomposition");
+    let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        minimum >= -assembly,
+        "fixture must be one the certificate accepts at resolution {assembly:.3e}; \
+         lambda_min(H + diag|g|) = {minimum:.6e}"
+    );
+
+    invert_identified_rho_hessian(&hessian, 1, &gradient, Some(&invariance), &[]).unwrap_or_else(
+        |error| {
+            panic!(
+                "the certificate accepted this point at its measured resolution and the \
+                 correction refused it: {error}"
+            )
+        },
+    );
+}

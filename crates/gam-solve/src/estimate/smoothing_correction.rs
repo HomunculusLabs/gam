@@ -731,25 +731,55 @@ pub(crate) fn invert_identified_rho_hessian(
         }
     }
 
-    // Per-direction resolution floor: the measured curvature resolution
-    // `‖δH‖₂`, or the outer certificate's gradient floor along this
-    // eigenvector, whichever admits more. Both are measurements, not tolerances
-    // chosen by hand.
-    let direction_floor = |i: usize| -> f64 {
+    // The outer certificate's EXACT chain-rule term along eigenvector `v`:
+    // `Σ_k |g_k| v_k²`, the magnitude of `diag(g_rho)`'s Rayleigh quotient
+    // there. Not a resolution — one of the two exact terms of
+    // `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`.
+    let chain_rule_term = |i: usize| -> f64 {
         if outer_gradient.is_empty() {
-            return zero_bound;
+            return 0.0;
         }
         let v = eigenvectors.column(i);
-        let mut floor = 0.0_f64;
+        let mut term = 0.0_f64;
         for k in 0..n {
-            floor += outer_gradient[k].abs() * v[k] * v[k];
+            term += outer_gradient[k].abs() * v[k] * v[k];
         }
-        if floor.is_finite() { floor.max(zero_bound) } else { zero_bound }
+        if term.is_finite() { term } else { 0.0 }
     };
+
+    // Identification floor: a direction counts as ACTIVE only if its curvature
+    // clears BOTH the chain-rule scale and the resolution, so `max` is the
+    // right combination here — this asks "is this positive curvature a
+    // measurement?", and either bar failing means it is not.
+    let direction_floor = |i: usize| -> f64 {
+        let term = chain_rule_term(i);
+        if term > zero_bound { term } else { zero_bound }
+    };
+
+    // Refusal bar: the SUM, not the max, and this is what makes this site agree
+    // with the outer certificate instead of applying a strictly stronger
+    // standard than it (#2748).
+    //
+    // The certificate accepts rho-hat by testing that `H + diag(|g|)` is PSD to
+    // its own curvature resolution `r`, i.e. `λ_min(H + diag|g|) ≥ −r`. Along
+    // an eigenvector of `H` that reads
+    //
+    //     σ  ≥  −( Σ_k |g_k| v_k²  +  r )
+    //
+    // — the two are ADDED, because they are different mechanisms: the chain
+    // rule contributes exactly `Σ_k g_k v_k²` (bounded in magnitude by the
+    // first term) and the assembly error contributes up to `‖δH‖₂`. Taking
+    // their maximum was not derived from anything, and it made this gate refuse
+    // points the certificate accepts — precisely the #2428 defect this site
+    // exists to have fixed. Measured on `papuan_oce_matern_k12`:
+    // `σ = −4.746e-7` against `Σ|g_k|v_k² = 4.407e-7` and a measured
+    // `‖δH‖₂ = 1.013e-7`; the max refuses it and the sum, which is what the
+    // certificate itself applied, does not.
+    let refusal_bar = |i: usize| -> f64 { chain_rule_term(i) + zero_bound };
 
     for i in deflated_dimension..n {
         let sigma = eigenvalues[i];
-        let floor = direction_floor(i);
+        let floor = refusal_bar(i);
         if sigma < -floor {
             let components = measured_hessian_error
                 .iter()
@@ -758,16 +788,18 @@ pub(crate) fn invert_identified_rho_hessian(
                 .join(", ");
             return Err(format!(
                 "rho Hessian has negative curvature {sigma:.3e} below the outer certificate's own \
-                 chain-rule gradient floor {floor:.3e} on that direction (that floor is an EXACT \
-                 chain-rule term of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, \
-                 not a resolution; the curvature resolution of an analytically-formed eigenvalue \
-                 is Weyl's ||dH||_2, measured here as {curvature_resolution} from [{components}] \
+                 bar {floor:.3e} on that direction -- the sum of the EXACT chain-rule term \
+                 {:.3e} of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)` (not a \
+                 resolution: one of the two exact terms) and the curvature resolution of an \
+                 analytically-formed eigenvalue, which is Weyl's ||dH||_2, measured here as \
+                 {curvature_resolution} from [{components}] \
                  -- #2690, #2748); the penalty map certified {expected_structural_nullity} null \
                  direction(s) and {deflated_dimension} were deflated before judging, so the \
                  direction above was judged; the outer loop certified this point as a minimum, \
                  and the curvature is larger than everything this assembly's own exactly-zero \
                  identities say it could have got wrong, so this is a genuine contradiction \
-                 rather than an unresolvable direction"
+                 rather than an unresolvable direction",
+                chain_rule_term(i),
             ));
         }
     }
