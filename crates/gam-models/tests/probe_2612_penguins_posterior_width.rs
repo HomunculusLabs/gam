@@ -124,6 +124,26 @@ fn accuracy(probs: &[f64], labels: &[usize]) -> f64 {
     correct as f64 / labels.len() as f64
 }
 
+/// Mean probability the estimand assigns to each row's OWN argmax class.
+///
+/// Against `accuracy` on the same rows this is a calibration statement that
+/// needs no reference implementation: a calibrated classifier's mean argmax
+/// probability equals its accuracy, an over-confident one exceeds it, and an
+/// under-confident one falls short. It is the only tool-free way to say that
+/// the published penguin probabilities are wrong rather than merely different
+/// from `nnet`'s, so it belongs beside the log-loss columns.
+fn mean_argmax_probability(probs: &[f64]) -> f64 {
+    let rows = probs.len() / K;
+    let mut acc = 0.0;
+    for i in 0..rows {
+        acc += probs[i * K..(i + 1) * K]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+    }
+    acc / rows as f64
+}
+
 #[test]
 fn zz_probe_2612_penguins_posterior_width() {
     if log::set_logger(&STDERR_LOGGER).is_ok() {
@@ -219,6 +239,18 @@ fn zz_probe_2612_penguins_posterior_width() {
         accuracy(&plug_flat, &labels),
         mean_log_loss(&plug_flat, &labels),
         mean_log_loss(&post_flat, &labels) - mean_log_loss(&plug_flat, &labels),
+    );
+
+    // The tool-free calibration statement: mean argmax probability against
+    // accuracy on the SAME held-out rows. Zero is calibrated; positive is
+    // under-confident (the model is right more often than it claims to be).
+    eprintln!(
+        "#2612 probe: calibration (accuracy - mean argmax probability): \
+         posterior-mean={:.5} (mean_p={:.5})  plug-in={:.5} (mean_p={:.5})",
+        accuracy(&post_flat, &labels) - mean_argmax_probability(&post_flat),
+        mean_argmax_probability(&post_flat),
+        accuracy(&plug_flat, &labels) - mean_argmax_probability(&plug_flat),
+        mean_argmax_probability(&plug_flat),
     );
 
     let cov = model.coefficient_covariance().expect("covariance");
