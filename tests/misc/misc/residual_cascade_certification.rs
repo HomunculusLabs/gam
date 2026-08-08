@@ -928,6 +928,7 @@ fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
         Err(ResidualCascadeError::Underresolved {
             checkpoint,
             gain_bound,
+            gain_lower_bound,
             requested_tolerance,
             obstruction:
                 gam::solver::residual_cascade::RefinementObstruction::IdentifiabilityCapacity {
@@ -944,6 +945,13 @@ fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
             // partial one: a capacity refusal may only fire once the capacity
             // is actually spent.
             assert_eq!(checkpoint.num_centers(), identifiable_directions);
+            // #2759: the refusal is certified from BELOW too, so "the remaining
+            // gain exceeds the tolerance" and "the bound was too loose to tell"
+            // are no longer the same sentence.
+            assert!(
+                gain_lower_bound <= gain_bound,
+                "inverted gain bracket [{gain_lower_bound}, {gain_bound}]"
+            );
             assert!(
                 gain_bound > requested_tolerance,
                 "capacity may refuse only while the honest gain bound remains above tolerance: \

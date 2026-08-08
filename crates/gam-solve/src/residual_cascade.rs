@@ -610,12 +610,20 @@ pub struct CascadeCertificate {
 /// on the penalized-objective decrease available from one more level.
 #[derive(Clone, Copy, Debug)]
 pub struct RefinementCertificate {
-    /// `‖X₂'W r̂‖² / (λ·d)` at the accepted fit, maximized over every candidate
-    /// set the cascade could still add: the next level, and — when a capacity
-    /// budget forced the finest level to be partial — the candidates that level
-    /// left behind at its own radius. Every one of them is at or below
-    /// [`Self::tolerance`]; this is the largest.
+    /// Certified UPPER bound on the penalized-objective decrease still
+    /// available, maximized over every candidate set the cascade could still
+    /// add: the next level, and — when a capacity budget forced the finest
+    /// level to be partial — the candidates that level left behind at its own
+    /// radius. Every one of them is at or below [`Self::tolerance`]; this is the
+    /// largest.
     pub next_level_gain_bound: f64,
+    /// Certified LOWER bound on the same decrease, from the same evidence
+    /// (#2759). It is what separates "this level provably cannot move the
+    /// objective" from "the bound was too loose to tell": a certificate whose
+    /// two ends are far apart passed on conservatism, and one whose ends have
+    /// met passed on the quantity itself. Reported for the same candidate set
+    /// that produced [`Self::next_level_gain_bound`].
+    pub next_level_gain_lower_bound: f64,
     /// The absolute tolerance it was compared against (`REFINE_TOL·rss_pen`).
     pub tolerance: f64,
 }
@@ -865,6 +873,13 @@ pub enum ResidualCascadeError {
     Underresolved {
         checkpoint: ResidualCascadeCheckpoint,
         gain_bound: f64,
+        /// Certified LOWER bound on the same gain (#2759). This is what makes
+        /// the refusal a statement about the CASCADE rather than about the
+        /// certificate: while the bound was `‖g‖²/(λd)` and nothing else, "the
+        /// remaining gain exceeds the tolerance" and "the bound is too loose to
+        /// tell" were the same sentence. A lower bound above
+        /// `requested_tolerance` excludes the second reading outright.
+        gain_lower_bound: f64,
         requested_tolerance: f64,
         obstruction: RefinementObstruction,
     },
@@ -951,14 +966,21 @@ impl std::fmt::Display for ResidualCascadeError {
             Self::Underresolved {
                 checkpoint,
                 gain_bound,
+                gain_lower_bound,
                 requested_tolerance,
                 obstruction,
             } => write!(
                 f,
-                "residual cascade underresolved after {} levels: next-level gain bound \
-                 {gain_bound:.6e} exceeds requested tolerance {requested_tolerance:.6e}; \
-                 {obstruction}",
-                checkpoint.num_levels()
+                "residual cascade underresolved after {} levels: the next level's gain is \
+                 certified in [{gain_lower_bound:.6e}, {gain_bound:.6e}] and exceeds requested \
+                 tolerance {requested_tolerance:.6e}{}; {obstruction}",
+                checkpoint.num_levels(),
+                if *gain_lower_bound > *requested_tolerance {
+                    " from BELOW, so this is the cascade's remaining gain and not the \
+                     certificate's conservatism"
+                } else {
+                    ""
+                }
             ),
         }
     }
@@ -5203,6 +5225,7 @@ enum RefinementDecision {
     },
 }
 
+
 /// Turn the typed next-level assessment into the only three legal refinement
 /// transitions. In particular, a capacity limit can yield a fit only when its
 /// already-computed gain bound independently passes the requested tolerance.
@@ -5299,6 +5322,7 @@ pub fn fit_residual_cascade(
         }
         pending.push(last.exponent + 1.0);
         let mut certified_bound = 0.0_f64;
+        let mut certified_lower = 0.0_f64;
         let mut refinement: Option<(f64, bool, bool, Vec<[f64; 3]>)> = None;
         for exponent in pending {
             let planned =
@@ -5327,9 +5351,13 @@ pub fn fit_residual_cascade(
             }
             let (complete, extends_last) = (planned.complete, planned.extends_last);
             let selection = planned.selection;
+            let certified_gain_lower = planned.gain.as_ref().map_or(0.0, |gain| gain.lower);
             match decide_refinement(planned.assessment, requested_tolerance) {
                 RefinementDecision::Converged { gain_bound } => {
-                    certified_bound = certified_bound.max(gain_bound);
+                    if gain_bound >= certified_bound {
+                        certified_bound = gain_bound;
+                        certified_lower = certified_gain_lower;
+                    }
                 }
                 RefinementDecision::Refine => {
                     refinement = Some((exponent, complete, extends_last, selection));
@@ -5342,6 +5370,7 @@ pub fn fit_residual_cascade(
                     return Err(ResidualCascadeError::Underresolved {
                         checkpoint: ResidualCascadeCheckpoint::new(fit),
                         gain_bound,
+                        gain_lower_bound: certified_gain_lower,
                         requested_tolerance,
                         obstruction,
                     });
@@ -5352,6 +5381,7 @@ pub fn fit_residual_cascade(
             None => {
                 fit.refinement = Some(RefinementCertificate {
                     next_level_gain_bound: certified_bound,
+                    next_level_gain_lower_bound: certified_lower,
                     tolerance: requested_tolerance,
                 });
                 return Ok(fit);
@@ -5912,6 +5942,7 @@ mod refinement_decision_tests {
                 Err(ResidualCascadeError::Underresolved {
                     checkpoint,
                     gain_bound,
+                    gain_lower_bound,
                     requested_tolerance,
                     obstruction:
                         RefinementObstruction::IdentifiabilityCapacity {
@@ -5920,6 +5951,13 @@ mod refinement_decision_tests {
                             identifiable_directions,
                         },
                 }) => {
+                    // The refusal is certified from BELOW as well (#2759): the
+                    // gain the cascade cannot reach is bounded away from the
+                    // tolerance, so this is not the certificate being cautious.
+                    assert!(
+                        gain_lower_bound <= gain_bound,
+                        "the gain bracket is inverted: [{gain_lower_bound}, {gain_bound}]"
+                    );
                     // The refusal is at the capacity FRONTIER, not before it
                     // (#2700): the automatic route takes as much of the
                     // over-wide level as the identifiability budget allows, so

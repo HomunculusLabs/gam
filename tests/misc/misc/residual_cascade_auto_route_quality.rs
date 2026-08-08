@@ -230,6 +230,7 @@ fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
         Err(ResidualCascadeError::Underresolved {
             checkpoint,
             gain_bound,
+            gain_lower_bound,
             requested_tolerance,
             obstruction:
                 RefinementObstruction::IdentifiabilityCapacity {
@@ -247,6 +248,13 @@ fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
             // refuses, so the retained checkpoint is the rank-maximal design
             // rather than the 1 759-center one it used to keep.
             assert_eq!(checkpoint.num_centers(), identifiable_directions);
+            // #2759: the refusal is certified from BELOW too, so "the remaining
+            // gain exceeds the tolerance" and "the bound was too loose to tell"
+            // are no longer the same sentence.
+            assert!(
+                gain_lower_bound <= gain_bound,
+                "inverted gain bracket [{gain_lower_bound}, {gain_bound}]"
+            );
             assert!(
                 gain_bound > requested_tolerance,
                 "the next level may be refused only while its honest gain bound is above \
