@@ -623,22 +623,40 @@ impl MultinomialFitOutputs {
         self.coefficients_active.nrows()
     }
 
-    /// Integrate the logistic-normal coefficient posterior at fresh design rows.
-    /// Returns posterior-mean class probabilities and their exact-under-the-
-    /// quadrature marginal standard deviations. The full joint coefficient
-    /// covariance, including cross-class blocks, is contracted into each row's
-    /// active-logit covariance before deterministic adaptive integration.
-    pub fn predict_probabilities_with_se(
+    /// Integrate the logistic-normal coefficient posterior at fresh design rows:
+    /// `E[softmax(η)]` and its marginal standard deviations with
+    /// `η ~ N(x'β̂, x'Σx)`, the full joint covariance (cross-class blocks
+    /// included) contracted into each row's active-logit covariance before
+    /// deterministic adaptive integration.
+    ///
+    /// # This is NOT the posterior mean, and the name says so on purpose (#2612)
+    ///
+    /// The quantity a caller usually wants — the posterior mean probability —
+    /// is not this. Integrating a nonlinear functional over the Laplace Gaussian
+    /// keeps the curvature half of the `O(n⁻¹)` correction to a posterior mean
+    /// and drops the skewness half; on a (quasi-)separated softmax the two are
+    /// neither small nor same-signed, and the result is under-confident by up to
+    /// tens of percentage points at unchanged argmax. The posterior mean is
+    /// computed by [`crate::multinomial_predictive`] as a ratio of normalising
+    /// constants, and [`MultinomialSavedModel::predict_probabilities`] is the
+    /// entry point that publishes it.
+    ///
+    /// What this function IS, and why it stays: the exact moments of `softmax`
+    /// under a STATED Gaussian. That is a well-defined object with its own uses
+    /// (propagating a declared coefficient uncertainty through the link, and
+    /// pinning the integrator itself), and naming it for the Gaussian rather
+    /// than for the posterior is what keeps the two from being confused again.
+    pub fn logistic_normal_softmax_moments(
         &self,
         x_new: ArrayView2<'_, f64>,
     ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
-        self.predict_probabilities_with_se_and_control(
+        self.logistic_normal_softmax_moments_with_control(
             x_new,
             &MultinomialPosteriorIntegrationControl::default(),
         )
     }
 
-    pub fn predict_probabilities_with_se_and_control(
+    pub fn logistic_normal_softmax_moments_with_control(
         &self,
         x_new: ArrayView2<'_, f64>,
         control: &MultinomialPosteriorIntegrationControl,
@@ -3741,10 +3759,17 @@ fn build_multinomial_predict_design(
 }
 
 /// Replay the saved termspec to build the predict-time design on a fresh
-/// dataset, then evaluate softmax probabilities. The predict dataset must carry
-/// the same feature columns the training data did, matched **by name** — it need
-/// not reproduce the training column order, and in particular need not carry the
-/// response column (prediction is for label-free new data).
+/// dataset, then evaluate the POSTERIOR-MEAN class probabilities
+/// `E[softmax(x'β) | data]`. The predict dataset must carry the same feature
+/// columns the training data did, matched **by name** — it need not reproduce
+/// the training column order, and in particular need not carry the response
+/// column (prediction is for label-free new data).
+///
+/// The posterior mean is computed as a ratio of normalising constants rather
+/// than by integrating `softmax` over the Laplace Gaussian; see
+/// [`crate::multinomial_predictive`] for why the latter is not an approximation
+/// of this estimand (#2612). For the plug-in `softmax(x'β̂)` every other softmax
+/// implementation reports, ask [`predict_multinomial_formula_plugin`] by name.
 pub fn predict_multinomial_formula(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,
@@ -3758,28 +3783,32 @@ pub fn predict_multinomial_formula(
 /// saved multinomial model on fresh data.
 ///
 /// [`predict_multinomial_formula`] returns a different estimand: the
-/// posterior-mean probability `E[softmax(η)]`, integrated over the Laplace
-/// posterior of the coefficients. Both are legitimate; they are not
-/// interchangeable, and the difference is one-sided. `softmax` is concave along
-/// the winning coordinate near a confident prediction, so integrating over
-/// posterior width pulls the answer TOWARD the centre of the simplex — the
-/// argmax is unchanged while the probability attached to it falls. A model whose
-/// posterior is wider than the data warrants therefore reads as under-confident
-/// on any proper scoring rule, at unchanged accuracy.
+/// posterior-mean probability `E[softmax(η)]`. Both are legitimate and they are
+/// not interchangeable, but the difference between them is much smaller than it
+/// used to appear, and the reason is worth stating here because this function is
+/// where a reader compares the two.
 ///
-/// That is not a hypothetical shape. `nnet::multinom`, `scikit-learn`,
-/// `statsmodels` and every other softmax reference report the plug-in quantity,
-/// so a held-out log-loss comparison against any of them is a comparison of two
-/// estimands unless this function is the one supplying gam's side. #2612
-/// measures exactly that gap on penguins (accuracy 0.9649 against nnet's 0.9912,
-/// log-loss 0.26080 against 0.09494 — right class, flattened posterior), and
-/// until now gam could not produce the plug-in number at all, so nothing could
-/// say how much of the gap was the estimand and how much was the fit.
+/// `softmax` is concave along the winning coordinate, so averaging it over
+/// posterior width pulls the answer toward the centre of the simplex. The
+/// posterior of a logit is also right-skewed toward larger `|η|`, which pulls
+/// the other way. A correct posterior mean carries BOTH; the Gaussian
+/// integration this path used to perform carried only the first, which is why
+/// the published probability read as under-confident at unchanged argmax
+/// (#2612). Measured on a quasi-separated fixture against an MCMC posterior, the
+/// Gaussian-integrated quantity is off by up to `2.1e-1` in probability while
+/// the ratio estimator [`predict_multinomial_formula`] now uses is off by
+/// `4.4e-3` — and the plug-in below sits much closer to the posterior mean than
+/// the Gaussian did.
 ///
-/// This is deliberately NOT a fallback: `multinomial_posterior` refuses to
-/// degrade to a plug-in when its quadrature cannot certify, and that refusal
-/// stands. A caller who wants the mode's own probability has to ask for it here,
-/// by name.
+/// `nnet::multinom`, `scikit-learn`, `statsmodels` and every other softmax
+/// reference report the plug-in quantity, so a held-out log-loss comparison
+/// against any of them is a comparison of two estimands unless this function is
+/// the one supplying gam's side.
+///
+/// This is deliberately NOT a fallback: the posterior-mean path refuses rather
+/// than degrading to a plug-in when it cannot certify its own accuracy, and that
+/// refusal stands. A caller who wants the mode's own probability has to ask for
+/// it here, by name.
 pub fn predict_multinomial_formula_plugin(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,
@@ -4162,8 +4191,8 @@ mod fisher_override_tests {
         // (2) & (3) Delta-method SEs and simplex probabilities on the training
         // design (any P-column matrix in the fitted basis works).
         let (probs, prob_se) = fit
-            .predict_probabilities_with_se(design.view())
-            .expect("delta-method SE must succeed");
+            .logistic_normal_softmax_moments(design.view())
+            .expect("logistic-normal softmax moments must succeed");
         let n = design.nrows();
         assert_eq!(probs.dim(), (n, k));
         assert_eq!(prob_se.dim(), (n, k));
