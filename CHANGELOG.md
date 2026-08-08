@@ -1,5 +1,75 @@
 ## Unreleased
 
+- **The smooth-term likelihood-ratio test is scored against its own null law,
+  not against a distribution fitted to two of that law's moments (#2672).** At
+  fixed `λ` the whole-term LR is exactly `W = Σ_j w_j χ²_1` with
+  `w = eig(2F_jj − F_jj²)`, so `Σ_j w_j` is Wood's `edf1` *and* the statistic's
+  null mean. The reference was `g·χ²_ν` with `(ν, g)` matched to the first two
+  moments of that spectrum. It is now the spectrum itself, inverted by
+  `gam_math::probability::weighted_chi_square_sf` (Imhof) — which had landed
+  under this same issue and had no consumer.
+
+  The two-moment surrogate is exact when the weights are equal and one-signed
+  wrong otherwise, with the error growing as the tail deepens. Measured against
+  the exact law on `f_j = 1/(1 + λγ_j)` for a second-difference penalty, six
+  decades of `λ` × `k ∈ {6, 12, 20}`, the size delivered at a nominal `α`:
+
+  ```text
+  α = 0.05   0.99 – 1.02 x       α = 1e-3   1.01 – 1.31 x
+  α = 0.01   1.00 – 1.11 x       α = 1e-4   1.14 – 1.61 x
+  ```
+
+  **Where the gap lives is not where the intuition puts it, and the measurement
+  is what says so.** The surrogate is exact at BOTH ends of the shrinkage range:
+  `w ≡ 1` on an unpenalized term, and a single distinct weight once REML has
+  shrunk a term to its null space — measured on a null-true `k = 12` fit,
+  `w = (0.322, 5.9e-7, 7.1e-8, …)`, where the two references agree to eight
+  figures. It opens in the middle, on a term carrying real signal. So a
+  null-simulation size grid — which spends all of its time in the collapsed
+  regime, at `α = 0.05`, where the surrogate is exact — could not have detected
+  this, and its passing was never evidence the reference was right.
+
+  **The whole spectrum, without a general eigensolver.** The moments were traces
+  of powers of `F_jj` precisely because reading the weights off `F_jj` would need
+  one — it is not symmetric. It need not be read off `F` at all: the penalty is
+  block-diagonal by term, so `(I − F)_jj = [H⁻¹S]_jj = [H⁻¹]_jj S_jj =: P`
+  exactly, hence `2F_jj − F_jj² = I − P²` and `w = 1 − eig(P)²`. `P = B·S` with
+  both factors symmetric PSD is similar to `B^{1/2} S B^{1/2}`, reachable with
+  the self-adjoint entry point already in `gam-linalg`, through `B = UΛUᵀ` rather
+  than a Cholesky so a singular block is a zero eigenvalue and not a
+  factorization failure. `[H⁻¹]_jj` is `beta_covariance()` divided by the
+  family's own `coefficient_covariance_scale()`; the two factors are in
+  reciprocal units, so that multiplier has to come off exactly or every weight is
+  wrong by it.
+
+  **The identity is measured, not assumed.** It holds only if the penalty is
+  block-diagonal by term AND `Vb`, `F` and `S(λ)` are published in one
+  coefficient basis — and both halves have been wrong in this exact path before
+  (the similarity-map drop, the internal-basis first-order correction, the
+  block-local `coeff_range`). None of the three is visible by reading. So the
+  driver assembles the spectrum both ways whenever the fit supports it and
+  publishes `moment_residual`, the relative disagreement; a test pins it under
+  `1e-8` across two families, three model shapes and both shrinkage regimes.
+
+  **The tail is resolved as finely as the statistic is known, and no finer.**
+  Imhof's truncation point grows like `ε^{-2/(2+m)}` in the number `m` of weights
+  active at it, and a shrunk smooth has one weight of order one over a tail of
+  dust, so `m = 1` and the cost is `ε^{-2/3}`: at `gam-math`'s default `1e-11` a
+  single p-value measures 0.13 s to 3.3 s. `W = 2(ℓ_full − ℓ_null)` is a
+  difference of two separately converged optimizations, so it is known to
+  `ΔW = tol·(W + E[W])`, and a p-value is known to `|S(W) − S(W + ΔW)|` however
+  well the integral is done. That is what the quadrature is asked for — evaluated
+  through the two-moment summary, which costs nothing and is being used as a
+  SCALE rather than as a value. `SmoothTermLrInference::p_value_bound` publishes
+  what was reached; the integration test compares the published p-value against
+  the strict default THROUGH that bound, so the bound has to be honest.
+
+  Three named lanes replace one switch: `NullSpectrum` (exact),
+  `SpectralMomentMatch` (the old `g·χ²_ν`, when `H⁻¹` or the penalty is
+  unavailable but `F` is), `UnitWeightFallback` (scalar EDF). Their errors have
+  different signs and sizes, and the Python surface carries the lane, the
+  spectrum, the residual and the bound alongside the p-values.
+
 - **The certified cascade held seven `m²` blocks to deliver two objects that
   need one, and the admissible design width is DERIVED from that residency
   (#2758).** `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
