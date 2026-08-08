@@ -1684,49 +1684,80 @@ impl Core {
         Some(upper_gram_entry(gram, self.m, row, col))
     }
 
-    /// Scatter the CSR design's row outer products into a fresh row-major UPPER
-    /// `m × m` `X'WX`: one `O(nnz·q)` pass, the same assembly `build` performs
-    /// under [`DENSE_GRAM_MAX`], just without the cap and without retaining the
-    /// result on the design.
-    fn assemble_upper_gram(&self) -> Vec<f64> {
+    /// The two Gram blocks the certified Schur complement is made of, and the
+    /// ONLY two it needs: the penalized block `G₁₁` as a row-major PACKED upper
+    /// triangle (`rank(rank+1)/2` entries) and the cross block `G₁₀ᵀ = G₀₁` as a
+    /// dense `q × rank` array, `q = nullity() ≤ 4`.
+    ///
+    /// The `m × m` upper `X'WX` this used to assemble in full is never formed.
+    /// That matters for one reason and it is not tidiness: the width at which a
+    /// design can be certified is DERIVED from the route's live memory
+    /// ([`CERTIFIED_SPECTRUM_MAX`]), so an `m²` transient that the mathematics
+    /// does not consume is a `1/√2` factor on every design this crate can prove
+    /// a smoothing parameter for. The null block `G₀₀` is not returned either —
+    /// [`Self::null_gram_factor`] already builds and factors it directly.
+    ///
+    /// The cache is read when the design carries one, so a narrow design's Schur
+    /// entries stay the exact `f64` they were; past the cache the same entries
+    /// are accumulated from the CSR rows in one `O(nnz·q)` pass, in the same
+    /// row-major order the cache was built in.
+    fn assemble_schur_gram_blocks(&self) -> (Vec<f64>, Vec<f64>) {
         let m = self.m;
-        let mut gram = vec![0.0_f64; m * m];
-        for i in 0..self.w.len() {
-            let lo = self.row_ptr[i];
-            let hi = self.row_ptr[i + 1];
+        let q = self.nullity();
+        let rank = m - q;
+        let mut penalized = vec![0.0_f64; packed_upper_len(rank)];
+        let mut cross = vec![0.0_f64; q * rank];
+        if let Some(gram) = &self.dense_gram {
+            for k in 0..q {
+                for j in 0..rank {
+                    cross[k * rank + j] = upper_gram_entry(gram, m, k, q + j);
+                }
+            }
+            for i in 0..rank {
+                let base = packed_upper_row_offset(rank, i);
+                for j in i..rank {
+                    penalized[base + (j - i)] = upper_gram_entry(gram, m, q + i, q + j);
+                }
+            }
+            return (penalized, cross);
+        }
+        for row in 0..self.w.len() {
+            let lo = self.row_ptr[row];
+            let hi = self.row_ptr[row + 1];
             for ea in lo..hi {
                 let ca = self.col_idx[ea] as usize;
-                let weighted = self.w[i] * self.vals[ea];
-                for eb in ea..hi {
-                    gram[ca * m + self.col_idx[eb] as usize] += weighted * self.vals[eb];
+                let weighted = self.w[row] * self.vals[ea];
+                // Columns are sorted within a row, so `eb >= ea` is exactly the
+                // upper triangle and the two blocks are told apart by `ca`.
+                if ca < q {
+                    for eb in ea..hi {
+                        let cb = self.col_idx[eb] as usize;
+                        if cb >= q {
+                            cross[ca * rank + (cb - q)] += weighted * self.vals[eb];
+                        }
+                    }
+                } else {
+                    let i = ca - q;
+                    let base = packed_upper_row_offset(rank, i);
+                    for eb in ea..hi {
+                        let j = self.col_idx[eb] as usize - q;
+                        penalized[base + (j - i)] += weighted * self.vals[eb];
+                    }
                 }
             }
         }
-        gram
+        (penalized, cross)
     }
 
-    /// The upper `X'WX` the certified spectral proof reads: the persistent cache
-    /// when the design is narrow enough to carry one, otherwise a transient
-    /// assembly from the CSR rows.
+    /// Whether the certified spectral proof can be built on this core.
     ///
-    /// `None` is the one honest refusal left — the design is wider than
-    /// [`CERTIFIED_SPECTRUM_MAX`], so the dense eigendecomposition the proof is
-    /// made of does not fit its memory budget. Crossing [`DENSE_GRAM_MAX`] alone
-    /// no longer forfeits the proof.
-    fn spectral_gram(&self) -> Option<std::borrow::Cow<'_, [f64]>> {
-        if let Some(gram) = &self.dense_gram {
-            return Some(std::borrow::Cow::Borrowed(gram.as_slice()));
-        }
-        if self.m > CERTIFIED_SPECTRUM_MAX {
-            return None;
-        }
-        if self.w.is_empty() {
-            // A core rebuilt from a persisted state keeps only a factored
-            // precision; there is no CSR design left to assemble a Gram from,
-            // and assembling one anyway would return zeros.
-            return None;
-        }
-        Some(std::borrow::Cow::Owned(self.assemble_upper_gram()))
+    /// `false` is the one honest refusal left — the design is wider than
+    /// [`CERTIFIED_SPECTRUM_MAX`], so the Schur complement the proof is made of
+    /// does not fit its memory budget, or the core was rebuilt from a persisted
+    /// state and has no design left to assemble one from. Crossing
+    /// [`DENSE_GRAM_MAX`] alone does not forfeit the proof.
+    fn certified_spectrum_available(&self) -> bool {
+        self.m <= CERTIFIED_SPECTRUM_MAX && !self.w.is_empty()
     }
 
     /// Factor the unpenalized polynomial Gram block. It is tiny (`dim+1 <= 4`)
@@ -1956,47 +1987,85 @@ impl Core {
         })
     }
 
-    /// Exact Schur spectrum, WITH the eigenbasis it is computed from.
+    /// Exact Schur spectrum, together with the response's coordinates in the
+    /// eigenbasis it is computed from — and WITHOUT ever forming that basis.
     ///
-    /// `gram` is the row-major UPPER `m × m` `X'WX` — [`Self::spectral_gram`]
-    /// supplies either the persistent cache or a transient assembly, so this
-    /// routine is available at every width inside
-    /// [`CERTIFIED_SPECTRUM_MAX`] rather than only under [`DENSE_GRAM_MAX`].
+    /// # What the certified profile actually consumes
     ///
-    /// `eigh` returns the eigenvectors whether or not the caller keeps them.
-    /// Dropping them here used to leave the residual half of the same score with
-    /// no way to reach the decomposition, so `evaluate` re-derived it as a fresh
-    /// Cholesky of `A = X'WX + λD` at every λ the certified search visited —
-    /// an O(m^3) factorization per trial, standing in for a projection this
-    /// factorization had already made available.
+    /// Two objects, and they are all this returns: every eigenvalue `θ_i` of
+    /// `B = D^{−1/2}(G₁₁ − G₁₀G₀₀^{−1}G₀₁)D^{−1/2} = VΘVᵀ`, which is what makes
+    /// each determinant mode an analytic kernel of `θ_i + λ`, and the single
+    /// projected vector `Vᵀβ` for the whitened response `β`, whose squares are
+    /// the residual moments' weights. The eigenVECTORS are read at exactly one
+    /// place — that projection — and nowhere else.
+    ///
+    /// A general eigendecomposition cannot hand over `Vᵀβ` without building the
+    /// whole `rank × rank` `V`, plus its tridiagonalization workspace. That is
+    /// not a tidiness question here: [`CERTIFIED_SPECTRUM_MAX`] is DERIVED from
+    /// this route's live memory, so every `m²` block it holds is a `1/√blocks`
+    /// factor on the widest design this crate can select a smoothing parameter
+    /// for at all — and a 6000-row cascade that identifies 5997 penalized
+    /// directions was refused at 2893 for exactly that reason (#2758).
+    ///
+    /// So the decomposition is taken through
+    /// [`gam_linalg::packed_symmetric_spectrum`], which reduces the PACKED
+    /// triangle in place and carries `β` alongside: `V = QW` for the Householder
+    /// `Q` and the QL `W`, so `Vᵀβ = Wᵀ(Qᵀβ)` is accumulated one vector at a
+    /// time and neither factor is materialized. The mathematics is unchanged —
+    /// all eigenvalues, the exact projection — and the residency is one packed
+    /// triangle rather than the seven-plus `m²` blocks `eigh` was measured to
+    /// hold.
     fn dense_cascade_spectrum(
         &self,
         null_chol: &[f64],
-        gram: &[f64],
     ) -> Result<(Vec<CascadeSpectralMode>, CascadeResidualSpectrum), String> {
-        let m = self.m;
         let q = self.nullity();
-        let rank = m - q;
-        let mut schur = Array2::<f64>::zeros((rank, rank));
-        let mut cross = vec![0.0; q];
+        let rank = self.m - q;
+        // The whitened right-hand side is built BEFORE the Schur triangle so
+        // the peak holds one `O(rank²)` object, not two: `whitened_residual_rhs`
+        // goes through `matvec` and allocates only `O(m)`.
+        let (whitened, anchor_energy) = self.whitened_residual_rhs(null_chol);
+        let (mut schur, cross_block) = self.assemble_schur_gram_blocks();
+        // `G₀₀^{−1}G₀₁` once for every column, `q ≤ 4` rows: the null
+        // elimination, held as `q × rank` rather than re-solved per entry.
+        let mut eliminated = vec![0.0_f64; q * rank];
+        let mut column = vec![0.0_f64; q];
         for j in 0..rank {
-            for (k, value) in cross.iter_mut().enumerate() {
-                *value = upper_gram_entry(gram, m, k, q + j);
+            for (k, value) in column.iter_mut().enumerate() {
+                *value = cross_block[k * rank + j];
             }
-            let projected = chol_solve(null_chol, q, &cross);
-            for i in 0..=j {
-                let mut value = upper_gram_entry(gram, m, q + i, q + j);
-                for (k, &coefficient) in projected.iter().enumerate() {
-                    value -= upper_gram_entry(gram, m, q + i, k) * coefficient;
-                }
-                value /= (self.pen_diag[q + i] * self.pen_diag[q + j]).sqrt();
-                schur[(i, j)] = value;
-                schur[(j, i)] = value;
+            let solved = chol_solve(null_chol, q, &column);
+            for (k, &coefficient) in solved.iter().enumerate() {
+                eliminated[k * rank + j] = coefficient;
             }
         }
-        let (eigenvalues, eigenvectors) = schur.eigh(Side::Lower).map_err(|error| {
+        // `B = D^{−1/2}(G₁₁ − G₀₁ᵀG₀₀^{−1}G₀₁)D^{−1/2}`, in place on the packed
+        // triangle the Gram block was accumulated into.
+        for i in 0..rank {
+            let base = packed_upper_row_offset(rank, i);
+            let scale_i = self.pen_diag[q + i];
+            for j in i..rank {
+                let mut value = schur[base + (j - i)];
+                for k in 0..q {
+                    value -= cross_block[k * rank + i] * eliminated[k * rank + j];
+                }
+                schur[base + (j - i)] = value / (scale_i * self.pen_diag[q + j]).sqrt();
+            }
+        }
+        drop(cross_block);
+        drop(eliminated);
+        // `projected` enters as `β` and leaves as `Vᵀβ`, in the same ascending
+        // order as `eigenvalues`.
+        let mut projected = whitened;
+        let eigenvalues = gam_linalg::packed_symmetric_spectrum::packed_symmetric_spectrum_with_probe(
+            rank,
+            &mut schur,
+            &mut projected,
+        )
+        .map_err(|error| {
             format!("residual cascade: Schur-complement eigendecomposition failed: {error}")
         })?;
+        drop(schur);
         let scale = eigenvalues
             .iter()
             .copied()
