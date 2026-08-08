@@ -2202,7 +2202,8 @@ impl SaeManifoldTerm {
     }
 
     /// #2228 Stage-2 TERMINAL NEWTON PHASE — the superlinear tail the majorized
-    /// Gauss–Newton inner loop is missing.
+    /// Gauss–Newton inner loop is missing, globalized as a Levenberg–Marquardt
+    /// trust region on the stationarity residual (#2762).
     ///
     /// The MM/GN inner solver is guaranteed descent but converges LINEARLY with
     /// contraction rate → 1 exactly where real data puts it: high residual (the
@@ -2212,34 +2213,85 @@ impl SaeManifoldTerm {
     /// iteration, i.e. ~1,800–3,000 uninterrupted iterations to close the gap
     /// from the objective-stall plateau (‖g‖ ≈ 1.4) to the KKT band — against a
     /// ~1e3 refine budget. The stall detector fires precisely when the MM phase
-    /// has entered that crawl (gain ratio ≈ 1, relative decrease below the
-    /// stall floor): from there, Newton on the EXACT Hessian is locally
-    /// quadratic and closes the same gap in O(10) steps, making the strict KKT
-    /// contract REACHABLE instead of loosened.
+    /// has entered that crawl: from there, Newton on the EXACT Hessian is
+    /// locally quadratic and closes the same gap in O(10) steps, making the
+    /// strict KKT contract REACHABLE instead of loosened.
     ///
-    /// Everything here reuses machinery that already exists for the outer IFT:
-    /// the exact joint Hessian apply `A·v = B·v + ΔC·v`
-    /// ([`Self::apply_exact_hessian`]) and its B-preconditioned, gauge-fixed
-    /// quotient GMRES ([`Self::solve_exact_stationarity`], via the same
-    /// [`Self::outer_gradient_arrow_solver`] quotient the ρ-gradient adjoint
-    /// uses). Indefiniteness of `A` (measured K=1-circle μ = −1.66e-3) is
-    /// handled by the acceptance test, not the solve: GMRES does not require
-    /// SPD, and a step is committed ONLY when it strictly contracts the joint
-    /// KKT residual OR the exact Newton decrement `λ² = gᵀH⁻¹g` — raw `‖g‖` is
-    /// non-monotone under the exact-Newton step at the indefinite inner Hessian
-    /// these over-parametrized charts produce, so the decrement is the monotone
-    /// currency there, and the disjunction aligns this phase's merit with the
-    /// `½λ²` currency of the stall-accept it feeds — while holding the
-    /// penalized objective within the same
-    /// no-meaningful-change band the stall detector just certified
-    /// (`SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL × objective_scale`). A step
-    /// failing that after backtracking restores the snapshot bit-for-bit, so
-    /// this phase can never worsen the state the refine loop would otherwise
-    /// have refused; every internal failure degrades to `Ok(false)` (fall
-    /// through to the historical stall accounting), never to a new error class.
+    /// # One merit, and it is the one the gate reads
     ///
-    /// Returns `Ok(true)` when at least one Newton step was committed (the
-    /// caller re-enters the refine loop, whose existing raw/quotient KKT gate +
+    /// This phase solves `g(θ) = 0`, and the gate that judges it is a bound on
+    /// `‖g‖` (raw or gauge-quotient). So the merit here is `½‖g‖²` and nothing
+    /// else. It is a function of the STATE, not of any operator evaluated at the
+    /// state, which is what makes a comparison across two states mean something.
+    ///
+    /// The `#2762` defect was that the acceptance test compared
+    /// `gᵀB(θ₊)⁻¹g(θ₊)` — the trial state's decrement in the MAJORIZER metric —
+    /// against `gᵀA⁺g` at the pre-state, in the EXACT-Hessian metric. Same
+    /// bilinear form, two different operators, measured 67x apart on the
+    /// witness; every step passed it, `‖g‖` rose 15x–107x per accepted step, and
+    /// 482 consecutive steps were accepted after the baseline was made
+    /// self-consistent, because `gᵀB(θ)⁻¹g(θ)` can fall while `‖g‖` rises
+    /// whenever `B` stiffens.
+    ///
+    /// # Why the step is damped, and why that is the actual root cause
+    ///
+    /// Fixing the merit alone does not converge this phase, and the measurement
+    /// says why. At the `#2015` witness — `‖g‖ = 1.23e-4`, the WHOLE residual
+    /// inside the retained range — the undamped step is `‖Δ‖ = 0.44`, its full
+    /// application drives the merit `7.5e-9 → 6.1e0`, and an Armijo test on
+    /// `½‖g‖²` first passes at `α = 4.9e-4`, buying 0.03%. The step's LENGTH is
+    /// set entirely by the near-null eigendirections of `A`; the residual is
+    /// carried by the well-conditioned ones. No scalar step length separates
+    /// them — shrinking the step to keep the flat direction inside the model
+    /// shrinks the useful directions by the same factor.
+    ///
+    /// Damping does separate them. `A` is already materialized and
+    /// diagonalized here, so the whole Levenberg–Marquardt path
+    /// [`ExactHessianSpectralBlock::damped_residual_step`] is available in
+    /// closed form at one diagonal pass per point — including the model merit it
+    /// predicts. On the same witness `ν = 5.7e-7` gives `‖Δ‖ = 4.6e-4`, drives
+    /// the merit `7.5e-9 → 6.2e-11` (`‖g‖ 1.23e-4 → 1.11e-5`, past a `7.1e-5`
+    /// tolerance in ONE step) at a measured/predicted ratio of `0.9992`.
+    ///
+    /// # The ladder, and why every number in it is derived
+    ///
+    /// * The first trial is `ν = 0` — the undamped step this phase has always
+    ///   taken — so the quadratic tail near a well-conditioned root is
+    ///   unchanged, and a state that never needed damping never pays for it.
+    /// * The ladder then runs from `λ_min²` to `λ_max²` over the RETAINED
+    ///   spectrum by [`opt::constants::RIDGE_GROWTH`]: below `λ_min²` a damping
+    ///   cannot move the flattest resolved direction, above `λ_max²` it has
+    ///   already flattened every direction there is.
+    /// * The accepted damping is CARRIED to the next step (divided by the same
+    ///   growth, and snapped back to `0` once it falls under `λ_min²`), so a
+    ///   converging tail walks back to the pure Newton step by itself.
+    /// * A trial is accepted when its MEASURED merit reduction is at least the
+    ///   shared Armijo fraction [`SAE_MANIFOLD_ARMIJO_C1`] of the reduction its
+    ///   own closed-form model predicted, with the shared round-off cushion.
+    ///   Model-predicted reduction is monotonically decreasing along the ladder,
+    ///   so a ladder that falls under the round-off floor
+    ///   [`SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR`] × merit is exhausted —
+    ///   that is a proof of termination, not a cap.
+    ///
+    /// Consequences worth stating as properties:
+    ///
+    /// * every accepted step STRICTLY decreases the quantity the refusal is
+    ///   denominated in, so this phase can no longer leave the state worse than
+    ///   it found it — which is what it measurably did on both `#2762` witnesses;
+    /// * the merit is monotone across steps by construction, so no
+    ///   cross-iteration contraction bail is needed and none is kept;
+    /// * a trial costs ONE assembly. It used to cost an assembly plus a full
+    ///   arrow factorization, because the merit it evaluated needed one.
+    ///
+    /// Indefiniteness of `A` needs no special handling: `Δ(ν)` solves
+    /// `(A² + ν)Δ = −Ag`, whose operator is positive semidefinite for every
+    /// symmetric `A`, so a resolved negative mode is descended, not reflected.
+    /// Every internal failure degrades to `Ok(false)` (fall through to the
+    /// historical stall accounting), never to a new error class, and a rejected
+    /// trial restores the snapshot bit-for-bit.
+    ///
+    /// Returns `Ok(true)` when at least one step was committed (the caller
+    /// re-enters the refine loop, whose existing raw/quotient KKT gate +
     /// idempotence certificate remain the SOLE acceptance authority — this
     /// phase mints nothing).
     fn terminal_exact_newton_polish(
@@ -2254,13 +2306,18 @@ impl SaeManifoldTerm {
         max_steps: usize,
         // #2228 — caller's cross-round best-seen accumulator, keyed on the
         // ½λ²/scale certificate. Captured HERE because the polish is where the
-        // decrement is evaluated per step and where ‖g‖ walks up off the
-        // certificate-min iterate.
+        // decrement is evaluated per step. #2762: the excursion it was
+        // introduced to undo can no longer be produced by this phase, whose
+        // merit is monotone; it remains the CALLER's accumulator across rounds
+        // and across the other movers, and is left keyed on the caller's own
+        // acceptance currency.
         best_seen: &mut Option<(f64, f64, SaeManifoldMutableState)>,
     ) -> Result<bool, String> {
         let mut made_progress = false;
-        let mut prev_grad_norm = f64::INFINITY;
-        let mut prev_decrement_sq = f64::INFINITY;
+        // Warm-carried Levenberg--Marquardt damping. `0` is the undamped exact
+        // Newton step, so the very first trial of the very first step is
+        // byte-identical to the step this phase has always proposed.
+        let mut damping = 0.0_f64;
         // #2267 — the polish's own elapsed clock, one candidate denominator for the
         // size predicate this route still lacks.
         let polish_started = std::time::Instant::now();
@@ -2285,6 +2342,9 @@ impl SaeManifoldTerm {
             }
             // Ridge-0 deflated criterion factor = the B-preconditioner for the
             // exact-pencil GMRES (identical to the outer IFT's preconditioner).
+            // It is NOT this phase's merit (#2762): it supplies the factor cache
+            // the exact-A materialization is built on, and the ½λ²/scale
+            // certificate the CALLER accumulates in `best_seen`.
             let factor = match self.factor_deflated_evidence_with_grad_norms(
                 &mut sys,
                 lambda_smooth,
@@ -2298,18 +2358,6 @@ impl SaeManifoldTerm {
                     break;
                 }
             };
-            // DUAL-CURRENCY no-contraction bail (#2132/#2228/#2267 — the same
-            // ε/raw-‖g‖ currency inconsistency the backtrack merit fixed, one loop
-            // out). Near an indefinite mode the raw ‖g‖ is NON-monotone ACROSS
-            // polish iterations (measured: ‖g‖ 1.78e-3 → 4.59e-3 while the fit is
-            // still converging), so a strict raw-‖g‖-contraction bail kills a
-            // polish that is still driving the affine Newton decrement λ²=gᵀH⁻¹g
-            // down — and the refine loop then re-arms and re-enters, grinding
-            // (measured: 25 bail→retry cycles to walltime after the merit patch).
-            // Bail only when NEITHER currency improves on its BEST-seen value; λ²
-            // is the curvature-aware quantity that certifies real progress at the
-            // saddle, and best-seen (not last-step) prevents pure oscillation from
-            // earning windows forever. The max_steps cap remains the hard backstop.
             let decrement_sq = sae_manifold_newton_directional_decrease(
                 &sys,
                 factor.delta_t.view(),
@@ -2333,16 +2381,6 @@ impl SaeManifoldTerm {
                  λ²={decrement_sq:.6e} cert={cert:.6e}",
                 step + 1,
             );
-            if !(grad_norm < prev_grad_norm) && !(decrement_sq < prev_decrement_sq) {
-                log::debug!(
-                    "terminal Newton bail: no contraction in either currency \
-                     (‖g‖={grad_norm:.6e} ≥ best {prev_grad_norm:.6e}, \
-                     λ²={decrement_sq:.6e} ≥ best {prev_decrement_sq:.6e})"
-                );
-                break;
-            }
-            prev_grad_norm = grad_norm.min(prev_grad_norm);
-            prev_decrement_sq = decrement_sq.min(prev_decrement_sq);
             let cache = factor.cache;
             // #2267 — FORECAST the dense exact-stationarity step before entering it,
             // and state it next to the two quantities any bar would be denominated
@@ -2369,148 +2407,154 @@ impl SaeManifoldTerm {
                     step + 1,
                 ),
             }
-            // Newton step on the exact Hessian: A Δ = −g on the gauge quotient.
-            let mut rhs_t = Array1::<f64>::zeros(cache.delta_t_len());
+            // The stationarity residual `g` as one ambient vector. The damped
+            // path below solves against `−g`; reporting the model residual for
+            // `g` itself keeps the predicted and the measured merit in the same
+            // units.
+            let mut residual_t = Array1::<f64>::zeros(cache.delta_t_len());
             let mut offset = 0usize;
             for row in &sys.rows {
                 for (axis, &g) in row.gt.iter().enumerate() {
-                    rhs_t[offset + axis] = -g;
+                    residual_t[offset + axis] = g;
                 }
                 offset += row.gt.len();
             }
-            let rhs = SaeArrowVector {
-                t: rhs_t,
-                beta: sys.gb.mapv(|v| -v),
+            let residual = SaeArrowVector {
+                t: residual_t,
+                beta: sys.gb.clone(),
             };
-            let newton = match self.solve_exact_stationarity(rho_fixed, target, &cache, &rhs) {
-                    Ok(newton) => newton,
+            // ONE eigendecomposition of `A` per step; every damping below reads
+            // it. This is the same materialization the undamped solve paid for.
+            let geometry =
+                match self.materialize_exact_stationarity_geometry(rho_fixed, target, &cache) {
+                    Ok(geometry) => geometry,
                     Err(err) => {
                         log::debug!(
-                            "terminal Newton bail: dense exact-stationarity pseudoinverse at \
+                            "terminal Newton bail: dense exact-stationarity geometry at \
                              ‖g‖={grad_norm:.6e}: {err}"
                         );
                         break;
                     }
                 };
-            let pre_obj = self
-                .penalized_objective_total(target, rho_fixed, registry, 1.0)
-                .map_err(|err| format!("SaeManifoldTerm::terminal_exact_newton_polish: {err}"))?;
-            // Rise budget: the stall band PLUS the quadratic model's own
-            // predicted change magnitude ½|λ²| = ½|gᵀΔ|. At an INDEFINITE
-            // stationary point (the measured K=1-circle μ < 0 class) the
-            // Newton root sits slightly UP in objective along the
-            // negative-curvature direction — root-finding must be allowed the
-            // rise its own model predicts, or every step is rejected and the
-            // fit parks 1.3× above tolerance (measured on the tier-0 fixtures:
-            // ‖g‖ 8.0e-5 vs tol 6.1e-5, refused at budget). The gradient-norm
-            // contraction below is the PRIMARY merit; this budget only stops
-            // objective blow-ups, not model-consistent saddle approaches.
-            let model_predicted_change = 0.5 * sae_inner(&rhs, &newton).abs();
-            // λ²_pre = gᵀH⁻¹g at the pre-step state (the exact Newton decrement,
-            // = 2·model_predicted_change). The affine SECONDARY merit below accepts
-            // a step that contracts THIS even when raw ‖g‖ does not — the
-            // indefinite/stiff class (#2132/#2228/#2267) where ‖g‖ is non-monotone
-            // under the exact-Newton step, so a valid move toward stationarity would
-            // be rejected by the raw-‖g‖-only merit and the fit refused off-optimum
-            // (measured: "step committed ‖g‖ 3.04e-1→2.73e-1" then "all backtracks
-            // rejected" cycling per tol-round — the merit-rejects-valid-step grind).
-            let pre_decrement_sq = 2.0 * model_predicted_change;
-            let obj_rise_budget = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * objective_scale
-                + model_predicted_change;
+            let Some((curvature_min, curvature_max)) = geometry.retained_curvature_extremes()
+            else {
+                log::debug!(
+                    "terminal Newton bail: every direction of A is inside its own null band at \
+                     ‖g‖={grad_norm:.6e} (floor {:.6e}) — no step of this operator can move the \
+                     residual",
+                    geometry.rank_floor,
+                );
+                break;
+            };
+            let smallest_damping = curvature_min * curvature_min;
+            let largest_damping = curvature_max * curvature_max;
+            let pre_merit = 0.5 * grad_norm_sq;
+            // Round-off floor on the MODEL's predicted reduction, in the merit's
+            // own units — the same relative floor the majorized Armijo lane
+            // applies to its directional decrease. A prediction below it is
+            // f64 noise in the quadratic model, not a step worth measuring.
+            let predicted_floor = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * pre_merit;
             let snapshot = self.snapshot_mutable_state();
-            let mut accepted = false;
-            let mut alpha = 1.0_f64;
             let backtrack_started = std::time::Instant::now();
-            let mut backtracks = 0usize;
-            for _ in 0..8 {
-                backtracks += 1;
-                if self
-                    .apply_newton_step(newton.t.view(), newton.beta.view(), alpha)
-                    .is_err()
-                {
-                    self.restore_mutable_state(&snapshot)?;
+            let mut trials = 0usize;
+            let mut accepted: Option<(f64, f64, DampedResidualStep)> = None;
+            let mut nu = damping;
+            loop {
+                let damped = match geometry.damped_residual_step(&residual, nu) {
+                    Ok(damped) => damped,
+                    Err(err) => {
+                        log::debug!(
+                            "terminal Newton bail: damped residual step at ν={nu:.6e}: {err}"
+                        );
+                        break;
+                    }
+                };
+                let predicted_decrease = pre_merit - damped.model_merit;
+                if !(predicted_decrease.is_finite() && predicted_decrease > predicted_floor) {
+                    // The model's predicted reduction decreases monotonically in
+                    // ν, so no larger damping on this ladder can clear the floor
+                    // either: the ladder is exhausted, and it is exhausted for a
+                    // stated reason rather than at a trial count.
+                    log::debug!(
+                        "terminal Newton: damping ladder exhausted at ν={nu:.6e} — predicted \
+                         merit reduction {predicted_decrease:.6e} is under the round-off floor \
+                         {predicted_floor:.6e} (merit {pre_merit:.6e})"
+                    );
                     break;
                 }
-                let trial_obj = self
-                    .penalized_objective_total(target, rho_fixed, registry, 1.0)
-                    .unwrap_or(f64::INFINITY);
-                // Two affine-consistent merits from the SAME trial system: the raw
-                // KKT gradient norm (PRIMARY — the stronger certificate on a PD
-                // Hessian, where it contracts quadratically) and the exact Newton
-                // decrement λ²_trial = gᵀH⁻¹g (SECONDARY — the monotone quantity at
-                // the indefinite / stiff inner Hessian the over-parametrized circle
-                // charts produce, where raw ‖g‖ is non-monotone under the exact-Newton
-                // step). Accepting on EITHER lets the polish descend the indefinite
-                // class instead of parking above tol and grinding (#2132/#2228/#2267);
-                // this aligns the polish merit with the ½λ² currency of the stall-accept
-                // it feeds, closing the three-currency inconsistency without loosening
-                // any tolerance.
-                let (trial_grad, trial_decrement_sq) =
+                trials += 1;
+                let trial_merit = if self
+                    .apply_newton_step(damped.step.t.view(), damped.step.beta.view(), 1.0)
+                    .is_ok()
+                {
                     match self.assemble_arrow_schur(target, rho_fixed, registry) {
-                        Ok(mut trial_sys) => {
-                            let g = Self::system_grad_norm_sq(&trial_sys).sqrt();
-                            // Bound first so the `&mut trial_sys` borrow ends
-                            // before the decrease below reads `&trial_sys`.
-                            let factored = self.factor_deflated_evidence_with_grad_norms(
-                                &mut trial_sys,
-                                lambda_smooth,
-                                options,
-                            );
-                            let decrement = match factored {
-                                Ok(factor) => Some(
-                                    sae_manifold_newton_directional_decrease(
-                                        &trial_sys,
-                                        factor.delta_t.view(),
-                                        factor.delta_beta.view(),
-                                    )
-                                    .max(0.0),
-                                ),
-                                Err(err) => {
-                                    log::debug!(
-                                        "[SAE polish] Newton decrement unavailable this \
-                                         trial ({err}); accepting on the KKT gradient norm alone"
-                                    );
-                                    None
-                                }
-                            };
-                            (Some(g), decrement)
-                        }
-                        Err(_) => (None, None),
-                    };
-                // Objective held to the stall detector's own no-change band (plus the
-                // model's predicted rise for the indefinite saddle approach).
-                let obj_ok = trial_obj.is_finite() && trial_obj <= pre_obj + obj_rise_budget;
-                let grad_ok = trial_grad.is_some_and(|g| g.is_finite() && g < grad_norm);
-                let decrement_ok =
-                    trial_decrement_sq.is_some_and(|d| d.is_finite() && d < pre_decrement_sq);
-                if obj_ok && (grad_ok || decrement_ok) {
-                    accepted = true;
-                    made_progress = true;
+                        Ok(trial_sys) => 0.5 * Self::system_grad_norm_sq(&trial_sys),
+                        Err(_) => f64::INFINITY,
+                    }
+                } else {
+                    f64::INFINITY
+                };
+                let sufficient = SAE_MANIFOLD_ARMIJO_C1 * predicted_decrease;
+                if trial_merit.is_finite()
+                    && pre_merit - trial_merit
+                        >= sufficient - opt::armijo_roundoff_cushion(pre_merit)
+                {
+                    accepted = Some((nu, trial_merit, damped));
                     break;
                 }
                 self.restore_mutable_state(&snapshot)?;
-                alpha *= 0.5;
+                nu = if nu > 0.0 {
+                    nu * opt::constants::RIDGE_GROWTH
+                } else {
+                    smallest_damping
+                };
+                if nu > largest_damping {
+                    log::debug!(
+                        "terminal Newton: damping ladder exhausted at ν={nu:.6e} — past \
+                         λ_max²={largest_damping:.6e}, where every direction is already damped"
+                    );
+                    break;
+                }
             }
-            // #2472 — the merit evaluation inside the backtrack loop re-assembles
-            // AND re-factors the whole arrow-Schur system per trial, so a step's
-            // cost is (1 + backtracks) systems, not one. This line prices that.
-            log::info!(
-                "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
-                 backtracks={backtracks} in {:.2}s (accepted={accepted}) total={:.2}s",
-                step + 1,
-                backtrack_started.elapsed().as_secs_f64(),
-                step_started.elapsed().as_secs_f64(),
-            );
-            if !accepted {
+            let Some((accepted_nu, accepted_merit, accepted_step)) = accepted else {
                 log::debug!(
-                    "terminal Newton bail: all backtracks rejected at ‖g‖={grad_norm:.6e} \
-                     (pre_obj={pre_obj:.9e}, rise_budget={obj_rise_budget:.3e})"
+                    "terminal Newton bail: no damping on [{smallest_damping:.6e}, \
+                     {largest_damping:.6e}] bought a sufficient measured decrease of the \
+                     residual merit at ‖g‖={grad_norm:.6e} ({trials} trial(s))"
                 );
                 break;
+            };
+            made_progress = true;
+            // Walk back toward the undamped Newton step: a damping under
+            // `λ_min²` cannot move the flattest resolved direction, so it IS the
+            // undamped step and is carried as exactly that.
+            damping = accepted_nu / opt::constants::RIDGE_GROWTH;
+            if damping < smallest_damping {
+                damping = 0.0;
             }
+            let predicted_decrease = pre_merit - accepted_step.model_merit;
+            log::info!(
+                "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
+                 trials={trials} in {:.2}s (ν={accepted_nu:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}) \
+                 total={:.2}s",
+                step + 1,
+                backtrack_started.elapsed().as_secs_f64(),
+                accepted_step.step_norm_sq.sqrt(),
+                accepted_step.retained_rank,
+                geometry.eigenvalues.len(),
+                step_started.elapsed().as_secs_f64(),
+            );
             log::debug!(
-                "SAE terminal Newton step committed: ‖g‖ {grad_norm:.6e} → next round \
-                 (α={alpha:.3e}, tol {grad_tolerance:.6e})"
+                "SAE terminal Newton step committed: merit {pre_merit:.6e} → \
+                 {accepted_merit:.6e} (predicted reduction {predicted_decrease:.6e}, measured \
+                 {:.6e}, ratio {:.4e}); ‖g‖ {grad_norm:.6e} → {:.6e}, tol {grad_tolerance:.6e}",
+                pre_merit - accepted_merit,
+                if predicted_decrease > 0.0 {
+                    (pre_merit - accepted_merit) / predicted_decrease
+                } else {
+                    f64::NAN
+                },
+                (2.0 * accepted_merit).max(0.0).sqrt(),
             );
         }
         Ok(made_progress)

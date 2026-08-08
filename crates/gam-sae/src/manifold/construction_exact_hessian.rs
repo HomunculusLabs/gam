@@ -95,7 +95,125 @@ struct ExactHessianSpectralBlock {
     rank_floor: f64,
 }
 
+/// One point of the Levenberg--Marquardt path of the LINEAR residual model,
+/// read off the eigensystem that is already materialized.
+///
+/// For damping `ν ≥ 0` the step
+///
+/// ```text
+///   Δ(ν) = Σ_i u_i λ_i (u_iᵀ rhs) / (λ_i² + ν)
+/// ```
+///
+/// is the exact minimizer of `‖rhs − AΔ‖² + ν‖Δ‖²`, and `ν = 0` reproduces the
+/// pseudoinverse step of [`ExactHessianSpectralBlock::solve_stationarity`]
+/// (same `rank_floor`, same retained band). Because the eigensystem is already
+/// in hand, the WHOLE path costs one diagonal pass per point — no
+/// refactorization, no second operator apply.
+///
+/// With `rhs = −g` the linear model of the stationarity residual at the trial
+/// point is exactly
+///
+/// ```text
+///   g + A Δ(ν) = Σ_i u_i c_i ν/(λ_i² + ν),      c_i = u_iᵀ g
+/// ```
+///
+/// so `model_merit = ½‖g + AΔ(ν)‖²` below is CLOSED FORM, not an estimate; the
+/// merit reduction it predicts is the reference an accepted step is measured
+/// against. This is why the polish can price a damping before paying for it.
+pub(crate) struct DampedResidualStep {
+    /// `Δ(ν)`.
+    pub(crate) step: SaeArrowVector,
+    /// `½‖g + AΔ(ν)‖²` — the linear model's residual merit at the trial point.
+    pub(crate) model_merit: f64,
+    /// `‖Δ(ν)‖²`.
+    pub(crate) step_norm_sq: f64,
+    /// Directions whose damped denominator cleared the null band.
+    pub(crate) retained_rank: usize,
+}
+
 impl ExactHessianSpectralBlock {
+    /// Smallest and largest `|λ|` the null band retained, or `None` when the
+    /// whole spectrum is inside it. The two set the DERIVED damping ladder the
+    /// polish walks: below `λ_min²` a damping cannot change the flattest
+    /// resolved direction, and above `λ_max²` it has already flattened every
+    /// direction there is, so no ladder needs to leave `[λ_min², λ_max²]`.
+    fn retained_curvature_extremes(&self) -> Option<(f64, f64)> {
+        let mut smallest = f64::INFINITY;
+        let mut largest = 0.0_f64;
+        for &lambda in self.eigenvalues.iter() {
+            let magnitude = lambda.abs();
+            if magnitude > self.rank_floor {
+                smallest = smallest.min(magnitude);
+                largest = largest.max(magnitude);
+            }
+        }
+        (largest > 0.0 && smallest.is_finite()).then_some((smallest, largest))
+    }
+
+    /// One point of the damped residual path — see [`DampedResidualStep`].
+    ///
+    /// `residual` is the stationarity residual `g`; the step returned solves the
+    /// damped system against `−g`, i.e. it is a descent step, and the model
+    /// merit is reported for `g` itself so the caller compares like with like.
+    /// A direction whose damped denominator `λ² + ν` is inside the null band
+    /// (`≤ rank_floor²`) contributes nothing to the step and its whole
+    /// coefficient to the model residual: at `ν = 0` that is exactly the
+    /// pseudoinverse's own classification.
+    fn damped_residual_step(
+        &self,
+        residual: &SaeArrowVector,
+        nu: f64,
+    ) -> Result<DampedResidualStep, String> {
+        let total_t = residual.t.len();
+        let dim = total_t + residual.beta.len();
+        let spectral_dim = self.eigenvalues.len();
+        if self.eigenvectors.dim() != (dim, spectral_dim) || spectral_dim != dim {
+            return Err(format!(
+                "damped residual step: eigenvectors {:?} and spectrum {spectral_dim} do not \
+                 match residual dimension {dim}",
+                self.eigenvectors.dim(),
+            ));
+        }
+        if !(nu.is_finite() && nu >= 0.0) {
+            return Err(format!("damped residual step: damping must be finite and ≥ 0; got {nu}"));
+        }
+        let mut flat = Array1::<f64>::zeros(dim);
+        flat.slice_mut(s![..total_t]).assign(&residual.t);
+        flat.slice_mut(s![total_t..]).assign(&residual.beta);
+        if !flat.iter().all(|value| value.is_finite()) {
+            return Err("damped residual step: residual contains a non-finite value".to_string());
+        }
+        let coefficients = self.eigenvectors.t().dot(&flat);
+        let null_band = self.rank_floor * self.rank_floor;
+        let mut step_coefficients = Array1::<f64>::zeros(spectral_dim);
+        let mut model_residual_norm_sq = 0.0_f64;
+        let mut retained_rank = 0usize;
+        for index in 0..spectral_dim {
+            let lambda = self.eigenvalues[index];
+            let denominator = lambda * lambda + nu;
+            let coefficient = coefficients[index];
+            if denominator > null_band {
+                // Δ solves `(A² + ν) Δ = −A g` in this direction.
+                step_coefficients[index] = -lambda * coefficient / denominator;
+                let surviving = coefficient * nu / denominator;
+                model_residual_norm_sq += surviving * surviving;
+                retained_rank += 1;
+            } else {
+                model_residual_norm_sq += coefficient * coefficient;
+            }
+        }
+        let solution = self.eigenvectors.dot(&step_coefficients);
+        Ok(DampedResidualStep {
+            step: SaeArrowVector {
+                t: solution.slice(s![..total_t]).to_owned(),
+                beta: solution.slice(s![total_t..]).to_owned(),
+            },
+            model_merit: 0.5 * model_residual_norm_sq,
+            step_norm_sq: solution.dot(&solution),
+            retained_rank,
+        })
+    }
+
     /// Apply the symmetric Moore--Penrose inverse.  Resolved positive and
     /// negative modes are both retained; only the spectral null band
     /// `|λ| ≤ rank_floor` is removed, and that band is the ONLY null predicate
