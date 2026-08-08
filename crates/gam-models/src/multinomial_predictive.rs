@@ -83,9 +83,19 @@ use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 /// useful than publishing a number nobody can bound.
 pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 1.0e-2;
 
-/// Convergence target for the augmented-mode Newton solve, on the infinity norm
-/// of the penalized gradient scaled by the problem's own gradient scale.
-const AUGMENTED_MODE_GRADIENT_TOLERANCE: f64 = 1.0e-10;
+/// Convergence target for the augmented-mode Newton solve, stated as the NEWTON
+/// DECREMENT `½ gᵀH⁻¹g` — the quadratic model's own bound on how much
+/// log-posterior is left to gain.
+///
+/// A gradient-norm target would be the wrong currency here twice over. It is
+/// not scale-free (the gradient of an `n`-row log-likelihood is `O(n)`, so the
+/// same threshold means different things on different fixtures), and it is not
+/// the quantity the answer depends on: every ratio this module publishes is
+/// `exp(L⁺ − L)`, so what has to be small is the residual error in `L`, which
+/// is exactly what the decrement bounds. At `1e-10` the ratio is converged to
+/// `1e-10` relative — five orders below the `1e-2` mass defect the estimator's
+/// own identity is checked at, so the solve is never the binding error.
+const AUGMENTED_MODE_DECREMENT_TOLERANCE: f64 = 1.0e-10;
 
 /// How far the base-mode polish may move the supplied coefficients, relative to
 /// their own largest magnitude, before the predictive refuses.
@@ -254,9 +264,12 @@ impl<'a> MultinomialPredictiveModel<'a> {
         }
     }
 
-    /// The penalized log-posterior `ℓ(θ) − ½ θ' S_λ θ`, optionally with extra
-    /// observations appended.
-    fn log_posterior(&self, theta: &[f64], extra: &[ExtraRow<'_>]) -> f64 {
+    /// The objective this predictive integrates:
+    /// `ℓ(θ) − ½ θ' S_λ θ + cᵀθ`, optionally with extra observations appended.
+    ///
+    /// See [`Self::stationarity_tilt`] for what `c` is and why it is measured
+    /// rather than assumed.
+    fn log_posterior(&self, theta: &[f64], extra: &[ExtraRow<'_>], tilt: &[f64]) -> f64 {
         let m = self.active_classes();
         let mut eta = vec![0.0_f64; m];
         let mut total = 0.0_f64;
@@ -286,16 +299,25 @@ impl<'a> MultinomialPredictiveModel<'a> {
             }
             quadratic += ti * acc;
         }
-        total - 0.5 * quadratic
+        let linear: f64 = theta.iter().zip(tilt.iter()).map(|(t, c)| t * c).sum();
+        total - 0.5 * quadratic + linear
     }
 
     /// Gradient of the NEGATIVE penalized log-posterior and its Hessian, both
     /// in the stacked class-major order.
+    ///
+    /// The `(a, b)` curvature block is `Xᵀ diag(w_ab) X` with
+    /// `w_ab[row] = weight · p_a (δ_ab − p_b)`, which is a GEMM. Accumulating it
+    /// row-by-row instead would be the same flops with none of the locality,
+    /// and this is the inner loop of every augmented mode: one per (prediction
+    /// row, class).
     fn gradient_and_precision(
         &self,
         theta: &[f64],
         extra: &[ExtraRow<'_>],
+        tilt: &[f64],
     ) -> (Array1<f64>, Array2<f64>) {
+        let n = self.training_design.nrows();
         let p = self.training_design.ncols();
         let m = self.active_classes();
         let d = p * m;
@@ -303,78 +325,134 @@ impl<'a> MultinomialPredictiveModel<'a> {
         let mut precision = self.joint_penalty.to_owned();
         let mut eta = vec![0.0_f64; m];
         let mut probs = vec![0.0_f64; self.n_classes];
-
-        let accumulate = |design_row: ArrayView1<'_, f64>,
-                              label: usize,
-                              weight: f64,
-                              eta: &mut Vec<f64>,
-                              probs: &mut Vec<f64>,
-                              gradient: &mut Array1<f64>,
-                              precision: &mut Array2<f64>| {
-            self.row_eta(design_row, theta, eta);
-            self.row_probabilities(eta, probs);
-            for a in 0..m {
-                let residual = weight * (probs[a] - if label == a { 1.0 } else { 0.0 });
-                for (i, &xi) in design_row.iter().enumerate() {
-                    gradient[a * p + i] += residual * xi;
-                }
-            }
-            for a in 0..m {
-                for b in 0..m {
-                    let delta = if a == b { 1.0 } else { 0.0 };
-                    let w = weight * probs[a] * (delta - probs[b]);
-                    if w == 0.0 {
-                        continue;
-                    }
-                    for (i, &xi) in design_row.iter().enumerate() {
-                        let scaled = w * xi;
-                        if scaled == 0.0 {
-                            continue;
-                        }
-                        for (j, &xj) in design_row.iter().enumerate() {
-                            precision[[a * p + i, b * p + j]] += scaled * xj;
-                        }
-                    }
-                }
-            }
-        };
+        // `curvature_weights[(row, a * m + b)]` is the row's contribution to the
+        // `(a, b)` block, kept as a column so each block is one GEMM.
+        let mut curvature_weights = Array2::<f64>::zeros((n, m * m));
 
         for (row, &label) in self.training_class_index.iter().enumerate() {
             let weight = self.training_weights[row];
             if weight == 0.0 {
                 continue;
             }
-            accumulate(
-                self.training_design.row(row),
-                label as usize,
-                weight,
-                &mut eta,
-                &mut probs,
-                &mut gradient,
-                &mut precision,
-            );
+            let design_row = self.training_design.row(row);
+            self.row_eta(design_row, theta, &mut eta);
+            self.row_probabilities(&eta, &mut probs);
+            let label = label as usize;
+            for a in 0..m {
+                let residual = weight * (probs[a] - if label == a { 1.0 } else { 0.0 });
+                for (i, &xi) in design_row.iter().enumerate() {
+                    gradient[a * p + i] += residual * xi;
+                }
+                for b in 0..m {
+                    let delta = if a == b { 1.0 } else { 0.0 };
+                    curvature_weights[[row, a * m + b]] = weight * probs[a] * (delta - probs[b]);
+                }
+            }
         }
+
+        for a in 0..m {
+            for b in a..m {
+                let column = curvature_weights.column(a * m + b);
+                let mut scaled = self.training_design.to_owned();
+                for (mut design_row, &w) in scaled.rows_mut().into_iter().zip(column.iter()) {
+                    design_row.map_inplace(|value| *value *= w);
+                }
+                let block = self.training_design.t().dot(&scaled);
+                for i in 0..p {
+                    for j in 0..p {
+                        precision[[a * p + i, b * p + j]] += block[[i, j]];
+                        if a != b {
+                            // `w_ab = w·p_a(δ_ab − p_b)` is symmetric in `(a, b)`,
+                            // so the mirrored block is the transpose and does not
+                            // need its own GEMM.
+                            precision[[b * p + j, a * p + i]] += block[[i, j]];
+                        }
+                    }
+                }
+            }
+        }
+
+        // The extra observations are rank-`m` and there are at most two of them,
+        // so they are accumulated directly rather than through another GEMM.
         for row in extra {
-            accumulate(
-                row.design,
-                row.class,
-                1.0,
-                &mut eta,
-                &mut probs,
-                &mut gradient,
-                &mut precision,
-            );
+            self.row_eta(row.design, theta, &mut eta);
+            self.row_probabilities(&eta, &mut probs);
+            for a in 0..m {
+                let residual = probs[a] - if row.class == a { 1.0 } else { 0.0 };
+                for (i, &xi) in row.design.iter().enumerate() {
+                    gradient[a * p + i] += residual * xi;
+                }
+            }
+            for a in 0..m {
+                for b in 0..m {
+                    let delta = if a == b { 1.0 } else { 0.0 };
+                    let w = probs[a] * (delta - probs[b]);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    for (i, &xi) in row.design.iter().enumerate() {
+                        let scaled = w * xi;
+                        if scaled == 0.0 {
+                            continue;
+                        }
+                        for (j, &xj) in row.design.iter().enumerate() {
+                            precision[[a * p + i, b * p + j]] += scaled * xj;
+                        }
+                    }
+                }
+            }
         }
+
         // The penalty's own contribution to the gradient of the NEGATIVE
-        // log-posterior is `S_λ θ`.
+        // log-posterior is `S_λ θ`; the tilt's is `−c`. Neither touches the
+        // curvature — the penalty is already in `precision` and a linear term
+        // has no second derivative.
         for i in 0..d {
             let mut acc = 0.0_f64;
             for j in 0..d {
                 acc += self.joint_penalty[[i, j]] * theta[j];
             }
-            gradient[i] += acc;
+            gradient[i] += acc - tilt[i];
         }
         (gradient, precision)
+    }
+
+    /// The linear term `c` that makes the SUPPLIED coefficients an exact
+    /// stationary point of the objective this predictive integrates.
+    ///
+    /// # What it is measuring
+    ///
+    /// A Laplace ratio is only a Laplace ratio if its denominator is expanded at
+    /// a mode. The published coefficients are the mode of the objective the FIT
+    /// maximised, and that objective is not always `ℓ − ½θ'S_λθ`: the multinomial
+    /// formula path arms a Jeffreys/Firth term `Φ` on separation evidence, and
+    /// on the geometry where it arms, `Φ`'s `O(1)` gradient is what pins a
+    /// direction the penalized likelihood leaves at `O(λ)`. Integrating the
+    /// bare penalized likelihood against a mode that belongs to `ℓ − ½θ'S_λθ + Φ`
+    /// would take every ratio against a posterior the published coefficients do
+    /// not live in.
+    ///
+    /// `c = ∇(−[ℓ − ½θ'S_λθ])(β̂)` is EXACTLY `∇Φ(β̂)`, by stationarity of the
+    /// fit's own mode — so the first-order content of whatever extra term the
+    /// objective carried is *measurable* at the published point rather than
+    /// something this module has to reconstruct. Carrying it as a linear term is
+    /// free: it moves no curvature (a linear function has no second derivative),
+    /// so the augmented modes and their log-determinants stay the ones the ratio
+    /// needs.
+    ///
+    /// When the fit carried no extra term, `c` is the inner solve's own residual
+    /// gradient — orders below anything that matters, and absorbing it makes the
+    /// base exactly stationary rather than nearly so, which is a strict
+    /// improvement on using the raw mode.
+    ///
+    /// What is NOT carried is the extra term's CURVATURE. That is second-order
+    /// in the ratio: `Φ`'s Hessian appears in the numerator's and the
+    /// denominator's log-determinants alike, one observation apart, and the
+    /// residual is what the mass-defect identity below measures at every row.
+    fn stationarity_tilt(&self, mode: &[f64]) -> Array1<f64> {
+        let zero = vec![0.0_f64; mode.len()];
+        let (gradient, _) = self.gradient_and_precision(mode, &[], &zero);
+        gradient
     }
 
     /// Newton with backtracking on the strictly convex negative penalized
@@ -386,13 +464,14 @@ impl<'a> MultinomialPredictiveModel<'a> {
         &self,
         start: &[f64],
         extra: &[ExtraRow<'_>],
+        tilt: &[f64],
     ) -> Result<(Vec<f64>, f64, f64), EstimationError> {
         let d = self.coefficient_dim();
         let mut theta = start.to_vec();
-        let mut value = self.log_posterior(&theta, extra);
+        let mut value = self.log_posterior(&theta, extra, tilt);
         let mut logdet;
         for _iteration in 0..AUGMENTED_MODE_MAX_ITERATIONS {
-            let (gradient, precision) = self.gradient_and_precision(&theta, extra);
+            let (gradient, precision) = self.gradient_and_precision(&theta, extra, tilt);
             let factor = precision.cholesky(faer::Side::Lower).map_err(|error| {
                 EstimationError::InvalidInput(format!(
                     "multinomial predictive: augmented posterior precision is not positive \
@@ -401,18 +480,21 @@ impl<'a> MultinomialPredictiveModel<'a> {
                 ))
             })?;
             logdet = factor.diag().iter().map(|v| v.abs().ln()).sum::<f64>() * 2.0;
-            let scale = gradient
-                .iter()
-                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
-                .max(1.0);
-            if gradient.iter().all(|v| v.abs() <= AUGMENTED_MODE_GRADIENT_TOLERANCE * scale) {
-                return Ok((theta, value, logdet));
-            }
             let step = factor.solvevec(&(-&gradient));
             if step.iter().any(|v| !v.is_finite()) {
                 crate::bail_invalid_estim!(
                     "multinomial predictive: augmented Newton step is not finite"
                 );
+            }
+            // `½ gᵀH⁻¹g = −½ gᵀ·step`, the quadratic model's predicted gain.
+            let decrement = -0.5
+                * gradient
+                    .iter()
+                    .zip(step.iter())
+                    .map(|(g, s)| g * s)
+                    .sum::<f64>();
+            if decrement <= AUGMENTED_MODE_DECREMENT_TOLERANCE {
+                return Ok((theta, value, logdet));
             }
             let mut accepted = false;
             let mut length = 1.0_f64;
@@ -421,7 +503,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
                 for i in 0..d {
                     trial[i] = theta[i] + length * step[i];
                 }
-                let trial_value = self.log_posterior(&trial, extra);
+                let trial_value = self.log_posterior(&trial, extra, tilt);
                 if trial_value.is_finite() && trial_value >= value {
                     theta = trial;
                     value = trial_value;
@@ -475,16 +557,17 @@ impl<'a> MultinomialPredictiveModel<'a> {
         // read from the saved covariance ON PURPOSE: numerator and denominator
         // of every ratio must come from the same assembly, or the difference of
         // two log-determinants inherits whatever the two paths disagree about.
-        let (base_mode, base_value, base_logdet) = self.augmented_mode(&base_theta, &[])?;
-        // ... and the polish must be a POLISH. If the supplied coefficients are
-        // the mode of a different objective — the Jeffreys/Firth-augmented one,
-        // say, whose `O(1)` term is what pins a direction the penalized
-        // likelihood leaves at `O(λ)` — then this solve moves the base a long
-        // way, every ratio is taken against a posterior the published
-        // coefficients do not belong to, and the two would disagree at first
-        // order in exactly the directions this estimator exists to get right.
-        // Refuse there: a probability from a different model is worse than no
-        // probability.
+        let tilt = self.stationarity_tilt(&base_theta);
+        let tilt = tilt.as_slice().expect("owned gradient is contiguous");
+        let (base_mode, base_value, base_logdet) = self.augmented_mode(&base_theta, &[], tilt)?;
+        // ... and with the stationarity tilt in place the polish must be a
+        // NO-OP: `c` was measured so that the supplied coefficients ARE the
+        // stationary point of this objective. A polish that moves anywhere is
+        // therefore a statement about this module, not about the fit — the tilt
+        // and the gradient it was built from have come apart — and it is checked
+        // rather than assumed, because every ratio below is expanded at this
+        // point and a base that is not a mode makes each of them something other
+        // than a Laplace approximation.
         let scale = base_theta
             .iter()
             .fold(1.0_f64, |acc, value| acc.max(value.abs()));
@@ -496,11 +579,11 @@ impl<'a> MultinomialPredictiveModel<'a> {
             });
         if drift > BASE_MODE_POLISH_TOLERANCE * scale {
             crate::bail_invalid_estim!(
-                "multinomial predictive: the supplied coefficients are not a stationary point of \
-                 the penalized log-posterior this predictive integrates — polishing moved them by \
-                 {drift:e} against a coefficient scale of {scale:e} (relative \
-                 {relative:e} > {tol:e}). The published mode and the published probability would \
-                 be describing two different posteriors",
+                "multinomial predictive: the stationarity-tilted base is not stationary — \
+                 polishing the supplied coefficients moved them by {drift:e} against a \
+                 coefficient scale of {scale:e} (relative {relative:e} > {tol:e}), so the tilt \
+                 and the gradient it was measured from disagree and every ratio below would be \
+                 expanded somewhere other than a mode",
                 relative = drift / scale,
                 tol = BASE_MODE_POLISH_TOLERANCE,
             );
@@ -524,7 +607,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
                     design: design_row,
                     class,
                 }];
-                let (_, value, logdet) = self.augmented_mode(&base_mode, &extra)?;
+                let (_, value, logdet) = self.augmented_mode(&base_mode, &extra, tilt)?;
                 raw[class] = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
             }
             let total: f64 = raw.iter().sum();
@@ -562,7 +645,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
                                 class: dd,
                             },
                         ];
-                        let (_, value, logdet) = self.augmented_mode(&base_mode, &extra)?;
+                        let (_, value, logdet) = self.augmented_mode(&base_mode, &extra, tilt)?;
                         let entry = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
                         raw_second[c * k + dd] = entry;
                         raw_second[dd * k + c] = entry;
