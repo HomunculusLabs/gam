@@ -87,6 +87,20 @@ pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 1.0e-2;
 /// of the penalized gradient scaled by the problem's own gradient scale.
 const AUGMENTED_MODE_GRADIENT_TOLERANCE: f64 = 1.0e-10;
 
+/// How far the base-mode polish may move the supplied coefficients, relative to
+/// their own largest magnitude, before the predictive refuses.
+///
+/// The polish exists so the base of every ratio is exactly a stationary point of
+/// the objective the ratios are taken against; on a fit whose mode was found
+/// under that same objective it moves the coefficients by the solver's own
+/// residual, which is orders below this. A LARGE move means the supplied mode
+/// belongs to a different objective, and the bar is set where "solver slack" and
+/// "different model" cannot be confused: an inner solve certified at a scaled
+/// KKT residual of `1e-5` leaves a mode displacement far under `1e-3` of the
+/// coefficient scale, while a first-order objective difference in a
+/// near-unpenalized direction moves it by `O(1)`.
+const BASE_MODE_POLISH_TOLERANCE: f64 = 1.0e-3;
+
 /// Maximum Newton iterations for one augmented mode. The objective is strictly
 /// convex and the start point is the un-augmented mode, one observation away, so
 /// this bound is never approached on a well-posed fit; it exists so a
@@ -290,7 +304,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
         let mut eta = vec![0.0_f64; m];
         let mut probs = vec![0.0_f64; self.n_classes];
 
-        let mut accumulate = |design_row: ArrayView1<'_, f64>,
+        let accumulate = |design_row: ArrayView1<'_, f64>,
                               label: usize,
                               weight: f64,
                               eta: &mut Vec<f64>,
@@ -376,7 +390,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
         let d = self.coefficient_dim();
         let mut theta = start.to_vec();
         let mut value = self.log_posterior(&theta, extra);
-        let mut logdet = f64::NAN;
+        let mut logdet;
         for _iteration in 0..AUGMENTED_MODE_MAX_ITERATIONS {
             let (gradient, precision) = self.gradient_and_precision(&theta, extra);
             let factor = precision.cholesky(faer::Side::Lower).map_err(|error| {
@@ -462,6 +476,35 @@ impl<'a> MultinomialPredictiveModel<'a> {
         // of every ratio must come from the same assembly, or the difference of
         // two log-determinants inherits whatever the two paths disagree about.
         let (base_mode, base_value, base_logdet) = self.augmented_mode(&base_theta, &[])?;
+        // ... and the polish must be a POLISH. If the supplied coefficients are
+        // the mode of a different objective — the Jeffreys/Firth-augmented one,
+        // say, whose `O(1)` term is what pins a direction the penalized
+        // likelihood leaves at `O(λ)` — then this solve moves the base a long
+        // way, every ratio is taken against a posterior the published
+        // coefficients do not belong to, and the two would disagree at first
+        // order in exactly the directions this estimator exists to get right.
+        // Refuse there: a probability from a different model is worse than no
+        // probability.
+        let scale = base_theta
+            .iter()
+            .fold(1.0_f64, |acc, value| acc.max(value.abs()));
+        let drift = base_mode
+            .iter()
+            .zip(base_theta.iter())
+            .fold(0.0_f64, |acc, (polished, supplied)| {
+                acc.max((polished - supplied).abs())
+            });
+        if drift > BASE_MODE_POLISH_TOLERANCE * scale {
+            crate::bail_invalid_estim!(
+                "multinomial predictive: the supplied coefficients are not a stationary point of \
+                 the penalized log-posterior this predictive integrates — polishing moved them by \
+                 {drift:e} against a coefficient scale of {scale:e} (relative \
+                 {relative:e} > {tol:e}). The published mode and the published probability would \
+                 be describing two different posteriors",
+                relative = drift / scale,
+                tol = BASE_MODE_POLISH_TOLERANCE,
+            );
+        }
 
         let rows = x_new.nrows();
         let k = self.n_classes;

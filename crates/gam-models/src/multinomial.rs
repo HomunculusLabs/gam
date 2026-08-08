@@ -1665,6 +1665,42 @@ pub struct MultinomialSavedModel {
     /// `summary()`. Empty for a wholly parametric (no-smooth) model.
     #[serde(default)]
     pub smooth_term_spans: Vec<MultinomialSmoothTermSpan>,
+    /// Training design in the RAW basis, flattened row-major over `(n, P)`.
+    ///
+    /// # Why a saved multinomial model carries its own rows (#2612)
+    ///
+    /// The published prediction is the posterior MEAN probability
+    /// `E[softmax(x'β)]`, and a Laplace summary — `β̂` plus
+    /// [`Self::coefficient_covariance_flat`] — cannot produce it. That summary
+    /// IS the quadratic model of the log-posterior, and the quadratic model is
+    /// exactly what fails: integrating `softmax` against `N(β̂, H⁻¹)` keeps the
+    /// curvature half of the `O(n⁻¹)` correction to a posterior mean and drops
+    /// the skewness half, which on a (quasi-)separated fit is neither small nor
+    /// the same sign. Computing the estimand honestly means evaluating the
+    /// posterior away from the mode, which means the likelihood, which means the
+    /// rows. See [`crate::multinomial_predictive`].
+    ///
+    /// This is the same choice `mgcv` makes when it stores the model frame with
+    /// the fitted object, and it is required rather than optional: a payload
+    /// without it cannot answer the question `predict` is asked.
+    pub training_design_flat: Vec<f64>,
+    /// Number of training rows `n`; segments [`Self::training_design_flat`].
+    pub training_rows: usize,
+    /// Training class index per row, values in `0..K`, aligned to
+    /// [`Self::class_levels`].
+    pub training_class_index: Vec<u32>,
+    /// Training row weights, length `n`.
+    pub training_weights: Vec<f64>,
+    /// The joint penalty `S_λ` at the selected smoothing parameters, flattened
+    /// row-major over `(P·M, P·M)` in the same stacked class-major order as
+    /// [`Self::coefficient_covariance_flat`].
+    ///
+    /// Stored rather than rebuilt because the coupled `Σ_t λ_t (M ⊗ S_t)`
+    /// carrier (#1587) is assembled from the family's equivariant specs, which
+    /// the saved payload does not otherwise carry — and because reconstructing
+    /// it as `Σ⁻¹(I − F)` would put an inverse of the very matrix whose
+    /// conditioning is the problem on the prediction path.
+    pub joint_penalty_flat: Vec<f64>,
     /// One descriptive label per *penalty component* within a single active-class
     /// block, parallel to that block's λ slice (i.e. length
     /// `lambdas_per_block[0]`). The Marra–Wood double penalty (and tensor /
@@ -1833,7 +1869,113 @@ impl MultinomialSavedModel {
                 "multinomial saved numeric payload is non-finite at combined index {index}: {value}"
             );
         }
+        // #2612: the training frame is what makes the published posterior mean
+        // computable at all, so its shape is a contract, not a hint.
+        let design_len = self
+            .training_rows
+            .checked_mul(self.p_per_class)
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "multinomial saved training design size overflowed usize".to_string(),
+                )
+            })?;
+        if self.training_design_flat.len() != design_len {
+            crate::bail_invalid_estim!(
+                "multinomial saved model has {} training design values, expected \
+                 {design_len} = {} rows x {} columns",
+                self.training_design_flat.len(),
+                self.training_rows,
+                self.p_per_class,
+            );
+        }
+        if self.training_class_index.len() != self.training_rows
+            || self.training_weights.len() != self.training_rows
+        {
+            crate::bail_invalid_estim!(
+                "multinomial saved model has {} training rows, {} labels and {} weights",
+                self.training_rows,
+                self.training_class_index.len(),
+                self.training_weights.len(),
+            );
+        }
+        let n_classes = self.class_levels.len();
+        if let Some(label) = self
+            .training_class_index
+            .iter()
+            .find(|&&label| label as usize >= n_classes)
+        {
+            crate::bail_invalid_estim!(
+                "multinomial saved training label {label} is outside 0..{n_classes}"
+            );
+        }
+        if self.joint_penalty_flat.len() != covariance_len {
+            crate::bail_invalid_estim!(
+                "multinomial saved model has {} joint-penalty values, expected {covariance_len}",
+                self.joint_penalty_flat.len(),
+            );
+        }
+        if let Some((index, value)) = self
+            .training_design_flat
+            .iter()
+            .chain(self.training_weights.iter())
+            .chain(self.joint_penalty_flat.iter())
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            crate::bail_invalid_estim!(
+                "multinomial saved training payload is non-finite at combined index \
+                 {index}: {value}"
+            );
+        }
         Ok(())
+    }
+
+    /// The training frame and penalty this model carries, as the borrowed view
+    /// [`crate::multinomial_predictive`] consumes.
+    pub fn predictive_model<'a>(
+        &'a self,
+        training_design: ndarray::ArrayView2<'a, f64>,
+        training_weights: ndarray::ArrayView1<'a, f64>,
+        joint_penalty: ndarray::ArrayView2<'a, f64>,
+    ) -> crate::multinomial_predictive::MultinomialPredictiveModel<'a> {
+        crate::multinomial_predictive::MultinomialPredictiveModel {
+            training_design,
+            training_class_index: &self.training_class_index,
+            training_weights,
+            joint_penalty,
+            n_classes: self.class_levels.len(),
+        }
+    }
+
+    /// Training design as an `(n, P)` `ndarray`.
+    pub fn training_design(&self) -> Result<Array2<f64>, EstimationError> {
+        Array2::from_shape_vec(
+            (self.training_rows, self.p_per_class),
+            self.training_design_flat.clone(),
+        )
+        .map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "multinomial saved training design is inconsistent with n x P: {error}"
+            ))
+        })
+    }
+
+    /// Joint penalty `S_λ` as a `(P·M, P·M)` `ndarray`.
+    pub fn joint_penalty(&self) -> Result<Array2<f64>, EstimationError> {
+        let d = self
+            .p_per_class
+            .checked_mul(self.n_active_classes)
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "multinomial saved joint-penalty dimension overflowed usize".to_string(),
+                )
+            })?;
+        Array2::from_shape_vec((d, d), self.joint_penalty_flat.clone()).map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "multinomial saved joint penalty is inconsistent with (P·M)x(P·M): {error}"
+            ))
+        })
     }
 
     /// Active-class coefficient block as an `(P, K-1)` `ndarray` view.
@@ -1884,8 +2026,11 @@ impl MultinomialSavedModel {
         &self,
         x_new: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, EstimationError> {
-        self.predict_probabilities_with_se(x_new)
-            .map(|(mean, _)| mean)
+        // Second moments cost `K(K+1)/2` extra augmented solves per row and
+        // nothing here reads them, so the mean-only caller does not pay for
+        // them.
+        self.predictive_moments(x_new, false)
+            .map(|moments| moments.class_mean)
     }
 
     /// Posterior-mean class probabilities and integrated marginal standard
@@ -1894,26 +2039,54 @@ impl MultinomialSavedModel {
         &self,
         x_new: ArrayView2<'_, f64>,
     ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
-        self.predict_probabilities_with_se_and_control(
-            x_new,
-            &MultinomialPosteriorIntegrationControl::default(),
-        )
+        let moments = self.predictive_moments(x_new, true)?;
+        let standard_deviation =
+            crate::multinomial_predictive::predictive_standard_deviation(&moments)?;
+        Ok((moments.class_mean, standard_deviation))
     }
 
-    pub fn predict_probabilities_with_se_and_control(
+    /// The posterior mode in the stacked class-major order the joint covariance,
+    /// the joint penalty and [`crate::multinomial_predictive`] all use:
+    /// `θ[a·P + i] = β[i, a]`.
+    pub fn stacked_mode(&self) -> Result<Array1<f64>, EstimationError> {
+        let coefficients = self.coefficients_active()?;
+        let p = self.p_per_class;
+        let m = self.n_active_classes;
+        let mut theta = Array1::<f64>::zeros(p * m);
+        for a in 0..m {
+            for i in 0..p {
+                theta[a * p + i] = coefficients[[i, a]];
+            }
+        }
+        Ok(theta)
+    }
+
+    /// Posterior-predictive moments at fresh design rows, by the ratio of
+    /// normalising constants (#2612).
+    ///
+    /// The Smolyak accuracy/level control this method used to take is gone
+    /// rather than ignored. That control existed because the old mechanism was
+    /// a quadrature whose answer could be bought with more nodes; this one is
+    /// not, and its accuracy is a property of the expansion (`O(n⁻²)`) that no
+    /// amount of extra work changes. What replaces it is a per-row exactness
+    /// check the caller does not have to configure: `Σ_c E[p_c] = 1` is an
+    /// identity of the estimand, so the deviation of the computed sum from one
+    /// IS the approximation's error at that row, and a row past
+    /// [`crate::multinomial_predictive::PREDICTIVE_MASS_DEFECT_TOLERANCE`] is
+    /// refused rather than published. See [`crate::multinomial_predictive`] for
+    /// why integrating `softmax` over `N(β̂, H⁻¹)` is not an approximation of
+    /// this estimand at all.
+    fn predictive_moments(
         &self,
         x_new: ArrayView2<'_, f64>,
-        control: &MultinomialPosteriorIntegrationControl,
-    ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
-        let coefficients = self.coefficients_active()?;
-        let covariance = self.coefficient_covariance()?;
-        let moments = integrate_multinomial_design_moments(
-            coefficients.view(),
-            covariance.view(),
-            x_new,
-            control,
-        )?;
-        Ok((moments.class_mean, moments.class_standard_deviation))
+        want_second_moments: bool,
+    ) -> Result<crate::multinomial_predictive::MultinomialPredictiveMoments, EstimationError> {
+        let design = self.training_design()?;
+        let penalty = self.joint_penalty()?;
+        let weights = Array1::from(self.training_weights.clone());
+        let mode = self.stacked_mode()?;
+        let model = self.predictive_model(design.view(), weights.view(), penalty.view());
+        model.predictive_moments(mode.view(), x_new, want_second_moments)
     }
 
     /// Wood (2013) rank-truncated Wald smooth-significance test per
@@ -2436,6 +2609,14 @@ pub(crate) struct PenalizedMultinomialFormulaParts {
     pub(crate) class_levels: Vec<String>,
     pub(crate) parametric_standardization: Vec<(usize, f64, f64)>,
     pub(crate) penalties_arc: Arc<Vec<PenaltyMatrix>>,
+    /// The design BEFORE the parametric standardization — the basis the saved
+    /// coefficients and the predict-time rebuild share, and therefore the one
+    /// the posterior-predictive ratio evaluates the likelihood in (#2612).
+    pub(crate) raw_training_design: Array2<f64>,
+    /// Training class index per row, values in `0..K` (#2612).
+    pub(crate) training_class_index: Vec<u32>,
+    /// Resolved per-row case weights (#2612).
+    pub(crate) training_weights: Array1<f64>,
 }
 
 pub(crate) fn penalized_multinomial_formula_parts(
@@ -2519,6 +2700,12 @@ pub(crate) fn penalized_multinomial_formula_parts(
     // columns are left alone (a penalty makes the rescaling non-equivalent),
     // and nothing is touched when explicit coefficient bounds/constraints
     // exist (those are stated in raw units).
+    // #2612: the RAW design, before the parametric standardization below, is the
+    // basis the saved coefficients and the predict-time rebuild both live in, so
+    // it is the one the posterior-predictive ratio must evaluate the likelihood
+    // in. Snapshot it here rather than un-standardizing later: an inverse map
+    // applied to a matrix is a second source of truth for the same rows.
+    let raw_training_design = x_dense.clone();
     let parametric_standardization: Vec<(usize, f64, f64)> =
         if design.coefficient_lower_bounds.is_some() || design.linear_constraints.is_some() {
             Vec::new()
@@ -2592,6 +2779,21 @@ pub(crate) fn penalized_multinomial_formula_parts(
             weights.len()
         );
     }
+    // #2612: the class index the posterior-predictive ratio appends its extra
+    // row's label from. Read off the one-hot the fit itself validated, so the
+    // two cannot disagree about which class a row is.
+    let training_class_index: Vec<u32> = (0..n_obs)
+        .map(|row| {
+            let mut best = 0usize;
+            for class in 1..k {
+                if y_one_hot[[row, class]] > y_one_hot[[row, best]] {
+                    best = class;
+                }
+            }
+            best as u32
+        })
+        .collect();
+    let training_weights = weights.clone();
     // First attempt runs the UNBIASED penalized-REML criterion (no Firth
     // shrinkage toward the uniform simplex); the Jeffreys/Firth proper prior is
     // armed conditionally below, only on separation evidence (#715/#753 — see
@@ -2776,6 +2978,9 @@ pub(crate) fn penalized_multinomial_formula_parts(
         class_levels,
         parametric_standardization,
         penalties_arc,
+        raw_training_design,
+        training_class_index,
+        training_weights,
     })
 }
 
@@ -2791,6 +2996,9 @@ pub fn fit_penalized_multinomial_formula(
         class_levels,
         parametric_standardization,
         penalties_arc,
+        raw_training_design,
+        training_class_index,
+        training_weights,
     } = penalized_multinomial_formula_parts(request)?;
     let MultinomialFitRequest {
         data,
@@ -3077,6 +3285,15 @@ pub fn fit_penalized_multinomial_formula(
         for (s, hs) in hinv_st.iter().enumerate() {
             f.scaled_add(-lam[s], hs);
         }
+        // #2612: the same `Σ_s λ_s M_s` in its own right. The posterior-
+        // predictive ratio has to evaluate the penalized log-posterior away
+        // from the mode, so it needs the penalty as an operator and not only
+        // through `F`. Assembled from the identical specs and λ so it cannot
+        // describe a different penalty than the influence matrix does.
+        let mut s_lambda = Array2::<f64>::zeros((expected_joint, expected_joint));
+        for (index, spec) in joint_specs.iter().enumerate() {
+            s_lambda.scaled_add(lam[index], &spec.matrix);
+        }
         // Per-class diagonal-block trace of F (the honest per-class EDF), and
         // the per-(class, component) penalty trace
         // `tr_{a,t} = Σ_{c∈term t} λ_{t,c} · Σ_{i∈class a} (H⁻¹ M_{t,c})[i,i]`
@@ -3130,7 +3347,7 @@ pub fn fit_penalized_multinomial_formula(
                 lam_flat.push(lam[s]);
             }
         }
-        Some((f, edf_per_class, edf_per_penalty, n_components, lam_flat))
+        Some((f, edf_per_class, edf_per_penalty, n_components, lam_flat, s_lambda))
     });
 
     // Flatten every (class, component) smoothing parameter in class-major order.
@@ -3141,7 +3358,7 @@ pub fn fit_penalized_multinomial_formula(
     // joint reconstruction is unavailable (legacy fixed-λ path or absent
     // covariance) fall back to the raw — now empty — per-block λ lists.
     let (lambdas_per_block, lambdas_flat): (Vec<usize>, Vec<f64>) = match joint_recon.as_ref() {
-        Some((_, _, _, n_components, lam_flat)) => {
+        Some((_, _, _, n_components, lam_flat, _)) => {
             let per_block = vec![*n_components; m];
             (per_block, lam_flat.clone())
         }
@@ -3178,7 +3395,7 @@ pub fn fit_penalized_multinomial_formula(
     // raw `edf_by_block` map did before.
     let edf_per_class = joint_recon
         .as_ref()
-        .map(|(_, epc, _, _, _)| epc.clone())
+        .map(|(_, epc, _, _, _, _)| epc.clone())
         .or_else(|| {
             // Legacy per-block trace path (fixed-λ / pre-#1587 fits whose
             // smoothing is still carried per block). Segment the block-major
@@ -3210,7 +3427,7 @@ pub fn fit_penalized_multinomial_formula(
     // carries that contract instead).
     let edf_per_penalty = joint_recon
         .as_ref()
-        .map(|(_, _, epp, _, _)| epp.clone())
+        .map(|(_, _, epp, _, _, _)| epp.clone())
         .or_else(|| {
             // Legacy per-block path: the inference layer's `edf_by_block` is
             // already the clamped per-penalty-block trace EDF, aligned 1:1 with
@@ -3305,7 +3522,7 @@ pub fn fit_penalized_multinomial_formula(
     // reconstruction when the joint reconstruction is unavailable (pre-#1587
     // per-block fits whose class blocks still carry their own penalties).
     let coefficient_influence_flat = match joint_recon.as_ref() {
-        Some((f, _, _, _, _)) => Some(f.iter().copied().collect::<Vec<f64>>()),
+        Some((f, _, _, _, _, _)) => Some(f.iter().copied().collect::<Vec<f64>>()),
         None => fit
             .covariance_conditional
             .as_ref()
@@ -3406,6 +3623,42 @@ pub fn fit_penalized_multinomial_formula(
     // row-by-row η = Xβ rebuild and softmax recompute were pure dead work.
     let deviance = -2.0 * fit.log_likelihood;
 
+    // #2612: the training frame and the penalty operator the posterior-mean
+    // predictive needs. `joint_recon` is the ONLY source for `S_λ` here — the
+    // per-block penalty lists were emptied into the coupled `M ⊗ S_t` carrier by
+    // #1587, so a block-diagonal reconstruction would describe a different
+    // model. If that reconstruction is unavailable the fit cannot publish its
+    // own estimand, and saying so is better than shipping a payload whose
+    // `predict` would have to fall back to the quantity #2612 is about.
+    let joint_penalty_flat: Vec<f64> = match joint_recon.as_ref() {
+        Some((_, _, _, _, _, s_lambda)) => {
+            if s_lambda.nrows() != expected_joint || s_lambda.ncols() != expected_joint {
+                crate::bail_invalid_estim!(
+                    "multinomial REML: joint penalty is {}x{}, expected {expected_joint}x{expected_joint}",
+                    s_lambda.nrows(),
+                    s_lambda.ncols(),
+                );
+            }
+            s_lambda.iter().copied().collect()
+        }
+        None => {
+            crate::bail_invalid_estim!(
+                "multinomial REML converged without the coupled joint penalty operator, so the \
+                 posterior-mean predictive has no penalty to evaluate its own log-posterior with"
+            )
+        }
+    };
+    if raw_training_design.ncols() != p_per_class {
+        crate::bail_invalid_estim!(
+            "multinomial REML: raw training design has {} columns but the fit reports \
+             p_per_class = {p_per_class}",
+            raw_training_design.ncols(),
+        );
+    }
+    let training_rows = raw_training_design.nrows();
+    let training_design_flat: Vec<f64> = raw_training_design.iter().copied().collect();
+    let training_weights_flat: Vec<f64> = training_weights.iter().copied().collect();
+
     Ok(MultinomialSavedModel {
         formula: formula.to_string(),
         class_levels: class_levels.clone(),
@@ -3426,6 +3679,11 @@ pub fn fit_penalized_multinomial_formula(
         coefficient_covariance_flat,
         coefficient_influence_flat,
         smooth_term_spans,
+        training_design_flat,
+        training_rows,
+        training_class_index,
+        training_weights: training_weights_flat,
+        joint_penalty_flat,
         lambda_labels,
     })
 }
