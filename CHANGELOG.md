@@ -1,5 +1,75 @@
 ## Unreleased
 
+- **`λ̂` is CHOSEN, and the smooth-term LR reference was pricing it as given
+  (#2672).** The pooled size of this issue's own null-simulation grid, measured
+  at main for the first time since `7dbd1dc43` landed: `size@.05 = 0.0962`
+  against nominal `0.05` and a band of `±0.0449`. The figure on the record is
+  `0.0272` — conservative by 1.8x. It is now anti-conservative by 1.9x, and
+  `7dbd1dc43` is what moved it: it removed the Wood–Pya–Säfken reference-df
+  inflation on the correct ground that the term is not in the fixed-`λ` null
+  law, and nothing replaced what that inflation had been standing in for. The
+  grid was not re-run.
+
+  A Gaussian null with `σ` KNOWN — so Lawley's `Δε` is exactly zero and the
+  reference is the only thing under test — reproduces it with none of gam's
+  machinery, and names the mechanism: `corr(W, Σw) = 0.94–0.96`. REML picks `λ̂`
+  on the same data that produced `W`, so the reference moves *with* the
+  statistic, but not by enough.
+
+  ```text
+  conditional at λ̂       α = .20   .10    .05    .01
+    n = 30,  k = 12          .2060 .1320  .0840  .0180
+    n = 100, k = 12          .2160 .1100  .0580  .0140
+    n = 200, k = 12          .1850 .1025  .0650  .0150
+  ```
+
+  **It is not a mean problem and must not be fixed as one.** On those runs
+  `E[W]/E[Σw] = 2.4–2.5`, and dividing `W` by that ratio takes `size@.05` from
+  `.087` to `.0000`. Two further candidates were measured and refused:
+  restoring the WPS term is the `0.027` arm, and substituting the `λ̂`-corrected
+  covariance `Vp` for `Vb` makes it *worse* (`.040 → .065`) on a `Var(ρ̂)` that
+  measures `9e6` because the criterion is flat under the null — which is exactly
+  the objection `7dbd1dc43` raised against that term, now confirmed.
+
+  **What the statistic needs is the law of `W(λ̂)` with the selection replayed.**
+  Diagonalize the term's fitted penalty against the Schur-complemented
+  information: the pair is symmetric-definite, so one basis diagonalizes both,
+  with generalized eigenvalues `ν_k = p_k/(1 − p_k)` read straight off the
+  penalty shares already computed. In that basis the tested block is `q`
+  independent standard normals, and BOTH the statistic and the criterion that
+  selects `λ` are closed forms in them and in `t = λ/λ̂`:
+
+  ```text
+  W(t) = Σ_k (2f_k − f_k²) u_k²,          f_k = 1/(1 + t·ν_k)
+  V(t) = ½ Σ_k u_k²·t·ν_k/(1 + t·ν_k) + ½ Σ_{ν_k>0} log((1 + t·ν_k)/(t·ν_k))
+  ```
+
+  So the whole selection — draw, choose `λ̂`, read `W` — is a function of `q`
+  numbers, and the null law is generated with no design, no response and no
+  refit, over the same `ρ` box the solver used. `t = 1` reproduces the
+  conditional law exactly, so this is a strict generalization rather than a
+  different reference.
+
+  ```text
+  selection-aware        α = .20   .10    .05    .01
+    n = 30,  k = 12          .1940 .1160  .0560  .0120
+    n = 100, k = 12          .2020 .0840  .0440  .0080
+    n = 200, k = 12          .1775 .0925  .0425  .0075
+  ```
+
+  Closer to nominal at every level in every cell — twelve of twelve — with power
+  untouched (`.9967` at `α = .05` either way on a planted alternative).
+
+  Two readings that measurement killed on the way: selection does not *inflate*
+  the statistic, it *disperses* it (`E[W(λ̂)] = 1.13` against `E[W(1)] = 2.17`,
+  because a fresh null draw usually wants more shrinkage than the fit chose,
+  while a draw that looks wiggly buys a smaller `λ` and a much larger `W`); and
+  the control variate does not always tighten the Monte-Carlo error, so that
+  error is measured per query and published. `p_value_bound` carries the
+  quadrature bound plus twice the replay's standard error, and
+  `p_value_conditional` publishes what the fixed-`λ` law alone said, so the
+  correction is visible rather than folded in.
+
 - **The refinement certificate had ONE side, so "the cascade has remaining gain"
   and "the bound is too loose to tell" were the same sentence (#2759).** Four
   cascade fixtures refuse at the rank-maximal design, and the issue's own framing
