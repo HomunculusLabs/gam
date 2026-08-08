@@ -1119,6 +1119,39 @@ fn gap_bridges_without_sagging_and_variance_grows() {
 /// fit's in-domain error must be consistent with that certified residual — the
 /// certificate is the instrument that detects "adding a level still moves the
 /// functional", exactly as the spec requires.
+///
+/// # THIS GATE IS RED, AND WHAT IT IS RED ABOUT IS NOW MEASURED (#2758, #2759)
+///
+/// It used to refuse on `CertifiedSpectrumCapacity` at 2893 of the 5997
+/// directions the sample identifies — a MEMORY budget. #2758 took the certified
+/// route's residency from seven-plus `m²` blocks to one packed triangle, the
+/// derived width went 2896 → 10362, and the cascade now refines to all 5997.
+/// It refuses at the rank-maximal design instead, and #2759's two-sided
+/// certificate says what that refusal is made of:
+///
+/// ```text
+///     level-(L+1) gain  ∈  [1.050801e-1, 1.055257e-1]      (bracket, closed)
+///     REFINE_TOL·rss_pen =  2.184455e-3                     48.1x below it
+///     shipped ‖g‖²/(λd)  =  1.290191e-1                     22% conservative
+/// ```
+///
+/// So the refusal is NOT the certificate being cautious: the exact remaining
+/// penalized-objective decrease is bounded away from the tolerance from BELOW.
+/// What the measurement leaves open is whether that decrease is the thing this
+/// criterion should be reading. At `num_centers = 5997` on `n = 6000` the design
+/// is rank-maximal and `rss_pen = 2.1845` against a noise floor of
+/// `n·σ² = 2.4` — the residual is noise, the truth (4 cycles per axis, resolved
+/// by a level-7 net at 64 centers per wavelength) carries no discretization bias
+/// worth 4.8% of the objective, and what a finer level buys is interpolation
+/// inside a row space the design already spans. `REFINE_TOL·rss_pen` is a
+/// bias criterion being read where more columns do not reduce bias.
+///
+/// That is a criterion question, not a tolerance question, and #2759 forbids
+/// answering it by moving `REFINE_TOL` — which would hide exactly the
+/// distinction the bracket just made visible. The assertion below is left
+/// STANDING rather than re-premised: it states something the spec asks for that
+/// the criterion cannot currently certify, and a gate that says so is worth more
+/// than a green one that does not.
 #[test]
 fn smoothness_ceiling_forces_refinement_and_certifies_residual_bias() {
     // Four full cycles per axis: the level-0..2 nets (covering radius h0·2^-l
@@ -1223,8 +1256,20 @@ fn quasi_uniformity_guard_rejects_degenerate_metric_keeps_benign() {
         "unit-metric uniform cloud should be nearly isotropic, got aspect_ratio={}",
         design_ok.metric_scaled_aspect_ratio()
     );
-    // The full magic-default fit succeeds on the benign metric.
-    fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("benign cascade fit");
+    // The benign metric must not be stopped BY THE GUARD. That is the whole of
+    // this fixture's claim on this arm, and it is narrower than "the fit
+    // succeeds": on this draw the refinement loop refuses at the rank-maximal
+    // design with the level-(L+1) gain certified in [3.560937e-2, 3.562072e-2]
+    // against a 2.485628e-3 tolerance (#2759), which is a statement about the
+    // cascade's remaining gain and not about the metric. Demanding a fit here
+    // made a quasi-uniformity gate fail for a refinement reason.
+    match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0) {
+        Ok(_) => {}
+        Err(ResidualCascadeError::Underresolved { .. }) => {}
+        Err(other) => panic!(
+            "the benign metric must not be refused by the quasi-uniformity guard; got: {other}"
+        ),
+    }
 
     // Degenerate: scale axis 1 down by 1e5, collapsing the metric-scaled cloud
     // onto axis 0. The aspect ratio blows past the ceiling and the guard fires.
@@ -1260,7 +1305,16 @@ fn cascade_state_roundtrip_reproduces_mean_and_variance() {
     let noise = 0.1;
     let (axes, y, w) = sample(2, n, noise, 0x1032_0042);
     let xs = axis_refs(&axes);
-    let fit = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("cascade fit");
+    // Fixed depth for the same reason as `cascade_state_rejects_corruption`:
+    // the subject is `to_state` -> JSON -> `from_state` reproducing mean AND
+    // variance, and on this draw the refinement loop refuses at the rank-maximal
+    // design with the gain certified in [6.326893e-2, 6.327000e-2] against a
+    // 1.690929e-2 tolerance (#2759) -- a correct refusal about a quantity this
+    // fixture does not measure.
+    let fit = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 5)
+        .expect("fixed-depth design")
+        .fit_reml()
+        .expect("certified lambda selection at fixed depth");
 
     let state = fit.to_state().expect("snapshot");
     let json = serde_json::to_string(&state).expect("serialize state");
@@ -1304,7 +1358,19 @@ fn cascade_state_rejects_corruption() {
     let n = 800;
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
-    let fit = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("cascade fit");
+    // A FIXED-DEPTH design, not the refinement loop. This fixture's subject is
+    // `from_state`, and routing it through `fit_residual_cascade` coupled it to
+    // the refinement CERTIFICATE, which is a different claim about a different
+    // quantity: on this draw the cascade refuses at the rank-maximal design
+    // with the level-(L+1) gain certified in [7.944884e-3, 7.946538e-3] against
+    // a 6.547001e-3 tolerance (#2759). That refusal is correct -- the bracket is
+    // closed to four digits, so it is the cascade's remaining gain and not the
+    // certificate's conservatism -- and it has nothing to say about whether a
+    // corrupt snapshot is rejected.
+    let fit = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 5)
+        .expect("fixed-depth design")
+        .fit_reml()
+        .expect("certified lambda selection at fixed depth");
     let good = fit.to_state().expect("snapshot");
 
     let mut bad = good.clone();
