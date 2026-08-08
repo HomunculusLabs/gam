@@ -398,3 +398,153 @@ fn two_negative_directions_still_refuse_with_one_direction_deflated_2676() {
         "deflating one direction cannot certify a matrix carrying two negative ones"
     );
 }
+
+/// The #2748 fixture for the OUTER certificate, built from the identity:
+/// `H = a·u₁u₁ᵀ − s·u₂u₂ᵀ + η·t tᵀ` with `g = 0`, so that
+///
+/// * the judged complement `span{u₁, u₂}` carries curvature `−s`;
+/// * the deflated direction carries `tᵀHt − Σ_k g_k t_k² = η`, which is
+///   **exactly zero in exact arithmetic** — a measured `‖δH‖₂`.
+///
+/// `g = 0` keeps the two effects separable: the gradient floor adds nothing, so
+/// the verdict is `−s` against the resolution and nothing else.
+fn outer_resolution_fixture(
+    negative_curvature: f64,
+    assembly_error: f64,
+) -> (Array2<f64>, Array1<f64>, Array2<f64>) {
+    let root_half = 0.5_f64.sqrt();
+    let t = array![root_half, 0.0, -root_half];
+    let u1 = array![root_half, 0.0, root_half];
+    let u2 = array![0.0_f64, 1.0, 0.0];
+    let mut hessian = Array2::<f64>::zeros((3, 3));
+    for r in 0..3 {
+        for c in 0..3 {
+            hessian[[r, c]] = u1[r] * u1[c] - negative_curvature * u2[r] * u2[c]
+                + assembly_error * t[r] * t[c];
+        }
+    }
+    let mut invariance = Array2::<f64>::zeros((3, 1));
+    invariance.column_mut(0).assign(&t);
+    (hessian, Array1::<f64>::zeros(3), invariance)
+}
+
+/// The instrument itself: with the pair consistent the measurement is zero, and
+/// with an error injected on the deflated direction it recovers it exactly.
+#[test]
+fn the_outer_certificate_measures_its_own_assembly_error_2748() {
+    let (consistent, gradient, invariance) = outer_resolution_fixture(1.0e-6, 0.0);
+    let clean = measured_outer_curvature_resolution(&consistent, &[], &gradient, Some(&invariance));
+    // Judged against the arithmetic this measurement itself runs at, not
+    // against literal zero: the residual is a Rayleigh quotient of a matrix
+    // whose scale is 1, so its own round-off is what a clean pair returns.
+    let matrix_scale = consistent
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        clean <= 64.0 * f64::EPSILON * matrix_scale,
+        "a consistent (H, g) pair on the invariance must measure round-off of the matrix \
+         scale {matrix_scale:.6e}; got {clean:.6e}"
+    );
+
+    let injected = 1.0e-6_f64;
+    let (perturbed, gradient, invariance) = outer_resolution_fixture(1.0e-6, injected);
+    let measured =
+        measured_outer_curvature_resolution(&perturbed, &[], &gradient, Some(&invariance));
+    assert!(
+        (measured - injected).abs() <= 64.0 * f64::EPSILON,
+        "expected the injected {injected:.6e}, measured {measured:.6e}"
+    );
+
+    // And it is unavailable, not zero-by-assumption, when no invariance is
+    // declared: that path keeps the historical shift, which is the inertness
+    // guarantee for every model without a redundant penalty map.
+    assert_eq!(
+        measured_outer_curvature_resolution(&perturbed, &[], &gradient, None),
+        0.0
+    );
+}
+
+/// The verdict moves with the MEASUREMENT and with nothing else: the same
+/// judged curvature is refused when the assembly is clean and admitted when the
+/// assembly has demonstrated, on its own exactly-zero identity, that it cannot
+/// resolve it.
+#[test]
+fn a_judged_curvature_inside_the_measured_resolution_is_not_a_saddle_2748() {
+    let curvature = 5.0e-7_f64;
+
+    // Clean assembly: nothing measured, the historical sqrt(eps) shift decides,
+    // and a 5e-7 negative direction is a saddle.
+    let (clean, gradient, invariance) = outer_resolution_fixture(curvature, 0.0);
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &clean,
+            &[],
+            &gradient,
+            Some(&invariance),
+        ),
+        Some(false),
+        "with no measured error the historical shift (1.49e-8) still refuses 5e-7"
+    );
+
+    // Same judged curvature, same gradient, but the assembly has measured
+    // itself inconsistent by 1e-6 on a direction whose exact answer is zero.
+    let (noisy, gradient, invariance) = outer_resolution_fixture(curvature, 1.0e-6);
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &noisy,
+            &[],
+            &gradient,
+            Some(&invariance),
+        ),
+        Some(true),
+        "a curvature inside the assembly's own measured error is unresolved, not a saddle"
+    );
+
+    // The control: an order MORE negative curvature against the same measured
+    // 1e-6 is outside it and still refuses. A resolution cannot swallow a
+    // quantity above it.
+    let (real_saddle, gradient, invariance) = outer_resolution_fixture(1.0e-5, 1.0e-6);
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &real_saddle,
+            &[],
+            &gradient,
+            Some(&invariance),
+        ),
+        Some(false),
+        "a curvature an order above the measured resolution is a genuine saddle"
+    );
+}
+
+/// The measured resolution can only ADMIT, never refuse: `max` with the
+/// historical shift means every point the pre-#2748 rule accepted is still
+/// accepted, whatever the measurement says.
+#[test]
+fn the_measured_resolution_can_only_admit_2748() {
+    for curvature in [1.0e-12_f64, 1.0e-9, 1.0e-7, 1.0e-4, 1.0e-1] {
+        let (clean, gradient, invariance) = outer_resolution_fixture(curvature, 0.0);
+        let before = certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &clean,
+            &[],
+            &gradient,
+            Some(&invariance),
+        );
+        let (noisy, gradient, invariance) = outer_resolution_fixture(curvature, 1.0e-6);
+        let after = certificate_hessian_is_psd_off_railed_above_gradient_floor(
+            &noisy,
+            &[],
+            &gradient,
+            Some(&invariance),
+        );
+        if before == Some(true) {
+            assert_eq!(
+                after,
+                Some(true),
+                "curvature {curvature:.1e} was accepted before the measurement and must \
+                 stay accepted"
+            );
+        }
+    }
+}
