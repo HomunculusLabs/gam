@@ -402,11 +402,17 @@ fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
         let exact = gam_math::probability::weighted_chi_square_sf(&p.weights, statistic);
         let summary =
             gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
+        // The bar is the dust itself, not a tolerance. The only thing separating
+        // this spectrum from a single weight — where the two references are
+        // IDENTICAL — is `dust`, and the two laws place that mass differently
+        // over an interval of length `dust`, so no tail can move by more than
+        // the density times it. `10·dust` is that statement with room for a
+        // density above one (the scale `g` is 0.32 here, so it is about 1.5).
         assert!(
-            (exact - summary).abs() <= 1e-6 * exact.max(1e-12),
-            "on a collapsed spectrum the two references must agree (they are the same \
-             scaled chi-square): exact {exact} vs summary {summary} at W = {multiple}·Σw. \
-             Spectrum: {:?}",
+            (exact - summary).abs() <= 10.0 * dust + 1e-12,
+            "on a collapsed spectrum the two references must agree to the dust that \
+             separates it from a single weight (dust = {dust:.3e}): exact {exact} vs \
+             summary {summary} at W = {multiple}·Σw. Spectrum: {:?}",
             p.weights
         );
     }

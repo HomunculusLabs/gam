@@ -579,9 +579,16 @@ fn assert_grid_calibration(cells: &[CellResult], reps: usize, tag: &str) {
 /// numbers", and all of them are functions of what `ref_df_provenance` publishes,
 /// so no candidate needs its own refit.
 ///
-/// * `spectral` — the shipped reference: `P(χ²_ν > W/g)` with `ν = (Σw)²/Σw²`
-///   and `g = Σw²/Σw`. Matches mean and variance; exact when the weights are
-///   equal, including the unpenalized `w ≡ 1 ⇒ χ²_q`.
+/// * `exact` — the shipped reference since #2672: `P(Σ_j w_j χ²_1 > W)` itself,
+///   by Imhof inversion of the spectrum the report publishes.
+/// * `spectral` — the two-moment summary of that same spectrum,
+///   `P(χ²_ν > W/g)` with `ν = (Σw)²/Σw²` and `g = Σw²/Σw`. It was the reference
+///   before #2672. Exact when the weights are equal — which includes both the
+///   unpenalized `w ≡ 1 ⇒ χ²_q` AND a term REML has shrunk to a single distinct
+///   weight, i.e. every cell of THIS grid. The `exact` and `spectral` rows
+///   agreeing here is the finding, not a null result: it is why a null-simulation
+///   size grid could not have detected the shape error, and why the arm that
+///   shows it has to be a signal-bearing fixture.
 /// * `mean-chi2` — `P(χ²_{Σw} > W)`, the pre-#2672 shape with the WPS inflation
 ///   and the floors removed. Matches only the mean, so it carries variance
 ///   `2Σw` where the statistic carries `2Σw²`; the arm that measures what
@@ -611,7 +618,7 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
         sum_d: f64,
     }
 
-    const NAMES: [&str; 3] = ["spectral", "mean-chi2", "mean-chi2-floor1"];
+    const NAMES: [&str; 4] = ["exact", "spectral", "mean-chi2", "mean-chi2-floor1"];
 
     eprintln!(
         "[zz2672-size] {:>16} {:>4} {:>3} {:>5} {:>8} | candidate           mean_nu   size@.05(raw/cor)  size@.01(cor)",
@@ -620,7 +627,7 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
     for &family in &families {
         for &k in &ks {
             for &n in &ns {
-                let mut counts = [CandCounts::default(); 3];
+                let mut counts = [CandCounts::default(); 4];
                 let mut used = 0usize;
                 let mut sum_w = 0.0;
                 let mut fallback_lane = 0usize;
@@ -633,14 +640,15 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
                     if !(r.statistic_lr.is_finite() && r.ref_df.is_finite() && r.ref_df > 0.0) {
                         continue;
                     }
-                    let prov = r.ref_df_provenance;
+                    let prov = r.ref_df_provenance.clone();
                     if !matches!(prov.source, SmoothLrReferenceSource::NullSpectrum) {
                         fallback_lane += 1;
                     }
                     // `c = mean_w/d` with `mean_w = d + Δε`, so `Δε = (c − 1)·d`
                     // exactly — no re-derivation of the Lawley assembly needed.
                     let delta_eps = (r.bartlett_factor - 1.0) * r.ref_df;
-                    // (shape, scale) per candidate.
+                    // (shape, scale) per chi-square candidate; the exact lane is
+                    // the spectrum itself and does not have a (ν, g).
                     let shapes = [
                         (prov.chi_square_df, prov.scale),
                         (prov.mean, 1.0),
@@ -648,15 +656,32 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
                     ];
                     used += 1;
                     sum_w += r.statistic_lr;
+                    let d = r.ref_df;
+                    let c = ((d + delta_eps) / d).max(f64::MIN_POSITIVE);
+                    {
+                        let weights = prov.weights.clone();
+                        let sf = |w: f64| {
+                            gam_math::probability::weighted_chi_square_sf(&weights, w)
+                        };
+                        counts[0].sum_d += prov.chi_square_df;
+                        if sf(r.statistic_lr) <= 0.05 {
+                            counts[0].raw_05 += 1;
+                        }
+                        if sf(r.statistic_lr / c) <= 0.05 {
+                            counts[0].cor_05 += 1;
+                        }
+                        if sf(r.statistic_lr / c) <= 0.01 {
+                            counts[0].cor_01 += 1;
+                        }
+                    }
                     for (slot, (nu, g)) in shapes.iter().copied().enumerate() {
+                        let slot = slot + 1;
                         if !(nu.is_finite() && nu > 0.0 && g.is_finite() && g > 0.0) {
                             continue;
                         }
                         let chi2 = statrs::distribution::ChiSquared::new(nu).expect("chi2");
                         use statrs::distribution::ContinuousCDF;
                         let sf = |w: f64| (1.0 - chi2.cdf(w / g)).clamp(0.0, 1.0);
-                        let d = r.ref_df;
-                        let c = ((d + delta_eps) / d).max(f64::MIN_POSITIVE);
                         counts[slot].sum_d += nu;
                         if sf(r.statistic_lr) <= 0.05 {
                             counts[slot].raw_05 += 1;
