@@ -5303,6 +5303,28 @@ pub fn fit_residual_cascade(
         for exponent in pending {
             let planned =
                 design.plan_level_at_exponent(&fit, exponent, Some(requested_tolerance))?;
+            // The two-sided evidence the decision below is taken on. #2759 made
+            // the gain a BRACKET rather than a one-sided bound; a run record
+            // that shows only the upper end cannot say whether a refusal was
+            // close or an order out, which is the whole point of having both
+            // ends. Reported here, at the one site that acts on it.
+            match planned.gain.as_ref() {
+                Some(bracket) => log::debug!(
+                    "[cascade] exponent={exponent} gain_bracket=[{:.6e}, {:.6e}] \
+                     cg_iterations={} requested_tolerance={requested_tolerance:.6e} \
+                     complete={} extends_last={}",
+                    bracket.lower,
+                    bracket.upper,
+                    bracket.iterations,
+                    planned.complete,
+                    planned.extends_last,
+                ),
+                None => log::debug!(
+                    "[cascade] exponent={exponent} gain_bracket=none (empty net, or a \
+                     proposal the center cap stopped before it was complete) \
+                     requested_tolerance={requested_tolerance:.6e}"
+                ),
+            }
             let (complete, extends_last) = (planned.complete, planned.extends_last);
             let selection = planned.selection;
             match decide_refinement(planned.assessment, requested_tolerance) {
