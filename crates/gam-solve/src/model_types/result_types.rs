@@ -1082,6 +1082,12 @@ pub enum CurvatureEvidence {
     ///
     /// Reachable only where an analytic Hessian exists AND the objective can be
     /// re-evaluated at trial points, which is exactly where the escape runs.
+    ///
+    /// Serializes as `null` under the legacy `hessian_psd` key and reloads as
+    /// [`Self::NotAvailable`] — the same deliberate lossiness the module doc
+    /// already records for `NotSpent`/`NoEstimand`, and sound for the same
+    /// reason: the four are acceptance-identical, and the adjudication is a
+    /// statement about a run, not a property of a stored model.
     CriterionContradicted,
 }
 
