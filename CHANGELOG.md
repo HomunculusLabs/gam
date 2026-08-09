@@ -74,16 +74,44 @@
   deserialize.
 
   Verified against difference quotients of PRODUCTION code, never a
-  reimplementation. The acceptance gate is the total `∂²(log L)/∂β∂ζ_j` against
-  a double central difference of the production log-likelihood with the grid
-  REBUILT at every perturbed `ζ` — blind to how the channels are split, so it
-  fails alike on an IFT sign error, a missing cross-row term, or a wrong
-  `1/sd`. Below it: allocation mass conservation on both margins; `D` against a
-  central FD of the production builder, including a row heavier than the
-  per-bin target (it lands in more than two bins — there is no
-  two-entries-per-row bound) and a zero-weight row (exactly zero sensitivity);
-  the tie certificate firing on a cut tie and not on a contained one; and an
-  arm asserting the cross-row channel is not negligible.
+  reimplementation, and separately against a second implementation of the
+  DERIVATION in another language
+  (`scripts/probe_2484_empirical_measure_sensitivity.py`) — the two catch
+  different things, since a formula transcribed consistently-but-wrongly into
+  both the code and its own test survives the first check and not the second.
+
+  The acceptance gate is the total `∂²(log L)/∂β∂ζ_j` against a double central
+  difference of the production log-likelihood with the grid REBUILT at every
+  perturbed `ζ` — blind to how the channels are split, so it fails alike on an
+  IFT sign error, a missing cross-row term, or a wrong `1/sd`. Below it:
+  allocation mass conservation on both margins; `D` against a central FD of the
+  production builder, including a row heavier than the per-bin target (it lands
+  in THREE bins — there is no two-entries-per-row bound) and a zero-weight row
+  (exactly zero sensitivity); the two projection identities `D·1 = 0` and
+  `D·ζ = 0` as exact assertions; the tie certificate firing on a cut tie and not
+  on a contained one; and the assembled correction being symmetric, PSD, and
+  strictly widening.
+
+  ```
+  cargo test -p gam-models --lib empirical_measure_2484
+    test result: ok. 10 passed; 0 failed
+
+  scripts/probe_2484_empirical_measure_sensitivity.py
+    D max abs err vs FD:                 1.63e-10
+    total mixed derivative max rel err:  1.28e-07
+    bins=3 (tie inside one bin):  |right − left| = 6.66e-09   differentiable
+    bins=4 (a boundary cuts it):  |right − left| = 5.39e-01   TWO-SIDED
+  ```
+
+  **What the channel is worth, stated honestly.** `|cross| / |direct|` is a
+  property of the sensitivity MATRIX; a user sees a standard error, three
+  contractions downstream. The correction as a whole moves the SE by
+  **1.06x–2.53x** against the naive covariance — that is what publishing the
+  naive matrix would have cost. The CROSS-ROW half of it moves the SE by
+  **1.2e-5 to 9.0e-3** relative, and what it scales with is the LOGSLOPE rather
+  than the grid size. Small enough that a direct-only implementation would pass
+  casual inspection, which is an argument for being exact and not an argument
+  that the channel is optional.
 
 - **A composed monotone warp was a function with a CORNER, and the Firth term
   put that corner into the objective (#2695).** `create_ispline_dense` is
