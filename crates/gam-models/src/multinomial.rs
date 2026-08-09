@@ -3028,6 +3028,97 @@ pub(crate) fn penalized_multinomial_formula_parts(
     })
 }
 
+/// The coupled joint penalty `S_λ = Σ_s λ_s M_s` at the selected smoothing
+/// parameters, in the stacked class-major coordinates the joint covariance, the
+/// influence matrix and the posterior-mean predictive all share.
+///
+/// # Why the penalty is measured on its own (#2612)
+///
+/// `S_λ` used to be a by-product of the influence-matrix reconstruction
+/// (`F = I − H⁻¹S_λ`), which needs two things the penalty does not:
+///
+/// * **at least one penalty component.** A wholly parametric multinomial —
+///   `y ~ x1 + x2`, the shape both `quality_vs_statsmodels_multinomial` arms
+///   fit — has none, so `S_λ` is the **zero operator**: a value, not an
+///   absence. Reading it off a reconstruction that returns `None` on
+///   `n_components == 0` turned "this model is unpenalized" into "this model
+///   has no penalty operator", and the predictive then refused to publish any
+///   parametric multinomial fit at all;
+/// * **the joint posterior covariance `H⁻¹`.** That is a different measurement
+///   of a different object. Conditioning the penalty's availability on it makes
+///   a covariance failure surface as a missing penalty, naming the wrong one of
+///   the two.
+///
+/// So the operator is assembled here from the family's own equivariant specs
+/// and the selected `λ`, and every consumer reads THIS matrix — the influence
+/// matrix and the published payload cannot describe different penalties.
+///
+/// # Basis
+///
+/// The specs live in the FITTED (standardized-parametric) basis, which is also
+/// the basis of `training_design`'s penalized columns: the standardization
+/// affine rescales parametric columns only and leaves every penalized column
+/// identity-mapped, and `S_λ` is exactly zero outside the penalized columns. So
+/// `A⁻ᵀS_λA⁻¹ = S_λ` and the published operator pairs with the raw design
+/// without a change of variables. A penalty that ever reached a standardized
+/// column would break that identity, which is why the zero-outside-penalized
+/// structure is a property of the specs and not an assumption made here.
+///
+/// # Refusals
+///
+/// Only genuine inconsistencies: a selected-λ vector that does not match the
+/// spec list, a spec of the wrong dimension, or λ reported for a model with
+/// nothing to apply them to. Each of those is a disagreement between two parts
+/// of the same fit, not a capability the fit lacks.
+fn multinomial_joint_penalty_operator(
+    joint_specs: &[gam_problem::JointPenaltySpec],
+    joint_log_lambdas: Option<&Array1<f64>>,
+    n_components: usize,
+    expected_joint: usize,
+) -> Result<Array2<f64>, EstimationError> {
+    let mut s_lambda = Array2::<f64>::zeros((expected_joint, expected_joint));
+    if n_components == 0 {
+        let reported = joint_log_lambdas.map_or(0, |jll| jll.len());
+        if reported != 0 || !joint_specs.is_empty() {
+            crate::bail_invalid_estim!(
+                "multinomial REML reported {reported} selected smoothing parameter(s) and {} \
+                 coupled penalty spec(s) for a model carrying no penalty component; there is \
+                 nothing for them to multiply",
+                joint_specs.len(),
+            );
+        }
+        // No penalized component exists, so the penalized log-posterior IS the
+        // log-likelihood and the penalty is exactly zero.
+        return Ok(s_lambda);
+    }
+    let jll = joint_log_lambdas.ok_or_else(|| {
+        EstimationError::InvalidInput(format!(
+            "multinomial REML converged with {n_components} penalty component(s) but surfaced no \
+             selected joint smoothing parameters"
+        ))
+    })?;
+    if jll.len() != joint_specs.len() || joint_specs.len() % n_components != 0 {
+        crate::bail_invalid_estim!(
+            "multinomial REML selected {} smoothing parameter(s) against {} coupled penalty \
+             spec(s) over {n_components} component(s)",
+            jll.len(),
+            joint_specs.len(),
+        );
+    }
+    for (spec, &log_lambda) in joint_specs.iter().zip(jll.iter()) {
+        if spec.matrix.nrows() != expected_joint || spec.matrix.ncols() != expected_joint {
+            crate::bail_invalid_estim!(
+                "multinomial REML coupled penalty spec is {}x{}, expected \
+                 {expected_joint}x{expected_joint}",
+                spec.matrix.nrows(),
+                spec.matrix.ncols(),
+            );
+        }
+        s_lambda.scaled_add(log_lambda.exp(), &spec.matrix);
+    }
+    Ok(s_lambda)
+}
+
 pub fn fit_penalized_multinomial_formula(
     request: &MultinomialFitRequest<'_>,
 ) -> Result<MultinomialSavedModel, EstimationError> {
@@ -3275,6 +3366,41 @@ pub fn fit_penalized_multinomial_formula(
     // now carries one λ per smooth term, so a single λ per class would discard
     // the independent per-term selection that fixes #561. `lambdas_per_block`
     // segments the flat vector by class so callers can recover per-term λ.
+    let expected_joint = p_per_class.checked_mul(m).ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "multinomial posterior covariance dimension overflowed usize".to_string(),
+        )
+    })?;
+    let n_penalty_components = penalties_arc.len();
+    // ── The penalty operator, measured once (#2612) ──────────────────────────
+    // `S_λ` is a fact about the fit in its own right: the influence-matrix
+    // reconstruction below and the published predictive payload both read THIS
+    // matrix, so they cannot describe different penalties, and a model with no
+    // penalized term publishes the zero operator it has instead of being refused
+    // for not having one. See `multinomial_joint_penalty_operator`.
+    //
+    // The coupled spec family at the selected λ, in raw stacked (class-major)
+    // coordinates — exactly the operator the inner solve and the covariance path
+    // penalize with. Under the equivariant carrier this is K per-class specs per
+    // term, grouped term-major (`s = t·K + c`); the K = 2 degenerate arm returns
+    // one shared centered spec per term. Assembled ONCE here: it materializes
+    // `n_specs` dense `(P·M)²` matrices, and both consumers below take this one
+    // list rather than each rebuilding it.
+    let joint_specs = if n_penalty_components == 0 {
+        Vec::new()
+    } else {
+        family.equivariant_class_penalty_specs().map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "multinomial REML could not rebuild the coupled joint penalty: {error}"
+            ))
+        })?
+    };
+    let joint_penalty = multinomial_joint_penalty_operator(
+        &joint_specs,
+        fit.artifacts.joint_log_lambdas.as_ref(),
+        n_penalty_components,
+        expected_joint,
+    )?;
     // ── gam#1587/#561 joint-penalty reconstruction ───────────────────────────
     // Under the #1587 centered-metric architecture every active class block
     // leaves its per-block penalty list EMPTY — the entire fit's smoothing rides
@@ -3295,21 +3421,17 @@ pub fn fit_penalized_multinomial_formula(
     // exactly `F = I − H⁻¹ S_λ`, its per-class diagonal-block trace is the honest
     // per-class EDF, and `Σ_a edf_a = tr(F) = edf_total`.
     let joint_recon = fit.artifacts.joint_log_lambdas.as_ref().and_then(|jll| {
-        let n_components = penalties_arc.len();
+        let n_components = n_penalty_components;
         if n_components == 0 {
             return None;
         }
-        // The coupled joint penalty family at the selected λ's, in raw stacked
-        // (class-major) coordinates — exactly the operator the inner solve and
-        // covariance path penalize with. Under the equivariant carrier this is
-        // K per-class specs per term, grouped term-major (`s = t·g + c`); the
-        // K = 2 degenerate arm returns one shared centered spec per term.
-        let joint_specs = family.equivariant_class_penalty_specs().ok()?;
+        // `joint_specs` is the list `joint_penalty` was assembled from, so the
+        // influence matrix and the published operator cannot describe different
+        // penalties.
         if jll.len() != joint_specs.len() || joint_specs.len() % n_components != 0 {
             return None;
         }
         let specs_per_term = joint_specs.len() / n_components;
-        let expected_joint = p_per_class.saturating_mul(m);
         let hinv = fit
             .covariance_conditional
             .as_ref()
@@ -3328,15 +3450,6 @@ pub fn fit_penalized_multinomial_formula(
         let mut f = Array2::<f64>::eye(expected_joint);
         for (s, hs) in hinv_st.iter().enumerate() {
             f.scaled_add(-lam[s], hs);
-        }
-        // #2612: the same `Σ_s λ_s M_s` in its own right. The posterior-
-        // predictive ratio has to evaluate the penalized log-posterior away
-        // from the mode, so it needs the penalty as an operator and not only
-        // through `F`. Assembled from the identical specs and λ so it cannot
-        // describe a different penalty than the influence matrix does.
-        let mut s_lambda = Array2::<f64>::zeros((expected_joint, expected_joint));
-        for (index, spec) in joint_specs.iter().enumerate() {
-            s_lambda.scaled_add(lam[index], &spec.matrix);
         }
         // Per-class diagonal-block trace of F (the honest per-class EDF), and
         // the per-(class, component) penalty trace
@@ -3391,7 +3504,7 @@ pub fn fit_penalized_multinomial_formula(
                 lam_flat.push(lam[s]);
             }
         }
-        Some((f, edf_per_class, edf_per_penalty, n_components, lam_flat, s_lambda))
+        Some((f, edf_per_class, edf_per_penalty, n_components, lam_flat))
     });
 
     // Flatten every (class, component) smoothing parameter in class-major order.
@@ -3402,7 +3515,7 @@ pub fn fit_penalized_multinomial_formula(
     // joint reconstruction is unavailable (legacy fixed-λ path or absent
     // covariance) fall back to the raw — now empty — per-block λ lists.
     let (lambdas_per_block, lambdas_flat): (Vec<usize>, Vec<f64>) = match joint_recon.as_ref() {
-        Some((_, _, _, n_components, lam_flat, _)) => {
+        Some((_, _, _, n_components, lam_flat)) => {
             let per_block = vec![*n_components; m];
             (per_block, lam_flat.clone())
         }
@@ -3439,7 +3552,7 @@ pub fn fit_penalized_multinomial_formula(
     // raw `edf_by_block` map did before.
     let edf_per_class = joint_recon
         .as_ref()
-        .map(|(_, epc, _, _, _, _)| epc.clone())
+        .map(|(_, epc, _, _, _)| epc.clone())
         .or_else(|| {
             // Legacy per-block trace path (fixed-λ / pre-#1587 fits whose
             // smoothing is still carried per block). Segment the block-major
@@ -3471,7 +3584,7 @@ pub fn fit_penalized_multinomial_formula(
     // carries that contract instead).
     let edf_per_penalty = joint_recon
         .as_ref()
-        .map(|(_, _, epp, _, _, _)| epp.clone())
+        .map(|(_, _, epp, _, _)| epp.clone())
         .or_else(|| {
             // Legacy per-block path: the inference layer's `edf_by_block` is
             // already the clamped per-penalty-block trace EDF, aligned 1:1 with
@@ -3498,11 +3611,6 @@ pub fn fit_penalized_multinomial_formula(
     // to RAW units (see below) so it pairs with the raw predict design; the
     // influence is kept in the fitted basis (the Wald table only slices penalized
     // columns, which the standardization affine leaves identity-mapped).
-    let expected_joint = p_per_class.checked_mul(m).ok_or_else(|| {
-        EstimationError::InvalidInput(
-            "multinomial posterior covariance dimension overflowed usize".to_string(),
-        )
-    })?;
     // The joint Hessian (and thus `H⁻¹`) was assembled in the STANDARDIZED
     // parametric basis used during fitting, while the saved coefficients and the
     // raw predict design are in raw units. Map the covariance to raw units with
@@ -3566,7 +3674,7 @@ pub fn fit_penalized_multinomial_formula(
     // reconstruction when the joint reconstruction is unavailable (pre-#1587
     // per-block fits whose class blocks still carry their own penalties).
     let coefficient_influence_flat = match joint_recon.as_ref() {
-        Some((f, _, _, _, _, _)) => Some(f.iter().copied().collect::<Vec<f64>>()),
+        Some((f, _, _, _, _)) => Some(f.iter().copied().collect::<Vec<f64>>()),
         None => fit
             .covariance_conditional
             .as_ref()
@@ -3668,30 +3776,12 @@ pub fn fit_penalized_multinomial_formula(
     let deviance = -2.0 * fit.log_likelihood;
 
     // #2612: the training frame and the penalty operator the posterior-mean
-    // predictive needs. `joint_recon` is the ONLY source for `S_λ` here — the
-    // per-block penalty lists were emptied into the coupled `M ⊗ S_t` carrier by
-    // #1587, so a block-diagonal reconstruction would describe a different
-    // model. If that reconstruction is unavailable the fit cannot publish its
-    // own estimand, and saying so is better than shipping a payload whose
-    // `predict` would have to fall back to the quantity #2612 is about.
-    let joint_penalty_flat: Vec<f64> = match joint_recon.as_ref() {
-        Some((_, _, _, _, _, s_lambda)) => {
-            if s_lambda.nrows() != expected_joint || s_lambda.ncols() != expected_joint {
-                crate::bail_invalid_estim!(
-                    "multinomial REML: joint penalty is {}x{}, expected {expected_joint}x{expected_joint}",
-                    s_lambda.nrows(),
-                    s_lambda.ncols(),
-                );
-            }
-            s_lambda.iter().copied().collect()
-        }
-        None => {
-            crate::bail_invalid_estim!(
-                "multinomial REML converged without the coupled joint penalty operator, so the \
-                 posterior-mean predictive has no penalty to evaluate its own log-posterior with"
-            )
-        }
-    };
+    // predictive needs. `joint_penalty` was measured above from the family's own
+    // equivariant specs and the selected λ — the same matrix the influence
+    // reconstruction consumed — so the payload and `F` cannot describe different
+    // penalties, and an unpenalized model publishes the zero operator it has
+    // rather than being refused for not having one.
+    let joint_penalty_flat: Vec<f64> = joint_penalty.iter().copied().collect();
     if raw_training_design.ncols() != p_per_class {
         crate::bail_invalid_estim!(
             "multinomial REML: raw training design has {} columns but the fit reports \

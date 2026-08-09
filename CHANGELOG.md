@@ -1,5 +1,45 @@
 ## Unreleased
 
+- **Every wholly parametric multinomial fit was being refused for not having a
+  penalty, and "no penalty" was the answer (#2612).** The posterior-mean
+  predictive needs `S_λ` as an operator, because it evaluates the penalized
+  log-posterior away from the mode. It read that operator off the
+  influence-matrix reconstruction, which returns `None` on two conditions the
+  penalty does not depend on:
+
+  ```rust
+  let joint_recon = fit.artifacts.joint_log_lambdas.as_ref().and_then(|jll| {
+      let n_components = penalties_arc.len();
+      if n_components == 0 { return None; }                    // unpenalized
+      let hinv = fit.covariance_conditional.as_ref()
+          .filter(|c| c.nrows() == expected_joint && ...)?;     // a DIFFERENT measurement
+  ```
+
+  `n_components == 0` means the model is *unpenalized*, so `S_λ` is the **zero
+  operator** — a value, not an absence; and `H⁻¹` is a measurement of a different
+  object, so conditioning the penalty's availability on it makes a covariance
+  failure surface as a missing penalty. A hard refusal on `None` then converted
+  both into no fit at all: `y ~ x1 + x2` — no smooths, hence no penalty
+  components — stopped fitting, and both
+  `quality_vs_statsmodels_multinomial` arms that use it went `GAM_ERROR`.
+
+  `S_λ` is now measured in its own right from the family's equivariant specs and
+  the selected `λ`, with the unpenalized case returning the zero operator it is.
+  The specs are assembled ONCE (they materialize `n_specs` dense `(P·M)²`
+  matrices) and the influence matrix and the published payload both read that one
+  list, so they cannot describe different penalties — the property the previous
+  two-site assembly asserted in a comment and only approximated. It refuses only
+  on genuine inconsistencies: a `λ` vector that does not match the spec list, a
+  spec of the wrong dimension, or `λ` reported for a model with nothing to
+  multiply.
+
+  Both regression bars are statements about the same operator from opposite
+  sides, so a payload that was merely publishable could not pass both: the
+  unpenalized arm must publish `S_λ = 0` **and** an influence matrix that is
+  exactly `I` (which `F = I − H⁻¹S_λ` forces), and the penalized arm's published
+  `S_λ` must reproduce its own published influence matrix through
+  `H⁻¹S_λ = I − F`.
+
 - **A curvature gate was refusing on numbers smaller than its own instrument's
   measured error, and nine `matern` benchmark scenarios died of it (#2748).**
   `invert_identified_rho_hessian`'s entire `‖δH‖₂` was
