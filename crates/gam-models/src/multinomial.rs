@@ -5984,6 +5984,56 @@ mod reference_class_invariance_tests {
                 readings.join("   ")
             );
         }
+
+        // The SHARPER instrument, and the one the verdict is actually about.
+        //
+        // The value walk above second-differences the criterion, so its noise is
+        // `2·ε_V/h²`: at `λ_min ~ 1e-3` and `h = 1e-3` the signal is `5e-10`,
+        // which is under any plausible `ε_V`. Central differences of the
+        // ANALYTIC gradient are a FIRST difference of an exact quantity, so the
+        // same `h` buys two more orders, and the quantity they produce —
+        // `vᵀ J(g) v` — is exactly what `vᵀ H v` claims to be. Any disagreement
+        // between the two is `‖δH‖₂` along the direction that decided, measured
+        // rather than assumed (SPEC 2 keeps this in a test, which is where it
+        // belongs: it is evidence about the assembly, not a production
+        // derivative).
+        //
+        // The armed Hessian is KNOWN to be incomplete — `D²_β H_Φ[−v_l, −v_k]`
+        // is not folded in, because `H_Φ` is a divided-difference object whose
+        // first β-derivative already consumes the family's second directional
+        // derivatives and a second would need the third (see
+        // `JeffreysHphiAwareJointDerivatives`). This measures how much that
+        // costs on the direction the certificate refuses on, at production
+        // scale, rather than on the seconds-scale synthetic fixture.
+        let analytic_curvature = evals[order[0]];
+        for h in [1e-4_f64, 1e-3, 1e-2] {
+            let plus = &rho + &(&direction * h);
+            let minus = &rho - &(&direction * h);
+            let (up, down) = (
+                evaluate(&plus, gam_problem::EvalMode::ValueAndGradient),
+                evaluate(&minus, gam_problem::EvalMode::ValueAndGradient),
+            );
+            match (up, down) {
+                (Ok(up), Ok(down)) => {
+                    let measured = (&up.gradient - &down.gradient).dot(&direction) / (2.0 * h);
+                    let gap = (analytic_curvature - measured).abs();
+                    eprintln!(
+                        "#2612 curvature probe: h={h:.0e}  v'Hv(analytic)={analytic_curvature:+.6e}  \
+                         v'J(g)v(measured)={measured:+.6e}  |gap|={gap:.6e}  \
+                         gap/|analytic|={:.3e}  inner_conv={}/{}",
+                        gap / analytic_curvature.abs().max(f64::MIN_POSITIVE),
+                        up.inner_converged,
+                        down.inner_converged,
+                    );
+                }
+                (up, down) => eprintln!(
+                    "#2612 curvature probe: h={h:.0e} directional gradient difference \
+                     unavailable (+ok={} -ok={})",
+                    up.is_ok(),
+                    down.is_ok(),
+                ),
+            }
+        }
     }
 
     /// The quality arm's stride-3 penguins TRAIN split, materialized through the
