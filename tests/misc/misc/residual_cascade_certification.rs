@@ -1304,20 +1304,16 @@ fn quasi_uniformity_guard_rejects_degenerate_metric_keeps_benign() {
         "unit-metric uniform cloud should be nearly isotropic, got aspect_ratio={}",
         design_ok.metric_scaled_aspect_ratio()
     );
-    // The benign metric must not be stopped BY THE GUARD. That is the whole of
-    // this fixture's claim on this arm, and it is narrower than "the fit
-    // succeeds": on this draw the refinement loop refuses at the rank-maximal
-    // design with the level-(L+1) gain certified in [3.560937e-2, 3.562072e-2]
-    // against a 2.485628e-3 tolerance (#2759), which is a statement about the
-    // cascade's remaining gain and not about the metric. Demanding a fit here
-    // made a quasi-uniformity gate fail for a refinement reason.
-    match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0) {
-        Ok(_) => {}
-        Err(ResidualCascadeError::Underresolved { .. }) => {}
-        Err(other) => panic!(
-            "the benign metric must not be refused by the quasi-uniformity guard; got: {other}"
-        ),
-    }
+    // The full magic-default fit succeeds on the benign metric.
+    //
+    // This arm was narrowed to "not refused BY THE GUARD" while the refinement
+    // loop refused at the rank-maximal design on this draw, with the
+    // level-(L+1) gain certified in [3.560937e-2, 3.562072e-2] against a
+    // 2.485628e-3 tolerance — a statement about the cascade's remaining gain
+    // and not about the metric. #2759 replaced that tolerance with the
+    // candidate set's own break-even gain, the level stopped paying for itself,
+    // and the end-to-end claim is available again: a benign metric fits.
+    fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("benign cascade fit");
 
     // Degenerate: scale axis 1 down by 1e5, collapsing the metric-scaled cloud
     // onto axis 0. The aspect ratio blows past the ceiling and the guard fires.
@@ -1353,16 +1349,14 @@ fn cascade_state_roundtrip_reproduces_mean_and_variance() {
     let noise = 0.1;
     let (axes, y, w) = sample(2, n, noise, 0x1032_0042);
     let xs = axis_refs(&axes);
-    // Fixed depth for the same reason as `cascade_state_rejects_corruption`:
-    // the subject is `to_state` -> JSON -> `from_state` reproducing mean AND
-    // variance, and on this draw the refinement loop refuses at the rank-maximal
-    // design with the gain certified in [6.326893e-2, 6.327000e-2] against a
-    // 1.690929e-2 tolerance (#2759) -- a correct refusal about a quantity this
-    // fixture does not measure.
-    let fit = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 5)
-        .expect("fixed-depth design")
-        .fit_reml()
-        .expect("certified lambda selection at fixed depth");
+    // Back on the magic-default route (#2759). This fixture was moved to a
+    // fixed depth while the refinement loop refused at the rank-maximal design
+    // on this draw — gain certified in [6.326893e-2, 6.327000e-2] against a
+    // 1.690929e-2 tolerance — which is a claim about a quantity a serialization
+    // gate does not measure. That tolerance is now the candidate set's own
+    // break-even gain, the level does not earn it, and the fixture can exercise
+    // the route a caller actually takes.
+    let fit = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("cascade fit");
 
     let state = fit.to_state().expect("snapshot");
     let json = serde_json::to_string(&state).expect("serialize state");
@@ -1406,19 +1400,14 @@ fn cascade_state_rejects_corruption() {
     let n = 800;
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
-    // A FIXED-DEPTH design, not the refinement loop. This fixture's subject is
-    // `from_state`, and routing it through `fit_residual_cascade` coupled it to
-    // the refinement CERTIFICATE, which is a different claim about a different
-    // quantity: on this draw the cascade refuses at the rank-maximal design
-    // with the level-(L+1) gain certified in [7.944884e-3, 7.946538e-3] against
-    // a 6.547001e-3 tolerance (#2759). That refusal is correct -- the bracket is
-    // closed to four digits, so it is the cascade's remaining gain and not the
-    // certificate's conservatism -- and it has nothing to say about whether a
-    // corrupt snapshot is rejected.
-    let fit = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 5)
-        .expect("fixed-depth design")
-        .fit_reml()
-        .expect("certified lambda selection at fixed depth");
+    // Back on the magic-default route (#2759). This fixture's subject is
+    // `from_state`, and it was moved to a fixed depth while the refinement loop
+    // refused at the rank-maximal design on this draw — gain certified in
+    // [7.944884e-3, 7.946538e-3] against a 6.547001e-3 tolerance. The refusal
+    // was honest about the gain and wrong about what to do with it: the level
+    // it could not add was 1e-3 of the residual wide and thousands of columns
+    // wide, and against its own Occam factor it does not pay for itself.
+    let fit = fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.0).expect("cascade fit");
     let good = fit.to_state().expect("snapshot");
 
     let mut bad = good.clone();
