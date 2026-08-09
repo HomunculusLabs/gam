@@ -221,53 +221,52 @@ fn screen_measure_jet_range(
     }
     // Endpoint walk. The criterion is still descending at a band end whenever
     // the band's resolution is coarser than the basin, and refusing to look is
-    // how a bracket silently reports its own edge as an optimum. The floor is
-    // the node spacing (below it neighbouring representers stop overlapping)
-    // and the cap is the node bounding-box diagonal (past it every pair of
-    // representers overlaps at >= exp(-1/2) and there is no distinct model);
-    // both are the bracket's own, so the walk introduces no length of its own.
-    let floor_ln = bracket.nodes[0].ln();
+    // how a bracket silently reports its own edge as an optimum.
+    //
+    // The walk is UPWARD ONLY, and that is a statement about the coordinate, not
+    // a simplification. The band's bottom node IS the physical floor — the median
+    // nearest-node spacing, below which neighbouring representers stop
+    // overlapping, the design stops being a partition of unity, and rows between
+    // nodes fall outside every representer's support — and the band's bottom node
+    // is already scored. There is nowhere below it to walk to.
+    //
+    // It used to walk downward as well, under a guard that could not fire
+    // (gam#2750): `next_ln < floor_ln - log_step * scored.len()` recedes by one
+    // log step for every node the walk pushes, exactly as fast as `next_ln`
+    // descends, so the comparison is false at every iteration for any bracket
+    // with two or more nodes. The only stops were "the criterion stopped
+    // improving" and "the basis refused to build", i.e. the documented floor was
+    // not enforced at all and the screen could seed a range below the one the
+    // outer search's own window (`measure_jet_ln_range_window`) is floored at —
+    // which the #2454 incumbent-containment rule would then have widened that
+    // window to admit, reintroducing exactly the region the floor excludes.
+    //
+    // The cap is the bracket's own ceiling, so the walk still introduces no
+    // length of its own.
     let ceiling_ln = bracket.ceiling.max(bracket.nodes[0]).ln();
-    for upward in [true, false] {
-        loop {
-            let (best_ln, best_value) =
-                scored
-                    .iter()
-                    .copied()
-                    .fold((f64::NAN, f64::INFINITY), |acc, node| {
-                        if node.1 < acc.1 { node } else { acc }
-                    });
-            let edge = if upward {
-                scored.last().copied()?
-            } else {
-                scored.first().copied()?
-            };
-            if edge.0 != best_ln || edge.1 != best_value {
-                break;
-            }
-            let next_ln = if upward {
-                edge.0 + bracket.log_step
-            } else {
-                edge.0 - bracket.log_step
-            };
-            if upward && next_ln > ceiling_ln {
-                break;
-            }
-            if !upward && next_ln < floor_ln - bracket.log_step * (scored.len() as f64) {
-                break;
-            }
-            let Some(value) = measure_jet_range_screen_value(data, y, weights, spec, next_ln.exp())
-            else {
-                break;
-            };
-            if upward {
-                scored.push((next_ln, value));
-            } else {
-                scored.insert(0, (next_ln, value));
-            }
-            if value >= edge.1 {
-                break;
-            }
+    loop {
+        let (best_ln, best_value) =
+            scored
+                .iter()
+                .copied()
+                .fold((f64::NAN, f64::INFINITY), |acc, node| {
+                    if node.1 < acc.1 { node } else { acc }
+                });
+        let edge = scored.last().copied()?;
+        if edge.0 != best_ln || edge.1 != best_value {
+            break;
+        }
+        let next_ln = edge.0 + bracket.log_step;
+        if next_ln > ceiling_ln {
+            break;
+        }
+        let Some(value) = measure_jet_range_screen_value(data, y, weights, spec, next_ln.exp())
+        else {
+            break;
+        };
+        scored.push((next_ln, value));
+        if value >= edge.1 {
+            break;
         }
     }
     let argmin = (0..scored.len()).fold(0usize, |best, idx| {

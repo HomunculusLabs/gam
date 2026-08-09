@@ -168,6 +168,30 @@
   degree-2 basis. The hull edge is therefore no rougher than a knot, which is
   the most a finite-degree spline can offer.
 
+- **The measure-jet range screen's downward walk was bounded by a guard that
+  could not fire (#2750).** The screen walks geometrically off either end of the
+  realized scale band while that end is still the incumbent, and its own comment
+  said the ends were the bracket's — "so the walk introduces no length of its
+  own". The upward cap was enforced. The downward one was
+
+  ```rust
+  if !upward && next_ln < floor_ln - bracket.log_step * (scored.len() as f64) { break; }
+  ```
+
+  and it recedes by one log step for every node the walk pushes, exactly as fast
+  as `next_ln` descends — so the comparison is false at every iteration for any
+  bracket with two or more nodes. The only stops left were "the criterion stopped
+  improving" and "the basis refused to build".
+
+  That matters now rather than before, because the outer search's own `ln ℓ`
+  window is floored at the same node spacing: a screen that seeded below it would
+  be widened INTO by the #2454 incumbent-containment rule, reintroducing exactly
+  the region the floor excludes.
+
+  The walk is upward-only, which is what the coordinate says. The band's bottom
+  node IS the floor — the median nearest-node spacing — and it is already scored,
+  so there is nowhere below it to walk to.
+
 - **Farthest-point knot selection compared a squared LENGTH against the number
   one, so it stopped being scale-equivariant below unit radius (#2750).**
   `select_thin_plate_knots` is the shared center selector for every radial
