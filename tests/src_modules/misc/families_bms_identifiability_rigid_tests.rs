@@ -6927,7 +6927,7 @@ fn auto_latent_measure_uses_rank_int_calibration_for_bad_normal_diagnostics() {
         latent_measure: LatentMeasureSpec::Auto { grid_size: 5 },
         ..LatentZPolicy::default()
     };
-    let (measure, calibration) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
+    let (measure, calibration, _) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "auto latent measure", e));
     assert!(
         matches!(measure, LatentMeasureKind::StandardNormal),
@@ -6994,7 +6994,7 @@ fn auto_latent_measure_falls_back_to_empirical_when_rank_int_cannot_gaussianize(
         latent_measure: LatentMeasureSpec::Auto { grid_size: 5 },
         ..LatentZPolicy::default()
     };
-    let (measure, calibration) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
+    let (measure, calibration, _) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "auto latent measure", e));
     assert!(
         matches!(measure, LatentMeasureKind::GlobalEmpirical { .. }),
@@ -7871,7 +7871,7 @@ fn auto_latent_measure_routes_conditional_shift_to_location_scale() {
         ..LatentZPolicy::default()
     };
 
-    let (measure, calibration) =
+    let (measure, calibration, _) =
         build_latent_measure_with_geometry(&z, &weights, &policy, Some(a_block.view()))
             .unwrap_or_else(|e| {
                 panic!(
@@ -7911,7 +7911,7 @@ fn auto_latent_measure_routes_conditional_shift_to_location_scale() {
     // shift and falls back to the pooled-marginal decision (here: no
     // calibration, since this z passes the pooled-normal diagnostics well
     // enough — exactly the leak the issue describes).
-    let (_measure_blind, calibration_blind) =
+    let (_measure_blind, calibration_blind, _) =
         build_latent_measure_with_geometry(&z, &weights, &policy, None).unwrap_or_else(|e| {
             panic!(
                 "{} failed: {:?}",
@@ -7940,7 +7940,7 @@ fn auto_latent_measure_preserves_standard_normal_fast_path() {
         latent_measure: LatentMeasureSpec::Auto { grid_size: 17 },
         ..LatentZPolicy::default()
     };
-    let (measure, calibration) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
+    let (measure, calibration, _) = build_latent_measure_with_geometry(&z, &weights, &policy, None)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "measure", e));
 
     assert!(matches!(measure, LatentMeasureKind::StandardNormal));
