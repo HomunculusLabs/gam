@@ -25,6 +25,18 @@
 //!
 //! Diagnostic-only: it asserts that every arm produced a finite time and a
 //! usable fit, and nothing about the level.
+//!
+//! # Why this is its own test binary
+//!
+//! It installs a process-global `log` sink, and `measure_jet_perf_parity`'s
+//! speed gate lives in the `measure_jet` target. `log::set_max_level(Info)` is
+//! process state, and `log::info!` evaluates its format ARGUMENTS eagerly — the
+//! outer κ/ψ phase's per-callback records build a psi string and read the design
+//! revision — so a logger installed by one test silently taxes every other test
+//! in the same process. Under `cargo nextest` each test is its own process and
+//! the hazard does not arise; under plain `cargo test` it does, and both routes
+//! are supported here. A test that installs a global logger does not share a
+//! process with a timing gate.
 
 use csv::StringRecord;
 use gam::{
