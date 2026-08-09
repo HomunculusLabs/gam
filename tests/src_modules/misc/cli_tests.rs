@@ -9245,3 +9245,90 @@ fn probit_location_scalewiggle_posterior_mean_matches_mc_in_largevariance_regime
         "wiggle posterior mean should match Monte Carlo in the hard regime: predicted={predicted}, mc={mc}"
     );
 }
+
+// TEMPORARY gam#2695 probe — degree A/B on the linkwiggle witness. Not for landing.
+fn probe_2695_linkwiggle_at_degree(degree: usize) -> Result<(), String> {
+    let dir = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let csv_path = dir.path().join("small_surv_linkwiggle.csv");
+    let out_path = dir.path().join("surv_linkwiggle.model.json");
+    std::fs::write(
+        &csv_path,
+        "entry,exit,event\n\
+             10,15,1\n\
+             20,35,0\n\
+             40,60,1\n\
+             80,100,0\n\
+             120,150,1\n\
+             160,220,1\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
+    super::run_survival(SurvivalArgs {
+        data: csv_path,
+        entry: Some("entry".to_string()),
+        exit: "exit".to_string(),
+        event: "event".to_string(),
+        formula: if degree == 0 {
+            "1".to_string()
+        } else {
+            format!("1 + linkwiggle(degree={degree}, internal_knots=2)")
+        },
+        predict_noise: None,
+        survival_likelihood: "location-scale".to_string(),
+        survival_distribution: "gaussian".to_string(),
+        link: None,
+        mixture_rho: None,
+        sas_init: None,
+        beta_logistic_init: None,
+        survival_time_anchor: None,
+        baseline_target: "linear".to_string(),
+        baseline_scale: None,
+        baseline_shape: None,
+        baseline_rate: None,
+        baseline_makeham: None,
+        time_basis: "ispline".to_string(),
+        time_degree: 2,
+        time_num_internal_knots: 4,
+        time_smooth_lambda: 1e-2,
+        ridge_lambda: 1e-6,
+        threshold_time_k: None,
+        threshold_time_degree: 3,
+        sigma_time_k: None,
+        sigma_time_degree: 3,
+        logslope_time_k: None,
+        logslope_time_degree: 3,
+        scale_dimensions: false,
+        pilot_subsample_threshold: 0,
+        out: Some(out_path),
+        logslope_formula: None,
+        z_column: None,
+        weights_column: None,
+        offset_column: None,
+        noise_offset_column: None,
+        frailty_kind: None,
+        frailty_sd: None,
+        hazard_loading: None,
+        persistent_warm_start_store: None,
+    })
+    .map(|_| ())
+}
+
+#[test]
+fn probe_2695_degree_ab() {
+    gam_runtime::test_support::install_diagnostic_logger();
+    for degree in [2usize] {
+        match probe_2695_linkwiggle_at_degree(degree) {
+            Ok(()) => println!("[2695-AB] degree={degree} FIT OK"),
+            Err(e) => {
+                let brackets: Vec<&str> = e.match_indices("joint-Newton terminal").map(|(i, _)| {
+                    let rest = &e[i..];
+                    let end = rest.find(']').map(|k| k + 1).unwrap_or(rest.len().min(400));
+                    &rest[..end]
+                }).collect();
+                println!("[2695-AB] degree={degree} FAILED, {} terminal brackets", brackets.len());
+                for (k, b) in brackets.iter().enumerate() {
+                    println!("[2695-AB]   degree={degree} seed{k}: {b}");
+                }
+            }
+        }
+    }
+}
