@@ -9444,3 +9444,178 @@ fn survival_ls_link_wiggle_real_warp_oracle_2695(knot_half_span: f64) {
         );
     }
 }
+
+/// gam#2695 — the OBSERVED INFORMATION must be a continuous function of β as a
+/// row's `q₀` crosses the link warp's knot-hull edge.
+///
+/// This is the same contract as the basis-level pins in `crate::wiggle`, taken
+/// from the other side: the basis is where the corner lived, but the object the
+/// inner solve actually broke on is this one, because
+/// `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is part of the objective the trust region accepts
+/// on. A corner in `I′_j` reaches `H` through two channels that carry it with
+/// **no `β_w` factor** — `∂²q/∂β_thr∂β_wj = I′_j·∂q₀/∂β_thr` and
+/// `∂q̇/∂β_wj = I′_j·r` — so `H` jumped by `O(1)` on the witness even though the
+/// warp was switched off at `β_w ≈ 1e-6`. A test that ran a warp with real
+/// amplitude would measure the `β_w`-weighted terms instead and could pass over
+/// the defect; this one deliberately keeps the warp off.
+///
+/// The assertion is scale-free: the gap across the edge must FALL with the step
+/// (a continuous `H` gives `O(h)`), not sit at a constant (a jump gives `O(1)`).
+#[test]
+fn joint_hessian_is_continuous_as_q0_crosses_the_link_warp_knot_hull_2695() {
+    let primaries: Vec<[f64; SLS_ROW_K]> = vec![
+        [0.2, 0.9, 1.3, 0.6, 0.4, 0.25, 0.3, 0.1, -0.2],
+        [-0.4, 0.5, 0.9, -0.8, -0.5, 0.4, -0.25, 0.35, 0.3],
+        [1.4, 2.1, 0.8, -1.1, -0.9, 0.2, 0.45, 0.55, 0.35],
+        [0.1, 0.6, 1.0, 0.3, 0.2, -0.3, -0.2, 0.15, 0.25],
+    ];
+    let event = [1.0, 0.0, 1.0, 1.0];
+    let weight = [1.0, 0.8, 1.2, 1.1];
+    let n = primaries.len();
+
+    // `q₀ = −η_t·e^{−η_ls}` and both predictors are linear in their single
+    // coefficient here, so at `β_ls = 1` the exit `q₀` of every row is exactly
+    // linear in `β_thr`. Put the hull's right edge ON row 1's `q₀` at
+    // `β_thr = 1`, so the ray below crosses the edge at a known point instead
+    // of at one found by search.
+    let q0_slope =
+        |row: usize| -> f64 { -primaries[row][3] * (-primaries[row][6]).exp() };
+    const B_STAR: f64 = 1.0;
+    const CROSSING_ROW: usize = 1;
+    let right = q0_slope(CROSSING_ROW) * B_STAR;
+    let left = right - 3.0;
+    let knots = Array1::from_vec(vec![
+        left,
+        left,
+        left,
+        left + 1.0,
+        left + 2.0,
+        right,
+        right,
+        right,
+    ]);
+    // The shipped witness shape: `linkwiggle(degree=2, internal_knots=2)`.
+    let degree = 2usize;
+
+    // Every other row must stay strictly inside the hull, so the measurement
+    // below is attributable to the one crossing.
+    for row in 0..n {
+        if row == CROSSING_ROW {
+            continue;
+        }
+        let q0 = q0_slope(row) * B_STAR;
+        assert!(
+            q0 > left && q0 < right,
+            "row {row} must stay inside the hull [{left:.6}, {right:.6}] for the crossing \
+             to be attributable; got q0 = {q0:.6}"
+        );
+    }
+
+    let seed_q0 = Array1::from_shape_fn(n, |i| q0_slope(i) * B_STAR);
+    let xwiggle =
+        survival_wiggle_basis_with_options(seed_q0.view(), &knots, degree, BasisOptions::value())
+            .expect("link wiggle design");
+    let pw = xwiggle.ncols();
+    assert!(pw >= 2, "the fixture must install a real wiggle block, got pw={pw}");
+
+    // Non-vacuity: the hull edge carries a materially non-zero one-sided slope,
+    // so the pre-fix constant tail really did step there and "continuous" is
+    // not being satisfied by a derivative that is zero on both sides.
+    let edge_slope = crate::wiggle::monotone_wiggle_basis_with_derivative_order(
+        Array1::from_elem(1, right).view(),
+        &knots,
+        degree,
+        1,
+    )
+    .expect("edge slope")
+    .row(0)
+    .iter()
+    .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    assert!(
+        edge_slope > 0.1,
+        "the hull edge must carry a real slope for this test to bite; max |I′| = \
+         {edge_slope:.3e}"
+    );
+
+    let inverse_link = residual_distribution_inverse_link(ResidualDistribution::Gaussian);
+    let mut family = survival_ls_joint_oracle_family(&inverse_link, &primaries, &event, &weight);
+    family.x_link_wiggle = Some(DesignMatrix::Dense(
+        gam_linalg::matrix::DenseDesignMatrix::from(xwiggle.clone()),
+    ));
+    family.wiggle_knots = Some(knots.clone());
+    family.wiggle_degree = Some(degree);
+
+    // The warp is OFF, exactly as on the witness. The channels under test carry
+    // `I′_j` with no `β_w` factor, so they must be continuous anyway.
+    let beta_w = Array1::from_shape_fn(pw, |j| 1.0e-6 * (j as f64 + 1.0));
+
+    let hessian_at = |beta_thr: f64| -> Array2<f64> {
+        let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
+            let mut eta = Array1::<f64>::zeros(3 * n);
+            for i in 0..n {
+                eta[i] = primaries[i][first] * scale;
+                eta[n + i] = primaries[i][second] * scale;
+                eta[2 * n + i] = primaries[i][deriv] * scale;
+            }
+            eta
+        };
+        let states = vec![
+            ParameterBlockState {
+                beta: array![1.0],
+                eta: stacked(0, 1, 2, 1.0),
+            },
+            ParameterBlockState {
+                beta: array![beta_thr],
+                eta: stacked(3, 4, 5, beta_thr),
+            },
+            ParameterBlockState {
+                beta: array![1.0],
+                eta: stacked(6, 7, 8, 1.0),
+            },
+            ParameterBlockState {
+                beta: beta_w.clone(),
+                eta: xwiggle.dot(&beta_w),
+            },
+        ];
+        family
+            .exact_newton_joint_hessian(&states)
+            .expect("joint hessian across the hull edge")
+            .expect("the family exposes an exact joint hessian")
+    };
+
+    let gap = |h: f64| -> f64 {
+        let plus = hessian_at(B_STAR + h);
+        let minus = hessian_at(B_STAR - h);
+        // Confirm the step really straddles the edge before reading the gap.
+        let q0_plus = q0_slope(CROSSING_ROW) * (B_STAR + h);
+        let q0_minus = q0_slope(CROSSING_ROW) * (B_STAR - h);
+        assert!(
+            (q0_plus - right).signum() != (q0_minus - right).signum(),
+            "step h={h:.1e} must straddle the hull edge {right:.9e}; got q0 {q0_minus:.9e} \
+             and {q0_plus:.9e}"
+        );
+        plus.iter()
+            .zip(minus.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max)
+    };
+
+    let coarse = gap(1.0e-3);
+    let fine = gap(1.0e-5);
+    assert!(
+        coarse > 0.0,
+        "the Hessian must respond to β at all for this measurement to mean anything"
+    );
+    // A jump leaves the gap flat in `h`; a continuous `H` divides it by the same
+    // factor the step was divided by. Allow half an order of slack against the
+    // exact 100× so the pin reads the ORDER, not a rate.
+    assert!(
+        fine <= coarse / 50.0,
+        "the joint Hessian does not close across the link-warp hull edge: the gap is \
+         {coarse:.6e} at h=1e-3 and {fine:.6e} at h=1e-5, a ratio of {:.3e} against the \
+         100x a continuous H must give. A constant-extended warp basis steps I′ from its \
+         interior one-sided slope ({edge_slope:.6e}) to 0 at the edge, which puts an O(1) \
+         jump into H and, through Φ, into the inner objective itself.",
+        coarse / fine.max(f64::MIN_POSITIVE),
+    );
+}

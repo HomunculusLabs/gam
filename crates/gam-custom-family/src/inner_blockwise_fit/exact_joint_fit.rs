@@ -1957,10 +1957,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             0.0
         };
         let old_objective = lastobjective - old_phi;
-        let probe_2695_h_old = family
-            .joint_jeffreys_information_with_specs(&states, specs)
-            .ok()
-            .flatten();
         // Row measure observed by the objective at β. `lastobjective` was
         // set on the previous cycle (or at function entry) under `options`;
         // see top-of-cycle capture for rationale.
@@ -3191,41 +3187,11 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // cycle the trial, the step (H_Φ=0/∇Φ=0), and the residual all sit
             // on the SAME Φ=0 objective (gam#729/#715 sign fix; the baseline and
             // post-accept folds carry the matching skippable gate).
-            let mut probe_2695_trial_phi = 0.0_f64;
             if !jeffreys_skippable_this_cycle
                 && let Some(z_joint) = joint_jeffreys_subspace.as_ref()
             {
-                probe_2695_trial_phi =
+                trial_penalty -=
                     custom_family_joint_jeffreys_value(family, &states, specs, &ranges, z_joint);
-                trial_penalty -= probe_2695_trial_phi;
-                if let (Some(h_old), Ok(Some(h_new))) = (
-                    probe_2695_h_old.as_ref(),
-                    family.joint_jeffreys_information_with_specs(&states, specs),
-                ) {
-                    let mut worst = 0.0_f64;
-                    let mut at = (0usize, 0usize);
-                    for i in 0..h_new.nrows() {
-                        for j in 0..h_new.ncols() {
-                            let d = (h_new[[i, j]] - h_old[[i, j]]).abs();
-                            if d > worst {
-                                worst = d;
-                                at = (i, j);
-                            }
-                        }
-                    }
-                    let flat: Vec<String> = h_new.iter().map(|v| format!("{v:+.9e}")).collect();
-                    let beta_flat: Vec<String> = states
-                        .iter()
-                        .flat_map(|s| s.beta.iter().copied())
-                        .map(|v| format!("{v:+.12e}"))
-                        .collect();
-                    log::info!(
-                        "[P2695H] cyc={cycle} att={trust_attempt} dH_max={worst:.6e} at={at:?} \
-                         ranges={ranges:?} beta=[{}] H=[{}]",
-                        beta_flat.join(" "),
-                        flat.join(" ")
-                    );
-                }
             }
             // Cheap-LL line-search path: rejected backtracking attempts
             // discard the exact-Newton workspace they build, so we evaluate
@@ -3422,48 +3388,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 )));
             }
             let actual_reduction = old_objective - trialobjective;
-            {
-                let dot = |a: &Array1<f64>| -> f64 {
-                    a.iter()
-                        .zip(trial_delta.iter())
-                        .map(|(x, d)| x * d)
-                        .sum::<f64>()
-                };
-                let gl_d = dot(&grad_joint);
-                let sb_d = dot(&penalty_beta);
-                let gphi_d = head_jeffreys_term
-                    .as_ref()
-                    .map(|(g, _)| dot(g))
-                    .unwrap_or(0.0);
-                let rhs_d = dot(&rhs);
-                let quad = 0.5
-                    * hpen_delta
-                        .iter()
-                        .zip(trial_delta.iter())
-                        .map(|(x, d)| x * d)
-                        .sum::<f64>();
-                let pure_trial = trialobjective + probe_2695_trial_phi;
-                let d_phi = probe_2695_trial_phi - old_phi;
-                let d_pure = lastobjective - pure_trial;
-                let dnorm = trial_delta
-                    .iter()
-                    .copied()
-                    .map(f64::abs)
-                    .fold(0.0_f64, f64::max);
-                let unit: Vec<String> = trial_delta
-                    .iter()
-                    .map(|x| format!("{:+.6}", x / dnorm.max(f64::MIN_POSITIVE)))
-                    .collect();
-                log::info!(
-                    "[P2695] cyc={cycle} att={trust_attempt} |d|={dnorm:.6e} \
-                     rhs_d={rhs_d:.9e} quad={quad:.9e} pred={predicted_reduction:.9e} \
-                     actual={actual_reduction:.9e} gl_d={gl_d:.9e} sb_d={sb_d:.9e} \
-                     gphi_d={gphi_d:.9e} d_pure={d_pure:.9e} d_phi={d_phi:.9e} \
-                     phi_old={old_phi:.9e} phi_trial={probe_2695_trial_phi:.9e} \
-                     u=[{}]",
-                    unit.join(" ")
-                );
-            }
             let trust_update = update_joint_trust_region_radius(
                 joint_trust_radius,
                 step_norm,

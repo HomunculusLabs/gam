@@ -3675,23 +3675,6 @@ impl SurvivalLocationScaleFamily {
         let dq_dq0 = fast_av(&basis_d1, &beta_w) + 1.0;
         let d2q_dq02 = fast_av(&basis_d2, &beta_w);
         let d3q_dq03 = fast_av(&basis_d3, &beta_w);
-        {
-            let q0s: Vec<String> = q0.iter().map(|v| format!("{v:+.12e}")).collect();
-            let kn: Vec<String> = knots.iter().map(|v| format!("{v:+.9e}")).collect();
-            let m1s: Vec<String> = dq_dq0.iter().map(|v| format!("{v:+.9e}")).collect();
-            let m2s: Vec<String> = d2q_dq02.iter().map(|v| format!("{v:+.9e}")).collect();
-            let bv: Vec<String> = basis.iter().map(|v| format!("{v:+.9e}")).collect();
-            let b1: Vec<String> = basis_d1.iter().map(|v| format!("{v:+.9e}")).collect();
-            log::info!(
-                "[P2695W] deg={degree} knots=[{}] q0=[{}] m1=[{}] m2=[{}] B=[{}] B1=[{}]",
-                kn.join(" "),
-                q0s.join(" "),
-                m1s.join(" "),
-                m2s.join(" "),
-                bv.join(" "),
-                b1.join(" ")
-            );
-        }
         Ok(Some(SurvivalWiggleGeometry {
             basis,
             basis_d1,
@@ -5068,18 +5051,6 @@ impl SurvivalLocationScaleFamily {
             r1,
         );
 
-        log::info!(
-            "[P2695R] row={row} d={d} w={w} u0={u0:+.12e} u1={u1:+.12e} g={g:+.12e} \
-             log_s0={log_s0:+.9e} r0={r0:+.9e} log_s1={log_s1:+.9e} r1={r1:+.9e} \
-             logphi1={logphi1:+.9e} dlogphi1={dlogphi1:+.9e} log_g={log_g:+.9e} \
-             d_log_g={d_log_g:+.9e} d2_log_g={d2_log_g:+.9e} h0={:+.9e} h1={:+.9e} \
-             q0={:+.12e} q1={:+.12e} slack={:+.6e}",
-            state.h0,
-            state.h1,
-            state.q0,
-            state.q1,
-            state.g_roundoff_slack,
-        );
         Ok(Some(SurvivalExactRowKernel {
             w,
             d,
