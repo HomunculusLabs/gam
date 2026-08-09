@@ -17,6 +17,12 @@ pub use penalty_priors::{
 
 include!("smooth/term_specs.rs");
 
+// The measure-jet term's outer-ψ plumbing, carved out of `term_specs.rs` and
+// included immediately after it so every path it exposes is unchanged. It is
+// one contract with one invariant — the ψ coordinate ORDER — spread over five
+// functions that must agree coordinate-for-coordinate; see its own header.
+include!("smooth/measure_jet_psi.rs");
+
 /// The caller's spatial length-scale window and the single expression that
 /// projects onto it (gam#2726). Re-exported into `smooth` so the ψ seed
 /// constructors in `term_specs.rs` and the outer fit driver share one
