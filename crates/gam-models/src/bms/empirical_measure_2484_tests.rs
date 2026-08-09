@@ -185,9 +185,11 @@ fn the_tie_certificate_fires_only_where_a_boundary_cuts_a_tie_2484() {
         "gam#2484: a certified tie straddle must refuse the derivative, not return one"
     );
 
-    // The same tie, but with two bins (per-bin target 3.0) the only interior
-    // boundary lands exactly on the tied pair's leading edge, so the whole tie
-    // sits inside one bin and the allocation is order-invariant.
+    // The same tie at three bins: per-bin target 2.0, so the interior
+    // boundaries at 2.0 and 4.0 land exactly on the tied pair's own edges. The
+    // whole tie then sits inside one bin, every member contributes its full
+    // weight to it whatever order the sort chose, and the allocation is
+    // order-invariant.
     let inside =
         build_empirical_z_grid_with_alpha(zeta.view(), weights.view(), 3, "tie").expect("builds");
     assert!(
@@ -544,4 +546,88 @@ fn the_shapes_with_no_channel_are_still_withheld_and_say_which_2484() {
         "local-empirical",
         "no fit-time build record",
     );
+}
+
+#[test]
+fn the_assembled_correction_is_psd_and_strictly_widens_the_naive_interval_2484() {
+    // The statistical content of the whole issue: the naive second-stage
+    // covariance treats `ζ` as known, so it omits the first-stage uncertainty
+    // and is TOO NARROW. The correction's job is to add that back, and a
+    // correction that came out zero (or indefinite) would be worse than
+    // withholding, because it reads as corrected on the wire.
+    let fixture = RowFixture::new();
+    let s_eff = fixture.analytic_total_sensitivity();
+    let p_beta = fixture.p_beta();
+
+    // A first-stage calibration on a one-column conditioning basis, with a PSD
+    // joint covariance. The numbers are a fixture, not a fit; what is under
+    // test is the congruence the seam performs with them.
+    let basis_ncols = 1;
+    let theta1_dim = 2 * (basis_ncols + 1);
+    let mut theta1_cov = Array2::<f64>::zeros((theta1_dim, theta1_dim));
+    for i in 0..theta1_dim {
+        for j in 0..theta1_dim {
+            // A Kac-Murdock-Szego correlation, scaled: symmetric, strictly PD.
+            theta1_cov[[i, j]] = 0.04 * 0.6_f64.powi((i as i32 - j as i32).abs());
+        }
+    }
+    let calibration = super::LatentZConditionalCalibration {
+        mean_coeffs: vec![0.05, 0.31],
+        var_coeffs: vec![0.9, 0.12],
+        basis_ncols,
+        var_floor: 1.0e-6,
+        homoskedastic_var: 0.9,
+        post_mean: 0.0,
+        post_sd: 1.0,
+        theta1_cov,
+    };
+    let a_block =
+        Array2::<f64>::from_shape_fn((fixture.zeta.len(), basis_ncols), |(i, _)| {
+            ((i as f64) - 4.5) / 4.5
+        });
+    let raw_z = Array1::from_shape_fn(fixture.zeta.len(), |i| 0.4 * fixture.zeta[i] + 0.05);
+    let vb = Array2::<f64>::from_shape_fn((p_beta, p_beta), |(i, j)| {
+        if i == j { 0.25 } else { 0.02 }
+    });
+
+    let correction = calibration
+        .generated_regressor_correction(s_eff.view(), raw_z.view(), a_block.view(), vb.view())
+        .expect("the correction assembles");
+
+    let mut max_diagonal = 0.0_f64;
+    for i in 0..p_beta {
+        max_diagonal = max_diagonal.max(correction[[i, i]]);
+        assert!(
+            correction[[i, i]] >= -1.0e-14,
+            "gam#2484: the correction is a congruence of a PSD V₁, so no diagonal may be \
+             negative; got {} at {i}",
+            correction[[i, i]]
+        );
+        for j in 0..p_beta {
+            assert!(
+                (correction[[i, j]] - correction[[j, i]]).abs() <= 1.0e-12,
+                "gam#2484: the correction must be symmetric at ({i},{j})"
+            );
+        }
+    }
+    assert!(
+        max_diagonal > 1.0e-8,
+        "gam#2484: the correction must actually widen the intervals; its largest diagonal is \
+         {max_diagonal:.6e}, which is indistinguishable from publishing the naive covariance"
+    );
+
+    // PSD in every direction, not just on the diagonal: a congruence cannot be
+    // indefinite, and an implementation that lost the symmetry of `V₁` could be.
+    for k in 0..p_beta {
+        for l in 0..p_beta {
+            let mut direction = Array1::<f64>::zeros(p_beta);
+            direction[k] += 1.0;
+            direction[l] -= 1.0;
+            let quadratic = direction.dot(&correction.dot(&direction));
+            assert!(
+                quadratic >= -1.0e-12,
+                "gam#2484: the correction is indefinite along e_{k} − e_{l}: {quadratic:.6e}"
+            );
+        }
+    }
 }

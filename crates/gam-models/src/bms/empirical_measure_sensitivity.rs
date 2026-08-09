@@ -498,6 +498,15 @@ pub(crate) struct EmpiricalRigidZetaChannels {
 /// for `u ∈ {ζ_i, x_b}`, which is what this function evaluates and contracts
 /// through the block design rows.
 ///
+/// # Cost
+///
+/// One intercept root-solve and one `O(m)` node pass per row, then two
+/// `n × m` by `n × p` GEMMs — so `O(n·(solve + m) + n·m·p_β)`, once, after the
+/// fit. The row solve is the same one the fit performs at every inner
+/// iteration, so this pass is a small fraction of a fit that already ran
+/// thousands of them. Memory is two `n × m` coefficient blocks alongside the
+/// `n × p_β` sensitivity the standard-normal branch already builds.
+///
 /// # Sign convention
 ///
 /// LOG-LIKELIHOOD, matching
