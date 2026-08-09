@@ -1969,6 +1969,15 @@ pub(crate) struct LatentMeasureDecision {
     /// empirical measure available to carry the residual law. Never a silent
     /// state: the caller must route it through its own [`LatentZCheckMode`].
     pub(crate) unmodelled_residual: Option<LatentNormalAdequacy>,
+    /// `Some` exactly when `kind` is a freshly built `GlobalEmpirical`: the
+    /// record of the equal-mass compression that produced it, which is what
+    /// makes the measure differentiable in the sample it was built from.
+    ///
+    /// Fit-time only and deliberately not part of `kind`: the measure is on the
+    /// persistence wire and its identity is its nodes and weights, while this is
+    /// provenance about the rows behind them. The gam#2484 Murphy–Topel
+    /// correction is its only consumer.
+    pub(crate) empirical_build: Option<empirical_measure_sensitivity::EmpiricalZGridBuild>,
 }
 
 impl LatentMeasureDecision {
@@ -1977,6 +1986,7 @@ impl LatentMeasureDecision {
             kind: LatentMeasureKind::StandardNormal,
             calibration,
             unmodelled_residual: None,
+            empirical_build: None,
         }
     }
 }
@@ -1986,7 +1996,14 @@ pub(crate) fn build_latent_measure_with_geometry(
     weights: &Array1<f64>,
     policy: &LatentZPolicy,
     conditioning: Option<ArrayView2<'_, f64>>,
-) -> Result<(LatentMeasureKind, LatentMeasureCalibration), String> {
+) -> Result<
+    (
+        LatentMeasureKind,
+        LatentMeasureCalibration,
+        Option<empirical_measure_sensitivity::EmpiricalZGridBuild>,
+    ),
+    String,
+> {
     let decision = build_latent_measure_decision(
         z,
         weights,
@@ -2008,7 +2025,7 @@ pub(crate) fn build_latent_measure_with_geometry(
                 .to_string(),
         );
     }
-    Ok((decision.kind, decision.calibration))
+    Ok((decision.kind, decision.calibration, decision.empirical_build))
 }
 
 /// The latent-measure gate, shared by both marginal-slope families.
@@ -2068,12 +2085,14 @@ pub(crate) fn build_latent_measure_decision(
                 let zeta = cal.apply(z.view(), a_block)?;
                 let residual_adequacy = latent_z_normal_adequacy(&zeta, weights, policy)?;
                 let residual_is_standard_normal = residual_adequacy.passes();
-                let kind = match (residual_is_standard_normal, support) {
+                let (kind, empirical_build) = match (residual_is_standard_normal, support) {
                     (true, _) | (false, EmpiricalLatentMeasureSupport::StandardNormalOnly) => {
-                        LatentMeasureKind::StandardNormal
+                        (LatentMeasureKind::StandardNormal, None)
                     }
                     (false, EmpiricalLatentMeasureSupport::Available) => {
-                        build_global_empirical_latent_measure(&zeta, weights, grid_size)?
+                        let (kind, build) =
+                            build_global_empirical_latent_measure(&zeta, weights, grid_size)?;
+                        (kind, Some(build))
                     }
                 };
                 log::info!(
@@ -2100,6 +2119,7 @@ pub(crate) fn build_latent_measure_decision(
                         kind,
                         calibration: LatentMeasureCalibration::ConditionalLocationScale(cal),
                         unmodelled_residual: Some(residual_adequacy),
+                        empirical_build,
                     });
                 }
                 if !residual_is_standard_normal {
@@ -2124,6 +2144,7 @@ pub(crate) fn build_latent_measure_decision(
                     kind,
                     calibration: LatentMeasureCalibration::ConditionalLocationScale(cal),
                     unmodelled_residual: None,
+                    empirical_build,
                 });
             }
             let pooled_adequacy = latent_z_normal_adequacy(z, weights, policy)?;
@@ -2164,12 +2185,13 @@ pub(crate) fn build_latent_measure_decision(
                                 calibration.post_sd,
                                 calibration.sorted_z.len(),
                             );
+                            let (kind, build) =
+                                build_global_empirical_latent_measure(z, weights, grid_size)?;
                             Ok(LatentMeasureDecision {
-                                kind: build_global_empirical_latent_measure(
-                                    z, weights, grid_size,
-                                )?,
+                                kind,
                                 calibration: LatentMeasureCalibration::None,
                                 unmodelled_residual: None,
+                                empirical_build: Some(build),
                             })
                         }
                         EmpiricalLatentMeasureSupport::StandardNormalOnly => {
@@ -2186,6 +2208,7 @@ pub(crate) fn build_latent_measure_decision(
                                     calibration,
                                 ),
                                 unmodelled_residual: Some(calibrated_adequacy),
+                                empirical_build: None,
                             })
                         }
                     }
@@ -2196,11 +2219,15 @@ pub(crate) fn build_latent_measure_decision(
             LatentMeasureCalibration::None,
         )),
         LatentMeasureSpec::GlobalEmpirical { grid_size } => match support {
-            EmpiricalLatentMeasureSupport::Available => Ok(LatentMeasureDecision {
-                kind: build_global_empirical_latent_measure(z, weights, grid_size)?,
-                calibration: LatentMeasureCalibration::None,
-                unmodelled_residual: None,
-            }),
+            EmpiricalLatentMeasureSupport::Available => {
+                let (kind, build) = build_global_empirical_latent_measure(z, weights, grid_size)?;
+                Ok(LatentMeasureDecision {
+                    kind,
+                    calibration: LatentMeasureCalibration::None,
+                    unmodelled_residual: None,
+                    empirical_build: Some(build),
+                })
+            }
             EmpiricalLatentMeasureSupport::StandardNormalOnly => Err(format!(
                 "{context} was asked for a global-empirical latent measure, but its row kernel \
                  exists only in the closed-form standard-normal branch: there is no empirical-grid \
@@ -2488,32 +2515,6 @@ pub(crate) fn weighted_tail_mass(
         .map(|(_, &wi)| wi)
         .sum::<f64>()
         / total_weight
-}
-
-/// Equal-mass compression of `(z, weights)` into an at-most-`grid_size`-node
-/// discrete latent measure.
-///
-/// A thin wrapper over
-/// [`empirical_measure_sensitivity::build_empirical_z_grid_with_alpha`], which
-/// owns the fill loop and additionally records the allocation the gam#2484
-/// Murphy–Topel correction differentiates. Keeping ONE fill loop is the point:
-/// a recorded allocation that came from a re-implementation would be measuring
-/// its own reconstruction rather than the grid the fit integrates against.
-pub(crate) fn build_empirical_z_grid(
-    z: &Array1<f64>,
-    weights: &Array1<f64>,
-    grid_size: usize,
-    context: &str,
-) -> Result<EmpiricalZGrid, String> {
-    Ok(
-        empirical_measure_sensitivity::build_empirical_z_grid_with_alpha(
-            z.view(),
-            weights.view(),
-            grid_size,
-            context,
-        )?
-        .grid,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2804,6 +2805,8 @@ mod stacked_first_stage_sandwich_2484_tests {
 pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
 pub(crate) mod empirical_measure_sensitivity;
+#[cfg(test)]
+mod empirical_measure_2484_tests;
 // #932 BMS flex single-source jet substrate (runtime-dimension `Jet2` + IFT
 // lift + cell base-moment jets). A bare `#[cfg(test)] mod` with an allowed name
 // so the build.rs ban-scanner exempts it; shared by its own FD gates and the

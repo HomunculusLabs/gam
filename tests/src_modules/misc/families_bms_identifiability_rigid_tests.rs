@@ -2,6 +2,7 @@ use super::exact_eval_cache::*;
 
 use super::family::*;
 
+use super::empirical_measure_sensitivity::build_empirical_z_grid_with_alpha;
 use super::gradient_paths::*;
 
 use super::hessian_paths::*;
@@ -7084,8 +7085,9 @@ fn empirical_intercept_calibrates_marginal_probability() {
 fn skewed_rigid_empirical_grid_calibrates_marginal_probability() {
     let z = array![-1.15, -1.05, -0.95, -0.8, -0.65, -0.45, 0.1, 0.9, 2.4, 4.7];
     let weights = array![1.0, 1.0, 1.0, 0.9, 0.9, 0.8, 0.5, 0.35, 0.2, 0.1];
-    let grid = build_empirical_z_grid(&z, &weights, 7, "test skewed grid")
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "grid", e));
+    let grid = build_empirical_z_grid_with_alpha(z.view(), weights.view(), 7, "test skewed grid")
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "grid", e))
+        .grid;
     let target_q = 0.25;
     let target_mu = normal_cdf(target_q);
     let slope = 1.35;
@@ -7123,8 +7125,9 @@ fn empirical_rigid_fd_fixture() -> (
 ) {
     let grid_nodes = array![-1.15, -1.05, -0.95, -0.8, -0.65, -0.45, 0.1, 0.9, 2.4, 4.7];
     let grid_w = array![1.0, 1.0, 1.0, 0.9, 0.9, 0.8, 0.5, 0.35, 0.2, 0.1];
-    let grid = build_empirical_z_grid(&grid_nodes, &grid_w, 7, "cf vs fd grid")
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "grid", e));
+    let grid = build_empirical_z_grid_with_alpha(grid_nodes.view(), grid_w.view(), 7, "cf vs fd grid")
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "grid", e))
+        .grid;
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(array![1.0, 0.0, 1.0]),
         weights: Arc::new(array![1.0, 0.7, 1.3]),

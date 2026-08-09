@@ -2269,17 +2269,26 @@ impl Default for AdaptiveRegularizationOptions {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum CovarianceDeclined {
-    /// Bernoulli marginal-slope, conditional latent-z calibration active, and a
-    /// second-stage latent measure that is not `StandardNormal`.
+    /// Bernoulli marginal-slope, conditional latent-z calibration active, a
+    /// second-stage latent measure that is not `StandardNormal`, AND no
+    /// cross-row channel for it.
     ///
-    /// The Murphy-Topel generated-regressor correction needs the per-row mixed
-    /// derivative `d2 l_i / d(beta) d(zeta_i)`, which is local in `i` only for
-    /// the rigid closed-form standard-normal kernel. An empirical measure is
-    /// built from the WHOLE calibrated-residual vector, so `l_i` depends on
-    /// `zeta_i` twice — directly, and through a grid every other `zeta_j`
-    /// helped build — and the honest object is a full `n x n` sensitivity. The
-    /// measure is also estimated from the same data, which is precisely the
-    /// known-second-stage-kernel assumption Murphy-Topel rests on.
+    /// This is no longer the whole non-StandardNormal class. gam#2484 derived
+    /// the channel the correction was missing: a row's log-likelihood depends on
+    /// `zeta_i` directly and through a grid every other `zeta_j` helped build,
+    /// and the second dependence has a closed form, because the equal-mass bins
+    /// are cut by cumulative WEIGHT and the allocation is therefore exactly
+    /// constant in `zeta`. On the ordinary rigid `global-empirical` fit the
+    /// correction is computed and the covariance IS published.
+    ///
+    /// What still declines are the shapes with no such channel, and the variant
+    /// now carries which one: a `local-empirical` measure (per-row grids, only
+    /// reachable by deserializing a saved model, so there is no fit-time
+    /// allocation record), a score-warp / link-deviation block (the latent score
+    /// enters the row a second time through a basis evaluated at it, so the
+    /// rigid intercept's node derivative is not the row's), or data on which the
+    /// compression is not differentiable at all (a tied `zeta` group that a bin
+    /// boundary cuts, where the left and right derivatives genuinely differ).
     ///
     /// Point estimation is unaffected and IS published; only the second-stage
     /// covariance and its standard errors are withheld.
@@ -2287,6 +2296,10 @@ pub enum CovarianceDeclined {
         /// The measure the adequacy gate selected instead, as named by
         /// `LatentMeasureKind`: `global-empirical` or `local-empirical`.
         latent_measure: String,
+        /// Which channel this fit's shape or data could not supply. Not named
+        /// `reason`: that is this enum's serde tag.
+        #[serde(default)]
+        unavailable_channel: String,
     },
     /// Survival marginal-slope, conditional latent-z calibration active, and a
     /// fit shape whose per-row `d(score_beta,i)/d(zeta_i)` channel the family
@@ -2313,21 +2326,26 @@ impl CovarianceDeclined {
     /// Kept beside the variant so every consumer renders the same sentence.
     pub fn explain(&self) -> String {
         match self {
-            Self::BmsGeneratedRegressorLatentMeasureNotStandardNormal { latent_measure } => {
+            Self::BmsGeneratedRegressorLatentMeasureNotStandardNormal {
+                latent_measure,
+                unavailable_channel,
+            } => {
                 format!(
                     "no coefficient covariance was published for this bernoulli marginal-slope \
                      fit: the conditional latent-z location-scale calibration fired, its \
                      calibrated residual then failed the standard-normal adequacy gate, and the \
                      second-stage latent measure is therefore `{latent_measure}`. The \
-                     Murphy-Topel generated-regressor correction needs a per-row mixed derivative \
-                     of the score in the latent coordinate; an empirical measure is built from \
-                     the whole calibrated-residual vector, so that sensitivity is not local in \
-                     the row and the measure is itself estimated from the same data. Publishing \
-                     the UNCORRECTED covariance instead is not admissible: it omits the \
-                     first-stage uncertainty the correction exists to add, so the intervals \
-                     would be too narrow and, on the wire, indistinguishable from corrected \
-                     ones. The point estimates are unaffected and are published. See gam#2484 \
-                     for the non-local sensitivity and gam#2718 for this contract."
+                     Murphy-Topel generated-regressor correction needs the TOTAL derivative of \
+                     the score in the latent coordinate, which for a measure built from the \
+                     whole calibrated-residual vector includes a cross-row channel through the \
+                     grid. gam#2484 derived that channel and the ordinary rigid global-empirical \
+                     fit now publishes the corrected covariance; this fit cannot, because \
+                     {unavailable_channel}. Publishing the UNCORRECTED covariance instead is not \
+                     admissible: it omits the first-stage uncertainty the correction exists to \
+                     add, so the intervals would be too narrow and, on the wire, \
+                     indistinguishable from corrected ones. The point estimates are unaffected \
+                     and are published. See gam#2484 for the channel and gam#2718 for this \
+                     contract."
                 )
             }
             Self::SurvivalMarginalSlopeGeneratedRegressorSensitivityUnavailable {

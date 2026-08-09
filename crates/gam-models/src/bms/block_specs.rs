@@ -1,6 +1,10 @@
 use super::family::*;
 use super::gradient_paths::*;
 use super::hessian_paths::{new_cell_moment_cache_stats, new_cell_moment_lru_cache};
+use super::empirical_measure_sensitivity::{
+    EmpiricalGeneratedRegressorChannel, classify_empirical_generated_regressor_channel,
+    rigid_empirical_score_zeta_channels,
+};
 use super::install_flex::validate_spec;
 use super::*;
 use crate::marginal_slope_orthogonal::influence_absorber_log_lambda;
@@ -2115,12 +2119,13 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 .try_to_dense_arc("bernoulli marginal-slope conditional latent-z gate")?,
         )
     };
-    let (latent_measure, latent_z_calibration) = build_latent_measure_with_geometry(
-        &spec.z,
-        &spec.weights,
-        &spec.latent_z_policy,
-        conditioning_dense.as_ref().map(|d| d.view()),
-    )?;
+    let (latent_measure, latent_z_calibration, latent_measure_build) =
+        build_latent_measure_with_geometry(
+            &spec.z,
+            &spec.weights,
+            &spec.latent_z_policy,
+            conditioning_dense.as_ref().map(|d| d.view()),
+        )?;
     if latent_measure.is_empirical() && sigma_learnable {
         return Err("empirical latent-measure marginal-slope calibration requires fixed GaussianShift sigma; learnable sigma derivatives must be fit under the standard-normal latent measure"
                     .to_string());
@@ -3020,13 +3025,36 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // protected was unreachable in practice — minted at measure selection and
     // destroyed here, on every fit.
     //
-    // So: withhold the covariance, DECLARE the withholding on the fit's own
-    // payload, and publish the point estimates. Publishing the UNCORRECTED
-    // covariance remains inadmissible — it omits the first-stage uncertainty the
-    // correction exists to add, so the intervals come out too narrow and are
-    // indistinguishable on the wire from corrected ones — but a typed absence is
-    // not that, and every consumer of these fields already destructures an
-    // `Option`. The real correction for this measure (`G_measure`) is gam#2484.
+    // gam#2484 CLOSES that gap rather than declaring it. On the one reachable
+    // non-StandardNormal pair — a fired conditional calibration whose residual
+    // sent the second-stage measure to `GlobalEmpirical` — the correction is now
+    // computed, because the thing that made it "not local in the row" is a
+    // cross-row channel with a closed form rather than an absent one. The
+    // measure is a deterministic function of ζ (equal-mass bins cut by
+    // cumulative WEIGHT, so the allocation is exactly constant in ζ), and
+    // Murphy–Topel conditions on the data, so under the same conditioning the
+    // StandardNormal branch already uses, the whole θ₁-dependence of the second
+    // stage is `ζ` and the grid built from it:
+    //
+    //   d score_β/d ζ_j = s_j + Σ_b u_b·D_{bj}   ⇒   S_eff = S + Dᵀ·U_Qᵀ
+    //
+    // `S`/`U_Q` come from `rigid_empirical_score_zeta_channels` and `D` from the
+    // build record; everything downstream (`G = S_effᵀ·J`, `Vb·G`, the `V₁`
+    // congruence) is untouched and stays PSD.
+    //
+    // Withholding survives for the shapes that genuinely have no channel, and
+    // says which one it was rather than restating the measure's name. Publishing
+    // the UNCORRECTED covariance is still inadmissible there — it omits the
+    // first-stage uncertainty the correction exists to add, so the intervals come
+    // out too narrow and are indistinguishable on the wire from corrected ones —
+    // but a typed absence is not that, and every consumer already destructures an
+    // `Option`.
+    let flex_active = score_warp_runtime.is_some() || link_dev_runtime.is_some();
+    let empirical_channel = classify_empirical_generated_regressor_channel(
+        &latent_measure,
+        latent_measure_build.as_ref(),
+        flex_active,
+    );
     // The guard mirrors the refusal it replaces EXACTLY -- including
     // `covariance_conditional.is_some()`. Without that clause a caller who
     // declined inference (so there is no covariance to begin with) would be told
@@ -3034,13 +3062,11 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // this field must always mean "a covariance existed and was taken away".
     if solved_fit.covariance_conditional.is_some()
         && latent_z_conditional_calibration.is_some()
-        && !matches!(latent_measure, LatentMeasureKind::StandardNormal)
+        && let EmpiricalGeneratedRegressorChannel::Unavailable {
+            latent_measure: latent_measure_label,
+            unavailable_channel,
+        } = &empirical_channel
     {
-        let latent_measure_label = match latent_measure {
-            LatentMeasureKind::StandardNormal => "standard-normal",
-            LatentMeasureKind::GlobalEmpirical { .. } => "global-empirical",
-            LatentMeasureKind::LocalEmpirical { .. } => "local-empirical",
-        };
         solved_fit.covariance_conditional = None;
         solved_fit.covariance_corrected = None;
         if let Some(inference) = solved_fit.inference.as_mut() {
@@ -3051,7 +3077,8 @@ pub fn fit_bernoulli_marginal_slope_terms(
         }
         let declined = gam_solve::estimate::CovarianceDeclined::
             BmsGeneratedRegressorLatentMeasureNotStandardNormal {
-                latent_measure: latent_measure_label.to_string(),
+                latent_measure: latent_measure_label.clone(),
+                unavailable_channel: unavailable_channel.clone(),
             };
         log::warn!("[BMS latent-z] {}", declined.explain());
         solved_fit.artifacts.covariance_declined = Some(declined);
@@ -3072,7 +3099,6 @@ pub fn fit_bernoulli_marginal_slope_terms(
         }
         let correction_family =
             make_family(&marginal_design, &logslope_design, final_sigma_cell.get());
-        let flex_active = score_warp_runtime.is_some() || link_dev_runtime.is_some();
         let s = if flex_active {
             correction_family.flex_score_zeta_sensitivity(
                 &solved_fit.block_states,
@@ -3100,18 +3126,85 @@ pub fn fit_bernoulli_marginal_slope_terms(
             let marginal_eta = &solved_fit.block_states[0].eta;
             let slope_eta = &solved_fit.block_states[1].eta;
             let probit_scale = probit_frailty_scale(final_sigma_cell.get());
-            rigid_standard_normal_score_zeta_sensitivity(
-                &spec.base_link,
-                marginal_eta,
-                slope_eta,
-                z.as_ref(),
-                y.as_ref(),
-                weights.as_ref(),
-                probit_scale,
-                score_marginal_dense.view(),
-                score_logslope_dense.view(),
-                p_beta,
-            )?
+            match &empirical_channel {
+                // gam#2484: the empirical kernel's row is
+                // `-w·logΦ(σ·(a(m,g) + s·g·ζ_i))` around an implicitly solved
+                // intercept, so neither channel is the closed-form kernel's.
+                // `direct` replaces `S` (it is not the same number), and the
+                // grid channel is pulled back to the rows through `D`. The two
+                // are returned by one pass because they share the per-row
+                // intercept solve.
+                EmpiricalGeneratedRegressorChannel::Empirical(build) => {
+                    let grid = match &latent_measure {
+                        LatentMeasureKind::GlobalEmpirical { grid } => grid,
+                        _ => {
+                            return Err(
+                                "bms generated-regressor: an empirical build record without a \
+                                 global-empirical measure"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    let channels = rigid_empirical_score_zeta_channels(
+                        &spec.base_link,
+                        marginal_eta,
+                        slope_eta,
+                        z.as_ref(),
+                        y.as_ref(),
+                        weights.as_ref(),
+                        probit_scale,
+                        grid,
+                        score_marginal_dense.view(),
+                        score_logslope_dense.view(),
+                        p_beta,
+                    )?;
+                    let cross_row = build.node_zeta_vjp(channels.node.view())?;
+                    if cross_row.nrows() != channels.direct.nrows() {
+                        return Err(format!(
+                            "bms generated-regressor: the empirical cross-row channel has {} \
+                             rows against the fit's {}",
+                            cross_row.nrows(),
+                            channels.direct.nrows()
+                        ));
+                    }
+                    log::info!(
+                        "[BMS latent-z] empirical generated-regressor channels: nodes={} \
+                         |S_direct|_max={:.6e} |D^T U_Q^T|_max={:.6e}",
+                        grid.nodes.len(),
+                        channels
+                            .direct
+                            .iter()
+                            .fold(0.0_f64, |acc, v| acc.max(v.abs())),
+                        cross_row.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())),
+                    );
+                    channels.direct + cross_row
+                }
+                EmpiricalGeneratedRegressorChannel::ClosedForm => {
+                    rigid_standard_normal_score_zeta_sensitivity(
+                        &spec.base_link,
+                        marginal_eta,
+                        slope_eta,
+                        z.as_ref(),
+                        y.as_ref(),
+                        weights.as_ref(),
+                        probit_scale,
+                        score_marginal_dense.view(),
+                        score_logslope_dense.view(),
+                        p_beta,
+                    )?
+                }
+                // Unreachable: the withholding block above cleared
+                // `covariance_conditional`, so this `if let` did not fire.
+                EmpiricalGeneratedRegressorChannel::Unavailable {
+                    latent_measure: measure,
+                    unavailable_channel: channel,
+                } => {
+                    return Err(format!(
+                        "bms generated-regressor: reached the correction with a {measure} \
+                         measure whose channel is unavailable ({channel})"
+                    ));
+                }
+            }
         };
         // The first-stage Jacobian expects the RAW normalized score and the
         // raw calibration design, whereas `s` above is evaluated at the

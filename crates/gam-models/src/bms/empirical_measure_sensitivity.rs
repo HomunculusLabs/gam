@@ -61,7 +61,10 @@
 //! [`build_empirical_z_grid_with_alpha`]; [`build_empirical_z_grid`] stays a thin
 //! wrapper over it and every existing caller and the wire are untouched.
 
-use super::{BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid};
+use super::{
+    BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid,
+    LatentMeasureKind,
+};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// A tied `ζ` group whose mass a bin boundary cuts, which is the only way the
@@ -648,4 +651,91 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
         );
     }
     Ok(EmpiricalRigidZetaChannels { direct, node })
+}
+
+// ---------------------------------------------------------------------------
+// Which generated-regressor channel this fit's measure has
+// ---------------------------------------------------------------------------
+
+/// The seam's decision about the Murphy–Topel channel, as a value rather than a
+/// branch buried in the fit driver.
+///
+/// gam#2484 originally read "a non-StandardNormal second-stage measure has no
+/// generated-regressor correction". That is no longer the class: the ordinary
+/// rigid `GlobalEmpirical` fit HAS one. What is left without a channel is a
+/// short, enumerable list, and this type is where the list lives — separately
+/// testable, so each arm has a witness that does not need a full fit.
+pub(crate) enum EmpiricalGeneratedRegressorChannel<'a> {
+    /// `StandardNormal`: the closed-form kernel, whose mixed derivative is local
+    /// in the row. Nothing extra to add.
+    ClosedForm,
+    /// A rigid global-empirical measure with a differentiable build record: the
+    /// direct channel is the empirical kernel's own and the cross-row channel is
+    /// pulled back through this record.
+    Empirical(&'a EmpiricalZGridBuild),
+    /// No channel. The covariance is withheld and the reason says which shape or
+    /// which property of the data removed it.
+    Unavailable {
+        latent_measure: String,
+        unavailable_channel: String,
+    },
+}
+
+/// Classify the measure the fit ended up with.
+///
+/// `flex_active` is the score-warp / link-deviation flag: those blocks evaluate
+/// a basis AT the latent score, so the row's dependence on the grid is not the
+/// rigid intercept's and the node derivative derived here does not describe it.
+pub(crate) fn classify_empirical_generated_regressor_channel<'a>(
+    latent_measure: &LatentMeasureKind,
+    build: Option<&'a EmpiricalZGridBuild>,
+    flex_active: bool,
+) -> EmpiricalGeneratedRegressorChannel<'a> {
+    match latent_measure {
+        LatentMeasureKind::StandardNormal => EmpiricalGeneratedRegressorChannel::ClosedForm,
+        LatentMeasureKind::LocalEmpirical { .. } => {
+            EmpiricalGeneratedRegressorChannel::Unavailable {
+                latent_measure: "local-empirical".to_string(),
+                unavailable_channel:
+                    "a per-row local-empirical measure carries no fit-time build record: it is \
+                     only produced by deserializing a saved model, never by the latent-measure \
+                     gate, so the equal-mass allocation behind its nodes is not known"
+                        .to_string(),
+            }
+        }
+        LatentMeasureKind::GlobalEmpirical { .. } if flex_active => {
+            EmpiricalGeneratedRegressorChannel::Unavailable {
+                latent_measure: "global-empirical".to_string(),
+                unavailable_channel:
+                    "a score-warp / link-deviation block evaluates a basis AT the latent score, \
+                     so the row depends on the grid through that basis as well as through the \
+                     calibration intercept, and the rigid kernel's node derivative is not the \
+                     row's"
+                        .to_string(),
+            }
+        }
+        LatentMeasureKind::GlobalEmpirical { .. } => match build {
+            None => EmpiricalGeneratedRegressorChannel::Unavailable {
+                latent_measure: "global-empirical".to_string(),
+                unavailable_channel:
+                    "the global-empirical measure reached the covariance seam with no build \
+                     record, so the equal-mass allocation it was compressed with is unknown"
+                        .to_string(),
+            },
+            Some(build) => match build.tie_straddle.as_ref() {
+                Some(tie) => EmpiricalGeneratedRegressorChannel::Unavailable {
+                    latent_measure: "global-empirical".to_string(),
+                    unavailable_channel: format!(
+                        "the equal-mass compression is not differentiable in the calibrated \
+                         score on this data: {} rows are tied at ζ = {:.6} and bin boundary {} \
+                         cuts the tied group, so which member lands in which bin is an order the \
+                         data does not define and the left and right derivatives of the grid \
+                         nodes genuinely differ",
+                        tie.rows, tie.value, tie.boundary
+                    ),
+                },
+                None => EmpiricalGeneratedRegressorChannel::Empirical(build),
+            },
+        },
+    }
 }

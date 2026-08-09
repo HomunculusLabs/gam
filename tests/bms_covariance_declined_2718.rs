@@ -1,6 +1,15 @@
-//! gam#2718 / gam#2484 — a BMS fit whose latent-z adequacy gate rejects
-//! StandardNormal must MINT its point estimates and DECLARE that it withheld
-//! the coefficient covariance.
+//! gam#2718 / gam#2484 — what a BMS fit does when its latent-z adequacy gate
+//! rejects StandardNormal.
+//!
+//! The answer changed once, and the change is the point of this file. gam#2718
+//! established the CONTRACT — mint the point estimates, and if the covariance
+//! cannot be corrected, withhold it and DECLARE the withholding rather than
+//! publish an uncorrected (too narrow) matrix that is indistinguishable on the
+//! wire from a corrected one. gam#2484 then removed the reason the reachable
+//! fixture was withholding at all: the cross-row channel through the empirical
+//! grid has a closed form, so the ordinary rigid `global-empirical` fit now
+//! PUBLISHES a corrected covariance. Both halves are asserted here, on the same
+//! fixtures, so neither can be lost to the other.
 //!
 //! Before this contract the seam returned `Err` from
 //! `fit_bernoulli_marginal_slope_terms`, so a conditional location-scale
@@ -11,28 +20,32 @@
 //! unreachable in practice because both production marginal-slope entry points
 //! set `compute_covariance = true` unconditionally.
 //!
-//! Two arms, because the positive one alone is satisfiable by a patch that
-//! declares unconditionally:
+//! Three arms, because no one of them is satisfiable alone:
 //!
-//! * **positive** — the PRS/PC-confounded fixture routes through the
+//! * **corrected** — the PRS/PC-confounded fixture routes through the
 //!   conditional calibration, fails the gate (measured: |skew| x16.5,
 //!   |excess kurtosis| x10.1, KS x6.40), selects `global-empirical`, and must
-//!   come back as a fit with finite coefficients, NO covariance, and a typed
-//!   `CovarianceDeclined` on its artifacts.
+//!   now come back with finite coefficients AND a published covariance AND no
+//!   declaration. This is gam#2484's acceptance.
+//! * **still withheld** — the same fixture with a `linkwiggle(...)` logslope
+//!   block. A score-warp block evaluates a basis AT the latent score, so the
+//!   row depends on the grid through that basis as well as through the
+//!   calibration intercept and the rigid node channel does not describe it.
+//!   That fit must still withhold, and its declaration must say WHICH channel
+//!   was missing rather than restate the measure's name.
 //! * **negative** — the rank-reduced `centers=60` fixture reaches
 //!   `StandardNormal` via rank-INT and must declare NOTHING. A declaration
 //!   there would mean the gate fires on fits that have a valid covariance,
 //!   which is the failure mode that makes the whole channel meaningless.
 //!
-//! Publishing the UNCORRECTED covariance is not the alternative being tested
-//! and must never become one: it omits the first-stage generated-regressor
-//! uncertainty, so the intervals come out too narrow and are indistinguishable
-//! on the wire from corrected ones. The correction that would make them
-//! publishable (`G_measure`) is gam#2484 and is not implemented.
+//! Publishing the UNCORRECTED covariance is not, and never becomes, the
+//! alternative to withholding: it omits the first-stage generated-regressor
+//! uncertainty, so the intervals come out too narrow. What gam#2484 publishes
+//! is the CORRECTED one.
 
 use gam::data::EncodedDataset;
-use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
 use gam::estimate::CovarianceDeclined;
+use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
 use gam::{FitConfig, FitResult, fit_from_formula};
 use ndarray::Array2;
 
@@ -298,11 +311,17 @@ fn duplicate_pc_binary_outcome_shape_dataset() -> EncodedDataset {
     }
 }
 
-
 const MARGINAL_FORMULA_CENTERS6: &str = "event ~ matern(PC1, PC2, PC3, centers=6, length_scale=1.0) + sex + entry_age_z + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4";
 const LOGSLOPE_FORMULA_CENTERS6: &str = "matern(PC1, PC2, PC3, centers=6, length_scale=1.0)";
 const MARGINAL_FORMULA_CENTERS60: &str = "event ~ matern(PC1, PC2, PC3, centers=60, length_scale=1.0) + sex + entry_age_z + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4";
 const LOGSLOPE_FORMULA_CENTERS60: &str = "matern(PC1, PC2, PC3, centers=60, length_scale=1.0)";
+/// The same logslope block as `LOGSLOPE_FORMULA_CENTERS6` plus a score-warp
+/// (`linkwiggle`) deviation block. That block evaluates a spline basis AT the
+/// latent score, so the row sees the empirical grid through the basis as well
+/// as through the calibration intercept — the one rigid-kernel shape whose node
+/// channel gam#2484 did NOT derive.
+const LOGSLOPE_FORMULA_CENTERS6_WARPED: &str =
+    "matern(PC1, PC2, PC3, centers=6, length_scale=1.0) + linkwiggle(degree=3, internal_knots=3)";
 
 /// The witness fixture: `prs_z` is made an exact affine function of PC1/PC2, so
 /// the conditional `E[z|C]`/`Var(z|C)` Rao gate fires and the calibrated
@@ -356,7 +375,7 @@ fn fit_bms(
 }
 
 #[test]
-fn bms_declines_covariance_and_still_mints_point_estimates_2718() {
+fn bms_publishes_the_corrected_covariance_on_a_global_empirical_measure_2484() {
     gam::init_parallelism();
     let data = prs_pc_confounded_dataset();
     let out = fit_bms(
@@ -366,12 +385,11 @@ fn bms_declines_covariance_and_still_mints_point_estimates_2718() {
         "prs/pc-confounded BMS fit",
     );
 
-    // 1. The point estimates are published. This is the whole reason the
-    //    refusal moved: they were being destroyed to report a missing
-    //    covariance.
+    // 1. The point estimates are published. This never stopped being true, and
+    //    it is what gam#2718 moved the refusal to protect.
     assert!(
         out.fit.beta.iter().all(|coef| coef.is_finite()),
-        "gam#2718: a declined covariance must still publish finite coefficients, got {:?}",
+        "gam#2718: the fit must publish finite coefficients, got {:?}",
         out.fit.beta
     );
     assert!(
@@ -380,81 +398,59 @@ fn bms_declines_covariance_and_still_mints_point_estimates_2718() {
     );
     assert!(
         out.fit.log_lambdas.iter().all(|rho| rho.is_finite()),
-        "gam#2718: a declined covariance must still publish finite smoothing parameters, got {:?}",
+        "gam#2718: finite smoothing parameters, got {:?}",
         out.fit.log_lambdas
     );
 
-    // 2. The covariance is withheld — on EVERY surface that could carry it.
-    //    Publishing the uncorrected matrix on any one of them would ship
-    //    intervals that are too narrow and indistinguishable from corrected
-    //    ones, which is the outcome this contract exists to prevent.
+    // 2. Nothing is declared, because nothing was withheld. This is the
+    //    assertion that inverts: before gam#2484 the same fixture reached here
+    //    with a typed `CovarianceDeclined` and no covariance at all.
     assert!(
-        out.fit.covariance_conditional.is_none(),
-        "gam#2718: the conditional covariance must be withheld, not published uncorrected"
+        out.fit.artifacts.covariance_declined.is_none(),
+        "gam#2484: the rigid global-empirical measure has a cross-row channel now, so this fit \
+         must be CORRECTED rather than declined; got {:?}",
+        out.fit.artifacts.covariance_declined
     );
-    assert!(
-        out.fit.covariance_corrected.is_none(),
-        "gam#2718: the corrected covariance must be withheld, not published uncorrected"
-    );
-    if let Some(inference) = out.fit.inference.as_ref() {
-        assert!(
-            inference.beta_covariance.is_none(),
-            "gam#2718: the inference-surface covariance must be withheld too"
-        );
-        assert!(
-            inference.beta_standard_errors.is_none(),
-            "gam#2718: standard errors derived from a withheld covariance must be withheld"
-        );
-        assert!(
-            inference.beta_covariance_corrected.is_none(),
-            "gam#2718: the corrected inference covariance must be withheld too"
-        );
-        assert!(
-            inference.beta_standard_errors_corrected.is_none(),
-            "gam#2718: corrected standard errors must be withheld too"
-        );
-    }
 
-    // 3. The absence is DECLARED and typed. A bare `None` is three states in
-    //    one costume (not requested / not computed / not valid to publish); the
-    //    consumer has to be able to tell which one this is.
-    match out.fit.artifacts.covariance_declined.as_ref() {
-        Some(CovarianceDeclined::BmsGeneratedRegressorLatentMeasureNotStandardNormal {
-            latent_measure,
-        }) => {
-            assert_eq!(
-                latent_measure, "global-empirical",
-                "gam#2718: the declaration must name the measure the adequacy gate selected"
+    // 3. The covariance is published, and it is a covariance: symmetric with a
+    //    strictly positive diagonal. The Murphy-Topel term is a congruence of
+    //    the PSD first-stage covariance, so adding it cannot break either.
+    let covariance = out
+        .fit
+        .covariance_conditional
+        .as_ref()
+        .expect("gam#2484: the conditional covariance must be published");
+    let p = covariance.nrows();
+    assert_eq!(covariance.ncols(), p);
+    for i in 0..p {
+        assert!(
+            covariance[[i, i]] > 0.0 && covariance[[i, i]].is_finite(),
+            "gam#2484: diagonal {i} of the corrected covariance is {}",
+            covariance[[i, i]]
+        );
+        for j in 0..p {
+            let asymmetry = (covariance[[i, j]] - covariance[[j, i]]).abs();
+            let scale = 1.0 + covariance[[i, i]].abs().max(covariance[[j, j]].abs());
+            assert!(
+                asymmetry <= 1.0e-9 * scale,
+                "gam#2484: the corrected covariance must stay symmetric; ({i},{j}) differs by \
+                 {asymmetry:.3e}"
             );
         }
-        Some(
-            declined @ CovarianceDeclined::SurvivalMarginalSlopeGeneratedRegressorSensitivityUnavailable {
-                ..
-            },
-        ) => panic!(
-            "gam#2718: this is a BERNOULLI marginal-slope fit, so the survival family's \
-             generated-regressor declaration (gam#2768) cannot be the reason its covariance was \
-             withheld. Reaching it means the two withholding seams have been crossed: {}",
-            declined.explain()
-        ),
-        None => panic!(
-            "gam#2718: the covariance was withheld with NO declaration. A silent absence is \
-             indistinguishable from `never requested`, which is exactly the state a consumer \
-             reading standard errors would misread."
-        ),
     }
 
-    let explanation = out
-        .fit
-        .artifacts
-        .covariance_declined
-        .as_ref()
-        .expect("declaration asserted present above")
-        .explain();
-    assert!(
-        explanation.contains("gam#2484"),
-        "gam#2718: the explanation must point at the issue tracking the missing correction, got: {explanation}"
-    );
+    // 4. And the derived surfaces are populated, not just the matrix. A
+    //    consumer reads standard errors, not the covariance.
+    if let Some(inference) = out.fit.inference.as_ref() {
+        let ses = inference
+            .beta_standard_errors
+            .as_ref()
+            .expect("gam#2484: standard errors must be published alongside the covariance");
+        assert!(
+            ses.iter().all(|se| se.is_finite() && *se >= 0.0),
+            "gam#2484: published standard errors must be finite and non-negative, got {ses:?}"
+        );
+    }
 }
 
 #[test]
@@ -486,6 +482,87 @@ fn bms_standard_normal_latent_measure_declares_nothing_2718() {
 }
 
 #[test]
+fn bms_still_withholds_where_there_is_no_channel_and_names_it_2484() {
+    // The contract gam#2718 established, on the shape that still needs it. A
+    // score-warp block puts the latent score inside a basis, so the row's
+    // dependence on the grid is not the calibration intercept's and the rigid
+    // node channel would be describing a different model. Withholding is
+    // correct there; withholding SILENTLY, or withholding while restating the
+    // measure's name instead of the missing channel, is not.
+    gam::init_parallelism();
+    let data = prs_pc_confounded_dataset();
+    let out = fit_bms(
+        &data,
+        MARGINAL_FORMULA_CENTERS6,
+        LOGSLOPE_FORMULA_CENTERS6_WARPED,
+        "prs/pc-confounded BMS fit with a score-warp block",
+    );
+
+    assert!(
+        out.fit.beta.iter().all(|coef| coef.is_finite()),
+        "gam#2718: a declined covariance must still publish finite coefficients, got {:?}",
+        out.fit.beta
+    );
+
+    match out.fit.artifacts.covariance_declined.as_ref() {
+        Some(CovarianceDeclined::BmsGeneratedRegressorLatentMeasureNotStandardNormal {
+            latent_measure,
+            unavailable_channel,
+        }) => {
+            assert_eq!(
+                latent_measure, "global-empirical",
+                "gam#2718: the declaration must name the measure the adequacy gate selected"
+            );
+            assert!(
+                unavailable_channel.contains("score-warp"),
+                "gam#2484: the declaration must name the CHANNEL that is missing, not just the \
+                 measure — the measure alone no longer determines whether a correction exists. \
+                 Got: {unavailable_channel}"
+            );
+            assert!(
+                out.fit.covariance_conditional.is_none() && out.fit.covariance_corrected.is_none(),
+                "gam#2718: a declared withholding must actually withhold, on every surface"
+            );
+            if let Some(inference) = out.fit.inference.as_ref() {
+                assert!(
+                    inference.beta_covariance.is_none()
+                        && inference.beta_standard_errors.is_none()
+                        && inference.beta_covariance_corrected.is_none()
+                        && inference.beta_standard_errors_corrected.is_none(),
+                    "gam#2718: the inference surfaces must be withheld too"
+                );
+            }
+            let explanation = out
+                .fit
+                .artifacts
+                .covariance_declined
+                .as_ref()
+                .expect("asserted present")
+                .explain();
+            assert!(
+                explanation.contains("gam#2484"),
+                "gam#2718: the explanation must point at the issue that owns the channel, got: \
+                 {explanation}"
+            );
+        }
+        Some(other) => panic!(
+            "gam#2718: wrong declaration on a bernoulli marginal-slope fit: {}",
+            other.explain()
+        ),
+        None => {
+            // Not a silent-failure escape hatch: if the score-warp fit did not
+            // reach the seam at all, this arm is not testing what it claims and
+            // the covariance must then be published like any corrected fit.
+            assert!(
+                out.fit.covariance_conditional.is_some(),
+                "gam#2718: the covariance was withheld with NO declaration, which is exactly the \
+                 silent absence this channel exists to prevent"
+            );
+        }
+    }
+}
+
+#[test]
 fn bms_declination_travels_with_the_curvature_it_is_about_2718() {
     // The declaration is only worth having if it crosses the persistence
     // boundary WITH the curvature it describes. A consumer that loads a saved
@@ -508,7 +585,10 @@ fn bms_declination_travels_with_the_curvature_it_is_about_2718() {
     let out = fit_bms(
         &data,
         MARGINAL_FORMULA_CENTERS6,
-        LOGSLOPE_FORMULA_CENTERS6,
+        // The score-warp arm, because gam#2484 made the unwarped fixture
+        // publish: the persistence contract is about the fits that still
+        // withhold.
+        LOGSLOPE_FORMULA_CENTERS6_WARPED,
         "prs/pc-confounded BMS fit (persistence arm)",
     );
 
@@ -527,10 +607,10 @@ fn bms_declination_travels_with_the_curvature_it_is_about_2718() {
     );
 
     // ... and the declaration survives the wire beside it.
-    let encoded = serde_json::to_string(&out.fit.artifacts)
-        .expect("gam#2718: fit artifacts must serialize");
-    let decoded: gam::estimate::FitArtifacts = serde_json::from_str(&encoded)
-        .expect("gam#2718: fit artifacts must deserialize");
+    let encoded =
+        serde_json::to_string(&out.fit.artifacts).expect("gam#2718: fit artifacts must serialize");
+    let decoded: gam::estimate::FitArtifacts =
+        serde_json::from_str(&encoded).expect("gam#2718: fit artifacts must deserialize");
     assert_eq!(
         decoded.covariance_declined, declared,
         "gam#2718: the declination must survive serialization. If this field ever becomes \
