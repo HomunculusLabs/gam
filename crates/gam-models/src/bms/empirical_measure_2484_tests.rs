@@ -714,7 +714,7 @@ fn the_batched_directional_chunk_size_never_inverts_its_clamp() {
     for &n in &[0usize, 1, 2, 63, 96, 1023, 1024, 1025, 50_000] {
         for &n_dirs in &[1usize, 3, 17, 4096] {
             let (rows, gpu) =
-                super::BernoulliMarginalSlopeFamily::batched_directional_derivative_chunk_rows(
+                super::family::BernoulliMarginalSlopeFamily::batched_directional_derivative_chunk_rows(
                     n, n_dirs,
                 );
             assert!(
