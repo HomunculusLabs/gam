@@ -1,5 +1,94 @@
 ## Unreleased
 
+- **The refinement tolerance is now DERIVED from the candidate set instead of
+  being a fixed fraction of the residual, because a fixed fraction charges
+  nothing for the set's width (#2759).** #2759's first half closed a two-sided
+  bracket on the level-`(L+1)` gain and established that four cascade fixtures
+  refuse at the rank-maximal design with the exact remaining
+  penalized-objective decrease bounded away from `REFINE_TOL·rss_pen` from
+  BELOW — so the refusals were the cascade's remaining gain, not the
+  certificate's conservatism. What it left open is whether that decrease is the
+  thing the criterion should be reading. It is not.
+
+  At the `smoothness_ceiling_...` refusal the candidate level is **32790
+  columns against 5997 identifiable directions** on `n = 6000`. Those
+  candidates are redundant against the data's own row space; what they buy is
+  penalty dilution and noise capacity, and `1e-3·rss_pen` cannot tell that from
+  discretization bias because it never looks at the set.
+
+  The missing charge is the set's own Occam factor — the log-determinant of the
+  SAME Schur complement the gain is a quadratic form in:
+
+  ```text
+      gain  = gᵀS⁻¹g,   occam = log det(S/(λd)),   S = X₂ᵀW(I − H)X₂ + λd·I
+      2·evidence = dof·log(rss_pen/rss_pen_refined) − occam
+  ```
+
+  The second line is an IDENTITY at the profiled σ̂², where the `rss_pen/σ̂² =
+  dof` quadratic cancels on both sides — so one more level is warranted exactly
+  when `gain > rss_pen·(1 − e^{−occam/dof})`. That break-even gain is the
+  tolerance, `REFINE_TOL` is deleted, and the cascade has no tolerance constant
+  left.
+
+  **Both numbers come from ONE fixed-λ evaluation of the design with the
+  complete candidate level appended**, and that evaluation is available past
+  every capacity budget the automatic route enforces.
+  `CERTIFIED_SPECTRUM_MAX` bounds the λ-independent Schur eigendecomposition
+  the score SEARCH is certified in; `n − nullity` bounds the rank that search
+  needs a stationary point in. A single evaluation at a fixed λ needs neither —
+  only a factorization, which the sparse route supplies far wider. So the
+  question "does one more level explain the data better?" has an exact answer
+  exactly where the cascade used to have only a bound.
+
+  The bracket is kept as the SCREEN. Hadamard on `S ⪯ diag(X₂ᵀWX₂) + λd` bounds
+  `occam` from above for nothing — it is a reduction over the Jacobi
+  preconditioner the bracket already forms — so a gain bracket whose LOWER end
+  clears that bound's break-even gain proves the level warranted without
+  building anything. Measured on the fixture's ladder, it fires on the coarse
+  rungs and steps aside on the two rungs that decide, which is the right way
+  round.
+
+  Measured, `n = 6000`, the fixture's own ladder:
+
+  ```text
+   rung centers  cand   rss_pen  1e-3·rss  gain_hi   occam   break-even  Δ logL   rmse -> refined
+    0        57     -   2.266e2  2.266e-1  1.985e3  5.17e2   1.872e1     +6293    0.1896 -> 0.0562
+    1       189     -   2.204e1  2.204e-2  8.452e1  1.55e3   5.011e0     +3240    0.0553 -> 0.0220
+    2       655     -   5.514e0  5.514e-3  3.517e0  2.21e3   1.697e0     + 654    0.0220 -> 0.0156
+    3      2166     -   2.997e0  2.997e-3  6.205e-1 1.33e3   5.962e-1    +  16.7  0.0157 -> 0.0155
+    4      5997 32790   2.184e0  2.184e-3  1.055e-1 3.23e2   1.146e-1    -  13.2  0.015583 -> 0.015589
+  ```
+
+  Rung 4 is the refusal in the issue body. The fixed bar is 48x below the gain
+  and demands another level; the restricted likelihood says the finer prior is
+  13.2 nats WORSE; and the held-out RMSE against the planted truth agrees with
+  the likelihood, not with the bar — refining makes it worse. `n = 2000`
+  reproduces the same turnover at its own rank-maximal rung (−18.2 nats,
+  0.03087 → 0.03133).
+
+  **The obvious objection, run and killed.** The comparison is at the
+  incumbent's λ, so the refined design might win it back at a λ of its own.
+  Swept `log λ ± 1, 2, 3` on the refined design at every rung: at both turnover
+  rungs the best λ IS the incumbent's, to the printed digit. The verdict is not
+  an artifact of the fixed λ.
+
+  Verified: the Occam term read off the two restricted log-likelihoods is
+  checked against the candidate Schur log-determinant formed DENSELY, one
+  column at a time through the same matrix-free operator, over a λ sweep — one
+  side is two profiled REML evaluations, the other is `m₂` cascade solves, and
+  they share nothing but the arithmetic they must agree on. The comparison also
+  differences a `fit_reml` restricted likelihood (normalized through the
+  certified Schur eigenbasis) against a `fit_at` one (a factorization at that
+  λ), at O(1) nats while each side is O(10³), so the two routes agreeing is a
+  premise and is now charged on both width regimes.
+
+  One latent defect fell out of it: `NextLevelPlan::exhausted` hard-coded
+  `extends_last: false`. That was invisible while the flag was read only on the
+  refine path — an exhausted plan is never refined into — and fatal the moment
+  the comparison materializes the candidate set FROM the plan, which is exactly
+  what the capacity refusals need. It is now decided from the radius, before
+  any candidate set exists, and carried by every outcome.
+
 - **The Murphy–Topel correction now exists for a `GlobalEmpirical` second-stage
   latent measure, and the refusal it replaces was resting on a false
   obstruction (#2484).** A BMS fit whose conditional location-scale calibration

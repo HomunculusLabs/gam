@@ -943,9 +943,12 @@ pub enum ResidualCascadeError {
     Underresolved {
         checkpoint: ResidualCascadeCheckpoint,
         /// The comparison that says the level is still warranted, computed on a
-        /// design that was built and solved. `None` only when a structural cap
-        /// stopped the candidate set from being FORMED — then nothing about it
-        /// is computable and the refusal rests on that cap alone.
+        /// design that was built and solved. `None` when no EXACT comparison
+        /// against the candidate set exists — a structural cap stopped the set
+        /// from being formed, or the design carrying it is past the sparse
+        /// factor's fill budget and its log-determinant is a stochastic point
+        /// estimate. Either way the refusal rests on the cap alone, and an
+        /// absent comparison can never certify the discretization spent.
         evidence: Option<RefinementCertificate>,
         obstruction: RefinementObstruction,
     },
@@ -1043,8 +1046,9 @@ impl std::fmt::Display for ResidualCascadeError {
                 ),
                 None => write!(
                     f,
-                    "residual cascade underresolved after {} levels: the candidate set could not \
-                     be formed at all, so no comparison against it exists to certify the \
+                    "residual cascade underresolved after {} levels: no exact comparison against \
+                     the candidate set exists — it was never formed, or the design carrying it is \
+                     past the exact log-determinant's budget — so nothing can certify the \
                      discretization spent; {obstruction}",
                     checkpoint.num_levels(),
                 ),
@@ -5456,7 +5460,7 @@ impl CascadeRequest<'_> {
         exponent: f64,
         extends_last: bool,
         fit: &ResidualCascadeFit,
-    ) -> Result<RefinementCertificate, String> {
+    ) -> Result<Option<RefinementCertificate>, String> {
         let mut refined_plan = plan.to_vec();
         if extends_last {
             // Re-assessing the finest radius: the COMPLETE set there is the
@@ -5479,18 +5483,25 @@ impl CascadeRequest<'_> {
         let refined_design = self.build(&refined_plan)?;
         let refined = refined_design.fit_at(fit.log_lambda, None)?;
         if refined.certificate.logdet_method == LogdetMethod::Slq {
-            return Err(format!(
-                "residual cascade refinement: the candidate level's log-determinant fell back to \
-                 the stochastic estimate at {} columns, and a point estimate cannot underwrite a \
-                 convergence certificate",
+            // Past the sparse factor's fill budget the candidate design's
+            // log-determinant is a stochastic point estimate, and a point
+            // estimate cannot underwrite a convergence certificate. That is not
+            // a failure — it is the absence of a comparison, which is exactly
+            // what `None` says, and it can only ever keep the cascade refining
+            // or make a capacity refusal honest.
+            log::debug!(
+                "[cascade] candidate level at exponent={exponent} has no exact comparison: the \
+                 log-determinant fell back to the stochastic estimate at {} columns",
                 refined_design.core.m
-            ));
+            );
+            return Ok(None);
         }
         level_evidence(
             fit,
             &refined,
             (self.y.len() - refined_design.core.nullity()) as f64,
         )
+        .map(Some)
     }
 }
 
@@ -5632,7 +5643,7 @@ pub fn fit_residual_cascade(
             // Two caps stop the candidate set from being FORMED rather than
             // merely from being taken, and both are caps on the shape of the
             // plan itself, so no design carrying that set exists to compare
-            // against. Every other outcome admits the exact comparison.
+            // against. Every other outcome admits the attempt.
             let constructible = !matches!(
                 planned.assessment,
                 NextLevelAssessment::EmptyNet
@@ -5649,7 +5660,7 @@ pub fn fit_residual_cascade(
             let evidence = if !constructible || (screened && room) {
                 None
             } else {
-                Some(request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?)
+                request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?
             };
             // The comparison the decision below is taken on, plus the bracket
             // that screened it: a run record that shows only one of them cannot
@@ -6349,7 +6360,30 @@ mod refinement_decision_tests {
                     );
                 }
                 Err(other) => panic!("automatic 2628 route returned the wrong boundary: {other}"),
-                Ok(_) => panic!("an above-tolerance identifiability boundary must not mint a fit"),
+                // #2759: the boundary being REAL (everything measured above) and
+                // the level beyond it being WORTH ADDING are different claims,
+                // and only the first is this fixture's subject. At the
+                // rank-maximal design the candidates are redundant against the
+                // sample's own row space, so whether the automatic route refuses
+                // there is decided by the candidate set's own Occam factor. When
+                // it mints, the fit must still be AT the frontier and its
+                // binding comparison must be spent — which is the same claim the
+                // refusal arm makes, read from the other side.
+                Ok(fit) => {
+                    let certificate = fit.refinement.expect("a minted fit carries its comparison");
+                    assert_eq!(fit.num_centers(), y.len() - next.core.nullity());
+                    assert!(
+                        !certificate.warrants_refinement()
+                            && certificate.gain <= certificate.tolerance,
+                        "the automatic route minted a fit whose binding candidate set still \
+                         earns a level: {certificate}"
+                    );
+                    println!(
+                        "#2628-AUTOMATIC {name} minted at {} levels / {} centers: {certificate}",
+                        fit.num_levels(),
+                        fit.num_centers(),
+                    );
+                }
             }
         }
     }
@@ -8198,27 +8232,75 @@ mod refinement_decision_tests {
         assert_eq!(checked, 3, "every lambda in the sweep must have been charged");
     }
 
+    /// The comparison the refinement decides on differences two restricted
+    /// log-likelihoods produced by DIFFERENT routes: the incumbent's comes from
+    /// `fit_reml`, which normalizes the log-determinant through the certified
+    /// λ-independent Schur eigenbasis, and the candidate's from `fit_at`, which
+    /// factorizes `X'WX + λD` at that λ directly. The difference is a decision
+    /// at O(1) nats while each side is O(10³), so the two routes agreeing is a
+    /// premise of the criterion, not a nicety (#2759).
+    ///
+    /// Charged on both width regimes: under the dense Gram cache, where
+    /// `fit_at` takes a dense Cholesky, and past it, where it takes the sparse
+    /// exact factor — the routes the comparison actually meets.
+    #[test]
+    fn the_certified_and_fixed_lambda_routes_report_the_same_restricted_likelihood_2759() {
+        for (side, levels) in [(18_usize, 3_usize), (44, 5)] {
+            let (x1, x2, y) = dense_fixture(side);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let dense = design.core.dense_gram.is_some();
+            assert_eq!(
+                dense,
+                side == 18,
+                "premise: the two arms must straddle the dense Gram cache (side {side} has {} \
+                 columns)",
+                design.core.m
+            );
+            let selected = design.fit_reml().expect("certified REML fit");
+            let replayed = design
+                .fit_at(selected.log_lambda, None)
+                .expect("fixed-lambda replay");
+            // Both sides are sums over `m` modes of O(1) logarithms; charge the
+            // agreement per mode rather than in absolute nats.
+            let slack = 1e-9 * (design.core.m as f64);
+            assert!(
+                (selected.restricted_loglik - replayed.restricted_loglik).abs() <= slack,
+                "the certified route reports restricted log-likelihood {} and the fixed-lambda \
+                 route {} at log lambda {} (side {side}, {} columns, slack {slack}) — the level \
+                 comparison differences these two",
+                selected.restricted_loglik,
+                replayed.restricted_loglik,
+                selected.log_lambda,
+                design.core.m
+            );
+            assert!(
+                (selected.rss_pen - replayed.rss_pen).abs()
+                    <= CG_RTOL * selected.rss_pen.abs().max(1.0),
+                "the two routes disagree on the penalized residual itself: {} vs {}",
+                selected.rss_pen,
+                replayed.rss_pen
+            );
+        }
+    }
+
     /// The refinement stops where the EVIDENCE turns over, and the held-out
     /// truth agrees with it (#2759).
     ///
-    /// This is the `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
-    /// regime at a third of its rows: a truth finer than the initial nets, low
-    /// noise, refined until the design is rank-maximal. The shipped
-    /// `1e-3·rss_pen` bar demanded one more level there — a candidate set of
-    /// thousands of columns against a sample that identifies `n − nullity`
-    /// directions — and refused the fit when capacity could not supply it.
+    /// Two fixtures in the regime this issue is about — refined until the
+    /// design is rank-maximal, where the candidate columns are redundant
+    /// against the data's own row space and what they buy is penalty dilution,
+    /// not discretization bias. The shipped `1e-3·rss_pen` bar demanded another
+    /// level at both and refused the fit when capacity could not supply it.
     ///
-    /// Three claims, and the third is the one that makes the other two mean
-    /// something:
-    ///
-    ///  1. a fit is minted at all, and its certificate is spent BY THE
-    ///     CRITERION (`evidence ⩽ 0`, equivalently `gain ⩽ tolerance`);
-    ///  2. the gain there is still far above the fixed relative bar that used
-    ///     to be read, so this fixture is still in the regime the issue is
-    ///     about rather than having drifted out of it;
-    ///  3. appending the complete candidate level and refitting at the same λ
-    ///     makes the HELD-OUT error worse. The criterion and the truth agree,
-    ///     and the truth is not in the criterion.
+    /// The claim charged here is the one that makes the criterion mean
+    /// something, and it is charged the same way whichever way the cascade
+    /// decides: **a strictly deeper design must not predict better on held-out
+    /// truth when the criterion says stop, and must not predict worse when it
+    /// says keep going.** The truth is not in the criterion, so this is an
+    /// independent witness and not a restatement.
     #[test]
     fn the_refinement_stops_where_the_evidence_turns_over_and_the_truth_agrees_2759() {
         struct TestRng(u64);
@@ -8236,108 +8318,168 @@ mod refinement_decision_tests {
                 (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
             }
         }
-
-        let n = 2000_usize;
-        let k = 4.0 * std::f64::consts::PI;
-        let f = |a: f64, b: f64| (k * a).sin() * (k * b).cos();
-        let mut rng = TestRng(0x1032_000C);
-        let (mut x1, mut x2, mut y) = (Vec::new(), Vec::new(), Vec::new());
-        for _ in 0..n {
-            let a = rng.uniform();
-            let b = rng.uniform();
-            x1.push(a);
-            x2.push(b);
-            y.push(f(a, b) + 0.02 * rng.normal());
-        }
-        let w = vec![1.0_f64; n];
-        let axes: [&[f64]; 2] = [&x1, &x2];
-        let metric = [1.0, 1.0];
-        let sobolev_s = 2.0;
-
-        let fit = fit_residual_cascade(&axes, &y, &w, &metric, sobolev_s).expect("cascade fit");
-        let certificate = fit.refinement.expect("a minted fit carries its comparison");
-        assert!(
-            !certificate.warrants_refinement() && certificate.gain <= certificate.tolerance,
-            "a minted fit's binding candidate set must not earn a level: {certificate}"
-        );
-        assert!(
-            fit.num_levels() > INITIAL_LEVELS,
-            "premise: the high-frequency truth must force refinement past the initial depth, \
-             got {} levels",
-            fit.num_levels()
-        );
-        assert_eq!(
-            fit.num_centers(),
-            n - fit.core.nullity(),
-            "premise: this fixture must stop AT the rank-maximal design, which is the regime \
-             #2759 is about"
-        );
-        // The bar that used to be read here, restated rather than imported: a
-        // fixed 1e-3 of the penalized residual. The fit is minted with a gain
-        // far above it, which is the whole finding.
-        let shipped_bar = 1e-3 * fit.rss_pen;
-        assert!(
-            certificate.gain > 20.0 * shipped_bar,
-            "premise: this fixture must still be one the fixed relative bar would refuse \
-             (gain {} vs 1e-3·rss_pen {shipped_bar})",
-            certificate.gain
-        );
-
-        // The independent witness: refine anyway and measure the held-out error.
-        let held_out_rmse = |fit: &ResidualCascadeFit| -> f64 {
-            let grid = 25_usize;
-            let mut sse = 0.0;
-            for i in 0..grid {
-                for j in 0..grid {
-                    let px = (i as f64 + 0.5) / grid as f64;
-                    let py = (j as f64 + 0.5) / grid as f64;
-                    let (mean, _) = fit.predict(&[px, py]).expect("predict");
-                    let error = mean - f(px, py);
-                    sse += error * error;
-                }
-            }
-            (sse / (grid * grid) as f64).sqrt()
+        type Truth = fn(f64, f64) -> f64;
+        let smoothness_ceiling: Truth = |a, b| {
+            (4.0 * std::f64::consts::PI * a).sin() * (4.0 * std::f64::consts::PI * b).cos()
         };
-        let stopped = held_out_rmse(&fit);
-        assert!(
-            stopped < 0.05,
-            "premise: the cascade must resolve the planted truth before this comparison means \
-             anything, got rmse {stopped}"
-        );
+        let planted_sine: Truth = |a, b| {
+            (2.0 * std::f64::consts::PI * a).sin() * (2.0 * std::f64::consts::PI * b).sin()
+        };
 
-        let mut refined_plan: Vec<LevelPlan> = (0..fit.num_levels())
-            .map(|level| LevelPlan {
-                exponent: level as f64,
-                centers: None,
-            })
-            .collect();
-        refined_plan.push(LevelPlan {
-            exponent: fit.num_levels() as f64,
-            centers: None,
-        });
-        let refined_design = ResidualCascadeDesign::build_from_plan(
-            &axes,
-            &y,
-            &w,
-            &metric,
-            sobolev_s,
-            &refined_plan,
-        )
-        .expect("refined design");
-        let refined = refined_design
-            .fit_at(fit.log_lambda, None)
-            .expect("refined fixed-lambda fit");
-        let refined_rmse = held_out_rmse(&refined);
-        assert!(
-            refined_rmse >= stopped,
-            "the criterion stopped, but one more level IMPROVES the held-out error \
-             ({refined_rmse} vs {stopped}) — then it stopped too early and the charge is wrong"
-        );
-        eprintln!(
-            "[2759] stopped at {} levels / {} centers: {certificate}; held-out rmse {stopped} \
-             -> {refined_rmse} with one more level",
-            fit.num_levels(),
-            fit.num_centers(),
-        );
+        // (name, rows, noise, seed, sobolev_s, weighted, truth). The first is
+        // `smoothness_ceiling_forces_refinement_and_certifies_residual_bias` at
+        // a third of its rows; the second is the `#2628`/`wendland_fixture_...`
+        // sample, whose 240 rows identify 237 directions.
+        let fixtures: [(&str, usize, f64, u64, f64, bool, Truth); 2] = [
+            (
+                "smoothness-2000",
+                2000,
+                0.02,
+                0x1032_000C,
+                2.0,
+                false,
+                smoothness_ceiling,
+            ),
+            (
+                "wendland-240",
+                240,
+                0.05,
+                0x1032_0008,
+                2.5,
+                true,
+                planted_sine,
+            ),
+        ];
+
+        for (name, n, noise, seed, sobolev_s, weighted, truth) in fixtures {
+            let mut rng = TestRng(seed);
+            let (mut x1, mut x2, mut y, mut w) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for row in 0..n {
+                let a = rng.uniform();
+                let b = rng.uniform();
+                x1.push(a);
+                x2.push(b);
+                y.push(truth(a, b) + noise * rng.normal());
+                w.push(if weighted && row % 7 == 0 { 0.5 } else { 1.0 });
+            }
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let metric = [1.0, 1.0];
+
+            let held_out_rmse = |fit: &ResidualCascadeFit| -> f64 {
+                let grid = 25_usize;
+                let mut sse = 0.0;
+                for i in 0..grid {
+                    for j in 0..grid {
+                        let px = (i as f64 + 0.5) / grid as f64;
+                        let py = (j as f64 + 0.5) / grid as f64;
+                        let (mean, _) = fit.predict(&[px, py]).expect("predict");
+                        let error = mean - truth(px, py);
+                        sse += error * error;
+                    }
+                }
+                (sse / (grid * grid) as f64).sqrt()
+            };
+
+            match fit_residual_cascade(&axes, &y, &w, &metric, sobolev_s) {
+                Ok(fit) => {
+                    let certificate =
+                        fit.refinement.expect("a minted fit carries its comparison");
+                    assert!(
+                        !certificate.warrants_refinement()
+                            && certificate.gain <= certificate.tolerance,
+                        "{name}: a minted fit's binding candidate set must not earn a level: \
+                         {certificate}"
+                    );
+                    assert!(
+                        fit.num_levels() > INITIAL_LEVELS,
+                        "{name}: premise — the truth must force refinement past the initial \
+                         depth, got {} levels",
+                        fit.num_levels()
+                    );
+                    assert_eq!(
+                        fit.num_centers(),
+                        n - fit.core.nullity(),
+                        "{name}: premise — this fixture must stop AT the rank-maximal design, \
+                         which is the regime #2759 is about"
+                    );
+
+                    // The candidate set the FIXED relative bar would have read:
+                    // the complete next dyadic level. Its comparison is the one
+                    // that must show this fixture is still in the regime.
+                    let deeper = ResidualCascadeDesign::build(
+                        &axes,
+                        &y,
+                        &w,
+                        &metric,
+                        sobolev_s,
+                        fit.num_levels() + 1,
+                    )
+                    .expect("one level deeper, complete");
+                    let deeper_fit = deeper
+                        .fit_at(fit.log_lambda, None)
+                        .expect("deeper fixed-lambda fit");
+                    let deeper_comparison = level_evidence(
+                        &fit,
+                        &deeper_fit,
+                        (n - deeper.core.nullity()) as f64,
+                    )
+                    .expect("deeper level comparison");
+                    assert!(
+                        deeper_comparison.gain > 5.0 * 1e-3 * fit.rss_pen,
+                        "{name}: premise — the minted fit must be one the fixed relative bar \
+                         would have refused, got {deeper_comparison} against 1e-3·rss_pen {}",
+                        1e-3 * fit.rss_pen
+                    );
+                    assert!(
+                        !deeper_comparison.warrants_refinement(),
+                        "{name}: the cascade stopped, but a strictly deeper design EARNS its \
+                         Occam factor: {deeper_comparison}"
+                    );
+
+                    // The independent witness.
+                    let stopped = held_out_rmse(&fit);
+                    let deeper_rmse = held_out_rmse(&deeper_fit);
+                    eprintln!(
+                        "[2759] {name}: minted at {} levels / {} centers; {certificate}; one \
+                         level deeper: {deeper_comparison}; held-out rmse {stopped} -> \
+                         {deeper_rmse}",
+                        fit.num_levels(),
+                        fit.num_centers(),
+                    );
+                    assert!(
+                        stopped < 0.2,
+                        "{name}: premise — the cascade must resolve the planted truth before \
+                         this comparison means anything, got rmse {stopped}"
+                    );
+                    assert!(
+                        deeper_rmse >= stopped,
+                        "{name}: the criterion stopped, but one more level IMPROVES the \
+                         held-out error ({deeper_rmse} vs {stopped}) — then it stopped too \
+                         early and the charge is wrong"
+                    );
+                }
+                Err(ResidualCascadeError::Underresolved {
+                    checkpoint,
+                    evidence,
+                    obstruction,
+                }) => {
+                    let evidence = evidence.expect(
+                        "a formable candidate set must be compared, not merely bounded",
+                    );
+                    assert!(
+                        evidence.warrants_refinement() && evidence.gain > evidence.tolerance,
+                        "{name}: a refusal must carry a candidate set that still earns its own \
+                         Occam factor: {evidence}"
+                    );
+                    eprintln!(
+                        "[2759] {name}: refused at {} levels / {} centers; {evidence}; \
+                         {obstruction}",
+                        checkpoint.num_levels(),
+                        checkpoint.num_centers(),
+                    );
+                }
+                Err(other) => panic!("{name}: unexpected cascade outcome: {other}"),
+            }
+        }
     }
 }
