@@ -1166,6 +1166,43 @@ impl JointJeffreysPlan {
         self.reduced_dim != 0 && self.gate_weight != 0.0
     }
 
+    /// Whether the reduced information is UNDER-IDENTIFIED at the gate's own
+    /// derived knots — the yes/no question, as distinct from
+    /// [`Self::is_active`]'s "would the term contribute anything".
+    ///
+    /// The two differ, and the difference is the whole width of the transition
+    /// band. `is_active` is `gate_weight != 0`, so its boundary is the ramp's
+    /// FAR knot [`CONDITIONING_GATE_ABSOLUTE_CLEAR`] (`16` observation-
+    /// equivalents). That knot exists so `Φ(ρ)` stays C¹ as `β̂(ρ)` carries the
+    /// spectrum across the boundary — a binary gate makes the outer objective
+    /// jump, which is the #787 "outer smoothing did not converge" regression —
+    /// and it is deliberately generous *for that reason*, not because a
+    /// direction holding fifteen observations' worth of curvature is
+    /// unidentified.
+    ///
+    /// This predicate is the gate's derived statement instead: the reduced
+    /// information is under-identified exactly when it is
+    /// [`CONDITIONING_GATE_ABSOLUTE`]-poor (below **one** observation-
+    /// equivalent, the scale at which "a direction carrying less than a single
+    /// observation's worth of information is, by construction, not identified
+    /// by the data and is the regime Firth exists to stabilise") or
+    /// [`CONDITIONING_GATE_RELATIVE`]-poor. It is expressed as
+    /// `conditioning_gate_weight == 1` so that one arithmetic authority decides
+    /// both the weight and the verdict; the ramp's lower branch returns exactly
+    /// `1.0` by early return, so the comparison is exact rather than
+    /// approximate, and the degenerate spectra (`λ_max ≤ 0`, non-finite
+    /// `λ_min`) that the weight calls fully active are under-identified here
+    /// too.
+    ///
+    /// A consumer that must choose an OBJECTIVE — the multinomial's conditional
+    /// Firth/Jeffreys engagement, which re-solves the whole fit against a
+    /// different estimand — needs this one. A consumer that scales a term by
+    /// how much of it is warranted needs [`Self::conditioning_gate_weight`]
+    /// (gam#2612).
+    pub fn is_under_identified(&self) -> bool {
+        self.reduced_dim != 0 && self.gate_weight == 1.0
+    }
+
     /// Exact extreme eigenvalues of the reduced Fisher information used by the
     /// conditioning gate.
     ///
@@ -3059,6 +3096,67 @@ mod tests {
     /// pre-check certifies a full skip by clearing the UPPER (`*_CLEAR`) knots.
     pub(crate) fn conditioning_gate_skips(lambda_min: f64, lambda_max: f64) -> bool {
         conditioning_gate_weight(lambda_min, lambda_max) == 0.0
+    }
+
+    /// gam#2612: the DECISION predicate and the CONTRIBUTION predicate are not
+    /// the same question, and the band on which they disagree is the whole
+    /// transition band `[1, 16]`.
+    ///
+    /// `is_active` is `weight != 0`, so it stays true across the entire ramp —
+    /// which is correct for a term that is scaled by that weight, and wrong for
+    /// a consumer choosing an objective. `is_under_identified` is the gate's own
+    /// derived statement at one observation-equivalent. A repair that collapsed
+    /// them into one predicate would fail here from one side or the other.
+    #[test]
+    pub(crate) fn under_identified_is_the_derived_knot_not_the_ramp_support_2612() {
+        let plan_at = |lambda_min: f64, lambda_max: f64| {
+            let mut h = Array2::<f64>::zeros((2, 2));
+            h[[0, 0]] = lambda_min;
+            h[[1, 1]] = lambda_max;
+            JointJeffreysPlan::prepare(h.view(), Array2::<f64>::eye(2).view())
+                .expect("diagonal reduced information")
+        };
+
+        // Below the derived knot: under-identified, and the term is fully on.
+        let poor = plan_at(0.4, 200.0);
+        assert!(poor.is_under_identified() && poor.is_active());
+        assert_eq!(poor.conditioning_gate_weight(), 1.0);
+
+        // INSIDE the transition band, at the measured #2612 synthetic value.
+        // Five and a half observations' worth of curvature in the worst
+        // direction is identified by the constant's own derivation, but the ramp
+        // has not finished tapering, so `is_active` still says yes.
+        let banded = plan_at(5.508, 883.6);
+        assert!(
+            !banded.is_under_identified(),
+            "5.5 observation-equivalents is past the derived knot of 1"
+        );
+        assert!(
+            banded.is_active(),
+            "...and the ramp has not reached zero, which is exactly the disagreement \
+             this test exists to pin"
+        );
+        let weight = banded.conditioning_gate_weight();
+        assert!(
+            weight > 0.0 && weight < 1.0,
+            "the band must be a genuine partial weight, got {weight}"
+        );
+
+        // Past the far knot: neither.
+        let identified = plan_at(40.0, 200.0);
+        assert!(!identified.is_under_identified() && !identified.is_active());
+
+        // The RELATIVE arm still decides on its own: a spectrum whose ratio is
+        // below the relative knot is under-identified however large `λ_min` is.
+        let ill_conditioned = plan_at(1.0e3, 1.0e3 / (CONDITIONING_GATE_RELATIVE * 0.1));
+        assert!(
+            ill_conditioned.is_under_identified(),
+            "the absolute arm must not be able to clear a relatively singular spectrum"
+        );
+
+        // A degenerate spectrum is under-identified, not silently identified.
+        let degenerate = plan_at(0.0, 0.0);
+        assert!(degenerate.is_under_identified() && degenerate.is_active());
     }
 
     #[test]

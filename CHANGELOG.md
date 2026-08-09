@@ -49,16 +49,38 @@
   determine this direction" and "and no λ repairs it" are different statements
   and the verdict rests on the second.
 
-  **The deciding threshold was `16`, not `1`.** The `n = 3000, k = 5` row sits at
-  `λ_min = 1.989`, above `CONDITIONING_GATE_ABSOLUTE = 1.0`, and armed anyway:
-  the arming predicate is `gate_weight != 0`, and the weight is a C¹ ramp that
-  reaches exactly zero only at `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16`. That ramp
-  is a continuity device for an always-on term (a binary gate makes `Φ(ρ)` jump,
-  the #787 regression), and reading `!= 0` as a verdict turns its far knot into a
-  decision boundary. The ramp is deliberately untouched — for the universal term
-  the weight IS the answer — and what changed is that a penalized direction now
-  carries `λ·s` observation-equivalents rather than `c_k·n`, so it is not sitting
-  near either knot for basis-shaped reasons.
+  **The deciding threshold was `16`, not `1`, and that is the second half of the
+  defect — the measurement is what forced it.** With `H + S_λ` in place the
+  fixture's deciding eigenvalue moved `0.405 → 5.508`, a factor of `13.6`, and
+  the fit **still armed**, at gate weight `0.783`:
+
+  ```text
+    identifiable-span PENALIZED curvature H+S_lambda is under-identified at the
+    certified mode: lambda_min=5.5076e0, lambda_max=8.8358e2, ratio=6.233e-3,
+    Jeffreys gate weight=7.8336e-1
+    (likelihood alone: lambda_min=4.0514e-1, lambda_max=1.5754e2)
+  ```
+
+  Five and a half observations' worth of curvature in the worst-determined
+  direction, still called separated — because the verdict was taken on
+  `JointJeffreysPlan::is_active`, which is `gate_weight != 0` and therefore
+  boundaries where the C¹ ramp reaches exactly zero,
+  `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16`. That band exists so `Φ(ρ)` stays C¹ as
+  `β̂(ρ)` carries the spectrum across the boundary — a binary gate makes the
+  outer objective jump, which is the #787 "outer smoothing did not converge"
+  regression — and it is generous FOR THAT REASON, not because a direction
+  holding fifteen observations' worth of curvature is unidentified. `weight != 0`
+  is the support of a smoothing device, and it was choosing an estimand.
+
+  `JointJeffreysPlan::is_under_identified()` is the gate's derived predicate
+  instead — below one observation-equivalent, or below the relative knot —
+  expressed as `conditioning_gate_weight == 1` so one arithmetic authority
+  decides both the weight and the verdict. `is_active` is untouched and still
+  governs the term's own contribution, where the weight IS the answer; only the
+  multinomial's conditional engagement, which re-solves the whole fit against a
+  different objective, takes the new one. The two halves are independent and the
+  fixture needs both: with `H` alone `λ_min = 0.405 < 1`, so the derived
+  predicate would arm anyway; with `is_active` the penalized `5.508` arms anyway.
 
   **Rejected**: widening the absolute knot (derived, and not the thing that is
   wrong); restricting the Jeffreys BASIS back to `ker(S)` (deliberately widened

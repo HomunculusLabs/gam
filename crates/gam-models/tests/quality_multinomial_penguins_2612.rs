@@ -478,6 +478,16 @@ fn gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_d
     let gam_plugin_acc = accuracy(&gam_plugin_flat, &test_labels, K);
     let gam_plugin_log_loss = mean_log_loss(&gam_plugin_flat, &test_labels, K);
 
+    // #2612 CONTEXT: which estimand the numbers above belong to. The
+    // Jeffreys/Firth proper prior is engaged automatically on separation
+    // evidence, and armed, the coefficients carry an O(1/n) pull toward the
+    // uniform simplex 1/K — the same direction as the log-loss gap this arm is
+    // about. Printed, not asserted: whether penguins is quasi-separated is a
+    // fact about the dataset, and this test's bars are about held-out quality.
+    eprintln!(
+        "penguin species multinomial (real-data arm, stride={STRIDE}): separation evidence = {:?}",
+        model.separation_evidence.as_deref(),
+    );
     eprintln!(
         "penguin species multinomial (real-data arm, stride={STRIDE}): \
          n_train={} n_test={n_test} K={K} \

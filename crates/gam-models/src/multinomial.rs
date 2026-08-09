@@ -591,7 +591,17 @@ fn multinomial_formula_penalized_separation_evidence(
         penalized.view(),
         identifiable_span,
     )?;
-    if !plan.is_active() {
+    // The DECISION, not the contribution: `is_under_identified` is the gate's
+    // derived predicate at one observation-equivalent, while `is_active` is
+    // `weight != 0` and therefore boundaries on the ramp's far knot at sixteen.
+    // Measured: the synthetic softmax-drawn fixture lands at
+    // `λ_min(H + S_λ) = 5.508` — five and a half observations' worth of
+    // curvature in the worst direction, comfortably identified by the
+    // constant's own derivation — and `is_active` still says yes, at weight
+    // `0.783`, because the ramp has not finished tapering. Choosing an
+    // estimand on the support of a smoothing device is the same category error
+    // as choosing one on a cost cap.
+    if !plan.is_under_identified() {
         return Ok(None);
     }
     let (lambda_min, lambda_max) = plan.information_extrema();

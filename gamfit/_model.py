@@ -1678,10 +1678,19 @@ class MultinomialModel:
         # rejected on this family for exactly that reason — and armed, the
         # coefficients carry an O(1/n) pull toward the uniform simplex 1/K. A
         # reader comparing two fits, or scoring calibration, needs to know which
-        # objective produced the numbers. `.get` (not `[...]`) so a model saved
-        # before the field existed still summarises.
-        separation = meta.get("separation_evidence")
-        if separation is None:
+        # objective produced the numbers.
+        #
+        # Three states, not two. The FFI exports the key unconditionally
+        # INCLUDING the `None` case precisely so that "the prior was disarmed"
+        # and "this payload predates the field" stay distinguishable here; a
+        # renderer that collapsed a missing key into "disarmed" would assert an
+        # estimand the model never claimed.
+        if "separation_evidence" not in meta:
+            lines.append(
+                "  separation: not recorded (model saved before the fit published "
+                "its arming decision)"
+            )
+        elif meta["separation_evidence"] is None:
             lines.append(
                 "  separation: none detected; Jeffreys/Firth prior disarmed "
                 "(unbiased penalized-REML mode)"
@@ -1689,7 +1698,7 @@ class MultinomialModel:
         else:
             lines.append(
                 "  separation: Jeffreys/Firth proper prior ARMED (coefficients carry "
-                f"the Firth bias correction) — {separation}"
+                f"the Firth bias correction) — {meta['separation_evidence']}"
             )
         # Per-class slope-norm + REML λ + hat-matrix trace rollup. Coefficients
         # are stored in row-major `(P, K-1)` order; column `a` is class
