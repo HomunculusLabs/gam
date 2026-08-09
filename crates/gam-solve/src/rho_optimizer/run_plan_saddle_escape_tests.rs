@@ -522,3 +522,180 @@ fn outer_search_escapes_interior_saddle_and_certifies_minimum() {
         "the escaped minimum must carry a PSD certificate",
     );
 }
+
+// ─── #2612 the criterion adjudicates the matrix ───────────────────
+
+// A LYING Hessian: a strictly convex bowl `f(ρ) = ½‖ρ‖²` whose declared
+// curvature is `diag(1, −1)`.
+//
+// This is #2665's measured shape reduced to two coordinates — there the
+// analytic `λ_min = −1721.5` had an actual objective curvature of `+121.6`
+// along its OWN eigenvector, established by `Δ ∝ α²` over three decades. No
+// resolution bound can catch that: the matrix is not imprecise there, it is
+// wrong, and it is wrong by 14× in magnitude and by sign.
+//
+// The point ρ = 0 is the global minimum and the gradient vanishes there, so
+// every first-order fact certifies. Only the declared curvature refuses, and
+// the criterion contradicts it: `f(±αe₁) = ½α² > 0` for every α.
+fn lying_hessian_cost(rho: &Array1<f64>) -> f64 {
+    0.5 * rho.dot(rho)
+}
+
+fn lying_hessian_eval(rho: &Array1<f64>) -> OuterEval {
+    OuterEval {
+        cost: lying_hessian_cost(rho),
+        gradient: rho.clone(),
+        // The true Hessian is `I`. This one is sign-flipped in ρ₁.
+        hessian: HessianValue::Dense(array![[1.0, 0.0], [0.0, -1.0]]),
+        inner_beta_hint: None,
+    }
+}
+
+#[test]
+fn criterion_contradicts_a_lying_hessian_and_the_point_certifies_2612() {
+    let problem = OuterProblem::new(2)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_initial_rho(array![0.0, 0.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(lying_hessian_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(lying_hessian_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = audit_stationary_point(&mut obj, array![0.0, 0.0], "lying-hessian #2612")
+        .expect("a global minimum must not be refused on curvature the criterion contradicts");
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified point carries its certificate");
+    assert!(
+        cert.certifies(),
+        "the certificate must accept: {}",
+        cert.summary()
+    );
+    assert_eq!(
+        cert.curvature,
+        CurvatureEvidence::CriterionContradicted,
+        "the withdrawn verdict must be RECORDED as contradicted, not quietly relabelled \
+         `Measured {{ psd: true }}` — nothing here established that the point is a minimum, \
+         only that this matrix's negative direction has no operational content: {}",
+        cert.summary()
+    );
+    assert_eq!(
+        cert.hessian_psd(),
+        None,
+        "the published `hessian_psd` contract is null|true|false and a contradicted verdict is \
+         not a PSD claim"
+    );
+    assert!(
+        result.saddle_escape_reseed.is_none(),
+        "there is nothing to escape from: {:?}",
+        result.saddle_escape_reseed
+    );
+}
+
+// The NEGATIVE CONTROL for the test above, and the reason it cannot pass by
+// simply never refusing: the same audit on a REAL saddle must still refuse and
+// still mint the escape. `certify_mints_saddle_escape_reseed_at_interior_saddle`
+// above is that control, unchanged.
+
+// A saddle whose descent is real but lives BELOW the old fixed ladder's last
+// rung.
+//
+//   f(ρ) = ½ρ₀² + 2ρ₁⁴ − 0.005ρ₁²        H = diag(1, 24ρ₁² − 0.01)
+//
+// At ρ = 0 the curvature is `−0.01` and the objective descends along ρ₁ only
+// while `2ρ₁⁴ < 0.005ρ₁²`, i.e. `|ρ₁| < 0.05`. The old ladder's rungs were
+// `[1, 0.5, 0.25, 0.125, 0.0625]` — every one of them OUTSIDE that well, so it
+// found no descending trial and the fit was refused at a point with a genuine,
+// exploitable descent one halving further down.
+//
+// The derived ladder runs to `α_min = sqrt(2·objective_resolution/|λ_min|)`,
+// which at the default `1e-7` resolution and `|λ_min| = 0.01` is `4.5e-3`, so
+// it reaches `0.03125` — inside the well — and mints the escape.
+fn narrow_well_cost(rho: &Array1<f64>) -> f64 {
+    let r0 = rho[0];
+    let r1 = rho[1];
+    0.5 * r0 * r0 + 2.0 * r1 * r1 * r1 * r1 - 0.005 * r1 * r1
+}
+
+fn narrow_well_eval(rho: &Array1<f64>) -> OuterEval {
+    let r0 = rho[0];
+    let r1 = rho[1];
+    OuterEval {
+        cost: narrow_well_cost(rho),
+        gradient: array![r0, 8.0 * r1 * r1 * r1 - 0.01 * r1],
+        hessian: HessianValue::Dense(array![[1.0, 0.0], [0.0, 24.0 * r1 * r1 - 0.01]]),
+        inner_beta_hint: None,
+    }
+}
+
+#[test]
+fn escape_reaches_a_descent_below_the_old_fixed_ladder_2612() {
+    // Pin the fixture's own arithmetic first, so a failure below is about the
+    // ladder and not about the well having moved.
+    let outside = narrow_well_cost(&array![0.0, 0.0625]);
+    let inside = narrow_well_cost(&array![0.0, 0.03125]);
+    assert!(
+        outside > 0.0,
+        "the old ladder's last rung must sit OUTSIDE the well (f={outside:.6e})"
+    );
+    assert!(
+        inside < 0.0,
+        "the next halving must sit INSIDE it (f={inside:.6e})"
+    );
+
+    let problem = OuterProblem::new(2)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_initial_rho(array![0.0, 0.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(narrow_well_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(narrow_well_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let rejection = audit_stationary_point(&mut obj, array![0.0, 0.0], "narrow-well #2612")
+        .expect_err("a saddle with a real descent must be refused, not certified");
+    let result = &rejection.result;
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("refused certificate must be recorded");
+    assert_eq!(
+        cert.hessian_psd(),
+        Some(false),
+        "the curvature here is genuinely indefinite AND exploitable, so the verdict must stand \
+         rather than be withdrawn: {}",
+        cert.summary()
+    );
+    let reseed = result
+        .saddle_escape_reseed
+        .as_ref()
+        .expect("the derived ladder must reach into the well and mint an escape reseed");
+    assert!(
+        narrow_well_cost(reseed) < -1e-12,
+        "the reseed {reseed:?} must land strictly below the saddle (f={:.6e})",
+        narrow_well_cost(reseed),
+    );
+    assert!(
+        reseed[1].abs() < 0.0625,
+        "the descent only exists below the OLD ladder's last rung, so a reseed at or beyond it \
+         would mean the well moved: {reseed:?}"
+    );
+}

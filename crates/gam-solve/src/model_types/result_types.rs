@@ -1484,6 +1484,11 @@ impl OuterCriterionCertificate {
             CurvatureEvidence::NotSpent => "screening-not-spent",
             CurvatureEvidence::NotAvailable => "unavailable",
             CurvatureEvidence::NoEstimand => "no-estimand",
+            // The SOURCE is still the terminal analytic Hessian — that is where
+            // the (withdrawn) verdict came from. Naming the adjudication here
+            // keeps the source honest while `hessian_psd=criterion-contradicted`
+            // beside it carries what happened to it.
+            CurvatureEvidence::CriterionContradicted => "terminal-analytic-contradicted",
         };
         let verdict = match self.refusal() {
             None => "stationary".to_string(),

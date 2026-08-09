@@ -6014,6 +6014,7 @@ mod reference_class_invariance_tests {
         // costs on the direction the certificate refuses on, at production
         // scale, rather than on the seconds-scale synthetic fixture.
         let analytic_curvature = evals[order[0]];
+        let mut measured_curvatures: Vec<f64> = Vec::new();
         for h in [1e-4_f64, 1e-3, 1e-2] {
             let plus = &rho + &(&direction * h);
             let minus = &rho - &(&direction * h);
@@ -6033,6 +6034,7 @@ mod reference_class_invariance_tests {
                         up.inner_converged,
                         down.inner_converged,
                     );
+                    measured_curvatures.push(measured);
                 }
                 (up, down) => eprintln!(
                     "#2612 curvature probe: h={h:.0e} directional gradient difference \
@@ -6041,6 +6043,39 @@ mod reference_class_invariance_tests {
                     down.is_ok(),
                 ),
             }
+        }
+        // The one BAR this file carries, and it is the file's own title: is the
+        // reported negative curvature REAL?
+        //
+        // Everything above prints. This asserts the single thing the terminal
+        // certificate's whole verdict rests on — that the analytic Hessian and
+        // the criterion agree about the SIGN of the direction that decides —
+        // at production scale, where the armed gate in
+        // `multinomial_jeffreys_outer_gradient_fd_2612` cannot reach (it runs a
+        // seconds-scale synthetic fixture).
+        //
+        // Measured here: analytic `-6.709810e-5` against `-9.248844e-5`, stable
+        // to five digits across `h` spanning two decades, so the `3.784e-1`
+        // relative gap is the omitted `D²_β H_Φ` term and not FD noise. That gap
+        // EXCEEDS the `0.25` bar the armed gate applies to `λ_min` on its own
+        // fixture, which is the finding; the sign, which is what the certificate
+        // spends, holds. A sign flip is the #2665 failure (`-1721.5` analytic
+        // against `+121.6` measured), and it is what this refuses to let recur
+        // unnoticed.
+        assert!(
+            !measured_curvatures.is_empty(),
+            "no directional gradient difference could be taken, so the sign bar below was never \
+             evaluated -- that is absence of coverage, not a pass"
+        );
+        for measured in &measured_curvatures {
+            assert_eq!(
+                measured.is_sign_negative(),
+                analytic_curvature.is_sign_negative(),
+                "the analytic curvature {analytic_curvature:+.6e} on the direction the \
+                 certificate judges disagrees in SIGN with the criterion's own \
+                 {measured:+.6e}. The terminal certificate's entire second-order verdict is \
+                 that sign (#2665)."
+            );
         }
     }
 

@@ -4897,7 +4897,21 @@ fn certify_outer_optimality_at_terminal_fidelity(
             SaddleAdjudication::Descended(point) => {
                 result.saddle_escape_reseed = Some(point);
             }
-            SaddleAdjudication::Contradicted { .. } => {
+            SaddleAdjudication::Contradicted {
+                probed,
+                smallest_step,
+                predicted_at_smallest,
+                objective_resolution,
+                best_seen_cost,
+            } => {
+                log::info!(
+                    "[CERTIFICATE] {context}: WITHDRAWING the curvature verdict — {probed} \
+                     evaluated trial(s) down to step {smallest_step:.3e}, where the claim's own \
+                     predicted decrease {predicted_at_smallest:.3e} reaches the criterion's \
+                     resolution {objective_resolution:.3e}; best cost seen {best_seen_cost:.9e} \
+                     never fell below the checkpoint. The certificate records \
+                     `criterion-contradicted`, NOT a PSD claim (#2612)."
+                );
                 // The verdict is withdrawn, not inverted: nothing here showed
                 // the point IS a minimum. `curvature_floor` goes with it —
                 // every field in it (`interior_min_eigenvalue`, the floor, the
