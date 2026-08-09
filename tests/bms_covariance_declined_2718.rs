@@ -27,12 +27,13 @@
 //!   |excess kurtosis| x10.1, KS x6.40), selects `global-empirical`, and must
 //!   now come back with finite coefficients AND a published covariance AND no
 //!   declaration. This is gam#2484's acceptance.
-//! * **still withheld** — the same fixture with a `linkwiggle(...)` logslope
-//!   block. A score-warp block evaluates a basis AT the latent score, so the
-//!   row depends on the grid through that basis as well as through the
-//!   calibration intercept and the rigid node channel does not describe it.
-//!   That fit must still withhold, and its declaration must say WHICH channel
-//!   was missing rather than restate the measure's name.
+//! * **still withheld** — the withholding contract itself, asserted on the
+//!   payload rather than on a fit. Its end-to-end witness moved when gam#2484
+//!   landed, and the obvious replacement (the same fixture with a
+//!   `linkwiggle(...)` score-warp block) was built and MEASURED: it does not
+//!   complete in 90 minutes at n=96, against 22 for the whole file before. So
+//!   WHICH shapes withhold is unit-tested on the classifier with no fit in the
+//!   loop, and THAT a withholding survives the wire is asserted here.
 //! * **negative** — the rank-reduced `centers=60` fixture reaches
 //!   `StandardNormal` via rank-INT and must declare NOTHING. A declaration
 //!   there would mean the gate fires on fits that have a valid covariance,
@@ -315,13 +316,6 @@ const MARGINAL_FORMULA_CENTERS6: &str = "event ~ matern(PC1, PC2, PC3, centers=6
 const LOGSLOPE_FORMULA_CENTERS6: &str = "matern(PC1, PC2, PC3, centers=6, length_scale=1.0)";
 const MARGINAL_FORMULA_CENTERS60: &str = "event ~ matern(PC1, PC2, PC3, centers=60, length_scale=1.0) + sex + entry_age_z + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4";
 const LOGSLOPE_FORMULA_CENTERS60: &str = "matern(PC1, PC2, PC3, centers=60, length_scale=1.0)";
-/// The same logslope block as `LOGSLOPE_FORMULA_CENTERS6` plus a score-warp
-/// (`linkwiggle`) deviation block. That block evaluates a spline basis AT the
-/// latent score, so the row sees the empirical grid through the basis as well
-/// as through the calibration intercept — the one rigid-kernel shape whose node
-/// channel gam#2484 did NOT derive.
-const LOGSLOPE_FORMULA_CENTERS6_WARPED: &str =
-    "matern(PC1, PC2, PC3, centers=6, length_scale=1.0) + linkwiggle(degree=3, internal_knots=3)";
 
 /// The witness fixture: `prs_z` is made an exact affine function of PC1/PC2, so
 /// the conditional `E[z|C]`/`Var(z|C)` Rao gate fires and the calibrated
@@ -482,140 +476,133 @@ fn bms_standard_normal_latent_measure_declares_nothing_2718() {
 }
 
 #[test]
-fn bms_still_withholds_where_there_is_no_channel_and_names_it_2484() {
-    // The contract gam#2718 established, on the shape that still needs it. A
-    // score-warp block puts the latent score inside a basis, so the row's
-    // dependence on the grid is not the calibration intercept's and the rigid
-    // node channel would be describing a different model. Withholding is
-    // correct there; withholding SILENTLY, or withholding while restating the
-    // measure's name instead of the missing channel, is not.
-    gam::init_parallelism();
-    let data = prs_pc_confounded_dataset();
-    let out = fit_bms(
-        &data,
-        MARGINAL_FORMULA_CENTERS6,
-        LOGSLOPE_FORMULA_CENTERS6_WARPED,
-        "prs/pc-confounded BMS fit with a score-warp block",
-    );
+fn a_withheld_covariance_names_the_missing_channel_and_survives_the_wire_2718() {
+    // gam#2718's contract, at the level it actually lives at.
+    //
+    // The end-to-end witness for withholding MOVED when gam#2484 landed: the
+    // PRS/PC fixture above now publishes. The obvious replacement — the same
+    // fixture with a `linkwiggle(...)` score-warp block — was built and
+    // measured, and it does NOT complete: 90 minutes on n=96 without finishing
+    // the four-arm file, against 22 minutes for the whole file before. A fit
+    // nobody can run is not a regression gate, so the withholding contract is
+    // asserted where it is cheap and exhaustive instead:
+    //
+    //   * WHICH shapes withhold, and why, is a pure decision over the measure,
+    //     the build record and the flex flag. All four arms — closed-form,
+    //     correctable, score-warp, local-empirical, non-differentiable data —
+    //     are unit-tested directly in
+    //     `crates/gam-models/src/bms/empirical_measure_2484_tests.rs`
+    //     (`the_shapes_with_no_channel_are_still_withheld_and_say_which_2484`),
+    //     with no fit in the loop.
+    //   * That a withholding SURVIVES THE WIRE is this file's half, and it is a
+    //     property of the payload, not of any particular fit. It is asserted
+    //     here on the declaration itself.
+    //
+    // The pairing gam#2718 cared about — H ships, so the declaration must ship
+    // beside it — is preserved by the arm below, which checks both on a real
+    // fit.
+    let declined = CovarianceDeclined::BmsGeneratedRegressorLatentMeasureNotStandardNormal {
+        latent_measure: "global-empirical".to_string(),
+        unavailable_channel: "a score-warp / link-deviation block evaluates a basis AT the \
+                              latent score"
+            .to_string(),
+    };
 
+    let explanation = declined.explain();
     assert!(
-        out.fit.beta.iter().all(|coef| coef.is_finite()),
-        "gam#2718: a declined covariance must still publish finite coefficients, got {:?}",
-        out.fit.beta
+        explanation.contains("gam#2484"),
+        "gam#2718: the explanation must point at the issue that owns the channel, got: \
+         {explanation}"
+    );
+    assert!(
+        explanation.contains("score-warp"),
+        "gam#2484: the explanation must name the CHANNEL that is missing, not just the measure — \
+         the measure alone no longer determines whether a correction exists. Got: {explanation}"
     );
 
-    match out.fit.artifacts.covariance_declined.as_ref() {
+    let mut artifacts = gam::estimate::FitArtifacts::default();
+    artifacts.covariance_declined = Some(declined.clone());
+    let encoded = serde_json::to_string(&artifacts).expect("gam#2718: artifacts must serialize");
+    let decoded: gam::estimate::FitArtifacts =
+        serde_json::from_str(&encoded).expect("gam#2718: artifacts must deserialize");
+    assert_eq!(
+        decoded.covariance_declined,
+        Some(declined),
+        "gam#2718: the declination must survive serialization. If this field ever becomes \
+         `skip_serializing`, or a persistence route reassembles the fit without carrying \
+         `artifacts`, a consumer loading the saved model gets H and phi with NO warning — which \
+         is the silent consumption this channel exists to prevent."
+    );
+
+    // And an OLD payload — written before gam#2484 split the reason from the
+    // channel — must still load, with the channel simply empty. A hard
+    // deserialization failure there would lock consumers out of models they
+    // could previously read.
+    let legacy = r#"{"covariance_declined":{"reason":"bms-generated-regressor-latent-measure-not-standard-normal","latent_measure":"global-empirical"}}"#;
+    let loaded: gam::estimate::FitArtifacts = serde_json::from_str(legacy)
+        .expect("gam#2484: a pre-channel payload must still deserialize");
+    match loaded.covariance_declined {
         Some(CovarianceDeclined::BmsGeneratedRegressorLatentMeasureNotStandardNormal {
             latent_measure,
             unavailable_channel,
         }) => {
-            assert_eq!(
-                latent_measure, "global-empirical",
-                "gam#2718: the declaration must name the measure the adequacy gate selected"
-            );
+            assert_eq!(latent_measure, "global-empirical");
             assert!(
-                unavailable_channel.contains("score-warp"),
-                "gam#2484: the declaration must name the CHANNEL that is missing, not just the \
-                 measure — the measure alone no longer determines whether a correction exists. \
-                 Got: {unavailable_channel}"
-            );
-            assert!(
-                out.fit.covariance_conditional.is_none() && out.fit.covariance_corrected.is_none(),
-                "gam#2718: a declared withholding must actually withhold, on every surface"
-            );
-            if let Some(inference) = out.fit.inference.as_ref() {
-                assert!(
-                    inference.beta_covariance.is_none()
-                        && inference.beta_standard_errors.is_none()
-                        && inference.beta_covariance_corrected.is_none()
-                        && inference.beta_standard_errors_corrected.is_none(),
-                    "gam#2718: the inference surfaces must be withheld too"
-                );
-            }
-            let explanation = out
-                .fit
-                .artifacts
-                .covariance_declined
-                .as_ref()
-                .expect("asserted present")
-                .explain();
-            assert!(
-                explanation.contains("gam#2484"),
-                "gam#2718: the explanation must point at the issue that owns the channel, got: \
-                 {explanation}"
+                unavailable_channel.is_empty(),
+                "gam#2484: an old payload carries no channel, so the field defaults empty rather \
+                 than inventing one; got {unavailable_channel:?}"
             );
         }
-        Some(other) => panic!(
-            "gam#2718: wrong declaration on a bernoulli marginal-slope fit: {}",
-            other.explain()
-        ),
-        None => {
-            // Not a silent-failure escape hatch: if the score-warp fit did not
-            // reach the seam at all, this arm is not testing what it claims and
-            // the covariance must then be published like any corrected fit.
-            assert!(
-                out.fit.covariance_conditional.is_some(),
-                "gam#2718: the covariance was withheld with NO declaration, which is exactly the \
-                 silent absence this channel exists to prevent"
-            );
-        }
+        other => panic!("gam#2484: the legacy payload decoded to {other:?}"),
     }
 }
 
 #[test]
-fn bms_declination_travels_with_the_curvature_it_is_about_2718() {
-    // The declaration is only worth having if it crosses the persistence
-    // boundary WITH the curvature it describes. A consumer that loads a saved
-    // fit gets the penalized Hessian `H` and the dispersion `phi`, from which
-    // `Vb_naive = phi * H^-1` is one Cholesky away; if the declaration did not
-    // travel alongside, that consumer would not have ignored a warning, they
-    // would never have received one.
+fn a_published_fit_ships_the_curvature_a_declination_would_be_about_2718() {
+    // The other half of the pairing. gam#2718's worry was that a consumer
+    // loading a saved fit gets the penalized Hessian `H` and the dispersion
+    // `phi`, from which `Vb_naive = phi * H^-1` is one Cholesky away — so a
+    // withheld covariance MUST travel with a declaration or the consumer never
+    // receives one.
     //
-    // The BMS saved-model route stores the whole `UnifiedFitResult`
-    // (`model_payload_builders.rs:802-803`), after a narrowing that carries
-    // `artifacts` forward (`:606`), so the link this test pins is the wire
-    // itself: `covariance_declined` is `#[serde(default)]`, NOT
-    // `skip_serializing`, and must survive a round trip.
-    //
-    // Both halves are asserted together on purpose. A future change that keeps
-    // the Hessian and drops the declaration is exactly the silent-consumption
-    // case, and it would pass either assertion alone.
+    // That worry is only load-bearing because H really does ship. Asserted here
+    // on the fixture gam#2484 made publish: H is present, the covariance is
+    // present, and nothing is declared. If a future change ever puts this
+    // fixture back into withholding, the arm above is what must then carry the
+    // declaration across the wire.
     gam::init_parallelism();
     let data = prs_pc_confounded_dataset();
     let out = fit_bms(
         &data,
         MARGINAL_FORMULA_CENTERS6,
-        // The score-warp arm, because gam#2484 made the unwarped fixture
-        // publish: the persistence contract is about the fits that still
-        // withhold.
-        LOGSLOPE_FORMULA_CENTERS6_WARPED,
+        LOGSLOPE_FORMULA_CENTERS6,
         "prs/pc-confounded BMS fit (persistence arm)",
     );
 
-    let declared = out.fit.artifacts.covariance_declined.clone();
-    assert!(
-        declared.is_some(),
-        "gam#2718: fixture must reach the declining seam for this arm to mean anything"
-    );
-
-    // The curvature the declaration is about is present ...
     assert!(
         out.fit.penalized_hessian().is_some(),
-        "gam#2718: a declined fit still publishes the penalized Hessian — EDF accounting, \
-         posterior whitening and prediction all read it. This assertion is here so that the \
-         NEXT one is load-bearing: shipping H is exactly why the declaration has to ship too."
+        "gam#2718: a BMS fit publishes the penalized Hessian — EDF accounting, posterior \
+         whitening and prediction all read it. This is why a WITHHELD covariance has to ship a \
+         declaration beside it."
+    );
+    assert!(
+        out.fit.covariance_conditional.is_some(),
+        "gam#2484: this fixture is corrected, so it publishes a covariance"
+    );
+    assert!(
+        out.fit.artifacts.covariance_declined.is_none(),
+        "gam#2484: and therefore declares nothing; got {:?}",
+        out.fit.artifacts.covariance_declined
     );
 
-    // ... and the declaration survives the wire beside it.
+    // The artifacts still round-trip, corrected or not — the wire is the same
+    // wire either way.
     let encoded =
         serde_json::to_string(&out.fit.artifacts).expect("gam#2718: fit artifacts must serialize");
     let decoded: gam::estimate::FitArtifacts =
         serde_json::from_str(&encoded).expect("gam#2718: fit artifacts must deserialize");
     assert_eq!(
-        decoded.covariance_declined, declared,
-        "gam#2718: the declination must survive serialization. If this field ever becomes \
-         `skip_serializing`, or a persistence route reassembles the fit without carrying \
-         `artifacts`, a consumer loading the saved model gets H and phi with NO warning — \
-         which is the silent consumption this channel exists to prevent."
+        decoded.covariance_declined,
+        out.fit.artifacts.covariance_declined
     );
 }
