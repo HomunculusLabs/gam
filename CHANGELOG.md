@@ -1,5 +1,88 @@
 ## Unreleased
 
+- **A composed monotone warp was a function with a CORNER, and the Firth term
+  put that corner into the objective (#2695).** `create_ispline_dense` is
+  constant outside its knot hull `[left, right]`, and says so; `a3304985f` made
+  the reported derivative agree with that value by zeroing it strictly outside.
+  Both halves are right, and together they name what is wrong: a
+  constant-extended I-spline is continuous with a **corner** at each hull edge —
+  `I_j` joins, `I'_j` steps from its interior one-sided slope straight to `0`.
+
+  A corner in a shape basis on fixed data is harmless; the evaluation point
+  never moves. A corner in a *warp* is not. The warp is composed onto the
+  model's own index, `q = q₀ + Σ_j βw_j·I_j(q₀)` with `q₀ = −η_t·e^{−η_ls}`, so
+  `q₀` moves with β while the hull is frozen at the seed `q₀`, and the basis is
+  evaluated on both sides of the edge inside a single inner solve. Two of the
+  chain-rule channels carry `I'_j` with **no `βw` factor at all**,
+
+  ```text
+      ∂²q/∂β_thr ∂βw_j = I'_j(q₀)·∂q₀/∂β_thr        ∂q̇/∂βw_j = I'_j(q₀)·r
+  ```
+
+  so the observed information jumps by `O(1)` across the edge **even with the
+  warp switched off** — and `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is part of the inner
+  objective the trust region accepts on. The objective is therefore
+  discontinuous, and `actual/predicted` cannot approach `1` at any step size.
+
+  Measured on `survival_location_scale_saved_fit_preserves_linkwiggle_metadata`,
+  cycle 13, five attempts from one base point along a bit-identical direction:
+
+  | ‖δ‖ | pred | actual | `d(−ℓ+½βᵀSβ)` | `dΦ` | max `dH` | at |
+  |---|---|---|---|---|---|---|
+  | 4.885e-5 | 1.760e-4 | −5.5209e-1 | 1.1404e-4 | −5.5220e-1 | 1.00001 | (5,5) |
+  | 1.221e-5 | 4.400e-5 | −5.5213e-1 | 2.8512e-5 | −5.5216e-1 | 0.99999 | (5,5) |
+  | 3.053e-6 | 1.100e-5 | −5.5214e-1 | 7.1280e-6 | −5.5215e-1 | 0.99999 | (5,5) |
+  | 7.633e-7 | 2.750e-6 | **+2.7502e-6** | 1.7820e-6 | +9.6818e-7 | 9.16e-6 | (0,1) |
+
+  The `−ℓ + ½βᵀSβ` half tracks its own linear model to six digits at every
+  attempt including the three that cross, so the likelihood is not the defect;
+  the whole error is `Φ`, as a jump. `dH` is ONE entry and its size is `1.0000`.
+  Against the frozen hull edge `right = +7.261500860e-1`, one row's exit `q₀`
+  sits `1.3e-7` outside it at the third attempt and `3.5e-6` inside it at the
+  fourth, and `I'_3` steps `9.9999823e-1 → 0` between them. The value is
+  continuous there (`[1,1,1,0.99999646] → [1,1,1,1]`).
+
+  **Rejected: raise the spline degree.** `w''` is indeed piecewise constant at
+  degree 2, but a four-arm A/B on the witness has `degree = 2/3/4/5` all still
+  refusing while `degree = 0` (no `linkwiggle`) fits. The corner belongs to the
+  extrapolation convention, not the polynomial degree, which is exactly why no
+  degree touches it.
+
+  `monotone_wiggle_basis_with_derivative_order` is now the single definition of
+  the warp on all of `ℝ`, with `x̄ = clamp(x, left, right)`:
+
+  ```text
+      I_j(x)    = I_j(x̄) + I'_j(x̄)·(x − x̄)
+      I'_j(x)   = I'_j(x̄)
+      I⁽ᵏ⁾_j(x) = interior value inside the hull, 0 outside        (k ≥ 2)
+  ```
+
+  and `monotone_wiggle_basis_from_knots` routes through it, so the fit design,
+  the derivative stack, prediction and inference all read one function. The
+  interior is bitwise unchanged, so no fit whose rows stay inside the hull
+  moves. The tail is the basis's own first-order expansion about the join, so
+  the two halves are one differentiable function rather than two that meet. An
+  I-spline is non-decreasing, so both tails have non-negative constant slope and
+  `βw ≥ 0` still gives a monotone warp on all of `ℝ`.
+
+  **Behaviour change worth stating:** the `[0, 1]` RANGE of the basis is given
+  up outside the hull, and with it the old "the warp does nothing beyond the
+  observed range" convention — a `linkwiggle` term now continues at its boundary
+  slope instead of flattening. That range is precisely why
+  `create_ispline_dense` saturates, and its own doc already directs callers who
+  need otherwise to *"clamp inputs and add their own extrapolation
+  correction"*; this is that correction, at the caller, and it is the standard
+  convention for a spline *transformation* as opposed to a spline *shape*
+  (restricted / linear-tail splines, as in flexible parametric survival models).
+  Ordinary I-spline *smooths* are untouched — only the monotone-warp entry
+  points route through the tail.
+
+  Orders `k ≥ 2` are zero on the tail, so `I''_j` is still discontinuous at the
+  join; it reaches the objective only as `m₂ = Σ_j βw_j·I''_j`, i.e. weighted by
+  the warp amplitude, exactly as it already is at every interior knot of a
+  degree-2 basis. The hull edge is therefore no rougher than a knot, which is
+  the most a finite-degree spline can offer.
+
 - **Farthest-point knot selection compared a squared LENGTH against the number
   one, so it stopped being scale-equivariant below unit radius (#2750).**
   `select_thin_plate_knots` is the shared center selector for every radial
