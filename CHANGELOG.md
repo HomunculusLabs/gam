@@ -1,5 +1,90 @@
 ## Unreleased
 
+- **The Murphy–Topel correction now exists for a `GlobalEmpirical` second-stage
+  latent measure, and the refusal it replaces was resting on a false
+  obstruction (#2484).** A BMS fit whose conditional location-scale calibration
+  fires and whose calibrated residual `ζ` then fails the standard-normal
+  adequacy gate selects an empirical latent measure built from `ζ` itself. That
+  pair used to withhold the coefficient covariance, on the argument that the
+  generated-regressor correction needs a per-row mixed derivative and `ℓ_i`
+  depends on `ζ_i` twice — directly, and through a grid every other `ζ_j`
+  helped build — so "the honest object is a full `n × n` sensitivity" and "the
+  measure is itself estimated from the same data".
+
+  The first half is a factorization, not a dense object; the second is the
+  chain rule, not a violated assumption.
+
+  `build_empirical_z_grid` cuts bins by cumulative **weight**, so for a fixed
+  sort order the bin allocation `α` is *exactly* constant in `ζ` and the grid
+  weights carry no `ζ`-sensitivity at all — only the `m ≈ 32` node VALUES move.
+  And Murphy–Topel conditions on the data: given `z`, the measure is a
+  deterministic function of `θ₁`, which is precisely what the correction
+  propagates. So the total derivative splits into a direct channel and a
+  rank-`m` cross-row channel,
+
+  ```text
+      d score_β/d ζ_j = s_j + Σ_b u_b·D_{bj}        ⇒        S_eff = S + Dᵀ·U_Qᵀ
+  ```
+
+  and the seam substitutes `S_eff` for `S`. `generated_regressor_correction`,
+  `build_zeta_theta1_jacobian`, `beta_theta1_sensitivity` and the
+  `(V_β G) V₁ (V_β G)ᵀ` congruence are untouched, and PSD-ness is preserved for
+  free.
+
+  Neither channel is the closed-form kernel's. The empirical row is
+  `−w·logΦ(σ·(a(m,g) + s·g·ζ_i))` around an implicitly solved intercept `a`
+  rather than `q·√(1+(s·g)²) + s·g·ζ_i`, so reusing
+  `rigid_standard_normal_score_zeta_sensitivity` for the DIRECT half would have
+  been a subtler wrong answer than refusing. Both come from one pass over the
+  rows, sharing the per-row intercept solve, with the node derivatives from the
+  same calibration root the row jet lifts:
+
+  ```text
+      a_x_b       = −s·g·π_b·φ(η_b)/Ψ₁
+      a_{m,x_b}   = −a_m·(dΨ₁/dx_b)/Ψ₁
+      a_{g,x_b}   = −[dΞ₁/dx_b + a_g·(dΨ₁/dx_b)]/Ψ₁
+  ```
+
+  `Σ_b a_x_b = −s·g` (a uniform node shift must be absorbed exactly by the
+  intercept) and `a_x_b ≡ 0` at `g = 0` (a fit with no slope cannot see the
+  latent axis) are the identities that pin the sign and scale.
+
+  **Rejected: seeding each node as a third jet axis** through the existing
+  `filtered_implicit_solve_scalar` lift, which is the more mechanical route.
+  It costs `O(n·m²)` lifts against the closed form's `O(n·m)`, on a path that
+  runs at biobank `n`.
+
+  `EmpiricalZGrid` and its `PartialEq` are untouched — it is the measure's
+  identity and it is on the persistence wire. The allocation record rides on a
+  fit-time-only `EmpiricalZGridBuild` returned by the one builder the fit
+  itself uses, so the recorded `α` is the fill loop's own rather than a
+  reconstruction.
+
+  **What still withholds, and it now names the missing CHANNEL rather than the
+  measure:** a score-warp / link-deviation block (the latent score enters
+  through a basis as well as through the intercept, so the rigid node channel
+  does not describe the row); a `local-empirical` measure (per-row grids, only
+  produced by deserializing a saved model, so there is no fit-time allocation);
+  and data on which the compression is genuinely non-differentiable — a tied
+  `ζ` group that a bin boundary cuts, where the left and right derivatives of
+  the nodes differ. That certificate is narrower than "no ties": a tied group
+  entirely inside one bin is order-invariant and is not refused.
+  `CovarianceDeclined::BmsGeneratedRegressorLatentMeasureNotStandardNormal`
+  gains a `#[serde(default)] unavailable_channel`, so older payloads still
+  deserialize.
+
+  Verified against difference quotients of PRODUCTION code, never a
+  reimplementation. The acceptance gate is the total `∂²(log L)/∂β∂ζ_j` against
+  a double central difference of the production log-likelihood with the grid
+  REBUILT at every perturbed `ζ` — blind to how the channels are split, so it
+  fails alike on an IFT sign error, a missing cross-row term, or a wrong
+  `1/sd`. Below it: allocation mass conservation on both margins; `D` against a
+  central FD of the production builder, including a row heavier than the
+  per-bin target (it lands in more than two bins — there is no
+  two-entries-per-row bound) and a zero-weight row (exactly zero sensitivity);
+  the tie certificate firing on a cut tie and not on a contained one; and an
+  arm asserting the cross-row channel is not negligible.
+
 - **A composed monotone warp was a function with a CORNER, and the Firth term
   put that corner into the objective (#2695).** `create_ispline_dense` is
   constant outside its knot hull `[left, right]`, and says so; `a3304985f` made
