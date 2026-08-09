@@ -4377,10 +4377,21 @@ impl ResidualCascadeDesign {
                 core.levels[next_l - 1].h
             ));
         }
+        // A level finer than the current one is a NEW level; re-assessing the
+        // finest radius extends the level already there and cannot exhaust the
+        // level count. Decided from the RADIUS alone, before any candidate set
+        // exists, because it describes where the set would go and not what is
+        // in it — every outcome below has to carry it, including the exhausted
+        // ones, or a caller that materializes the candidate set from the plan
+        // plants a second level at a radius that already has one.
+        let extends_last = h == core.levels[next_l - 1].h;
         let mut net = core.net.clone();
         let candidates = extend_net(&mut net, &core.z, core.dim, h, &core.z_range);
         if candidates.is_empty() {
-            return Ok(NextLevelPlan::exhausted(NextLevelAssessment::EmptyNet));
+            return Ok(NextLevelPlan::exhausted(
+                NextLevelAssessment::EmptyNet,
+                extends_last,
+            ));
         }
         if net.len() > MAX_CENTERS {
             return Ok(NextLevelPlan::exhausted(
@@ -4395,6 +4406,7 @@ impl ResidualCascadeDesign {
                     // certify the omitted columns.
                     gain_bound: f64::INFINITY,
                 },
+                extends_last,
             ));
         }
         let delta = OVERLAP * h;
@@ -4430,10 +4442,6 @@ impl ResidualCascadeDesign {
         let candidate_penalized_modes = net.len();
         let candidate_columns = core.nullity() + candidate_penalized_modes;
         let identifiable_directions = core.y.len().saturating_sub(core.nullity());
-        // A level finer than the current one is a NEW level; re-assessing the
-        // finest radius extends the level already there and cannot exhaust the
-        // level count.
-        let extends_last = h == core.levels[next_l - 1].h;
         if !extends_last && next_l >= MAX_LEVELS {
             return Ok(NextLevelPlan::exhausted_with(
                 NextLevelAssessment::CapacityExceeded {
@@ -4444,6 +4452,7 @@ impl ResidualCascadeDesign {
                     gain_bound,
                 },
                 bracket,
+                extends_last,
             ));
         }
         // Penalized modes this design may still carry with the certified
@@ -4480,6 +4489,7 @@ impl ResidualCascadeDesign {
                     gain_bound,
                 },
                 bracket,
+                extends_last,
             ));
         }
         let candidate_count = candidates.len();
@@ -4894,21 +4904,25 @@ struct NextLevelPlan {
 impl NextLevelPlan {
     /// An assessment that admits no refinement: an empty net, or a capacity
     /// with no room left in it.
-    fn exhausted(assessment: NextLevelAssessment) -> Self {
+    fn exhausted(assessment: NextLevelAssessment, extends_last: bool) -> Self {
         Self {
             assessment,
             gain: None,
             selection: Vec::new(),
             complete: false,
-            extends_last: false,
+            extends_last,
         }
     }
 
     /// An exhausted plan that still carries the evidence its bound came from.
-    fn exhausted_with(assessment: NextLevelAssessment, gain: RefinementGainBracket) -> Self {
+    fn exhausted_with(
+        assessment: NextLevelAssessment,
+        gain: RefinementGainBracket,
+        extends_last: bool,
+    ) -> Self {
         Self {
             gain: Some(gain),
-            ..Self::exhausted(assessment)
+            ..Self::exhausted(assessment, extends_last)
         }
     }
 }
