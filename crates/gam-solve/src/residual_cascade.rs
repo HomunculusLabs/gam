@@ -4434,13 +4434,32 @@ impl ResidualCascadeDesign {
         }
         let r = core.residuals(&fit.coeff);
         let mut g = vec![0.0_f64; candidates.len()];
+        // Which candidates carry a row at all. A candidate whose bump covers no
+        // observation is an exactly zero column: it contributes nothing to `g`,
+        // nothing to the Schur complement, and — because its `λd` diagonal
+        // appears identically in `log|A|` and in `log|λD|₊` — nothing to the
+        // restricted likelihood either. Dropping it from the design the
+        // comparison is taken on is therefore an identity, not an
+        // approximation, and it is worth taking: at the radii this decision is
+        // made at, most of a dyadic level's centers sit between data points.
+        let mut supported = vec![false; candidates.len()];
         for (i, zi) in core.z.iter().enumerate() {
             let wr = core.w[i] * r[i];
             grid.for_neighbors(zi, |j| {
-                let rad = dist2(zi, &candidates[j as usize], core.dim).sqrt() / delta;
-                g[j as usize] += wr * wendland(rad);
+                let j = j as usize;
+                let rad = dist2(zi, &candidates[j], core.dim).sqrt() / delta;
+                let value = wendland(rad);
+                if value != 0.0 {
+                    supported[j] = true;
+                }
+                g[j] += wr * value;
             });
         }
+        let supported: Vec<[f64; 3]> = candidates
+            .iter()
+            .zip(supported.iter())
+            .filter_map(|(center, &carries)| carries.then_some(*center))
+            .collect();
         let d_next = level_weight(exponent, core.sobolev_s, core.dim);
         let lambda = gam_problem::checked_exp_log_strength(fit.log_lambda)
             .map_err(|error| format!("residual cascade refinement: {error}"))?;
@@ -4470,6 +4489,7 @@ impl ResidualCascadeDesign {
                     gain_bound,
                 },
                 bracket,
+                supported,
                 extends_last,
             ));
         }
@@ -4507,6 +4527,7 @@ impl ResidualCascadeDesign {
                     gain_bound,
                 },
                 bracket,
+                supported,
                 extends_last,
             ));
         }
@@ -4534,6 +4555,7 @@ impl ResidualCascadeDesign {
             assessment: NextLevelAssessment::GainBound(gain_bound),
             gain: Some(bracket),
             selection,
+            supported,
             complete,
             extends_last,
         })
@@ -4943,6 +4965,12 @@ struct NextLevelPlan {
     gain: Option<RefinementGainBracket>,
     /// Centers the refinement may add; empty exactly when nothing may be added.
     selection: Vec<[f64; 3]>,
+    /// The complete candidate set MINUS its exactly-zero columns — the centers
+    /// whose bumps cover no observation. Those columns cannot move the fit or
+    /// the evidence (their `λd` diagonal cancels between `log|A|` and
+    /// `log|λD|₊`), so this is the set the comparison is taken on, and it is the
+    /// complete set for every purpose the comparison has.
+    supported: Vec<[f64; 3]>,
     /// Whether the selection is the complete candidate set. A partial level is
     /// reproducible only from its explicit centers, so the plan carries them.
     complete: bool,
@@ -4959,19 +4987,26 @@ impl NextLevelPlan {
             assessment,
             gain: None,
             selection: Vec::new(),
+            supported: Vec::new(),
             complete: false,
             extends_last,
         }
     }
 
     /// An exhausted plan that still carries the evidence its bound came from.
+    /// An exhausted plan that still carries the evidence its bound came from
+    /// AND the candidate set that bound is over. A capacity with no room left
+    /// is exactly where the exact comparison matters most, so it is exactly
+    /// where the set must survive the plan.
     fn exhausted_with(
         assessment: NextLevelAssessment,
         gain: RefinementGainBracket,
+        supported: Vec<[f64; 3]>,
         extends_last: bool,
     ) -> Self {
         Self {
             gain: Some(gain),
+            supported,
             ..Self::exhausted(assessment, extends_last)
         }
     }
@@ -5512,8 +5547,15 @@ impl CascadeRequest<'_> {
         plan: &[LevelPlan],
         exponent: f64,
         extends_last: bool,
+        supported: &[[f64; 3]],
         fit: &ResidualCascadeFit,
     ) -> Result<Option<RefinementCertificate>, String> {
+        if supported.is_empty() {
+            // Every candidate is an exactly zero column. There is no comparison
+            // to make: such a set cannot move the objective and cannot charge an
+            // Occam factor.
+            return Ok(Some(RefinementCertificate::EXHAUSTED));
+        }
         let mut refined_plan = plan.to_vec();
         if extends_last {
             // Re-assessing the finest radius: the COMPLETE set there is the
@@ -5523,14 +5565,16 @@ impl CascadeRequest<'_> {
             // it plants is more than `h` from every other, so no member of the
             // complete set can be covered by the partial selection, and no
             // non-member can escape being covered by one.
-            refined_plan
+            let last = refined_plan
                 .last_mut()
-                .expect("the plan always carries a level")
-                .centers = None;
+                .expect("the plan always carries a level");
+            let mut centers = last.centers.take().unwrap_or_default();
+            centers.extend_from_slice(supported);
+            last.centers = Some(centers);
         } else {
             refined_plan.push(LevelPlan {
                 exponent,
-                centers: None,
+                centers: Some(supported.to_vec()),
             });
         }
         let refined_design = self.build(&refined_plan)?;
@@ -5719,7 +5763,13 @@ pub fn fit_residual_cascade(
             let evidence = match (screened, constructible) {
                 (Some(proved), _) => Some(proved),
                 (None, true) => {
-                    request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?
+                    request.candidate_level_evidence(
+                        &plan,
+                        exponent,
+                        extends_last,
+                        &planned.supported,
+                        &fit,
+                    )?
                 }
                 (None, false) => None,
             };
@@ -8306,18 +8356,17 @@ mod refinement_decision_tests {
     /// exact factor — the routes the comparison actually meets.
     #[test]
     fn the_certified_and_fixed_lambda_routes_report_the_same_restricted_likelihood_2759() {
-        for (side, levels) in [(18_usize, 3_usize), (44, 5)] {
+        for (side, levels, dense_arm) in [(18_usize, 3_usize, true), (44, 6, false)] {
             let (x1, x2, y) = dense_fixture(side);
             let weights = vec![1.0; y.len()];
             let axes: [&[f64]; 2] = [&x1, &x2];
             let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
                 .expect("cascade design");
-            let dense = design.core.dense_gram.is_some();
             assert_eq!(
-                dense,
-                side == 18,
-                "premise: the two arms must straddle the dense Gram cache (side {side} has {} \
-                 columns)",
+                design.core.dense_gram.is_some(),
+                dense_arm,
+                "premise: the two arms must straddle the dense Gram cache at \
+                 {DENSE_GRAM_MAX} columns (side {side}, {levels} levels, {} columns)",
                 design.core.m
             );
             let selected = design.fit_reml().expect("certified REML fit");
