@@ -2025,7 +2025,11 @@ pub(crate) fn build_latent_measure_with_geometry(
                 .to_string(),
         );
     }
-    Ok((decision.kind, decision.calibration, decision.empirical_build))
+    Ok((
+        decision.kind,
+        decision.calibration,
+        decision.empirical_build,
+    ))
 }
 
 /// The latent-measure gate, shared by both marginal-slope families.
@@ -2301,7 +2305,10 @@ impl LatentNormalAdequacy {
     /// statistic to its bound; a clause with `x <= 1` passed.
     pub(crate) fn ledger(&self) -> String {
         fn clause(name: &str, value: f64, bound: f64) -> String {
-            format!("{name}={value:.4e}/{bound:.4e}(x{:.2})", (value / bound).abs())
+            format!(
+                "{name}={value:.4e}/{bound:.4e}(x{:.2})",
+                (value / bound).abs()
+            )
         }
         format!(
             "n_eff={:.1} {} {} {} {} {} {} {} {}",
@@ -2309,10 +2316,22 @@ impl LatentNormalAdequacy {
             clause("|mean|", self.mean, self.mean_tol),
             clause("|sd-1|", self.sd - 1.0, self.sd_tol),
             clause("|skew|", self.skew, self.skew_tol),
-            clause("|excess_kurtosis|", self.excess_kurtosis, self.excess_kurtosis_tol),
+            clause(
+                "|excess_kurtosis|",
+                self.excess_kurtosis,
+                self.excess_kurtosis_tol
+            ),
             clause("ks", self.ks, self.ks_tol),
-            clause("tail_mass_inner", self.tail_mass_inner, self.tail_bound_inner),
-            clause("tail_mass_outer", self.tail_mass_outer, self.tail_bound_outer),
+            clause(
+                "tail_mass_inner",
+                self.tail_mass_inner,
+                self.tail_bound_inner
+            ),
+            clause(
+                "tail_mass_outer",
+                self.tail_mass_outer,
+                self.tail_bound_outer
+            ),
             clause("max_abs", self.max_abs, self.max_abs_tol),
         )
     }
@@ -2456,7 +2475,13 @@ pub(crate) fn build_global_empirical_latent_measure(
     z: &Array1<f64>,
     weights: &Array1<f64>,
     grid_size: usize,
-) -> Result<(LatentMeasureKind, empirical_measure_sensitivity::EmpiricalZGridBuild), String> {
+) -> Result<
+    (
+        LatentMeasureKind,
+        empirical_measure_sensitivity::EmpiricalZGridBuild,
+    ),
+    String,
+> {
     let build = empirical_measure_sensitivity::build_empirical_z_grid_with_alpha(
         z.view(),
         weights.view(),
@@ -2650,10 +2675,7 @@ mod stacked_first_stage_sandwich_2484_tests {
     /// `A`, weights, and a normal matrix `M = AᵀWA + λR` built exactly the way
     /// the calibration builds it, so the sandwich is exercised on a realistic
     /// bread rather than on an identity.
-    fn system(
-        basis: &Array2<f64>,
-        weights: &Array1<f64>,
-    ) -> Array2<f64> {
+    fn system(basis: &Array2<f64>, weights: &Array1<f64>) -> Array2<f64> {
         let mut wa = basis.clone();
         for (mut row, &w) in wa.rows_mut().into_iter().zip(weights.iter()) {
             row.iter_mut().for_each(|value| *value *= w);
@@ -2688,10 +2710,7 @@ mod stacked_first_stage_sandwich_2484_tests {
         let weights = Array1::from(vec![1.0, 1.0, 0.5, 0.5, 2.0, 2.0]);
         let mean_residuals = vec![0.6, -0.6, 0.9, -0.9, 0.3, -0.3];
         // r depends on û only through û², so it is equal within each pair.
-        let var_residuals: Vec<f64> = mean_residuals
-            .iter()
-            .map(|&u| u * u - 0.5)
-            .collect();
+        let var_residuals: Vec<f64> = mean_residuals.iter().map(|&u| u * u - 0.5).collect();
         let m = system(&basis, &weights);
 
         let joint = stacked_first_stage_sandwich_cov(
@@ -2804,9 +2823,9 @@ mod stacked_first_stage_sandwich_2484_tests {
 
 pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
-pub(crate) mod empirical_measure_sensitivity;
 #[cfg(test)]
 mod empirical_measure_2484_tests;
+pub(crate) mod empirical_measure_sensitivity;
 // #932 BMS flex single-source jet substrate (runtime-dimension `Jet2` + IFT
 // lift + cell base-moment jets). A bare `#[cfg(test)] mod` with an allowed name
 // so the build.rs ban-scanner exempts it; shared by its own FD gates and the

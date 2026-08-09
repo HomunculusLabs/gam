@@ -44,6 +44,18 @@
 //! On the `sd ≤ BMS_VARIANCE_FLOOR` branch the standardization is skipped, so
 //! `M = I` and the `1/sd` factor is absent.
 //!
+//! `M` is a PROJECTION, and that bounds the whole channel: `M·1 = 0` and
+//! `M·x = 0`, because the standardized grid carries weighted mean 0 and
+//! weighted sd 1 by construction. Shifting every `ζ_i` by the same amount, or
+//! rescaling them all, moves every raw node and no standardized one. So the
+//! cross-row channel only ever transmits the SHAPE of a node perturbation —
+//! which is why it is materially smaller in the published standard error than
+//! its own matrix norm suggests, and why what it scales with is the logslope
+//! (the thing that lets a row see the latent axis at all) rather than the grid
+//! size. Both identities are gated in `empirical_measure_2484_tests`, and the
+//! standard-error sweep behind the claim is
+//! `scripts/probe_2484_empirical_measure_sensitivity.py`.
+//!
 //! The one thing that is NOT differentiable is the sort order, and it fails in
 //! exactly one place: a tied group of rows whose cumulative-mass span a bin
 //! boundary cuts. There the left and right derivatives genuinely differ, so the
@@ -62,8 +74,7 @@
 //! wrapper over it and every existing caller and the wire are untouched.
 
 use super::{
-    BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid,
-    LatentMeasureKind,
+    BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid, LatentMeasureKind,
 };
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -140,10 +151,11 @@ impl EmpiricalZGridBuild {
     /// the cross-row contribution to the per-row sensitivity matrix is
     /// `(U_Q·D)ᵀ = Dᵀ·U_Qᵀ`.
     ///
-    /// Evaluated as `Aᵀ·(Mᵀ·V)/sd`: the `m × m` product first (`O(m²·p)`), then
-    /// the sparse scatter through `α` (`O(nnz(α)·p)`). With
-    /// `(Mᵀv)_c = (1/sd)·[v_c − w_c·Σ_b v_b − w_c·x_c·Σ_b x_b v_b]` the dense
-    /// half is really `O(m·p)`, so the whole apply is linear in the data.
+    /// Evaluated as `Aᵀ·(Mᵀ·V)/sd`. `Mᵀ` never has to be formed: two `m`-length
+    /// reductions give
+    /// `(Mᵀv)_c = (1/sd)·[v_c − w_c·Σ_b v_b − w_c·x_c·Σ_b x_b·v_b]` in `O(m·p)`,
+    /// after which `Aᵀ` is a sparse scatter through `α` in `O(nnz(α)·p)`. The
+    /// whole apply is therefore linear in the data, not quadratic in the grid.
     ///
     /// Returns `Err` when the build recorded a tie straddle: there is no
     /// derivative to apply.
@@ -651,13 +663,13 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
     let node_logslope =
         gam_linalg::faer_ndarray::fast_atb(&node_coeff_logslope.view(), &logslope_design);
     let mut node = Array2::<f64>::zeros((m, p_beta));
-    node.slice_mut(ndarray::s![.., ..p_m]).assign(&node_marginal);
-    node.slice_mut(ndarray::s![.., p_m..]).assign(&node_logslope);
+    node.slice_mut(ndarray::s![.., ..p_m])
+        .assign(&node_marginal);
+    node.slice_mut(ndarray::s![.., p_m..])
+        .assign(&node_logslope);
 
     if !direct.iter().all(|v| v.is_finite()) || !node.iter().all(|v| v.is_finite()) {
-        return Err(
-            "empirical score_zeta channels produced a non-finite sensitivity".to_string(),
-        );
+        return Err("empirical score_zeta channels produced a non-finite sensitivity".to_string());
     }
     Ok(EmpiricalRigidZetaChannels { direct, node })
 }

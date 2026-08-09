@@ -40,10 +40,12 @@ fn zeta_and_weights() -> (Array1<f64>, Array1<f64>) {
     let zeta = Array1::from(vec![
         -1.83, -1.10, -0.74, -0.31, -0.05, 0.17, 0.42, 0.68, 0.95, 1.31, 1.77, 2.40,
     ]);
-    // Total weight 12.4 over 5 bins ⇒ per-bin target 2.48, and the 3.5-weight
-    // row exceeds it.
+    // Total weight 14.9 over 5 bins ⇒ per-bin target 2.98. The 6.0-weight row
+    // is more than TWICE that and starts mid-bin, so it spans three bins and
+    // appears in `α` three times — the case the "at most two nonzeros per
+    // column" claim in the original design would have got wrong.
     let weights = Array1::from(vec![
-        0.7, 1.2, 0.9, 3.5, 0.0, 1.1, 0.8, 1.4, 0.6, 0.9, 0.7, 0.6,
+        0.7, 1.2, 0.9, 6.0, 0.0, 1.1, 0.8, 1.4, 0.6, 0.9, 0.7, 0.6,
     ]);
     (zeta, weights)
 }
@@ -121,14 +123,19 @@ fn node_zeta_sensitivity_matches_central_fd_of_the_production_builder_2484() {
         let mut minus = zeta.clone();
         plus[i] += h;
         minus[i] -= h;
-        let grid_plus = build_empirical_z_grid_with_alpha(plus.view(), weights.view(), GRID_SIZE, "fd")
-            .expect("perturbed grid builds")
-            .grid;
+        let grid_plus =
+            build_empirical_z_grid_with_alpha(plus.view(), weights.view(), GRID_SIZE, "fd")
+                .expect("perturbed grid builds")
+                .grid;
         let grid_minus =
             build_empirical_z_grid_with_alpha(minus.view(), weights.view(), GRID_SIZE, "fd")
                 .expect("perturbed grid builds")
                 .grid;
-        assert_eq!(grid_plus.nodes.len(), m, "the perturbation changed the node count");
+        assert_eq!(
+            grid_plus.nodes.len(),
+            m,
+            "the perturbation changed the node count"
+        );
         for b in 0..m {
             let fd = (grid_plus.nodes[b] - grid_minus.nodes[b]) / (2.0 * h);
             let tol = 1.0e-6 * (1.0 + fd.abs());
@@ -384,11 +391,69 @@ fn the_total_zeta_sensitivity_matches_a_double_central_fd_of_the_objective_2484(
 }
 
 #[test]
+fn the_standardization_annihilates_location_and_scale_2484() {
+    // An exact structural property of `D`, and the reason the cross-row channel
+    // is smaller in the published standard error than its matrix norm suggests
+    // (measured in `scripts/probe_2484_empirical_measure_sensitivity.py`).
+    //
+    // The grid is STANDARDIZED: its nodes carry weighted mean 0 and weighted sd
+    // 1 by construction. So no perturbation of `ζ` can move the measure's
+    // location or its scale — only its SHAPE. Two directions witness that
+    // exactly:
+    //
+    //   * shifting every `ζ_i` by the same δ shifts every RAW node by δ and
+    //     leaves the standardized nodes fixed  ⇒  `D·1 = 0`;
+    //   * scaling every `ζ_i` by `1 + ε` scales every raw node the same way and
+    //     again leaves the standardized nodes fixed  ⇒  `D·ζ = 0`.
+    //
+    // These are identities, not tolerances, so they hold to machine precision
+    // and would break under a dropped `−w_c·Σ v` or `−w_c·x_c·Σ x v` term in
+    // the `M` factor — the two terms a hand-rolled `∂x/∂n` most easily loses.
+    let (zeta, weights) = zeta_and_weights();
+    let build = build_empirical_z_grid_with_alpha(zeta.view(), weights.view(), GRID_SIZE, "test")
+        .expect("grid builds");
+    let m = build.grid.nodes.len();
+    let n = zeta.len();
+    let mut d_transpose = Array2::<f64>::zeros((n, m));
+    for b in 0..m {
+        let mut e_b = Array2::<f64>::zeros((m, 1));
+        e_b[[b, 0]] = 1.0;
+        let column = build.node_zeta_vjp(e_b.view()).expect("differentiable");
+        for i in 0..n {
+            d_transpose[[i, b]] = column[[i, 0]];
+        }
+    }
+    for b in 0..m {
+        let shift: f64 = (0..n).map(|i| d_transpose[[i, b]]).sum();
+        let rescale: f64 = (0..n).map(|i| d_transpose[[i, b]] * zeta[i]).sum();
+        assert!(
+            shift.abs() <= 1.0e-10,
+            "gam#2484: a uniform shift of ζ must not move standardized node {b}; got {shift:.3e}"
+        );
+        assert!(
+            rescale.abs() <= 1.0e-10,
+            "gam#2484: a uniform rescale of ζ must not move standardized node {b}; got \
+             {rescale:.3e}"
+        );
+    }
+}
+
+#[test]
 fn the_cross_row_channel_is_a_first_class_part_of_the_total_2484() {
     // The direct channel alone is what the standard-normal branch would have
     // supplied. If the grid channel were negligible the whole issue would be a
     // rounding error, so assert it is not: it must be a large fraction of the
     // total on this ordinary fixture.
+    //
+    // This is a claim about the SENSITIVITY MATRIX, which is what this file can
+    // see. It is deliberately NOT a claim about the published standard error:
+    // three contractions (`G = S_effᵀJ`, `Vb·G`, the `V₁` congruence) sit
+    // between the two, and the sweep in
+    // `scripts/probe_2484_empirical_measure_sensitivity.py` measures the SE
+    // effect at 1.2e-5 to 9.0e-3 relative, growing with the LOGSLOPE rather
+    // than with the grid size. Small enough that a direct-only implementation
+    // would pass casual inspection, which is the reason to be exact rather than
+    // a reason not to bother.
     let fixture = RowFixture::new();
     let build = build_empirical_z_grid_with_alpha(
         fixture.zeta.view(),
@@ -581,14 +646,12 @@ fn the_assembled_correction_is_psd_and_strictly_widens_the_naive_interval_2484()
         post_sd: 1.0,
         theta1_cov,
     };
-    let a_block =
-        Array2::<f64>::from_shape_fn((fixture.zeta.len(), basis_ncols), |(i, _)| {
-            ((i as f64) - 4.5) / 4.5
-        });
-    let raw_z = Array1::from_shape_fn(fixture.zeta.len(), |i| 0.4 * fixture.zeta[i] + 0.05);
-    let vb = Array2::<f64>::from_shape_fn((p_beta, p_beta), |(i, j)| {
-        if i == j { 0.25 } else { 0.02 }
+    let a_block = Array2::<f64>::from_shape_fn((fixture.zeta.len(), basis_ncols), |(i, _)| {
+        ((i as f64) - 4.5) / 4.5
     });
+    let raw_z = Array1::from_shape_fn(fixture.zeta.len(), |i| 0.4 * fixture.zeta[i] + 0.05);
+    let vb =
+        Array2::<f64>::from_shape_fn((p_beta, p_beta), |(i, j)| if i == j { 0.25 } else { 0.02 });
 
     let correction = calibration
         .generated_regressor_correction(s_eff.view(), raw_z.view(), a_block.view(), vb.view())

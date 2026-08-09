@@ -1,10 +1,10 @@
-use super::family::*;
-use super::gradient_paths::*;
-use super::hessian_paths::{new_cell_moment_cache_stats, new_cell_moment_lru_cache};
 use super::empirical_measure_sensitivity::{
     EmpiricalGeneratedRegressorChannel, classify_empirical_generated_regressor_channel,
     rigid_empirical_score_zeta_channels,
 };
+use super::family::*;
+use super::gradient_paths::*;
+use super::hessian_paths::{new_cell_moment_cache_stats, new_cell_moment_lru_cache};
 use super::install_flex::validate_spec;
 use super::*;
 use crate::marginal_slope_orthogonal::influence_absorber_log_lambda;
@@ -2690,73 +2690,73 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 .zip(right.iter())
                 .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
     };
-    let get_hyper_layout = |theta: &Array1<f64>,
-                            specs: &[TermCollectionSpec],
-                            designs: &[TermCollectionDesign]|
-     -> Result<crate::custom_family::SharedCustomFamilyHyperLayout, String> {
-        if let Some((cached_theta, cached_layout)) = hyper_layout_cache.borrow().as_ref()
-            && theta_matches(cached_theta, theta)
-        {
-            return Ok(Arc::clone(cached_layout));
-        }
+    let get_hyper_layout =
+        |theta: &Array1<f64>,
+         specs: &[TermCollectionSpec],
+         designs: &[TermCollectionDesign]|
+         -> Result<crate::custom_family::SharedCustomFamilyHyperLayout, String> {
+            if let Some((cached_theta, cached_layout)) = hyper_layout_cache.borrow().as_ref()
+                && theta_matches(cached_theta, theta)
+            {
+                return Ok(Arc::clone(cached_layout));
+            }
 
-        let built = |specs: &[TermCollectionSpec],
-                     designs: &[TermCollectionDesign]|
-         -> Result<
-            Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>>,
-            String,
-        > {
-            let marginal_psi_derivs = if marginal_has_spatial {
-                build_block_spatial_psi_derivatives(data_view, &specs[0], &designs[0])?.ok_or_else(
-                    || {
-                        "bernoulli marginal-slope: marginal block has spatial terms \
+            let built = |specs: &[TermCollectionSpec],
+                         designs: &[TermCollectionDesign]|
+             -> Result<
+                Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>>,
+                String,
+            > {
+                let marginal_psi_derivs = if marginal_has_spatial {
+                    build_block_spatial_psi_derivatives(data_view, &specs[0], &designs[0])?
+                        .ok_or_else(|| {
+                            "bernoulli marginal-slope: marginal block has spatial terms \
                          but spatial psi derivatives are unavailable"
-                            .to_string()
-                    },
-                )?
-            } else {
-                Vec::new()
-            };
-            let logslope_psi_derivs = if logslope_has_spatial {
-                let built = if let Some(reparam) = logslope_reduced_reparam.as_ref() {
-                    let transform =
-                        CoefficientSpatialPsiBlockTransform::new(&reparam.transform)?;
-                    build_block_spatial_psi_derivatives_with_transform(
-                        data_view,
-                        &specs[1],
-                        &designs[1],
-                        &transform,
-                    )?
+                                .to_string()
+                        })?
                 } else {
-                    build_block_spatial_psi_derivatives(data_view, &specs[1], &designs[1])?
+                    Vec::new()
                 };
-                built.ok_or_else(|| {
-                    "bernoulli marginal-slope: logslope block has spatial terms \
+                let logslope_psi_derivs = if logslope_has_spatial {
+                    let built = if let Some(reparam) = logslope_reduced_reparam.as_ref() {
+                        let transform =
+                            CoefficientSpatialPsiBlockTransform::new(&reparam.transform)?;
+                        build_block_spatial_psi_derivatives_with_transform(
+                            data_view,
+                            &specs[1],
+                            &designs[1],
+                            &transform,
+                        )?
+                    } else {
+                        build_block_spatial_psi_derivatives(data_view, &specs[1], &designs[1])?
+                    };
+                    built.ok_or_else(|| {
+                        "bernoulli marginal-slope: logslope block has spatial terms \
                      but spatial psi derivatives are unavailable"
-                        .to_string()
-                })?
-            } else {
-                Vec::new()
-            };
-            let mut derivative_blocks = vec![marginal_psi_derivs, logslope_psi_derivs];
-            if score_warp_runtime.is_some() {
-                derivative_blocks.push(Vec::new());
-            }
-            if link_dev_runtime.is_some() {
-                derivative_blocks.push(Vec::new());
-            }
-            Ok(derivative_blocks)
-        }(specs, designs)?;
-        let family_axes = if sigma_learnable { vec![0] } else { Vec::new() };
-        let hyper_values = theta.slice(s![setup.rho_dim()..]).to_owned();
-        let layout = Arc::new(crate::custom_family::CustomFamilyHyperLayout::new(
-            built,
-            family_axes,
-            hyper_values,
-        )?);
-        hyper_layout_cache.replace(Some((theta.clone(), Arc::clone(&layout))));
-        Ok(layout)
-    };
+                            .to_string()
+                    })?
+                } else {
+                    Vec::new()
+                };
+                let mut derivative_blocks = vec![marginal_psi_derivs, logslope_psi_derivs];
+                if score_warp_runtime.is_some() {
+                    derivative_blocks.push(Vec::new());
+                }
+                if link_dev_runtime.is_some() {
+                    derivative_blocks.push(Vec::new());
+                }
+                Ok(derivative_blocks)
+            }(specs, designs)?;
+            let family_axes = if sigma_learnable { vec![0] } else { Vec::new() };
+            let hyper_values = theta.slice(s![setup.rho_dim()..]).to_owned();
+            let layout = Arc::new(crate::custom_family::CustomFamilyHyperLayout::new(
+                built,
+                family_axes,
+                hyper_values,
+            )?);
+            hyper_layout_cache.replace(Some((theta.clone(), Arc::clone(&layout))));
+            Ok(layout)
+        };
 
     // Bernoulli marginal-slope is a multi-block family with β-dependent
     // joint Hessian: EFS/HybridEFS fixed-point structural invariant fails,
@@ -2794,13 +2794,9 @@ pub fn fit_bernoulli_marginal_slope_terms(
             final_sigma_cell.set(sigma);
             let family = make_family(&designs[0], &designs[1], sigma);
             let fit = match provenance {
-                SpatialFitProvenance::NoOuterOptimization => {
-                    inner_fit(&family, &blocks, options)?
-                }
+                SpatialFitProvenance::NoOuterOptimization => inner_fit(&family, &blocks, options)?,
                 SpatialFitProvenance::Certified { outer, mode } => {
-                    inner_fit_from_certified_outer(
-                        &family, &blocks, options, mode, theta, outer,
-                    )?
+                    inner_fit_from_certified_outer(&family, &blocks, options, mode, theta, outer)?
                 }
             };
             if let Some(block) = fit.block_states.first()
@@ -2921,7 +2917,8 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 hyper_layout,
                 &candidates,
                 effective_mode,
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             if let Some(err) = bernoulli_marginal_slope_runaway_error(
                 &selection.result.warm_start,
                 &designs[0],

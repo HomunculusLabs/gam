@@ -78,7 +78,7 @@ def D_matrix(zeta,w):
 np.random.seed(0)
 n=12
 zeta=np.array([-1.83,-1.10,-0.74,-0.31,-0.05,0.17,0.42,0.68,0.95,1.31,1.77,2.40])
-w=np.array([0.7,1.2,0.9,3.5,0.0,1.1,0.8,1.4,0.6,0.9,0.7,0.6])
+w=np.array([0.7,1.2,0.9,6.0,0.0,1.1,0.8,1.4,0.6,0.9,0.7,0.6])
 D,x,pi=D_matrix(zeta,w)
 h=1e-6
 err=0
@@ -212,3 +212,99 @@ def tie_certificate_report():
 
 
 tie_certificate_report()
+
+
+# ---------------------------------------------------------------------------
+# What the cross-row channel is worth ON THE PUBLISHED INTERVAL, and why it is
+# smaller there than its norm suggests.
+#
+# `|cross| / |direct|` is a property of the sensitivity MATRIX. What a user
+# sees is the standard error, after `G = S_eff^T J`, `Vb G`, and the `V1`
+# congruence — three contractions that can and do damp it. Reporting only the
+# matrix ratio would overstate the change.
+#
+# There is a structural reason for the damping, and it is worth stating because
+# it bounds the whole channel: the grid is STANDARDIZED. Its nodes carry
+# weighted mean 0 and weighted sd 1 by construction, so no perturbation of zeta
+# can move the measure's location or scale — only its SHAPE. `M` is exactly the
+# projection that enforces that (`(M^T v)_c = v_c − w_c*sum_b v_b −
+# w_c*x_c*sum_b x_b v_b` annihilates a node channel that is constant, and one
+# that is proportional to the nodes). A node channel with no shape content
+# contributes exactly nothing.
+#
+# Measured over grid size and logslope magnitude (V1 a scaled KMS correlation,
+# Vb = 0.25*I + 0.02 off-diagonal, so the ABSOLUTE ratios are fixture-specific;
+# the pattern across the sweep is not):
+#
+#     grid  slope  |cross|/|direct|  max SE corr/naive  max SE corr/direct-only
+#        3    0.3            0.0058             1.0577                 1.000012
+#        3    1.0            0.1053             1.3189                 1.000634
+#        3    3.0            0.6774             2.5301                 1.008743
+#        5    0.3            0.0066             1.0577                 1.000018
+#        5    1.0            0.1084             1.3190                 1.000831
+#        5    3.0            0.8048             2.5372                 1.009017
+#        8    0.3            0.0070             1.0577                 1.000020
+#        8    1.0            0.1116             1.3190                 1.000893
+#        8    3.0            0.7951             2.5343                 1.008965
+#
+# Three things fall out, and the second is the one that has to be said plainly.
+#
+# 1. The CORRECTION matters: 1.06x to 2.53x on the SE against the naive
+#    covariance. Publishing the naive matrix — the thing this seam refuses to
+#    do — understates the interval by that much.
+# 2. The CROSS-ROW HALF of it is second-order on these fixtures: 1.2e-5 to
+#    9.0e-3 relative on the SE. An implementation that used only the direct
+#    channel would be wrong by well under a percent here. That is exactly why
+#    it would have been a dangerous shortcut rather than an obvious one — it is
+#    the size of error nobody notices.
+# 3. It is NOT uniformly small, and what it scales with is the logslope, not
+#    the grid size: 3x the slope moves it by ~700x on the matrix and ~14x on
+#    the SE, while 3x the grid size barely moves either. The channel exists
+#    because the slope is what lets a row see the latent axis at all
+#    (`da/dx_b = 0` at `g = 0`), so a strongly-sloped fit is where it bites.
+# ---------------------------------------------------------------------------
+
+
+def standard_error_impact_report():
+    global GRID
+    conditioning = np.hstack([np.ones((nrow, 1)),
+                              np.array([[(i - 4.5) / 4.5] for i in range(nrow)])])
+    mean_c = np.array([0.05, 0.31])
+    var_c = np.array([0.9, 0.12])
+    floor = 1.0e-6
+    raw_z = 0.4 * zr + 0.05
+    jac = np.zeros((nrow, 4))
+    for i in range(nrow):
+        m_ = conditioning[i] @ mean_c
+        v_ = max(conditioning[i] @ var_c, floor)
+        jac[i, :2] = (-1.0 / np.sqrt(v_)) * conditioning[i]
+        centered = (raw_z[i] - m_) / np.sqrt(v_)
+        jac[i, 2:] = (-centered / (2.0 * v_)) * conditioning[i]
+    v1 = np.array([[0.04 * 0.6 ** abs(i - j) for j in range(4)] for i in range(4)])
+    vb = np.full((4, 4), 0.02)
+    np.fill_diagonal(vb, 0.25)
+
+    def congruence(sensitivity):
+        g = sensitivity.T @ jac
+        vg = vb @ g
+        return vg @ v1 @ vg.T
+
+    naive = np.sqrt(np.diag(vb))
+    print(f"{'grid':>5} {'slope':>6} {'|cross|/|direct|':>17} {'SE corr/naive':>14}"
+          f" {'SE corr/direct-only':>21}")
+    for grid_size in (3, 5, 8):
+        for slope_scale in (0.3, 1.0, 3.0):
+            GRID = grid_size
+            scaled = beta.copy()
+            scaled[2:] = beta[2:] * slope_scale
+            total, direct_only, cross_only = analytic(scaled, zr)
+            se_total = np.sqrt(np.diag(vb) + np.diag(congruence(total)))
+            se_direct = np.sqrt(np.diag(vb) + np.diag(congruence(direct_only)))
+            print(f"{grid_size:>5} {slope_scale:>6} "
+                  f"{np.linalg.norm(cross_only) / np.linalg.norm(direct_only):>17.4f} "
+                  f"{np.max(se_total / naive):>14.4f} "
+                  f"{np.max(se_total / se_direct):>21.6f}")
+    GRID = 5
+
+
+standard_error_impact_report()

@@ -6,10 +6,9 @@ use crate::model_types::{Dispersion, EstimationError};
 use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_linalg::utils::stack_offsets;
 use gam_problem::{
-    GlmLikelihoodSpec, InverseLink, LatentCLogLogState, LikelihoodScaleMetadata, LikelihoodSpec,
-    LogLikelihoodNormalization, MixtureLinkSpec, MixtureLinkState, ResponseFamily, SasLinkSpec,
-    FitStationarityEvidence, SasLinkState, StandardLink,
-    StationarityRung,
+    FitStationarityEvidence, GlmLikelihoodSpec, InverseLink, LatentCLogLogState,
+    LikelihoodScaleMetadata, LikelihoodSpec, LogLikelihoodNormalization, MixtureLinkSpec,
+    MixtureLinkState, ResponseFamily, SasLinkSpec, SasLinkState, StandardLink, StationarityRung,
 };
 
 pub use gam_problem::ExecutionPath;
@@ -715,9 +714,7 @@ impl RailTailEvidence {
                     && curvature_margin.is_finite()
                     && *min_curvature > *curvature_margin
             }
-            Self::ProbedTail { noise_floor, .. } => {
-                noise_floor.is_finite() && tail_constant > 0.0
-            }
+            Self::ProbedTail { noise_floor, .. } => noise_floor.is_finite() && tail_constant > 0.0,
         }
     }
 
@@ -867,7 +864,6 @@ impl OuterStationarityCertificate {
         matches!(self, Self::FixedPoint { .. })
     }
 
-
     /// The certified asymptote rails, when this is an `AsymptoteRail`.
     pub fn rails(&self) -> &[RailCoordinate] {
         match self {
@@ -939,7 +935,6 @@ pub struct CurvatureFloorClearance {
     /// Whether `H + diag(|g|)` is positive semidefinite on that sub-block.
     pub cleared: bool,
 }
-
 
 /// One railed coordinate together with the interval and margin it was judged
 /// against (#2530).
@@ -1399,8 +1394,7 @@ impl OuterCriterionCertificate {
                 RailFault::TailConstantRefusedByRoute
             } else if !(rail.value_gap.is_finite() && rail.value_gap >= 0.0) {
                 RailFault::UnusableValueGap
-            } else if !(rail.estimand_travel_bound.is_finite()
-                && rail.estimand_travel_bound >= 0.0)
+            } else if !(rail.estimand_travel_bound.is_finite() && rail.estimand_travel_bound >= 0.0)
             {
                 RailFault::UnusableTravelBound
             } else {
@@ -1575,9 +1569,7 @@ impl std::fmt::Display for CertificationRefusal {
             Self::UnusableBound { bound } => {
                 write!(f, "UNUSABLE STATIONARITY BOUND ({bound:.3e})")
             }
-            Self::NoRailOnRailCertificate => {
-                f.write_str("RAIL CERTIFICATE CARRIES NO RAIL")
-            }
+            Self::NoRailOnRailCertificate => f.write_str("RAIL CERTIFICATE CARRIES NO RAIL"),
             Self::MalformedRail {
                 index,
                 route,
@@ -1811,9 +1803,8 @@ impl Default for FitOptions {
 #[cfg(test)]
 mod tests_certification_refusal_2550 {
     use super::{
-        CertificationRefusal, CurvatureAdmissibility, CurvatureEvidence,
-        OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate, RailFault,
-        RailTailEvidence,
+        CertificationRefusal, CurvatureAdmissibility, CurvatureEvidence, OuterCriterionCertificate,
+        OuterStationarityCertificate, RailCoordinate, RailFault, RailTailEvidence,
     };
     use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
 
@@ -2180,11 +2171,7 @@ mod shipped_criterion_identity_tests {
         // ...and every configured family is correctly excluded, each because
         // its own gradient has a nonzero limit as rho -> +infinity.
         assert!(
-            !RhoPrior::Normal {
-                mean: 0.0,
-                sd: 3.0
-            }
-            .upper_tail_gradient_vanishes(0),
+            !RhoPrior::Normal { mean: 0.0, sd: 3.0 }.upper_tail_gradient_vanishes(0),
             "Normal leaves (rho - mean)/sd^2, which diverges"
         );
         assert!(
@@ -2207,10 +2194,7 @@ mod shipped_criterion_identity_tests {
         // certifiable on one coordinate and not on its neighbour.
         let mixed = RhoPrior::Independent(vec![
             RhoPrior::Flat,
-            RhoPrior::Normal {
-                mean: 0.0,
-                sd: 3.0,
-            },
+            RhoPrior::Normal { mean: 0.0, sd: 3.0 },
         ]);
         assert!(mixed.upper_tail_gradient_vanishes(0));
         assert!(!mixed.upper_tail_gradient_vanishes(1));
@@ -2881,8 +2865,7 @@ pub struct FitGeometry {
     /// This is deliberately part of the required wire schema: old constrained
     /// models must be regenerated rather than silently treating their reported
     /// coefficient vector as both a posterior mean and an optimizer mode.
-    pub constrained_posterior:
-        Option<crate::constrained_posterior::ConstrainedPosteriorGeometry>,
+    pub constrained_posterior: Option<crate::constrained_posterior::ConstrainedPosteriorGeometry>,
     /// Optional owned row-wise diagonal IRLS evidence. `None` is a typed
     /// statement that the terminal solver geometry has no single diagonal
     /// row representation; it is never represented by empty or zero-filled
@@ -2947,13 +2930,12 @@ impl FitConvergenceEvidence {
             // against nothing -- `Some(0.0) against None`, recorded on #2471.
             // A norm of different provenance is not a degraded version of the
             // certified residual; it is a different quantity.
-            stationarity: certificate.map_or(
-                FitStationarityEvidence::NoComparison,
-                |value| FitStationarityEvidence::Certified {
+            stationarity: certificate.map_or(FitStationarityEvidence::NoComparison, |value| {
+                FitStationarityEvidence::Certified {
                     residual: value.stationarity.projected_norm(),
                     bound: value.stationarity.bound(),
-                },
-            ),
+                }
+            }),
             // The solver exports no accepted-step residual on this path, so
             // there is no step comparison to report either.
             step: FitStationarityEvidence::NoComparison,
@@ -3660,14 +3642,11 @@ pub fn validate_explicit_dense_hessian_for_whitening(
     if expected_dim == 0 {
         return Ok(());
     }
-    hessian
-        .to_owned()
-        .cholesky(Side::Lower)
-        .map_err(|err| {
-            EstimationError::InvalidInput(format!(
-                "{label} must be positive definite for HMC/NUTS whitening; Cholesky failed: {err:?}"
-            ))
-        })?;
+    hessian.to_owned().cholesky(Side::Lower).map_err(|err| {
+        EstimationError::InvalidInput(format!(
+            "{label} must be positive definite for HMC/NUTS whitening; Cholesky failed: {err:?}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -3710,8 +3689,7 @@ fn flatten_block_lambdas(blocks: &[FittedBlock]) -> Array1<f64> {
 /// Kept as a single constant so the summary, `evidence`, `compare_models` and
 /// the Bayes-factor path cannot drift into describing the same state three
 /// different ways (#2595).
-pub const NO_CRITERION_AT_EXACT_FIT: &str =
-    "this fit has no REML/LAML criterion value: the fitted mean reproduces the response to \
+pub const NO_CRITERION_AT_EXACT_FIT: &str = "this fit has no REML/LAML criterion value: the fitted mean reproduces the response to \
      floating-point resolution, so the profiled Gaussian scale is exactly zero and the \
      restricted likelihood is unbounded. Evidence, Bayes factors and cross-model comparison \
      are undefined for an exactly-interpolating fit; compare it on predictive accuracy \
@@ -3844,8 +3822,7 @@ impl UnifiedFitResult {
     pub fn wald_residual_degrees_of_freedom(&self) -> Option<f64> {
         self.edf_total().and_then(|edf| {
             let residual_df = self.training_sample_size.get() as f64 - edf;
-            (edf.is_finite() && residual_df.is_finite() && residual_df > 0.0)
-                .then_some(residual_df)
+            (edf.is_finite() && residual_df.is_finite() && residual_df > 0.0).then_some(residual_df)
         })
     }
 
@@ -3921,8 +3898,8 @@ impl UnifiedFitResult {
             outer_gradient_norm
         };
 
-        let training_sample_size = std::num::NonZeroUsize::new(training_sample_size)
-            .ok_or_else(|| {
+        let training_sample_size =
+            std::num::NonZeroUsize::new(training_sample_size).ok_or_else(|| {
                 EstimationError::InvalidInput(
                     "UnifiedFitResult training_sample_size must be positive".to_string(),
                 )
@@ -4375,7 +4352,10 @@ impl UnifiedFitResult {
         // does not enter the covariance, so a d.f. change leaves `Vb`/`Vp`
         // untouched. When there is no inference block there is nothing whose
         // dispersion could be estimated, so treat it as fixed and bail.
-        let Some(dispersion) = self.inference.as_ref().map(|inference| inference.dispersion)
+        let Some(dispersion) = self
+            .inference
+            .as_ref()
+            .map(|inference| inference.dispersion)
         else {
             return Ok(1.0);
         };
@@ -4670,7 +4650,12 @@ impl UnifiedFitResult {
                     .as_ref()
                     .and_then(|inf| inf.beta_covariance_corrected.as_ref())
             })
-            .or_else(|| self.lambdas.is_empty().then(|| self.beta_covariance()).flatten())
+            .or_else(|| {
+                self.lambdas
+                    .is_empty()
+                    .then(|| self.beta_covariance())
+                    .flatten()
+            })
     }
 
     /// Get beta standard errors (conditional) if available.
@@ -4767,7 +4752,6 @@ impl UnifiedFitResult {
             .map(|inf| &inf.penalized_hessian)
             .or_else(|| self.geometry.as_ref().map(|geom| &geom.penalized_hessian))
     }
-
 
     /// Get owned row-wise diagonal working evidence if available.
     pub fn working_geometry(&self) -> Option<&WorkingGeometry> {
@@ -5119,7 +5103,10 @@ mod curvature_evidence_serialized_contract_2561_tests {
         ] {
             let parsed: CurvatureEvidence =
                 serde_json::from_str(wire).expect("legacy hessian_psd reloads");
-            assert_eq!(parsed, expected, "legacy {wire} must reload as {expected:?}");
+            assert_eq!(
+                parsed, expected,
+                "legacy {wire} must reload as {expected:?}"
+            );
         }
 
         // The lossy half, asserted rather than hidden.
@@ -5169,7 +5156,10 @@ mod curvature_evidence_serialized_contract_2561_tests {
                 None,
                 "{unmeasured:?} answered no curvature question, so it has no verdict"
             );
-            assert!(!unmeasured.was_measured(), "{unmeasured:?} was not measured");
+            assert!(
+                !unmeasured.was_measured(),
+                "{unmeasured:?} was not measured"
+            );
             assert_ne!(
                 CurvatureAdmissibility::Unevaluated {
                     evidence: unmeasured
@@ -5183,7 +5173,10 @@ mod curvature_evidence_serialized_contract_2561_tests {
         // to have) is a different fact from `NotAvailable` (a curvature
         // question that could not be answered) and from `NotSpent` (a
         // screening pass that declined to ask).
-        assert_ne!(CurvatureEvidence::NoEstimand, CurvatureEvidence::NotAvailable);
+        assert_ne!(
+            CurvatureEvidence::NoEstimand,
+            CurvatureEvidence::NotAvailable
+        );
         assert_ne!(CurvatureEvidence::NotSpent, CurvatureEvidence::NotAvailable);
         assert_ne!(CurvatureEvidence::NoEstimand, CurvatureEvidence::NotSpent);
     }
