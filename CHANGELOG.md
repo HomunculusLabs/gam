@@ -1,5 +1,64 @@
 ## Unreleased
 
+- **A measure-jet term's `ln ℓ` search box was a chosen absolute interval, and
+  `ℓ` is a length in the data's own chart (#2750).** Every measure-jet ψ
+  coordinate got the same kind of box:
+
+  ```rust
+  pub const MEASURE_JET_PSI_LN_LENGTH_SCALE_BOUNDS: (f64, f64) =
+      (-6.907755278982137, 4.605170185988092);   // ln[1e-3, 1e2]
+  ```
+
+  and the doc said why: *"Absolute (not seed-relative) so the bound producer
+  needs no data view, matching the other dial boxes."* For the two PENALTY dials
+  that is right — `α` and `ln τ` are dimensionless and no geometry bounds them.
+  For `ln ℓ` it is not: `ℓ` decides which span the representers occupy, it is a
+  LENGTH in the frame the basis is realized in, and the term already derives
+  both of its walls in `MeasureJetRangeBracket` —
+
+  * **floor** = the median nearest-node spacing (which is also the auto range):
+    below it neighbouring representers stop overlapping and the design
+    degenerates from a partition of unity into a bump-per-node indicator;
+  * **ceiling** = the node bounding-box diagonal: at that range every PAIR of
+    representers overlaps at `≥ exp(−1/2)`, so the block is numerically one
+    function plus the affine head and there is no distinct model past it.
+
+  Measured, frozen geometry read off the fitted terms:
+
+  ```text
+  fixture     m    fitted ln ℓ   geometry box        width   absolute box       width   ratio
+  perf_parity 16     −0.0404     [−0.6648, +1.6766]  2.3413  [−6.9078, +4.6052] 11.5129  4.92x
+  sweep seed1 50     +1.0922     [−2.9597, +1.2299]  4.1897  [−6.9078, +4.6052] 11.5129  2.75x
+  ```
+
+  A trust-region method scales its first step to the box it is handed. On
+  `measure_jet_perf_parity` the first `ln ℓ` step is `−0.693`, landing at
+  `ℓ = 0.488` against a floor of `0.5145` — **outside the term's own geometry** —
+  and it is rejected twelve times, every rejection a full design realization.
+  The `[KAPPA-PHASE]` trace of the whole fit is 105 outer evaluations and 57
+  design realizations, against 18 and 1 for a same-size `matern(k=16)` whose
+  `log κ` is the same kind of design-moving coordinate — to move `ln ℓ` by
+  `0.0154`.
+
+  The box is now `measure_jet_ln_range_window`: the bracket's own two walls,
+  read back rather than re-derived, WIDENED (never narrowed) to contain the
+  incumbent range — the same feasible-set rule `spatial_term_psi_search_box`
+  applies to the other spatial families (#2454). The constant is deleted; no
+  number replaces it.
+
+  The regression test is an INVARIANCE rather than a level: the window is made
+  of lengths, so rescaling the chart by `c` must shift both ends by exactly
+  `ln c` and leave the width fixed. An absolute window fails both halves by
+  construction — the same node configuration measured in metres and in
+  millimetres would be handed two different search problems, and at `c = 10³`
+  the seed moves `6.9` log units inside a window only `11.5` wide.
+
+  `[KAPPA-PHASE]` records now carry the SIGNED ψ coordinates beside `‖ψ‖`.
+  A norm is the right summary for a multi-axis anisotropy block and the wrong
+  one for a single signed coordinate: `‖ψ‖ = 0.718` is consistent with a trial
+  at `ℓ = 2.05` and with one at `ℓ = 0.49`, and only the second is outside the
+  window — which is exactly the distinction the diagnosis above turns on.
+
 - **A curvature refusal is now adjudicated BY THE CRITERION instead of asserted
   by the matrix (#2612).** `negative_curvature_escape_point` already stepped the
   criterion along the reported minimum eigenvector, and the code threw half of

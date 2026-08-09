@@ -2996,10 +2996,22 @@ impl SpatialLogKappaCoords {
         let mut cursor = 0;
         for (slot, &term_idx) in term_indices.iter().enumerate() {
             let d = dims_per_term[slot];
-            // Measure-jet: per-coordinate dial boxes, never κ-window geometry
-            // (which would reject legitimate dial values outright).
-            if let Some(mj) = measure_jet_term_spec(spec, term_idx) {
-                let bounds = measure_jet_psi_bound_values(mj, matches!(end, AnisoBoundEnd::Upper));
+            // Measure-jet: per-coordinate dial boxes, never the κ-window
+            // geometry (`-ln(length_scale)` is not this term's chart, and that
+            // window would reject legitimate dial values outright). The
+            // design-moving `ln ℓ` dial still gets a DATA-derived window — its
+            // own node-spacing floor and node-diameter ceiling — because it is a
+            // length in the chart the basis is realized in (gam#2750).
+            if measure_jet_term_spec(spec, term_idx).is_some() {
+                let term = spec
+                    .smooth_terms
+                    .get(term_idx)
+                    .expect("measure_jet_term_spec resolved this index");
+                let bounds = measure_jet_psi_bound_values(
+                    data,
+                    &term.basis,
+                    matches!(end, AnisoBoundEnd::Upper),
+                )?;
                 for (offset, bound) in bounds.into_iter().enumerate() {
                     if offset < d {
                         values[cursor + offset] = bound;
@@ -3485,14 +3497,6 @@ pub const MEASURE_JET_PSI_ALPHA_BOUNDS: (f64, f64) = (-1.0, 3.0);
 
 pub const MEASURE_JET_PSI_LN_TAU_BOUNDS: (f64, f64) = (-18.420680743952367, 4.605170185988092);
 
-/// Log-ℓ box for the design-moving representer length-scale dial (#1116). An
-/// ABSOLUTE window in the data coordinate scale (ln of ℓ ∈ [1e-3, 1e2]) used
-/// only when the spec explicitly enrolls the learned representer range. Absolute
-/// (not seed-relative) so the bound producer needs no data view, matching the
-/// other dial boxes. `ln(1e-3) = -6.9077…`, `ln(1e2) = 4.6051…`.
-pub const MEASURE_JET_PSI_LN_LENGTH_SCALE_BOUNDS: (f64, f64) =
-    (-6.907755278982137, 4.605170185988092);
-
 /// Number of multiscale PENALTY dials (excluding the design-moving ℓ):
 /// multiscale (per-scale spectral) mode carries (α, lnτ) = 2 — the order is
 /// either the pinned explicit `s` or absorbed by the REML-learned per-scale
@@ -3542,21 +3546,60 @@ pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> 
 
 /// One end of the per-coordinate dial boxes, in producer coordinate order
 /// (ℓ first when enrolled, then the multiscale penalty dials).
+///
+/// The two PENALTY dials are dimensionless — `α` selects a density
+/// normalization exponent and `ln τ` a ridge on the local projection — so
+/// nothing in the data's geometry bounds them and their boxes are the fixed
+/// intervals above. The design-moving `ln ℓ` dial is the opposite case: it is a
+/// LENGTH in the chart the basis is realized in, and its window is the term's
+/// own [`crate::basis::measure_jet_ln_range_window`] — the node-spacing floor
+/// and the node-diameter ceiling the range bracket already derives (gam#2750).
+/// The window is WIDENED, never narrowed, to contain the incumbent range, the
+/// same feasible-set rule [`spatial_term_psi_search_box`] applies to the other
+/// spatial families (#2454): a box that excludes the incumbent turns a
+/// monotonicity contract into a contradiction.
 pub fn measure_jet_psi_bound_values(
-    mj: &crate::basis::MeasureJetBasisSpec,
+    data: ArrayView2<'_, f64>,
+    term: &SmoothBasisSpec,
     upper: bool,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, BasisError> {
+    let SmoothBasisSpec::MeasureJet {
+        feature_cols,
+        spec: mj,
+        input_scale,
+    } = term
+    else {
+        crate::bail_invalid_basis!(
+            "measure-jet ψ bounds requested for a {} term",
+            term.structural_kind()
+        );
+    };
     let pick = |b: (f64, f64)| if upper { b.1 } else { b.0 };
     let mut bounds = Vec::with_capacity(measure_jet_psi_dim(mj));
     if measure_jet_learns_length_scale(mj) {
-        bounds.push(pick(MEASURE_JET_PSI_LN_LENGTH_SCALE_BOUNDS));
+        let mut columns = select_columns(data, feature_cols)?;
+        // A term that carries an input scale is realized in the standardized
+        // frame, and so is the `length_scale` the ψ seed reads; convert the
+        // view before measuring lengths in it.
+        if let Some(scale) = input_scale {
+            scale.standardize(&mut columns);
+        }
+        let (mut lo, mut hi) = crate::basis::measure_jet_ln_range_window(columns.view(), mj)?;
+        if mj.length_scale > 0.0 {
+            let incumbent = mj.length_scale.ln();
+            if incumbent.is_finite() {
+                lo = lo.min(incumbent);
+                hi = hi.max(incumbent);
+            }
+        }
+        bounds.push(if upper { hi } else { lo });
     }
     if measure_jet_penalty_psi_dim(mj) > 0 {
         // Multiscale penalty dials, producer order: (α, lnτ).
         bounds.push(pick(MEASURE_JET_PSI_ALPHA_BOUNDS));
         bounds.push(pick(MEASURE_JET_PSI_LN_TAU_BOUNDS));
     }
-    bounds
+    Ok(bounds)
 }
 
 /// Write optimized ψ dials back into a measure-jet spec. Returns `true` when

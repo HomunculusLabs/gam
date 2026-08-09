@@ -3625,6 +3625,27 @@ impl<'d> SpatialJointContext<'d> {
 /// NOT a gauge direction — it controls the identifiable isotropic scale
 /// κ = exp(ψ̄). The isotropic kind carries one log-κ coordinate per term. In
 /// neither case is a sum-to-zero constraint enforced during optimization.
+/// The ψ tail of `theta`, SIGNED and per-coordinate.
+///
+/// [`kphase_log_norms`] reports `‖ψ‖`, which is the right summary for a
+/// multi-axis anisotropy block and the wrong one for a single signed coordinate:
+/// measure-jet's ψ is `ln ℓ`, so `‖ψ‖ = 0.718` is consistent with a trial at
+/// `ℓ = 2.05` and with one at `ℓ = 0.49`, and only the second is outside the
+/// term's own geometry window. Reading the trajectory of a design-moving
+/// coordinate out of the log requires the sign (gam#2750), so the per-trial
+/// record carries the coordinates themselves alongside the norm.
+fn kphase_psi_display(theta: &Array1<f64>, rho_dim: usize) -> String {
+    let mut out = String::from("[");
+    for (offset, value) in theta.iter().skip(rho_dim).enumerate() {
+        if offset > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("{value:+.4e}"));
+    }
+    out.push(']');
+    out
+}
+
 fn kphase_log_norms(theta: &Array1<f64>, rho_dim: usize) -> (f64, f64) {
     let theta_norm = theta.iter().map(|v| v * v).sum::<f64>().sqrt();
     let log_kappa_norm = theta
@@ -4312,12 +4333,13 @@ fn run_exact_joint_spatial_optimization(
         kphase_eval_total_s.set(kphase_eval_total_s.get() + elapsed_s);
         let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, rho_dim);
         log::info!(
-            "[KAPPA-PHASE] phase=eval_outer call={} order={:?} design_revision={:?} theta_norm={:.4e} log_kappa_norm={:.4e} elapsed_s={:.4}",
+            "[KAPPA-PHASE] phase=eval_outer call={} order={:?} design_revision={:?} theta_norm={:.4e} log_kappa_norm={:.4e} psi={} elapsed_s={:.4}",
             kphase_eval_calls.get(),
             order,
             Some(ctx.cache.design_revision()),
             theta_norm,
             log_kappa_norm,
+            kphase_psi_display(theta, rho_dim),
             elapsed_s,
         );
         match raw {

@@ -1146,6 +1146,64 @@ pub fn measure_jet_range_bracket(
     })
 }
 
+/// The `ln ℓ` SEARCH WINDOW for the design-moving representer range, in the
+/// frame `spec.length_scale` is expressed in (gam#2750).
+///
+/// ## Why this is not an absolute interval
+///
+/// `ℓ` is a LENGTH in the chart the basis is realized in, so a window for it is
+/// a statement about the node cloud, not about `f64`. The term already derives
+/// both of its walls, and they are the same two
+/// [`MeasureJetRangeBracket`] uses:
+///
+/// * **floor** — the median nearest-node spacing (`MeasureJetBand::eps[0]`,
+///   which is also [`realized_measure_jet_length_scale`]'s auto value). At that
+///   range neighbouring representers overlap at `exp(−1/2)`; below it they stop
+///   overlapping and the design degenerates from a partition of unity into a
+///   bump-per-node indicator.
+/// * **ceiling** — the node bounding-box diagonal. At that range EVERY pair of
+///   representers overlaps at `≥ exp(−1/2)`, so the block is numerically one
+///   function plus the affine head and there is no distinct model past it.
+///
+/// Measured, against the `ln[1e-3, 1e2]` absolute window this replaces: the
+/// geometry window is `2.34` log units on `measure_jet_perf_parity` (16 nodes in
+/// 3-D) and `4.19` on the `measure_jet_formula_fit_robustness_sweep` seed-1 rows
+/// (50 nodes in 1-D), against `11.51` — **4.9× and 2.8× narrower**. A
+/// trust-region method scales its first step to the box it is handed, and the
+/// measured first `ln ℓ` step on the parity fixture is `−0.693`, which lands at
+/// `ℓ = 0.488` against a floor of `0.5145`: outside the term's own geometry, and
+/// rejected twelve times, every rejection a full design realization.
+///
+/// ## Frames
+///
+/// A REPLAY spec (frozen quadrature + `UserProvided` nodes) carries its range,
+/// its nodes and its band all in the standardized frame, so the window comes off
+/// the spec with no data view and no conversion. A FRESH spec's `length_scale`
+/// is an original-units request (the scale contract's asymmetric fresh/replay
+/// rule), so the window is realized from `data` in the frame the caller passed —
+/// which is the same frame the seed `ln(spec.length_scale)` is in either way.
+pub fn measure_jet_ln_range_window(
+    data: ArrayView2<'_, f64>,
+    spec: &MeasureJetBasisSpec,
+) -> Result<(f64, f64), BasisError> {
+    let (floor, ceiling) = match (&spec.center_strategy, &spec.frozen_quadrature) {
+        (CenterStrategy::UserProvided(nodes), Some(frozen)) if !frozen.eps_band.is_empty() => {
+            (frozen.eps_band[0], bounding_box_diagonal(nodes.view()))
+        }
+        _ => {
+            let bracket = measure_jet_range_bracket(data, spec)?;
+            (bracket.nodes[0], bracket.ceiling)
+        }
+    };
+    if !(floor.is_finite() && floor > 0.0 && ceiling.is_finite() && ceiling > floor) {
+        crate::bail_invalid_basis!(
+            "measure-jet ln-range window is degenerate: floor={floor}, ceiling={ceiling}; \
+             the node cloud has no distinct range scale to search over"
+        );
+    }
+    Ok((floor.ln(), ceiling.ln()))
+}
+
 /// Build the realized geometric scale band from the center set: floor at the
 /// median nearest-center spacing (below it the quadrature resolves nothing),
 /// ceiling at half the bounding-box diagonal (a deterministic diameter-scale
