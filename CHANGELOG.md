@@ -355,6 +355,20 @@
   written before the channel field existed, which must still load with the
   channel empty rather than fail.
 
+  **Subsystem sweep.** `cargo test -p gam-models --lib bms::` — **297 passed,
+  2 failed**, and neither failure is this change:
+  `bms::gradient_paths::jet_tower_oracle_tests::rigid_third_and_fourth_full_shares_one_tower_bit_identical`
+  (a last-ulp tower difference) and
+  `bms::tests::bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi`
+  (`psi[1]` at `rel = 4.132e-3`). Both are already recorded in
+  `bench/gha_results/rust-test-suite/MASTER_FAILURES.md`, written by CI run
+  31291341087 in `e146df43a`, which `git merge-base --is-ancestor` confirms
+  predates the first commit of this work. Neither path is touched here: the only
+  production edit outside the BMS covariance seam is the `clamp` fix below, and
+  it is bit-identical for `n >= 1024` (`rows.min(1024) == 1024`) and converts a
+  panic into a value below it — it cannot change a number that previously
+  computed.
+
   **What the channel is worth, stated honestly.** `|cross| / |direct|` is a
   property of the sensitivity MATRIX; a user sees a standard error, three
   contractions downstream. The correction as a whole moves the SE by
