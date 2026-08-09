@@ -221,6 +221,27 @@
   λ), at O(1) nats while each side is O(10³), so the two routes agreeing is a
   premise and is now charged on both width regimes.
 
+  **All four fixtures are back on the route a caller takes.** This issue's
+  acceptance was "either it certifies, or its refusal is shown to be a true
+  statement about the data at that `n`". Its first half took the second branch
+  and moved three of them off `fit_residual_cascade` — a serialization gate
+  going red because the cascade has remaining gain is not measuring
+  serialization — which was the honest reading while the criterion was what it
+  was. With the tolerance derived from the candidate set they take the FIRST
+  branch: `cascade_state_rejects_corruption`,
+  `cascade_state_roundtrip_reproduces_mean_and_variance` and the benign arm of
+  `quasi_uniformity_guard_rejects_degenerate_metric_keeps_benign` all fit
+  end-to-end again. `cargo test -p gam --test misc residual_cascade` is 26 of
+  26, from 25 of 26 with three fixtures held off the route; `cargo test
+  -p gam-solve --lib residual_cascade` is 29 of 29.
+
+  A candidate column whose bump covers no observation is exactly zero, and its
+  `λd` diagonal cancels between `log|A|` and `log|λD|₊`, so it contributes
+  nothing to the gain, nothing to the Occam factor, and nothing to the
+  restricted likelihood. Dropping such columns from the design the comparison is
+  built on is therefore an identity, and it is worth taking: 4976 of 7176
+  candidates are structurally empty at level 7 on 240 rows.
+
   One latent defect fell out of it: `NextLevelPlan::exhausted` hard-coded
   `extends_last: false`. That was invisible while the flag was read only on the
   refine path — an exhausted plan is never refined into — and fatal the moment
