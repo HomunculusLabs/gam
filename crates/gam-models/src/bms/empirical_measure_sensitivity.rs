@@ -62,7 +62,7 @@
 //! wrapper over it and every existing caller and the wire are untouched.
 
 use super::{BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid};
-use ndarray::{Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// A tied `ζ` group whose mass a bin boundary cuts, which is the only way the
 /// equal-mass compression stops being differentiable in `ζ`.
@@ -417,4 +417,235 @@ fn detect_tie_straddle(
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// The row side: `S` (direct) and `U_Q` (through the grid)
+// ---------------------------------------------------------------------------
+
+/// The two `ζ`-sensitivity channels of the rigid empirical-grid BMS kernel.
+///
+/// Together with `D` these are everything the Murphy–Topel chain needs:
+///
+/// ```text
+///   d score_β / d ζ_j  =  s_j  +  Σ_b u_b · D_{bj}
+///   S_eff              =  S    +  Dᵀ·U_Qᵀ
+/// ```
+pub(crate) struct EmpiricalRigidZetaChannels {
+    /// `S` (`n × p_β`): the DIRECT sensitivity `∂score_β,i/∂ζ_i` with the grid
+    /// held fixed — the analogue of what
+    /// [`super::gradient_paths::rigid_standard_normal_score_zeta_sensitivity`]
+    /// returns for the closed-form kernel, and NOT equal to it: the empirical
+    /// row's observed index is `a(m, g) + s·g·ζ_i` around an implicitly solved
+    /// intercept, not `q·√(1+(s·g)²) + s·g·ζ_i`.
+    pub(crate) direct: Array2<f64>,
+    /// `U_Qᵀ` (`m × p_β`): `∂score_β/∂node_b` summed over ALL rows. This is the
+    /// channel that has no counterpart in the standard-normal kernel, because
+    /// there the measure is a fixed law rather than a statistic of the sample.
+    pub(crate) node: Array2<f64>,
+}
+
+/// Both `ζ`-sensitivity channels of the rigid empirical-grid kernel, in one
+/// pass over the rows (they share the per-row intercept solve, which is the
+/// expensive part).
+///
+/// # The derivation
+///
+/// Write the row's implicitly-solved intercept as `a`, the grid nodes as `x_b`
+/// with weights `π_b`, `s` for the probit frailty scale, and
+/// `η_b = a + s·g·x_b`. The calibration that defines `a` is
+///
+/// ```text
+///   F(a; m, g, x) = Σ_b π_b Φ(η_b) − μ(m) = 0
+/// ```
+///
+/// so, with `Ψ_p = Σ_b π_b Φ^{(p)}(η_b)` and `Ξ_p = Σ_b π_b Φ^{(p)}(η_b)·(s x_b)`,
+///
+/// ```text
+///   a_m   =  μ'(m)/Ψ_1              a_g = −Ξ_1/Ψ_1
+///   a_x_b = −s·g·π_b Φ'(η_b)/Ψ_1
+/// ```
+///
+/// The last line has the two properties that say the sign and scale are right:
+/// `Σ_b a_x_b = −s·g` (shifting every node by δ shifts every `η_b` by `s·g·δ`,
+/// which the intercept must absorb exactly), and it is exactly zero at `g = 0`
+/// (a fit with no slope cannot see the latent axis).
+///
+/// Differentiating `a_m` and `a_g` once more, through both `a` and the explicit
+/// `x_b`:
+///
+/// ```text
+///   dΨ_1/dx_b = Ψ_2·a_x_b + s·g·π_b Φ''(η_b)
+///   dΞ_1/dx_b = Ξ_2·a_x_b + s·g·π_b Φ''(η_b)·(s x_b) + s·π_b Φ'(η_b)
+///   a_{m,x_b} = −a_m·(dΨ_1/dx_b)/Ψ_1
+///   a_{g,x_b} = −[dΞ_1/dx_b + a_g·(dΨ_1/dx_b)]/Ψ_1
+/// ```
+///
+/// The row's observed index is `e = a(m, g) + s·g·ζ_i`, so `e_m = a_m`,
+/// `e_g = a_g + s·ζ_i`, `e_{x_b} = a_{x_b}`, `e_ζ = s·g`, `e_{m,ζ} = 0`,
+/// `e_{g,ζ} = s`, and the second-order `e_{θ,x_b}` are the intercept's own. With
+/// `ℓ = −w·log Φ(σ·e)` and `k = [ℓ, ℓ', ℓ'']` the shared signed-probit stack
+/// ([`super::gradient_paths::signed_probit_neglog_unary_stack`], already carrying
+/// the row weight and the NEGATION), the LOG-LIKELIHOOD mixed partials are
+///
+/// ```text
+///   ∂²(log L)/∂θ∂u = −k₂·e_θ·e_u − σ·k₁·e_{θ,u}
+/// ```
+///
+/// for `u ∈ {ζ_i, x_b}`, which is what this function evaluates and contracts
+/// through the block design rows.
+///
+/// # Sign convention
+///
+/// LOG-LIKELIHOOD, matching
+/// [`super::gradient_paths::rigid_standard_normal_mixed_z_sensitivity`] (#1131):
+/// the returned quantities are `∂²(log L)/∂(primary)∂u`, so the downstream
+/// `Vb·G` is `+∂β̂/∂θ₁` rather than its negative.
+pub(crate) fn rigid_empirical_score_zeta_channels(
+    base_link: &gam_problem::InverseLink,
+    marginal_eta: &Array1<f64>,
+    slope_eta: &Array1<f64>,
+    zeta: &Array1<f64>,
+    y: &Array1<f64>,
+    weights: &Array1<f64>,
+    probit_scale: f64,
+    grid: &EmpiricalZGrid,
+    marginal_design: ArrayView2<'_, f64>,
+    logslope_design: ArrayView2<'_, f64>,
+    p_beta: usize,
+) -> Result<EmpiricalRigidZetaChannels, String> {
+    let n = marginal_eta.len();
+    let p_m = marginal_design.ncols();
+    let r = logslope_design.ncols();
+    if slope_eta.len() != n
+        || zeta.len() != n
+        || y.len() != n
+        || weights.len() != n
+        || marginal_design.nrows() != n
+        || logslope_design.nrows() != n
+    {
+        return Err(format!(
+            "empirical score_zeta channels row mismatch: marginal_eta={n}, slope_eta={}, zeta={}, \
+             y={}, weights={}, marginal_design rows={}, logslope_design rows={}",
+            slope_eta.len(),
+            zeta.len(),
+            y.len(),
+            weights.len(),
+            marginal_design.nrows(),
+            logslope_design.nrows()
+        ));
+    }
+    if p_m + r != p_beta {
+        return Err(format!(
+            "empirical score_zeta channels width mismatch: marginal({p_m}) + logslope({r}) != \
+             p_beta({p_beta})"
+        ));
+    }
+    let m = grid.nodes.len();
+    let s = probit_scale;
+
+    let mut direct = Array2::<f64>::zeros((n, p_beta));
+    // Per-row node coefficients, kept as two `n × m` blocks so the contraction
+    // into `U_Qᵀ` is two GEMMs rather than an `O(n·m·p_β)` scalar scatter.
+    let mut node_coeff_marginal = Array2::<f64>::zeros((n, m));
+    let mut node_coeff_logslope = Array2::<f64>::zeros((n, m));
+
+    let mut phi1 = vec![0.0_f64; m];
+    let mut phi2 = vec![0.0_f64; m];
+    for i in 0..n {
+        let marginal = super::family::bernoulli_marginal_link_map(base_link, marginal_eta[i])?;
+        let g = slope_eta[i];
+        let a = super::gradient_paths::empirical_intercept_from_marginal(
+            marginal.mu,
+            marginal.q,
+            g,
+            s,
+            &grid.nodes,
+            &grid.weights,
+            None,
+        )?;
+        let observed_slope = s * g;
+
+        // Ψ_1, Ψ_2, Ξ_1, Ξ_2 and the per-node CDF derivatives they are built
+        // from. `Φ' = φ`, `Φ'' = −η·φ`, taken from the same stack the row jet
+        // uses so the two paths cannot drift.
+        let (mut psi1, mut psi2, mut xi1, mut xi2) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for b in 0..m {
+            let node = grid.nodes[b];
+            let pi = grid.weights[b];
+            let eta_b = a + observed_slope * node;
+            let stack = super::gradient_paths::unary_derivatives_normal_cdf(eta_b);
+            let d1 = pi * stack[1];
+            let d2 = pi * stack[2];
+            phi1[b] = d1;
+            phi2[b] = d2;
+            psi1 += d1;
+            psi2 += d2;
+            xi1 += d1 * (s * node);
+            xi2 += d2 * (s * node);
+        }
+        if !(psi1.is_finite() && psi1 > 0.0) {
+            return Err(format!(
+                "empirical score_zeta channels: non-positive calibration Jacobian Ψ₁={psi1} at \
+                 row {i}"
+            ));
+        }
+        let a_m = marginal.mu1 / psi1;
+        let a_g = -xi1 / psi1;
+
+        // The row's own observed index and the shared signed-probit stack. `k`
+        // already carries the row weight and the NLL negation, so
+        // `w·σ·L' = −σ·k₁` and `w·L'' = −k₂`.
+        let sigma = 2.0 * y[i] - 1.0;
+        let e = a + observed_slope * zeta[i];
+        let k = super::gradient_paths::signed_probit_neglog_unary_stack(sigma * e, weights[i]);
+        if !(k[1].is_finite() && k[2].is_finite()) {
+            return Err(format!(
+                "empirical score_zeta channels: non-finite signed-probit stack at row {i}"
+            ));
+        }
+        let e_m = a_m;
+        let e_g = a_g + s * zeta[i];
+
+        // Direct channel: e_ζ = s·g, e_{m,ζ} = 0, e_{g,ζ} = s.
+        let direct_m = -k[2] * e_m * observed_slope;
+        let direct_g = -k[2] * e_g * observed_slope - sigma * k[1] * s;
+        if direct_m != 0.0 {
+            for (j, &x) in marginal_design.row(i).iter().enumerate() {
+                direct[[i, j]] = direct_m * x;
+            }
+        }
+        if direct_g != 0.0 {
+            for (j, &x) in logslope_design.row(i).iter().enumerate() {
+                direct[[i, p_m + j]] = direct_g * x;
+            }
+        }
+
+        // Node channel.
+        for b in 0..m {
+            let a_xb = -observed_slope * phi1[b] / psi1;
+            let d_psi1 = psi2 * a_xb + observed_slope * phi2[b];
+            let d_xi1 = xi2 * a_xb + observed_slope * phi2[b] * (s * grid.nodes[b]) + s * phi1[b];
+            let a_m_xb = -a_m * d_psi1 / psi1;
+            let a_g_xb = -(d_xi1 + a_g * d_psi1) / psi1;
+            node_coeff_marginal[[i, b]] = -k[2] * e_m * a_xb - sigma * k[1] * a_m_xb;
+            node_coeff_logslope[[i, b]] = -k[2] * e_g * a_xb - sigma * k[1] * a_g_xb;
+        }
+    }
+
+    // `U_Qᵀ[b, ·] = Σ_i coeff[i, b]·design.row(i)`, i.e. `Cᵀ·X` per block.
+    let node_marginal =
+        gam_linalg::faer_ndarray::fast_atb(&node_coeff_marginal.view(), &marginal_design);
+    let node_logslope =
+        gam_linalg::faer_ndarray::fast_atb(&node_coeff_logslope.view(), &logslope_design);
+    let mut node = Array2::<f64>::zeros((m, p_beta));
+    node.slice_mut(ndarray::s![.., ..p_m]).assign(&node_marginal);
+    node.slice_mut(ndarray::s![.., p_m..]).assign(&node_logslope);
+
+    if !direct.iter().all(|v| v.is_finite()) || !node.iter().all(|v| v.is_finite()) {
+        return Err(
+            "empirical score_zeta channels produced a non-finite sensitivity".to_string(),
+        );
+    }
+    Ok(EmpiricalRigidZetaChannels { direct, node })
 }

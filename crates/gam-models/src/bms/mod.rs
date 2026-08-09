@@ -2418,15 +2418,29 @@ pub(crate) fn latent_z_normal_adequacy(
     })
 }
 
+/// The global-empirical latent measure AND the fit-time record of how it was
+/// built.
+///
+/// The two are returned together, never separately: the record is what makes
+/// the measure differentiable in the sample it was compressed from (gam#2484),
+/// and a record obtained from a second call to the builder would be a record of
+/// a second compression.
 pub(crate) fn build_global_empirical_latent_measure(
     z: &Array1<f64>,
     weights: &Array1<f64>,
     grid_size: usize,
-) -> Result<LatentMeasureKind, String> {
-    let grid = build_empirical_z_grid(z, weights, grid_size, "empirical latent measure")?;
-    let measure = LatentMeasureKind::GlobalEmpirical { grid };
+) -> Result<(LatentMeasureKind, empirical_measure_sensitivity::EmpiricalZGridBuild), String> {
+    let build = empirical_measure_sensitivity::build_empirical_z_grid_with_alpha(
+        z.view(),
+        weights.view(),
+        grid_size,
+        "empirical latent measure",
+    )?;
+    let measure = LatentMeasureKind::GlobalEmpirical {
+        grid: build.grid.clone(),
+    };
     measure.validate("empirical latent measure")?;
-    Ok(measure)
+    Ok((measure, build))
 }
 
 pub(crate) fn weighted_ks_to_standard_normal(

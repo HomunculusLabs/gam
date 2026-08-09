@@ -5352,11 +5352,13 @@ pub fn fit_residual_cascade(
             match planned.gain.as_ref() {
                 Some(bracket) => log::debug!(
                     "[cascade] exponent={exponent} gain_bracket=[{:.6e}, {:.6e}] \
-                     cg_iterations={} requested_tolerance={requested_tolerance:.6e} \
+                     cg_iterations={} hadamard_occam={:.6e} \
+                     requested_tolerance={requested_tolerance:.6e} \
                      complete={} extends_last={}",
                     bracket.lower,
                     bracket.upper,
                     bracket.iterations,
+                    bracket.hadamard_occam,
                     planned.complete,
                     planned.extends_last,
                 ),
