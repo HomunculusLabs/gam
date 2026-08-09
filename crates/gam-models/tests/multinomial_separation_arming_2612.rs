@@ -127,6 +127,10 @@ fn separated_records(n: usize) -> Vec<StringRecord> {
     let mut rows = Vec::with_capacity(n);
     for index in 0..n {
         let x1 = -3.0 + 6.0 * (index as f64) / ((n - 1) as f64);
+        // A second covariate that is NOT a multiple of the first — an aliased
+        // column would be dropped by the identifiability audit and the fixture
+        // would be testing a one-covariate model without saying so.
+        let x2 = (2.7 * x1).sin();
         let class = if x1 < -1.0 {
             0
         } else if x1 < 1.0 {
@@ -136,7 +140,7 @@ fn separated_records(n: usize) -> Vec<StringRecord> {
         };
         rows.push(StringRecord::from(vec![
             x1.to_string(),
-            (0.5 * x1).to_string(),
+            x2.to_string(),
             CLASS_NAMES[class].to_string(),
         ]));
     }
@@ -230,6 +234,10 @@ fn a_smooth_multinomial_that_does_not_separate_keeps_the_prior_disarmed_2612() {
         );
     }
     let rmse = (squared / (600.0 * 3.0)).sqrt();
+    eprintln!(
+        "#2612 disarmed smooth fit: held-out truth-RMSE = {rmse:.5}, worst argmax shrinkage = \
+         {worst_shrinkage:+.5}"
+    );
     // The generating softmax keeps every class between roughly 0.15 and 0.6, so
     // an intercept-only fit scores about 0.13 here and a fit shrunk to the
     // uniform simplex scores worse still. The bar is loose enough to be about

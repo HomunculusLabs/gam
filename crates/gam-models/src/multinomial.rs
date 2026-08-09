@@ -494,12 +494,22 @@ fn multinomial_formula_separation_evidence(block_states: &[ParameterBlockState])
 ///
 /// # Why `H + S_λ` and not `H` (#2612)
 ///
-/// The gate's absolute arm fires when `λ_min < 1`, i.e. when the worst-determined
-/// direction holds less than **one observation-equivalent** of curvature, and its
-/// own derivation says why that is the right scale: such a direction "is, by
-/// construction, not identified by the data and is the regime Firth exists to
-/// stabilise". It also states the premise that makes it conservative — "it never
-/// fires on a genuinely well-conditioned large-`n` fit, whose `λ_min = O(n) ≫ 1`".
+/// The gate's absolute arm saturates at `λ_min < 1`, i.e. when the
+/// worst-determined direction holds less than **one observation-equivalent** of
+/// curvature, and its own derivation says why that is the right scale: such a
+/// direction "is, by construction, not identified by the data and is the regime
+/// Firth exists to stabilise". It also states the premise that makes it
+/// conservative — "it never fires on a genuinely well-conditioned large-`n` fit,
+/// whose `λ_min = O(n) ≫ 1`".
+///
+/// (The predicate this call site consults is `JointJeffreysPlan::is_active`,
+/// which is `gate_weight != 0`, and the weight is a C¹ ramp reaching exactly
+/// zero only at `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16`. So the arming boundary
+/// is sixteen observation-equivalents, not one — measured: an `n = 3000, k = 5`
+/// fit at `λ_min = 1.989` still armed, at weight `≈ 0.988`. That ramp is a
+/// continuity device for an always-on term — a binary gate makes `Φ(ρ)` jump,
+/// which is the #787 regression — so it stays; what changes is which matrix it
+/// is asked about.)
 ///
 /// That premise is false for **every penalized smooth basis**, and this call site
 /// used to hand the gate the bare Fisher information `H`. A `k`-dimensional
