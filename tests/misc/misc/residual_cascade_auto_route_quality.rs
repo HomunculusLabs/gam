@@ -19,9 +19,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::solver::residual_cascade::{
-    ResidualCascadeDesign, fit_residual_cascade,
-};
+use gam::solver::residual_cascade::{ResidualCascadeDesign, fit_residual_cascade};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };

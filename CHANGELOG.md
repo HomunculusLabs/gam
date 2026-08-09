@@ -3,18 +3,19 @@
 - **The refinement tolerance is now DERIVED from the candidate set instead of
   being a fixed fraction of the residual, because a fixed fraction charges
   nothing for the set's width (#2759).** #2759's first half closed a two-sided
-  bracket on the level-`(L+1)` gain and established that four cascade fixtures
-  refuse at the rank-maximal design with the exact remaining
+  bracket on the level-`(L+1)` gain and established that the cascade fixtures
+  refusing at the rank-maximal design have the exact remaining
   penalized-objective decrease bounded away from `REFINE_TOL·rss_pen` from
-  BELOW — so the refusals were the cascade's remaining gain, not the
+  BELOW — so those refusals were the cascade's remaining gain, not the
   certificate's conservatism. What it left open is whether that decrease is the
   thing the criterion should be reading. It is not.
 
   At the `smoothness_ceiling_...` refusal the candidate level is **32790
-  columns against 5997 identifiable directions** on `n = 6000`. Those
-  candidates are redundant against the data's own row space; what they buy is
-  penalty dilution and noise capacity, and `1e-3·rss_pen` cannot tell that from
-  discretization bias because it never looks at the set.
+  columns against 5997 identifiable directions** on `n = 6000`. Past the data's
+  identifiable rank those candidates are redundant against the sample's own row
+  space; what they buy is penalty dilution and noise capacity, and
+  `1e-3·rss_pen` cannot tell that from discretization bias because it never
+  looks at the set.
 
   The missing charge is the set's own Occam factor — the log-determinant of the
   SAME Schur complement the gain is a quadratic form in:
@@ -40,13 +41,14 @@
   question "does one more level explain the data better?" has an exact answer
   exactly where the cascade used to have only a bound.
 
-  The bracket is kept as the SCREEN. Hadamard on `S ⪯ diag(X₂ᵀWX₂) + λd` bounds
-  `occam` from above for nothing — it is a reduction over the Jacobi
-  preconditioner the bracket already forms — so a gain bracket whose LOWER end
-  clears that bound's break-even gain proves the level warranted without
-  building anything. Measured on the fixture's ladder, it fires on the coarse
-  rungs and steps aside on the two rungs that decide, which is the right way
-  round.
+  The bracket is kept as the SCREEN, and it is not a different instrument: read
+  the gain from its LOWER end and the Occam factor from Hadamard on
+  `S ⪯ diag(X₂ᵀWX₂) + λd` (a reduction over the Jacobi preconditioner the
+  bracket already forms), and both readings understate the evidence, so a
+  positive evidence there PROVES the level warranted without building anything.
+  It settles the positive side only — a fit is never minted on it — which is
+  what lets it carry the memory-boundary refusal at `n = 525_000` without
+  materializing a design wider than the budget that refusal exists to protect.
 
   Measured, `n = 6000`, the fixture's own ladder:
 
@@ -63,14 +65,33 @@
   and demands another level; the restricted likelihood says the finer prior is
   13.2 nats WORSE; and the held-out RMSE against the planted truth agrees with
   the likelihood, not with the bar — refining makes it worse. `n = 2000`
-  reproduces the same turnover at its own rank-maximal rung (−18.2 nats,
-  0.03087 → 0.03133).
+  reproduces the same turnover at its own rank-maximal rung (−18.7 nats,
+  0.03087 → 0.03129).
 
   **The obvious objection, run and killed.** The comparison is at the
   incumbent's λ, so the refined design might win it back at a λ of its own.
   Swept `log λ ± 1, 2, 3` on the refined design at every rung: at both turnover
-  rungs the best λ IS the incumbent's, to the printed digit. The verdict is not
-  an artifact of the fixed λ.
+  rungs the best λ IS the incumbent's, to the printed digit. Structurally that
+  is what has to happen — at the turnover the extra columns are redundant, so
+  the score surface barely moves and its optimum does not — and the sweep is
+  now a gate rather than an observation.
+
+  **The identifiability frontier is where the cascade STOPS, not where it
+  refuses.** Two fixtures asserted a refusal there and now mint the
+  rank-maximal fit, for the same reason: at `n = 240` the level proposes 504
+  penalized modes against 237 identifiable directions and is worth −0.30 nats;
+  at `n = 2000`, 6968 against 1997. Neither exists to test the certificate —
+  both exist to keep the automatic route out of a rank-deficient score search
+  whose cost is exponential in the subdivision depth — and stopping at the
+  frontier keeps it out just as a refusal did, while returning a usable fit.
+  The measured boundaries are asserted exactly as before; only the verdict
+  taken on them moved. The typed `Underresolved` refusal is not orphaned: it is
+  the MEMORY boundary, where the design is capped BELOW the identifiable rank
+  and the levels it cannot reach do pay for themselves
+  (`past_cliff_...`, `n = 525_000`, unchanged).
+  `cascade_matches_or_beats_dense_duchon_on_truth_recovery` reports RMSE
+  0.02781 against the dense comparator's 0.03018, so the shallower stopping
+  point costs no accuracy.
 
   Verified: the Occam term read off the two restricted log-likelihoods is
   checked against the candidate Schur log-determinant formed DENSELY, one
