@@ -331,6 +331,30 @@
     bins=4 (a boundary cuts it):  |right − left| = 5.39e-01   TWO-SIDED
   ```
 
+  **The witnesses.** The three `..._starts_outer_solver` fixtures gam#2484 was
+  filed against:
+
+  ```
+  binary_outcome_shape_bms_shared_matern_prs_pc_confound_starts_outer_solver ..... ok
+  production_like_binary_outcome_shared_matern_centers10_confound_starts_outer_solver ... ok
+  production_like_binary_outcome_shared_matern_learned_kappa_starts_outer_solver ....... FAILED
+  ```
+
+  The third fails on `INDEFINITE CURVATURE AT INTERIOR OPTIMUM` (`|g| = 1.241e-2`
+  against `bound = 3.850e-2`, `hessian_psd = NO`) — the outer-stationarity
+  cluster, which is not this seam and never reaches it. That is the state
+  gam#2484's own 2026-08-01 measurement recorded: *"masked, not resolved … it is
+  now blocked one stage earlier."* Its calibrated residual still selects
+  `global-empirical`, so it would be corrected if the outer solve certified.
+  Both witnesses that reach the seam pass.
+
+  `tests/bms_covariance_declined_2718.rs` runs in **2.3 s** (4 arms) against
+  22 min before, with strictly more coverage: the end-to-end withholding witness
+  moved to the classifier, where all four arms are decided with no fit in the
+  loop, and the wire contract is asserted on the payload — including a payload
+  written before the channel field existed, which must still load with the
+  channel empty rather than fail.
+
   **What the channel is worth, stated honestly.** `|cross| / |direct|` is a
   property of the sensitivity MATRIX; a user sees a standard error, three
   contractions downstream. The correction as a whole moves the SE by
