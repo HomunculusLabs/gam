@@ -1673,6 +1673,24 @@ class MultinomialModel:
             f"  deviance: {float(meta['deviance']):.6g}",
             f"  penalized -log L: {float(meta['penalized_neg_log_likelihood']):.6g}",
         ]
+        # Which estimand this model publishes (#2612). The Jeffreys/Firth proper
+        # prior is engaged automatically on separation evidence — `firth=` is
+        # rejected on this family for exactly that reason — and armed, the
+        # coefficients carry an O(1/n) pull toward the uniform simplex 1/K. A
+        # reader comparing two fits, or scoring calibration, needs to know which
+        # objective produced the numbers. `.get` (not `[...]`) so a model saved
+        # before the field existed still summarises.
+        separation = meta.get("separation_evidence")
+        if separation is None:
+            lines.append(
+                "  separation: none detected; Jeffreys/Firth prior disarmed "
+                "(unbiased penalized-REML mode)"
+            )
+        else:
+            lines.append(
+                "  separation: Jeffreys/Firth proper prior ARMED (coefficients carry "
+                f"the Firth bias correction) — {separation}"
+            )
         # Per-class slope-norm + REML λ + hat-matrix trace rollup. Coefficients
         # are stored in row-major `(P, K-1)` order; column `a` is class
         # `levels[a]`.

@@ -1275,6 +1275,16 @@ fn multinomial_model_metadata_pyfunc<'py>(
     // label here component-for-component instead of assuming one λ per term.
     out.set_item("lambda_labels", envelope.saved.lambda_labels.clone())?;
     out.set_item("iterations", envelope.saved.iterations)?;
+    // #2612: which estimand this model publishes. `None` is the unbiased
+    // penalized-REML mode; a string is the certificate that armed the
+    // Jeffreys/Firth proper prior, whose `O(1/n)` pull toward the uniform
+    // simplex the coefficients then carry. Exported unconditionally, including
+    // the `None` case, because "the prior was disarmed" and "this model predates
+    // the field" are different facts and a missing key cannot tell them apart.
+    out.set_item(
+        "separation_evidence",
+        envelope.saved.separation_evidence.clone(),
+    )?;
     out.set_item(
         "penalized_neg_log_likelihood",
         envelope.saved.penalized_neg_log_likelihood,
