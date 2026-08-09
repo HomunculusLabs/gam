@@ -3179,7 +3179,7 @@ pub fn fit_penalized_multinomial_formula(
 
     let run_firth_refit =
         |evidence: String,
-         warm_start: Option<(&[ParameterBlockState], &Array1<f64>)>| {
+         warm_start: Option<(&[ParameterBlockState], Option<&Array1<f64>>)>| {
         let mut firth_family = family.clone().with_joint_jeffreys_term(true);
         let mut firth_blocks = blocks.clone();
         if let Some((states, log_lambdas)) = warm_start {
@@ -3207,13 +3207,14 @@ pub fn fit_penalized_multinomial_formula(
                 }
                 block.initial_beta = Some(state.beta.clone());
             }
-            if log_lambdas.iter().any(|value| !value.is_finite()) {
-                return Err(EstimationError::InvalidInput(
-                    "multinomial Firth warm start contains non-finite log-lambdas".to_string(),
-                ));
+            if let Some(log_lambdas) = log_lambdas {
+                if log_lambdas.iter().any(|value| !value.is_finite()) {
+                    return Err(EstimationError::InvalidInput(
+                        "multinomial Firth warm start contains non-finite log-lambdas".to_string(),
+                    ));
+                }
+                firth_family = firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
             }
-            firth_family =
-                firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
         }
         log::info!(
             "multinomial REML: arming the Jeffreys/Firth proper prior — separation evidence: \
@@ -3291,16 +3292,23 @@ pub fn fit_penalized_multinomial_formula(
                 // strongest available local information and repeat the whole
                 // unbiased path.
                 let evidence = separation.expect("checked as present");
-                let joint_log_lambdas = probe_fit
-                    .artifacts
-                    .joint_log_lambdas
-                    .as_ref()
-                    .ok_or_else(|| {
-                        EstimationError::InvalidInput(
-                            "multinomial unbiased fit omitted its converged joint log-lambdas"
-                                .to_string(),
-                        )
-                    })?;
+                // #2612: a model with NO penalty component selects no smoothing
+                // parameter, so `joint_log_lambdas` is legitimately absent — the
+                // same "no penalty is a value, not an absence" the joint-penalty
+                // operator carries. Only a PENALIZED probe that reached a
+                // certified optimum without surfacing its own selected λ is a
+                // broken fit, and only that is refused here. The coefficient
+                // warm start is handed over either way: it is the strongest
+                // available local information about the mode, and on an
+                // unpenalized model it is the whole of it.
+                let joint_log_lambdas = probe_fit.artifacts.joint_log_lambdas.as_ref();
+                if joint_log_lambdas.is_none() && !penalties_arc.is_empty() {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "multinomial unbiased fit carries {} penalty component(s) but omitted \
+                         its converged joint log-lambdas",
+                        penalties_arc.len(),
+                    )));
+                }
                 run_firth_refit(
                     evidence,
                     Some((&probe_fit.block_states, joint_log_lambdas)),

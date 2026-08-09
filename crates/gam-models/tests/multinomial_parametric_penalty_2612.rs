@@ -40,34 +40,54 @@ use ndarray::Array2;
 const N_TRAIN: usize = 600;
 const CLASS_NAMES: [&str; 3] = ["a", "b", "c"];
 
-/// Deterministic low-discrepancy covariates and a three-class softmax label with
-/// a genuine overlap region, so the fit is an ordinary interior one and neither
-/// arm is testing a separation path.
+/// Deterministic low-discrepancy covariates and labels DRAWN from a three-class
+/// softmax truth.
+///
+/// Drawing rather than taking the argmax is load-bearing, not decoration. An
+/// argmax label is a deterministic function of `x`, so the classes are exactly
+/// separated by their own decision boundaries; the softmax MLE then runs to
+/// infinity, the formula path certifies (quasi-)separation and re-solves with
+/// the Jeffreys/Firth prior armed, and both arms below would be exercising the
+/// separation lane instead of the ordinary interior fit they are about. The
+/// draw uses a small deterministic LCG — reproducible, no RNG dependency, no
+/// seed to choose.
 fn training_records() -> Vec<StringRecord> {
     let mut rows = Vec::with_capacity(N_TRAIN);
+    let mut lcg: u64 = 0x2612_2612_2612_2612;
+    let mut next_unit = || -> f64 {
+        lcg = lcg
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((lcg >> 11) as f64) / ((1u64 << 53) as f64)
+    };
     for index in 0..N_TRAIN {
-        // Two coprime golden-ratio-style strides: no RNG, no repeats.
+        // Two coprime golden-ratio-style strides: covariates stay deterministic
+        // and well spread, so only the labels carry randomness.
         let x1 = -2.0 + 4.0 * (((index as f64) * 0.618_033_988_749_894_8) % 1.0);
         let x2 = -2.0 + 4.0 * (((index as f64) * 0.414_213_562_373_095_1) % 1.0);
-        // A smooth, non-degenerate class assignment: the argmax of three linear
-        // scores plus a deterministic wobble that keeps every class populated
-        // and the boundaries genuinely overlapped.
-        let wobble = (3.0 * x1 + 1.7 * x2).sin();
+        // Moderate, smooth, non-degenerate class scores: every class keeps
+        // appreciable probability everywhere, so no direction is separating.
         let scores = [
-            0.9 * x1 - 0.4 * x2 + 0.3 * wobble,
-            -0.5 * x1 + 0.8 * x2 - 0.2 * wobble,
-            0.1 * x1 + 0.1 * x2 + 0.5 * wobble,
+            0.6 * x1 - 0.3 * x2,
+            -0.4 * x1 + 0.5 * x2,
+            0.2 * (x1 * x1 - x2 * x2) * 0.25,
         ];
-        let mut best = 0usize;
-        for class in 1..3 {
-            if scores[class] > scores[best] {
-                best = class;
+        let shift = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights: Vec<f64> = scores.iter().map(|s| (s - shift).exp()).collect();
+        let total: f64 = weights.iter().sum();
+        let mut draw = next_unit() * total;
+        let mut label = CLASS_NAMES.len() - 1;
+        for (class, weight) in weights.iter().enumerate() {
+            if draw < *weight {
+                label = class;
+                break;
             }
+            draw -= weight;
         }
         rows.push(StringRecord::from(vec![
             x1.to_string(),
             x2.to_string(),
-            CLASS_NAMES[best].to_string(),
+            CLASS_NAMES[label].to_string(),
         ]));
     }
     rows
@@ -163,6 +183,15 @@ fn parametric_multinomial_publishes_the_zero_penalty_it_has_2612() {
 /// published `S_λ` is the one the published influence matrix was built from.
 /// `F = I − H⁻¹S_λ` is checked against the fit's OWN covariance and influence,
 /// so a payload assembled from different specs or different λ fails here.
+///
+/// BASIS. The published covariance is mapped to RAW parametric units while the
+/// influence matrix and `S_λ` stay in the fitted basis, so the identity is only
+/// stated where those coincide. `y ~ s(x1) + s(x2)` carries no unpenalized
+/// LINEAR column — the standardization only touches `design.linear_ranges`
+/// entries that no penalty covers — so the affine is the identity here and the
+/// three matrices are in one basis. (The unpenalized arm above spans the other
+/// case: it DOES standardize `x1`/`x2`, and `F = I` is basis-free, since
+/// `A I A⁻¹ = I`.)
 #[test]
 fn published_penalty_reproduces_the_published_influence_matrix_2612() {
     let model = fit("y ~ s(x1, k=6) + s(x2, k=6)");

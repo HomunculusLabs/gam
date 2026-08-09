@@ -1061,6 +1061,28 @@ pub enum CurvatureEvidence {
     /// to be admissible or otherwise. Distinct from [`Self::NotAvailable`],
     /// which means a curvature question existed and could not be answered.
     NoEstimand,
+    /// A Hessian was measured, reported a negative direction, and **the
+    /// criterion itself was then asked about that direction and did not fall**
+    /// (#2612).
+    ///
+    /// The escape steps `ρ ± αv` along the reported minimum eigenvector, in
+    /// both signs, from one e-fold down to the step at which the quadratic
+    /// model's own predicted decrease `½|λ_min|α²` reaches the criterion's
+    /// resolution. Below that step the claim predicts nothing the criterion can
+    /// represent, so that ladder covers the claim's WHOLE falsifiable range. A
+    /// direction that lowers the objective nowhere in it is not a descent
+    /// direction of this criterion, whatever the matrix says.
+    ///
+    /// This is a statement about the MATRIX, not about the point, and it is the
+    /// reason the second-order conjunct does not refuse here: refusing would
+    /// spend evidence the criterion has just contradicted. It is deliberately
+    /// NOT [`Self::Measured`] with `psd: true` — nothing established that the
+    /// point is a minimum either; what was established is that this Hessian's
+    /// negative direction has no operational content.
+    ///
+    /// Reachable only where an analytic Hessian exists AND the objective can be
+    /// re-evaluated at trial points, which is exactly where the escape runs.
+    CriterionContradicted,
 }
 
 impl CurvatureEvidence {
@@ -1069,11 +1091,20 @@ impl CurvatureEvidence {
     pub fn psd(self) -> Option<bool> {
         match self {
             Self::Measured { psd } => Some(psd),
-            Self::NotSpent | Self::NotAvailable | Self::NoEstimand => None,
+            Self::NotSpent
+            | Self::NotAvailable
+            | Self::NoEstimand
+            | Self::CriterionContradicted => None,
         }
     }
 
     /// Whether a curvature question was actually answered here.
+    ///
+    /// [`Self::CriterionContradicted`] answers `false`: a Hessian was measured
+    /// there, but its verdict was withdrawn by the criterion, so no curvature
+    /// ANSWER survives. Reporting `true` would let a consumer that asked for a
+    /// real second-order guarantee read a withdrawn verdict as a delivered one,
+    /// which is the #2578 conflation one variant further along.
     pub fn was_measured(self) -> bool {
         matches!(self, Self::Measured { .. })
     }
@@ -1112,6 +1143,7 @@ impl std::fmt::Display for CurvatureEvidence {
             Self::NotSpent => "not-spent",
             Self::NotAvailable => "n/a",
             Self::NoEstimand => "no-estimand",
+            Self::CriterionContradicted => "criterion-contradicted",
         })
     }
 }
@@ -1138,6 +1170,13 @@ pub enum CurvatureAdmissibility {
     Inadmissible { floor_consulted: bool },
     /// No curvature question was answered here, and this is why.
     Unevaluated { evidence: CurvatureEvidence },
+    /// A Hessian was measured, reported a negative direction, and the CRITERION
+    /// was then asked about that direction and did not fall anywhere in the
+    /// claim's falsifiable range (#2612). Distinct from every variant above:
+    /// it is not admissible (nothing showed the point is a minimum), it is not
+    /// inadmissible (the evidence that would refuse has been contradicted), and
+    /// it is not unevaluated (a measurement was taken and then adjudicated).
+    CriterionContradicted,
 }
 
 impl std::fmt::Display for CurvatureAdmissibility {
@@ -1154,6 +1193,9 @@ impl std::fmt::Display for CurvatureAdmissibility {
                 }
             ),
             Self::Unevaluated { evidence } => write!(f, "unevaluated ({evidence})"),
+            Self::CriterionContradicted => f.write_str(
+                "CONTRADICTED (the criterion does not fall along the reported negative direction)",
+            ),
         }
     }
 }
@@ -1235,6 +1277,9 @@ impl OuterCriterionCertificate {
                         floor_consulted: self.curvature_floor.is_some(),
                     }
                 }
+            }
+            CurvatureEvidence::CriterionContradicted => {
+                CurvatureAdmissibility::CriterionContradicted
             }
             evidence @ (CurvatureEvidence::NotSpent
             | CurvatureEvidence::NotAvailable

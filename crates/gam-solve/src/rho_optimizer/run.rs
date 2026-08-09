@@ -1988,6 +1988,20 @@ pub(crate) fn certificate_meets_curvature_requirement(
     matches!(fidelity, CertificationFidelity::Screening)
         || !require_measured_psd
         || certificate.hessian_psd() == Some(true)
+        // #2612: a caller asking for a certified local minimum is asking for the
+        // strongest statement the curvature evidence can support. When that
+        // evidence has been CONTRADICTED by the criterion — every feasible step
+        // along its reported negative eigenvector, over the whole range in which
+        // the claim predicts a decrease the criterion can represent, failed to
+        // lower the objective — the strongest supportable statement is that no
+        // descent along it exists. Refusing here instead would refuse for the
+        // ABSENCE of a measurement the route has just shown it cannot make,
+        // which is the failure mode this flag's own doc block at
+        // `with_require_measured_psd` warns about one case earlier.
+        || matches!(
+            certificate.curvature,
+            CurvatureEvidence::CriterionContradicted
+        )
 }
 
 pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
@@ -2136,8 +2150,52 @@ pub(crate) fn interior_curvature_floor_clearance(
     })
 }
 
+/// What the CRITERION said about a Hessian's reported negative direction
+/// (#2357/#2155/#2612).
+///
+/// The escape has always been able to distinguish "the saddle is real, here is
+/// the descending reseed" from "no descending trial was found", but only the
+/// first was reported to the caller: the second reached the refusal as `None`,
+/// where it was indistinguishable from "the escape was never runnable", and the
+/// curvature refusal proceeded on the matrix's word alone.
+///
+/// Those are three different states and one of them is a MEASUREMENT of the
+/// criterion, so they are three variants.
+#[derive(Debug)]
+pub(crate) enum SaddleAdjudication {
+    /// A strictly-descending feasible point exists along the reported direction:
+    /// the point is not a minimum, and this is the one-shot reseed.
+    Descended(Array1<f64>),
+    /// Every feasible step along the reported direction — both signs, from one
+    /// e-fold down to the step at which the quadratic model's own predicted
+    /// decrease reaches the criterion's resolution — failed to lower the
+    /// objective. The claim has been falsified over its whole falsifiable
+    /// range.
+    Contradicted {
+        /// Trials actually evaluated (finite cost, not clamped back onto ρ).
+        probed: usize,
+        /// Smallest step the ladder reached.
+        smallest_step: f64,
+        /// `½|λ_min|·α_min²` — what the claim predicted at that step, against
+        /// which the criterion's resolution was the stopping standard.
+        predicted_at_smallest: f64,
+        /// The criterion's own resolution, i.e. the standard that bounded the
+        /// ladder.
+        objective_resolution: f64,
+        /// Best objective seen, against the baseline it had to beat.
+        best_seen_cost: f64,
+    },
+    /// The adjudication could not be run: no eigen-resolvable negative
+    /// direction, nothing left to search after rails and invariance, an
+    /// eigensolver failure, or trials that could not be evaluated at all.
+    /// Nothing has been established about the point either way.
+    Declined(String),
+}
+
 /// Escape point off a certified strict saddle in the free (un-railed) subspace
-/// (#2357, generalised to the box-constrained case in #2155).
+/// (#2357, generalised to the box-constrained case in #2155), and — when no
+/// escape exists — the verdict that the criterion has CONTRADICTED the matrix
+/// (#2612).
 ///
 /// A gradient-only outer convergence gate — ARC's own, or the cost-stall guard's
 /// — can ARRIVE at a point that is first-order stationary (`‖Pg‖ ≤ bound`) yet
@@ -2167,7 +2225,7 @@ pub(crate) fn interior_curvature_floor_clearance(
 /// clears the box projection with a strict objective decrease. Restores the
 /// objective's profiled inner state to `rho` before returning either way, so the
 /// refusal path that follows measures the checkpoint rather than the last probe.
-fn negative_curvature_escape_point(
+fn adjudicate_negative_curvature(
     obj: &mut dyn OuterObjective,
     rho: &Array1<f64>,
     gradient: &Array1<f64>,
@@ -2175,9 +2233,10 @@ fn negative_curvature_escape_point(
     railed: &[usize],
     invariance: Option<&Array2<f64>>,
     baseline_cost: f64,
+    objective_resolution: f64,
     bounds: &(Array1<f64>, Array1<f64>),
     context: &str,
-) -> Option<Array1<f64>> {
+) -> SaddleAdjudication {
     use faer::Side;
     use gam_linalg::faer_ndarray::FaerEigh;
 
@@ -2191,14 +2250,13 @@ fn negative_curvature_escape_point(
         // exits cannot be told apart from the run record. The sibling
         // NOT ATTEMPTED warning above covers the case where this function is
         // never called; these cover the case where it is called and declines.
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- the analytic Hessian is not a \
-             usable square finite matrix (rows={}, cols={}, all_finite={})",
+        return SaddleAdjudication::Declined(format!(
+            "the analytic Hessian is not a usable square finite matrix (rows={}, cols={}, \
+             all_finite={})",
             n,
             hessian.ncols(),
             hessian.iter().all(|v| v.is_finite()),
-        );
-        return None;
+        ));
     }
     // The escape direction lives in the INTERIOR (un-railed) subspace — the exact
     // reduced Hessian / critical cone that `certificate_hessian_is_psd_off_railed`
@@ -2216,11 +2274,10 @@ fn negative_curvature_escape_point(
     if interior.is_empty() {
         // Every coordinate is railed: there is no feasible interior direction and
         // the rail KKT signs are the whole certificate.
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- every one of the {n} outer \
-             coordinates is railed, so there is no feasible interior direction to descend"
-        );
-        return None;
+        return SaddleAdjudication::Declined(format!(
+            "every one of the {n} outer coordinates is railed, so there is no feasible interior \
+             direction to descend"
+        ));
     }
     // #2676: the escape must search the SAME subspace the certificate judged.
     // `judged_subspace_basis` returns the interior indicator basis when there is
@@ -2232,12 +2289,11 @@ fn negative_curvature_escape_point(
     // refused.
     let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
     let Some(judged) = crate::penalty_invariance::judged_subspace_basis(n, railed, deflate) else {
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- after removing the railed \
-             coordinates and the criterion's own invariance there is no direction left to \
-             search"
+        return SaddleAdjudication::Declined(
+            "after removing the railed coordinates and the criterion's own invariance there is \
+             no direction left to search"
+                .to_string(),
         );
-        return None;
     };
     let m = judged.ncols();
     let sub = match deflate {
@@ -2255,11 +2311,9 @@ fn negative_curvature_escape_point(
     let (eigenvalues, eigenvectors) = match sub.eigh(Side::Lower) {
         Ok(pair) => pair,
         Err(err) => {
-            log::warn!(
-                "[CERTIFICATE] {context}: saddle-escape eigendecomposition failed ({err}); \
-                 refusing at the checkpoint without a reseed"
-            );
-            return None;
+            return SaddleAdjudication::Declined(format!(
+                "the interior sub-block's eigendecomposition failed ({err})"
+            ));
         }
     };
     // The SAME √ε·‖H‖ margin `certificate_hessian_is_psd` uses to separate a
@@ -2283,27 +2337,20 @@ fn negative_curvature_escape_point(
         // different numbers, so a point can be refused for curvature AND
         // declined for escape, with no record of either bound. Print both so
         // the gap is measurable rather than inferred (#2665).
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- the interior sub-block's most \
-             negative eigenvalue does not clear the roundoff margin: lambda_min={:.6e}, \
-             neg_margin={:.6e} (= sqrt(EPSILON) * max(1, max_k |H_kk|) with max_diag={:.6e}), \
-             interior_dim={}",
-            eigenvalues[min_idx],
-            neg_margin,
-            max_diag,
-            m,
-        );
-        return None;
+        return SaddleAdjudication::Declined(format!(
+            "the interior sub-block's most negative eigenvalue does not clear the roundoff \
+             margin: lambda_min={:.6e}, neg_margin={:.6e} (= sqrt(EPSILON) * max(1, max_k \
+             |H_kk|) with max_diag={:.6e}), interior_dim={}",
+            eigenvalues[min_idx], neg_margin, max_diag, m,
+        ));
     }
     let v_sub = eigenvectors.column(min_idx);
     let dir_norm = v_sub.dot(&v_sub).sqrt();
     if !(dir_norm > 0.0) || !dir_norm.is_finite() {
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- the lambda_min={:.6e} \
-             eigenvector has an unusable norm {dir_norm:.6e}",
+        return SaddleAdjudication::Declined(format!(
+            "the lambda_min={:.6e} eigenvector has an unusable norm {dir_norm:.6e}",
             eigenvalues[min_idx],
-        );
-        return None;
+        ));
     }
     // Lift the judged eigenvector into the full ρ space through the same basis
     // the sub-block was taken in. Its rows are exactly zero on every railed
@@ -2320,11 +2367,56 @@ fn negative_curvature_escape_point(
     } else {
         1.0
     };
-    // One e-fold in log-λ is a macroscopic step across the saddle ridge; ARC then
-    // refines from wherever this lands, so the reseed only needs to leave the
-    // ridge, not solve the problem. Backtrack so the box-projected point still
-    // strictly descends.
-    const ESCAPE_STEP_SCALES: [f64; 5] = [1.0, 0.5, 0.25, 0.125, 0.0625];
+    // The step ladder is DERIVED from what the claim predicts, not chosen
+    // (#2612).
+    //
+    // One e-fold in log-λ is a macroscopic step across the saddle ridge, and
+    // ARC refines from wherever this lands, so the largest step stays `1`. What
+    // the old fixed ladder could not say is where to STOP: it halted at
+    // `0.0625` because five entries had been written down, so a claim whose
+    // descent only appears below that step was reported the same way as a claim
+    // with no descent at all — and the refusal then proceeded on the matrix's
+    // word either way.
+    //
+    // At a stationary point the quadratic model of the claim itself is
+    //
+    // ```text
+    //     V(ρ ± αv) − V(ρ) ≈ ½ λ_min α²,     λ_min < 0
+    // ```
+    //
+    // so the claim predicts a decrease of `½|λ_min|α²`. Once that falls to the
+    // criterion's own resolution the claim predicts nothing the criterion can
+    // represent, and no smaller step can falsify it. That step,
+    //
+    // ```text
+    //     α_min = sqrt(2 · objective_resolution / |λ_min|),
+    // ```
+    //
+    // is therefore the exact end of the claim's FALSIFIABLE RANGE — derived
+    // from the eigenvalue in dispute and the same `rel_cost_tolerance`-anchored
+    // resolution the rail and cost-stall machinery already use, with no
+    // constant chosen here. Probing from `1` down to it and finding no descent
+    // in either sign is a measurement of the criterion that contradicts the
+    // matrix; stopping earlier would only have been a statement about the
+    // ladder.
+    let lambda_min = eigenvalues[min_idx];
+    let alpha_min = if objective_resolution.is_finite() && objective_resolution > 0.0 {
+        (2.0 * objective_resolution / lambda_min.abs()).sqrt().min(1.0)
+    } else {
+        // No usable resolution: keep the historical five-rung ladder's reach.
+        0.0625
+    };
+    let mut escape_step_scales: Vec<f64> = Vec::new();
+    let mut alpha = 1.0_f64;
+    loop {
+        escape_step_scales.push(alpha);
+        // `f64::EPSILON` is where halving stops changing `ρ + αv` at all — a
+        // property of the arithmetic, not a budget.
+        if alpha <= alpha_min || alpha <= f64::EPSILON {
+            break;
+        }
+        alpha *= 0.5;
+    }
     // A strict-decrease floor at the objective's roundoff resolution: a reseed
     // that only matches the checkpoint to roundoff is not a real escape.
     let strict_floor = baseline_cost.abs().max(1.0) * (16.0 * f64::EPSILON);
@@ -2340,7 +2432,7 @@ fn negative_curvature_escape_point(
     let mut nonfinite = 0usize;
     let mut best_seen_cost = f64::INFINITY;
     for sign in [primary_sign, -primary_sign] {
-        for &alpha in ESCAPE_STEP_SCALES.iter() {
+        for &alpha in escape_step_scales.iter() {
             let mut trial = rho.clone();
             for i in 0..n {
                 trial[i] += sign * alpha * direction[i];
@@ -2369,21 +2461,6 @@ fn negative_curvature_escape_point(
             break;
         }
     }
-    if best.is_none() {
-        log::info!(
-            "[CERTIFICATE] {context}: saddle escape declined -- a certified strict saddle \
-             (lambda_min={:.6e}, neg_margin={:.6e}) produced NO strictly-descending feasible \
-             trial: probed={probed}, clamped_back_onto_rho={clamped_onto_rho}, \
-             eval_failed={eval_failed}, non_finite={nonfinite}; best cost seen={:.9e} against \
-             baseline={:.9e} (needs < {:.9e}, strict_floor={:.3e})",
-            eigenvalues[min_idx],
-            neg_margin,
-            best_seen_cost,
-            baseline_cost,
-            baseline_cost - strict_floor,
-            strict_floor,
-        );
-    }
     // Restore the profiled inner state to the checkpoint ρ so the refusal path
     // that follows measures the checkpoint, not the last probe.
     if let Err(err) = obj.eval_cost(rho) {
@@ -2392,17 +2469,54 @@ fn negative_curvature_escape_point(
              after saddle-escape probing: {err}"
         );
     }
-    best.map(|(cost, point)| {
+    if let Some((cost, point)) = best {
         log::info!(
-            "[CERTIFICATE] {context}: interior strict saddle (λ_min={:.3e} < 0, |Pg| within \
-             band); minting a negative-curvature escape reseed (objective {:.6e} → {:.6e}) for \
-             one retry (#2357)",
-            eigenvalues[min_idx],
+            "[CERTIFICATE] {context}: interior strict saddle (λ_min={lambda_min:.3e} < 0, |Pg| \
+             within band); minting a negative-curvature escape reseed (objective {:.6e} → \
+             {:.6e}) for one retry (#2357)",
             baseline_cost,
             cost,
         );
-        point
-    })
+        return SaddleAdjudication::Descended(point);
+    }
+    let smallest_step = escape_step_scales
+        .last()
+        .copied()
+        .unwrap_or(f64::INFINITY);
+    let predicted_at_smallest = 0.5 * lambda_min.abs() * smallest_step * smallest_step;
+    // `probed == 0` is not a contradiction: nothing was evaluated, so nothing
+    // was falsified. The three ways that happens are counted separately for
+    // exactly this reason (#2665).
+    if probed == 0 {
+        return SaddleAdjudication::Declined(format!(
+            "a certified strict saddle (lambda_min={lambda_min:.6e}, neg_margin={neg_margin:.6e}) \
+             produced no EVALUABLE trial at all: clamped_back_onto_rho={clamped_onto_rho}, \
+             eval_failed={eval_failed}, non_finite={nonfinite} over {} step(s)",
+            escape_step_scales.len(),
+        ));
+    }
+    log::warn!(
+        "[CERTIFICATE] {context}: the criterion CONTRADICTS the reported negative curvature. \
+         lambda_min={lambda_min:.6e} on the judged sub-block, and {probed} feasible trial(s) \
+         along its eigenvector — both signs, steps {:.3e} down to {smallest_step:.3e} — lowered \
+         the objective nowhere. The ladder ends where the claim's own predicted decrease \
+         (½|λ_min|α² = {predicted_at_smallest:.3e}) reaches the criterion's resolution \
+         ({objective_resolution:.3e}), so that is the WHOLE range in which the claim could have \
+         been falsified. best cost seen={best_seen_cost:.9e} against baseline={:.9e} (needed \
+         < {:.9e}); clamped_back_onto_rho={clamped_onto_rho}, eval_failed={eval_failed}, \
+         non_finite={nonfinite}. The negative direction is a property of this matrix, not of \
+         this point (#2612).",
+        escape_step_scales.first().copied().unwrap_or(1.0),
+        baseline_cost,
+        baseline_cost - strict_floor,
+    );
+    SaddleAdjudication::Contradicted {
+        probed,
+        smallest_step,
+        predicted_at_smallest,
+        objective_resolution,
+        best_seen_cost,
+    }
 }
 
 /// Second-order predicted objective decrease of a safeguarded Newton step at a
@@ -4533,7 +4647,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         }
     }
 
-    let certificate = OuterCriterionCertificate {
+    let mut certificate = OuterCriterionCertificate {
         stationarity: OuterStationarityCertificate::AnalyticGradient {
             grad_norm,
             projected_grad_norm: certified_projected_grad_norm,
@@ -4728,31 +4842,94 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // second-order requirement belongs exclusively to the terminal mint; applying
     // it here would reject every first-order candidate as `NotSpent` and turn a
     // two-basin comparison into seed-budget exhaustion.
-    let curvature_requirement_met =
+    let mut curvature_requirement_met =
         certificate_meets_curvature_requirement(&certificate, config.require_measured_psd, fidelity);
+    // #2612 — ADJUDICATE a curvature refusal against the criterion, BEFORE
+    // deciding it.
+    //
+    // This block used to live inside the refusal below, which meant its verdict
+    // could only ever mint a reseed: a run that found no descending trial
+    // returned `None`, indistinguishable from "the escape was never runnable",
+    // and the refusal then proceeded on the matrix's word. But "no feasible step
+    // along the reported negative eigenvector lowers the objective, anywhere in
+    // the range where the claim predicts a decrease the criterion can represent"
+    // is a MEASUREMENT of the criterion, and it contradicts the matrix. Spending
+    // a refusal on evidence the criterion has just falsified is the failure mode
+    // #2665 documented from the other side (an analytic `λ_min = −1721.5` whose
+    // objective curvature along the same eigenvector is `+121.6`), and no
+    // resolution bound can catch it — the matrix is not imprecise there, it is
+    // wrong.
+    //
+    // Moving it here changes nothing about a real saddle: a descending trial
+    // still mints the same one-shot reseed, and the refusal that follows is
+    // still the refusal a genuinely indefinite point earns.
+    let strict_curvature_refused =
+        config.require_measured_psd && certificate.hessian_psd() == Some(false);
+    result.saddle_escape_reseed = None;
+    if allow_tail_snap
+        && certificate.is_stationary()
+        && (!certificate.curvature_not_refused() || strict_curvature_refused)
+        && let Some(hessian) = result.final_hessian.clone()
+        && let Some(gradient) = result.final_gradient.clone()
+    {
+        probes_ran = true;
+        let saddle_rho = result.rho.clone();
+        let baseline_cost = result.final_value;
+        // `curvature_not_refused()` is `false` exactly when the REDUCED
+        // (off-railed) Hessian is indefinite, so a railed coordinate does not
+        // waive the adjudication: rails are passed through and held fixed while
+        // the step searches the free-direction saddle (#2155). They must be held
+        // fixed on the SAME face the reduction was taken on — the certificate's
+        // λ-block report would leave a railed ψ free to be stepped out of its
+        // box.
+        match adjudicate_negative_curvature(
+            obj,
+            &saddle_rho,
+            &gradient,
+            &hessian,
+            &certificate_railed,
+            criterion_invariance.as_ref(),
+            baseline_cost,
+            asymptote_objective_tol,
+            &bounds,
+            context,
+        ) {
+            SaddleAdjudication::Descended(point) => {
+                result.saddle_escape_reseed = Some(point);
+            }
+            SaddleAdjudication::Contradicted { .. } => {
+                // The verdict is withdrawn, not inverted: nothing here showed
+                // the point IS a minimum. `curvature_floor` goes with it —
+                // every field in it (`interior_min_eigenvalue`, the floor, the
+                // floored eigenvalue) is a statement about the matrix whose
+                // negative direction has just been falsified, and reporting
+                // them beside a withdrawn verdict is exactly the #2550
+                // misdirection.
+                certificate.curvature = CurvatureEvidence::CriterionContradicted;
+                certificate.curvature_floor = None;
+                result.criterion_certificate = Some(certificate.clone());
+                curvature_requirement_met = certificate_meets_curvature_requirement(
+                    &certificate,
+                    config.require_measured_psd,
+                    fidelity,
+                );
+            }
+            SaddleAdjudication::Declined(reason) => {
+                log::info!("[CERTIFICATE] {context}: saddle escape declined -- {reason}");
+            }
+        }
+    }
     if !certificate.certifies() || !curvature_requirement_met {
         // Mint the #2392 reseeds fresh for THIS refused point: clear any value a
         // prior (multistart / pre-polish) certification of a different ρ left on
         // the result so the resume loop never consumes a stale pull-back/freeze.
         result.wrong_rail_reseed = None;
         result.active_set_reseed = None;
-        // #2357 — saddle escape. The point is first-order stationary
-        // (`is_stationary`: ‖Pg‖ ≤ bound) yet its INTERIOR reduced Hessian is a
-        // certified strict saddle (`!curvature_admissible`). A railed coordinate
-        // no longer waives this: `curvature_admissible` already reads the
-        // off-railed reduced Hessian, and the escape descends only the free
-        // (un-railed) directions while holding every rail fixed (#2155). That is
-        // exactly the case a gradient-only
-        // convergence gate mis-accepts: it arrived with the gradient already
-        // below tolerance and stopped, leaving the certified negative-curvature
-        // eigendirection — a strict descent — untaken. Mint a one-shot reseed
-        // stepped off the ridge to a strictly-lower objective so the plan runner
-        // can re-descend to the true PSD minimum, exactly as an identical
-        // warm-started resume does by hand. Gated by `allow_tail_snap` (the same
-        // one-shot reseed gate the tail snap rides) so the retry pass — which
-        // runs with it `false` — can never recurse.
-        let strict_curvature_refused =
-            config.require_measured_psd && certificate.hessian_psd() == Some(false);
+        // Reaching here means the #2612 adjudication above did NOT withdraw the
+        // curvature verdict: either it minted a descending reseed (a real
+        // saddle, and this refusal carries the retry), or it declined, or the
+        // refusal is not about curvature at all.
+        //
         // #2665: when a MEASURED analytic Hessian is what refuses the fit, say
         // whether that Hessian agrees with the objective it claims to be the
         // curvature of. On the SAS/mixture cluster it does not: the rho/rho
@@ -4890,33 +5067,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     config.require_measured_psd,
                 );
             }
-        }
-        if allow_tail_snap
-            && certificate.is_stationary()
-            && (!certificate.curvature_not_refused() || strict_curvature_refused)
-            && let Some(hessian) = result.final_hessian.clone()
-            && let Some(gradient) = result.final_gradient.clone()
-        {
-            let saddle_rho = result.rho.clone();
-            let baseline_cost = result.final_value;
-            // `curvature_admissible()` is `false` exactly when the REDUCED
-            // (off-railed) Hessian is indefinite, so a railed coordinate no
-            // longer waives the escape: it is passed through and held fixed while
-            // the step descends the free-direction saddle (#2155). It must be
-            // held fixed on the SAME face the reduction was taken on — the
-            // certificate's λ-block report would leave a railed ψ free to be
-            // stepped out of its box.
-            result.saddle_escape_reseed = negative_curvature_escape_point(
-                obj,
-                &saddle_rho,
-                &gradient,
-                &hessian,
-                &certificate_railed,
-                criterion_invariance.as_ref(),
-                baseline_cost,
-                &bounds,
-                context,
-            );
         }
         // #2392 — wrong-rail pull-back and active-set reduction. A coordinate at
         // the ρ box whose deep-λ terminal gradient is instrument noise leaves the
@@ -7226,7 +7376,7 @@ pub(crate) fn run_outer(
                 // is a first-order-stationary point whose reduced (off-railed)
                 // Hessian is indefinite, the certificate publishes a
                 // negative-curvature reseed stepped strictly BELOW the saddle
-                // (`negative_curvature_escape_point`). Reseeding the resume at the
+                // (`adjudicate_negative_curvature`). Reseeding the resume at the
                 // refused checkpoint itself would re-descend straight back to that
                 // zero-gradient saddle — the #2273/#2374 stale-tolerance resume
                 // anchors the tolerance and breaks flat-valley stalls, but it
