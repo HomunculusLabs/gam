@@ -1727,9 +1727,7 @@ impl BernoulliMarginalSlopeFamily {
             }
             let refused = status
                 .iter()
-                .filter(|&&s| {
-                    s != crate::gpu_kernels::cubic_cell::CubicCellMomentStatus::Ok
-                })
+                .filter(|&&s| s != crate::gpu_kernels::cubic_cell::CubicCellMomentStatus::Ok)
                 .count();
             if refused > 0 {
                 return Err(format!(
@@ -2355,8 +2353,19 @@ impl BernoulliMarginalSlopeFamily {
         // in this build); revisit when a runtime device backend is
         // reintroduced.
         const CPU_TARGET_CHUNK_FLOATS: usize = 1 << 17;
-        let cpu_rows = (CPU_TARGET_CHUNK_FLOATS / (3 * n_dirs).max(1)).clamp(1024, n.max(1));
-        (cpu_rows.min(n.max(1)), false)
+        // The `1024` floor is an AMORTIZATION TARGET — it stops the budget
+        // division from fanning the sweep out into chunks too small to pay for
+        // their own workspace setup. It is not a requirement, and it cannot be
+        // one: a fit with fewer rows than the floor has to chunk at its own
+        // size. `usize::clamp` PANICS when `min > max`, so the floor has to be
+        // capped by the row count before it is used as one. Without that cap
+        // every BMS fit below 1024 rows that reached this path aborted the
+        // process with `min > max. min = 1024, max = <n>` — a panic, not a
+        // typed refusal, on the two `dense_contiguous_rows` batched
+        // directional-derivative call sites in `axis_direction_search`.
+        let rows = n.max(1);
+        let cpu_rows = (CPU_TARGET_CHUNK_FLOATS / (3 * n_dirs).max(1)).clamp(rows.min(1024), rows);
+        (cpu_rows, false)
     }
 
     pub(super) fn row_primary_psi_direction_from_map(
@@ -4674,7 +4683,15 @@ impl BernoulliMarginalSlopeFamily {
             }
             // Intercept a-chain moments (#2347): ∂ₐ of the second-order moments.
             f_aaa += exact::cell_third_derivative_from_moments(
-                cell, &dc_da, &dc_da, &dc_da, &dc_daa, &dc_daa, &dc_daa, &dc_daaa, &state.moments,
+                cell,
+                &dc_da,
+                &dc_da,
+                &dc_da,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daaa,
+                &state.moments,
             )?;
             for u in 1..r {
                 f_aau[u] += exact::cell_third_derivative_from_moments(
@@ -6006,11 +6023,34 @@ impl BernoulliMarginalSlopeFamily {
             // the moving intercept root. Same cell moments, with the intercept
             // coefficient jet (dc_da / dc_daa / dc_daaa) in the extra slots.
             f_aaa += exact::cell_third_derivative_from_moments(
-                cell, &dc_da, &dc_da, &dc_da, &dc_daa, &dc_daa, &dc_daa, &dc_daaa, &state.moments,
+                cell,
+                &dc_da,
+                &dc_da,
+                &dc_da,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daaa,
+                &state.moments,
             )?;
             f_aaaa += exact::cell_fourth_derivative_from_moments(
-                cell, &dc_da, &dc_da, &dc_da, &dc_da, &dc_daa, &dc_daa, &dc_daa, &dc_daa, &dc_daa,
-                &dc_daa, &dc_daaa, &dc_daaa, &dc_daaa, &dc_daaa, &dc_daaaa, &state.moments,
+                cell,
+                &dc_da,
+                &dc_da,
+                &dc_da,
+                &dc_da,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daa,
+                &dc_daaa,
+                &dc_daaa,
+                &dc_daaa,
+                &dc_daaa,
+                &dc_daaaa,
+                &state.moments,
             )?;
             for primary in 1..r {
                 f_aau[primary] += exact::cell_third_derivative_from_moments(
@@ -6501,8 +6541,8 @@ impl BernoulliMarginalSlopeFamily {
                 {
                     continue;
                 }
-                let delta_c3 = window[0].partition_cell.link_span.c3
-                    - window[1].partition_cell.link_span.c3;
+                let delta_c3 =
+                    window[0].partition_cell.link_span.c3 - window[1].partition_cell.link_span.c3;
                 if delta_c3 == 0.0 {
                     continue;
                 }
@@ -6794,10 +6834,11 @@ impl BernoulliMarginalSlopeFamily {
                             // derivatives through the moving intercept root (#2347):
                             // d/d_dir f = f_dir_explicit + (df/da)*a_dir.
                             let a_dir = a_dirs[direction];
-                            let f_uv_dir_total =
-                                f_uv_dir[matrix_base + left * r + right] + f_auv[[left, right]] * a_dir;
+                            let f_uv_dir_total = f_uv_dir[matrix_base + left * r + right]
+                                + f_auv[[left, right]] * a_dir;
                             let f_au_dir_left = f_au_dir[vector_base + left] + f_aau[left] * a_dir;
-                            let f_au_dir_right = f_au_dir[vector_base + right] + f_aau[right] * a_dir;
+                            let f_au_dir_right =
+                                f_au_dir[vector_base + right] + f_aau[right] * a_dir;
                             let f_aa_dir_total = f_aa_dir[direction] + f_aaa * a_dir;
                             let f_a_dir_total = f_a_dir[direction] + f_aa * a_dir;
                             let numerator = f_uv_dir_total
@@ -6929,8 +6970,7 @@ impl BernoulliMarginalSlopeFamily {
                         let f_a_dir_r = f_a_dir[right_direction] + f_aa * a_r;
                         let f_aa_dir_l = f_aa_dir[left_direction] + f_aaa * a_l;
                         let f_aa_dir_r = f_aa_dir[right_direction] + f_aaa * a_r;
-                        let f_au_dir_l_left =
-                            f_au_dir[left_vector_base + left] + f_aau[left] * a_l;
+                        let f_au_dir_l_left = f_au_dir[left_vector_base + left] + f_aau[left] * a_l;
                         let f_au_dir_r_left =
                             f_au_dir[right_vector_base + left] + f_aau[left] * a_r;
                         let f_au_dir_l_right =
@@ -8157,19 +8197,20 @@ mod test_support {
                 let dc_daab = scale_coeff4(third.1, scale);
                 let dc_dabb = scale_coeff4(third.2, scale);
                 let dc_dbbb = scale_coeff4(third.3, scale);
-                f_uv += exact::cell_second_derivative_from_moments(cell, &dc_db, &dc_db, &dc_dbb, m)?;
+                f_uv +=
+                    exact::cell_second_derivative_from_moments(cell, &dc_db, &dc_db, &dc_dbb, m)?;
                 f_auv += exact::cell_third_derivative_from_moments(
                     cell, &dc_da, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dbb, &dc_dabb, m,
                 )?;
                 // ∂⁴M/∂a²∂b²: slots (a,a,b,b); fourth coeff ∂⁴η/∂a²∂b² = 0.
                 f_aauv += exact::cell_fourth_derivative_from_moments(
-                    cell, &dc_da, &dc_da, &dc_db, &dc_db, &dc_daa, &dc_dab, &dc_dab, &dc_dab, &dc_dab,
-                    &dc_dbb, &dc_daab, &dc_daab, &dc_dabb, &dc_dabb, &[0.0; 4], m,
+                    cell, &dc_da, &dc_da, &dc_db, &dc_db, &dc_daa, &dc_dab, &dc_dab, &dc_dab,
+                    &dc_dab, &dc_dbb, &dc_daab, &dc_daab, &dc_dabb, &dc_dabb, &[0.0; 4], m,
                 )?;
                 // ∂⁴M/∂a∂b³: slots (a,b,b,b); fourth coeff ∂⁴η/∂a∂b³ = 0.
                 f_auv_db += exact::cell_fourth_derivative_from_moments(
-                    cell, &dc_da, &dc_db, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dab, &dc_dbb, &dc_dbb,
-                    &dc_dbb, &dc_dabb, &dc_dabb, &dc_dabb, &dc_dbbb, &[0.0; 4], m,
+                    cell, &dc_da, &dc_db, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dab, &dc_dbb,
+                    &dc_dbb, &dc_dbb, &dc_dabb, &dc_dabb, &dc_dabb, &dc_dbbb, &[0.0; 4], m,
                 )?;
             }
             Ok((f_uv, f_auv, f_aauv, f_auv_db, flux_aauv))

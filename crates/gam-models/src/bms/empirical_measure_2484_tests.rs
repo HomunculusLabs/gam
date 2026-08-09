@@ -696,3 +696,36 @@ fn the_assembled_correction_is_psd_and_strictly_widens_the_naive_interval_2484()
         }
     }
 }
+
+#[test]
+fn the_batched_directional_chunk_size_never_inverts_its_clamp() {
+    // Not a gam#2484 finding by intent — a hard PANIC found by gam#2484's
+    // score-warp arm, which is the first fixture on this path with fewer rows
+    // than the amortization floor.
+    //
+    // `batched_directional_derivative_chunk_rows` clamped a budget-derived row
+    // count into `[1024, n]`, and `usize::clamp` panics when `min > max`. Every
+    // BMS fit below 1024 rows that reached either `dense_contiguous_rows`
+    // batched directional-derivative call site aborted the process with
+    // `min > max. min = 1024, max = <n>`.
+    //
+    // The contract, at every size: at least one row, never more than `n`, and
+    // never a panic.
+    for &n in &[0usize, 1, 2, 63, 96, 1023, 1024, 1025, 50_000] {
+        for &n_dirs in &[1usize, 3, 17, 4096] {
+            let (rows, gpu) =
+                super::BernoulliMarginalSlopeFamily::batched_directional_derivative_chunk_rows(
+                    n, n_dirs,
+                );
+            assert!(
+                rows >= 1,
+                "chunk size must be at least one row at n={n}, n_dirs={n_dirs}; got {rows}"
+            );
+            assert!(
+                rows <= n.max(1),
+                "chunk size {rows} exceeds the row count at n={n}, n_dirs={n_dirs}"
+            );
+            assert!(!gpu, "there is no live device backend in this build");
+        }
+    }
+}
