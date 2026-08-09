@@ -650,16 +650,26 @@ pub struct CascadeCertificate {
 /// largest [`Self::evidence`] over the next level and, when a capacity budget
 /// forced the finest level to be partial, the candidates that level left behind
 /// at its own radius — and every one of them is at or below its own tolerance.
+///
+/// Two routes produce one: the design carrying the candidate set is built and
+/// solved, in which case every field is EXACT; or the matrix-free gain bracket
+/// and its Hadamard Occam bound already settle the comparison, in which case
+/// `gain` is a certified lower bound and `occam` a certified upper one — both
+/// read in the direction that understates [`Self::evidence`], so a positive
+/// evidence from that route is still a proof. The second route only ever
+/// settles the POSITIVE side: a fit is never minted on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RefinementCertificate {
-    /// EXACT penalized-objective decrease the complete candidate set buys at
-    /// this fit's λ: `rss_pen − rss_pen_refined`, differenced from a design
-    /// that was actually built and solved rather than bounded.
+    /// Penalized-objective decrease the complete candidate set buys at this
+    /// fit's λ: `rss_pen − rss_pen_refined`, differenced from a design that was
+    /// built and solved — or, on a refusal the screen settled, a certified
+    /// lower bound on it.
     pub gain: f64,
-    /// `log det(I + X₂ᵀW(I − H)X₂/(λd)) ⩾ 0`, the candidate set's Occam factor.
-    /// It is the charge for the set's DIMENSION, weighted by how far each of
-    /// its directions is identified by the data: a candidate column with no
-    /// rows in its support contributes exactly zero to it, and to the gain.
+    /// `log det(I + X₂ᵀW(I − H)X₂/(λd)) ⩾ 0`, the candidate set's Occam factor,
+    /// or a certified upper bound on it. It is the charge for the set's
+    /// DIMENSION, weighted by how far each of its directions is identified by
+    /// the data: a candidate column with no rows in its support contributes
+    /// exactly zero to it, and to the gain.
     pub occam: f64,
     /// Break-even gain `rss_pen·(1 − e^{−occam/dof})` — the objective decrease
     /// this candidate set's own Occam factor already pays for. DERIVED from the
@@ -4303,14 +4313,18 @@ impl ResidualCascadeDesign {
     }
 
     /// Assess the candidate level L+1 at this fit's λ. A complete candidate
-    /// reports the exact upper bound `‖X₂'W r̂‖² / (λ·d_{L+1})` on its
-    /// penalized-objective decrease (see the module header for the Schur-
-    /// complement argument). Empty-net exhaustion and structural capacity are
-    /// different typed outcomes because only an empty net certifies zero
-    /// remaining gain. A complete candidate that outruns data identifiability
-    /// or the certified-spectrum budget still carries its finite bound, so the
-    /// automatic route can return one honest `Underresolved` result before
-    /// invoking either downstream failure mode.
+    /// reports a certified UPPER bound on its penalized-objective decrease (see
+    /// the module header for the Schur-complement argument). Empty-net
+    /// exhaustion and structural capacity are different typed outcomes because
+    /// only an empty net certifies zero remaining gain. A complete candidate
+    /// that outruns data identifiability or the certified-spectrum budget still
+    /// carries its finite bound, so the automatic route can return one honest
+    /// `Underresolved` result before invoking either downstream failure mode.
+    ///
+    /// This is the SIZE of what one more level could buy, not the decision:
+    /// whether it is worth buying is `gain > rss_pen·(1 − e^{−occam/dof})` for
+    /// that set's own Occam factor, which [`fit_residual_cascade`] settles by
+    /// building the set and comparing restricted likelihoods (#2759).
     pub fn assess_next_level(
         &self,
         fit: &ResidualCascadeFit,
@@ -4341,10 +4355,10 @@ impl ResidualCascadeDesign {
     /// Assess the candidate level at `exponent` AND decide what the refinement
     /// may actually take from it.
     ///
-    /// The assessment (the `‖X₂'W r̂‖²/(λ·d)` bound) is always over the COMPLETE
-    /// candidate set, because that is the quantity the convergence tolerance
-    /// has to be compared against: a bound over a subset would certify nothing
-    /// about the candidates left out. The SELECTION is a different question,
+    /// The assessment is always over the COMPLETE candidate set, because that is
+    /// the quantity the refinement decision has to be taken on: a bound over a
+    /// subset would certify nothing about the candidates left out, and the
+    /// Occam factor it is compared against is the complete set's too. The SELECTION is a different question,
     /// and it is the one the capacity budgets answer — how many more penalized
     /// modes this design may carry before automatic REML loses the rank it
     /// needs (`n − nullity` identifiable directions) or the certified spectrum
@@ -4554,6 +4568,14 @@ impl EvidenceScale {
     fn break_even_gain(&self, occam: f64) -> f64 {
         -self.rss_pen * (-occam / self.dof).exp_m1()
     }
+
+    /// The restricted log-likelihood change a candidate set with this `gain` and
+    /// this `occam` produces: `[dof·log(rss/(rss − gain)) − occam]/2`. Increasing
+    /// in `gain`, decreasing in `occam` — which is what lets a lower bound on
+    /// one and an upper bound on the other CERTIFY a positive value.
+    fn evidence(&self, gain: f64, occam: f64) -> f64 {
+        0.5 * (-self.dof * (-gain / self.rss_pen).ln_1p() - occam)
+    }
 }
 
 /// The candidate level a refinement gain is being certified for: its centers,
@@ -4687,6 +4709,25 @@ struct RefinementGainBracket {
     /// diagonal product — so this costs one pass over the candidate supports
     /// and no solve at all.
     hadamard_occam: f64,
+}
+
+impl RefinementGainBracket {
+    /// The comparison this bracket CERTIFIES on its own, without building
+    /// anything: the gain read from its LOWER end and the Occam factor from its
+    /// Hadamard upper bound. Both readings are taken in the direction that can
+    /// only understate the evidence, so a positive `evidence` here is a proof
+    /// that one more level earns its own Occam factor — and a non-positive one
+    /// is no information at all, because both readings were taken against the
+    /// level. It is the same comparison the exact route makes, evaluated on
+    /// certified bounds instead of on a design.
+    fn screened_comparison(&self, scale: EvidenceScale) -> RefinementCertificate {
+        RefinementCertificate {
+            gain: self.lower,
+            occam: self.hadamard_occam,
+            tolerance: scale.break_even_gain(self.hadamard_occam),
+            evidence: scale.evidence(self.lower, self.hadamard_occam),
+        }
+    }
 }
 
 /// The exact level-`(L+1)` gain `gᵀS⁻¹g`, bracketed.
@@ -5633,13 +5674,18 @@ pub fn fit_residual_cascade(
             let planned = design.plan_level_at_exponent(&fit, exponent, Some(scale))?;
             let (complete, extends_last) = (planned.complete, planned.extends_last);
             let room = !planned.selection.is_empty();
-            // The free half of the comparison. `Σ_j log(diag(S)_j/λd)` bounds
-            // the Occam factor from above, so a gain bracket whose LOWER end
-            // already clears that bound's break-even gain proves the level
-            // warranted without building anything.
-            let screened = planned.gain.as_ref().is_some_and(|bracket| {
-                bracket.lower > scale.break_even_gain(bracket.hadamard_occam)
-            });
+            // The free half of the comparison, read off the bracket the plan
+            // already carries. When it PROVES the level warranted there is
+            // nothing left to decide and the refined design is not built —
+            // which matters most where building it is worst: a
+            // certified-spectrum refusal is a memory boundary, and paying that
+            // memory to confirm a conclusion already proved would be the exact
+            // cost the boundary exists to avoid.
+            let screened = planned
+                .gain
+                .as_ref()
+                .map(|bracket| bracket.screened_comparison(scale))
+                .filter(RefinementCertificate::warrants_refinement);
             // Two caps stop the candidate set from being FORMED rather than
             // merely from being taken, and both are caps on the shape of the
             // plan itself, so no design carrying that set exists to compare
@@ -5653,14 +5699,17 @@ pub fn fit_residual_cascade(
                         ..
                     }
             );
-            // The screen may only skip the exact comparison when there is room
-            // to ACT on it. A refusal must never rest on a bound while the
-            // number itself is one factorization away, which is the whole of
-            // this issue's remaining half.
-            let evidence = if !constructible || (screened && room) {
-                None
-            } else {
-                request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?
+            // A level is never declared SPENT on a bound: the screen can only
+            // ever prove the positive, so an inconclusive screen sends the
+            // decision to the design itself. That is the whole of this issue's
+            // remaining half — a refusal must not rest on a bound while the
+            // number is one factorization away.
+            let evidence = match (screened, constructible) {
+                (Some(proved), _) => Some(proved),
+                (None, true) => {
+                    request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?
+                }
+                (None, false) => None,
             };
             // The comparison the decision below is taken on, plus the bracket
             // that screened it: a run record that shows only one of them cannot
@@ -5676,7 +5725,7 @@ pub fn fit_residual_cascade(
                     )
                 ),
                 evidence.map_or_else(
-                    || "none (screened, or unformed)".to_string(),
+                    || "none (the candidate set was never formed)".to_string(),
                     |evidence| evidence.to_string()
                 ),
             );
