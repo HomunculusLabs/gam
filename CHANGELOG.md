@@ -1,5 +1,64 @@
 ## Unreleased
 
+- **A curvature refusal is now adjudicated BY THE CRITERION instead of asserted
+  by the matrix (#2612).** `negative_curvature_escape_point` already stepped the
+  criterion along the reported minimum eigenvector, and the code threw half of
+  its verdict away: it returned `Option<Array1<f64>>`, so "a strictly-descending
+  feasible point exists" arrived as `Some` while "no descending trial exists
+  anywhere I looked" arrived as `None` — bit-identical to "the escape was never
+  runnable" — after which the refusal proceeded on the matrix's word alone.
+
+  That second case is not an absence of evidence. Evaluating the objective at
+  trial points is not a finite difference (SPEC 2 is untouched); it is the
+  criterion answering the exact question the Hessian claimed to answer, and a
+  direction along which the criterion does not fall is not a descent direction of
+  that criterion. #2665 is the same defect from the other side: an analytic
+  `λ_min = −1721.5` whose objective curvature along its OWN eigenvector is
+  `+121.6`. No resolution bound catches that — the matrix there is not
+  imprecise, it is wrong.
+
+  The step ladder also stopped in the wrong place:
+
+  ```rust
+  const ESCAPE_STEP_SCALES: [f64; 5] = [1.0, 0.5, 0.25, 0.125, 0.0625];
+  ```
+
+  `0.0625` because five entries had been written down, so a claim whose descent
+  only appears below that step read identically to a claim with no descent at
+  all. At a stationary point the claim's own quadratic model predicts
+  `½|λ_min|α²`; once that reaches the criterion's resolution the claim predicts
+  nothing the criterion can represent and no smaller step can falsify it. The
+  ladder now runs `1 → α_min = sqrt(2·objective_resolution/|λ_min|)` by halving
+  in both signs, with the resolution being the same
+  `rel_cost_tolerance`-anchored quantity the rail and cost-stall machinery
+  already spend. No constant is chosen; the only other stop is `f64::EPSILON`,
+  where halving stops changing `ρ + αv` at all.
+
+  `SaddleAdjudication::{Descended, Contradicted, Declined}` replaces the
+  `Option` (`probed == 0` is `Declined` — nothing evaluated, nothing falsified),
+  and `CurvatureEvidence::CriterionContradicted` records the withdrawn verdict.
+  It is deliberately **not** `Measured { psd: true }`: nothing established that
+  the point is a minimum, only that this matrix's negative direction has no
+  operational content. `psd()` stays `None`, so the published `hessian_psd`
+  contract (`null | true | false`) is unchanged.
+
+  Measured at the penguins terminal ρ with the Jeffreys term armed, which is
+  what put this on the table and also killed the first hypothesis about it:
+
+  ```text
+    v'Hv (analytic)    = -6.709810e-5
+    v'J(g)v (measured) = -9.248844e-5    stable to 5 digits over h = 1e-4 .. 1e-2
+    gap/|analytic|     =  3.784e-1
+    max_k |g_k| over the judged coordinates = 9.6243e-4
+  ```
+
+  The sign agrees, so that negative curvature is real; and `|λ_min|` sits 14×
+  INSIDE its own gradient floor, so the curvature conjunct does not refuse there
+  at all. The `3.784e-1` gap is the omitted `D²_β H_Φ[−v_l, −v_k]` term measured
+  at production scale — it exceeds the `0.25` bar the armed gate applies to
+  `λ_min` on its own seconds-scale fixture, which is now on the record rather
+  than papered over.
+
 - **Every wholly parametric multinomial fit was being refused for not having a
   penalty, and "no penalty" was the answer (#2612).** The posterior-mean
   predictive needs `S_λ` as an operator, because it evaluates the penalized
