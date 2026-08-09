@@ -168,3 +168,47 @@ for j in range(nrow):
         worst=max(worst, abs(fd-A[j,k])/(1+abs(fd)))
 print("total mixed derivative max rel err:", worst)
 print("|direct| =", np.linalg.norm(direct), " |cross| =", np.linalg.norm(cross))
+
+
+# ---------------------------------------------------------------------------
+# The differentiability certificate, brute-forced.
+#
+# The shipped rule is "refuse iff an equal-mass bin boundary lies strictly
+# inside a tied group's cumulative-mass span", and it is narrower than "refuse
+# on ties". This measures the thing the rule is a proxy for: the ONE-SIDED
+# derivatives of the grid nodes at a tied row, from each side of the tie.
+#
+# Measured when written, six unit-weight rows with two of them tied at 0.5:
+#
+#     bins=3 (the tie lies inside one bin):   6.66e-09   -- roundoff, differentiable
+#     bins=4 (a boundary cuts the tie):       5.39e-01   -- genuinely two-sided
+#
+# So the contained tie must NOT be refused and the cut tie must be, which is
+# exactly what the certificate does.
+# ---------------------------------------------------------------------------
+
+
+def one_sided_node_derivative(zeta, w, row, h, sign):
+    """Right (sign=+1) or left (sign=-1) difference quotient of every node."""
+    base, _, _, _, _ = build_grid(np.array(zeta, dtype=float), w)
+    moved = np.array(zeta, dtype=float)
+    moved[row] += sign * h
+    shifted, _, _, _, _ = build_grid(moved, w)
+    return (shifted - base) / (sign * h)
+
+
+def tie_certificate_report():
+    global GRID
+    tied = [-2.0, -1.0, 0.5, 0.5, 1.0, 2.0]
+    weights = np.ones(6)
+    for bins in (3, 4):
+        GRID = bins
+        right = one_sided_node_derivative(tied, weights, 2, 1e-7, +1)
+        left = one_sided_node_derivative(tied, weights, 2, 1e-7, -1)
+        gap = float(np.max(np.abs(right - left)))
+        verdict = "differentiable" if gap < 1e-6 else "TWO-SIDED"
+        print(f"bins={bins}: max |right - left| at the tied row = {gap:.6e}  ({verdict})")
+    GRID = 5
+
+
+tie_certificate_report()
