@@ -913,61 +913,82 @@ fn cascade_matches_dense_wendland_kernel_solve() {
 ///
 /// What it retains changed with #2700. The 504 candidates are not refused
 /// whole any more: the route takes the 90 of them that the identifiability
-/// budget still admits (`237 − 147`), largest `|g_j|` first, refits, and only
-/// then finds that what remains is still above tolerance with no capacity left.
-/// So the checkpoint is the RANK-MAXIMAL design — five levels, 237 centers,
-/// exactly `n − nullity` — and the refusal names the boundary from the frontier
-/// instead of from 90 centers short of it. The candidate evidence is unchanged
-/// by that, and necessarily so: the candidates are mutually `h`-separated, so
-/// planting some of them makes none of the others covered, and the complete
-/// candidate set is the same 504 modes either way.
+/// budget still admits (`237 − 147`), largest `|g_j|` first, refits, and lands
+/// on the RANK-MAXIMAL design — five levels, 237 centers, exactly
+/// `n − nullity`. The candidate evidence is unchanged by that, and necessarily
+/// so: the candidates are mutually `h`-separated, so planting some of them
+/// makes none of the others covered, and the complete candidate set is the same
+/// 504 modes either way.
+///
+/// # WHAT THE ROUTE DOES AT THAT FRONTIER CHANGED WITH #2759, AND WHY
+///
+/// It used to refuse there, because `1e-3·rss_pen` was still below the 504-mode
+/// level's gain. That bar charges nothing for the WIDTH of the set it is
+/// buying, and at the rank-maximal design the width is the whole story: the 504
+/// candidates are redundant against the sample's own row space, so what they
+/// buy is penalty dilution, not resolution. Charged against its own Occam
+/// factor the level does not pay for itself, and the route mints the
+/// rank-maximal fit instead:
+///
+/// ```text
+///     binding candidate set: gain 4.505e-3 vs break-even 5.666e-3   (−0.304 nats)
+///     complete next level:   gain 5.217e-3 vs break-even 1.105e-2   (−1.539 nats)
+///     held-out rmse 0.05594 stopped, 0.05599 one level deeper
+/// ```
+///
+/// So the claim this fixture carries is now the one it was always FOR — the
+/// automatic route must not enter the rank-deficient fifth-level score search,
+/// whose cost is exponential in the subdivision depth — and it carries it by
+/// stopping AT the identifiability frontier rather than by refusing there. The
+/// typed `Underresolved` refusal is not orphaned: it is the memory boundary,
+/// where the design is capped BELOW the identifiable rank and the levels it
+/// cannot reach do still pay for themselves
+/// (`past_cliff_fit_from_formula_propagates_refinement_proof_capacity`).
 #[test]
-fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
+fn wendland_fixture_stops_at_the_identifiability_frontier_before_a_rank_deficient_score_search() {
     let n = 240;
     let (axes, y, w) = sample(2, n, 0.05, 0x1032_0008);
     let xs = axis_refs(&axes);
-    match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
-        Err(ResidualCascadeError::Underresolved {
-            checkpoint,
-            evidence,
-            obstruction:
-                gam::solver::residual_cascade::RefinementObstruction::IdentifiabilityCapacity {
-                    candidate_columns,
-                    candidate_penalized_modes,
-                    identifiable_directions,
-                },
-        }) => {
-            assert_eq!(checkpoint.num_levels(), 5);
-            assert_eq!(candidate_columns, 507);
-            assert_eq!(candidate_penalized_modes, 504);
-            assert_eq!(identifiable_directions, 237);
-            // The retained work is the widest identified design, not a
-            // partial one: a capacity refusal may only fire once the capacity
-            // is actually spent.
-            assert_eq!(checkpoint.num_centers(), identifiable_directions);
-            // #2759: the refusal carries the exact comparison it was taken on —
-            // computed on a design that was BUILT and solved at the same λ — so
-            // "one more level still earns marginal likelihood" and "the bound
-            // was too loose to tell" cannot be the same sentence.
-            let evidence = evidence.expect(
-                "an identifiability capacity leaves the candidate set formable, so the refusal \
-                 must carry its exact comparison",
-            );
-            assert!(
-                evidence.evidence > 0.0 && evidence.gain > evidence.tolerance,
-                "capacity may refuse only while one more level still earns its own Occam \
-                 factor: gain {} vs break-even {} ({:+} nats)",
-                evidence.gain,
-                evidence.tolerance,
-                evidence.evidence
-            );
-        }
+    let fit = match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
+        Ok(fit) => fit,
         Err(other) => panic!(
-            "the cascade must name the refinement/identifiability boundary before score search; \
-             got {other}"
+            "the cascade must stop at the identifiability frontier rather than enter the \
+             rank-deficient score search; got {other}"
         ),
-        Ok(_) => panic!("an above-tolerance capacity boundary must not mint a fit"),
-    }
+    };
+    // The frontier itself: five levels, exactly `n − nullity` centers. One
+    // center more and the certified score search is rank deficient.
+    assert_eq!(fit.num_levels(), 5);
+    assert_eq!(fit.num_centers(), n - 3);
+
+    // The boundary is still MEASURED, not assumed: the complete fifth level is
+    // 507 columns / 504 penalized modes against 237 identifiable directions.
+    // That is a property of the geometry and it did not move.
+    let complete_fifth =
+        ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.5, 5).expect("complete level 5");
+    assert_eq!(complete_fifth.num_coeffs(), 507);
+    assert_eq!(complete_fifth.num_centers(), 504);
+
+    // And the fit is minted BY THE CRITERION, not by exhaustion: the binding
+    // candidate set does not earn its own Occam factor (#2759).
+    let certificate = fit.refinement.as_ref().expect("a minted fit carries its comparison");
+    assert!(
+        certificate.gain <= certificate.tolerance && certificate.evidence <= 0.0,
+        "the frontier fit's binding candidate set still earns a level: gain {} vs break-even \
+         {} ({:+} nats)",
+        certificate.gain,
+        certificate.tolerance,
+        certificate.evidence
+    );
+    // The bar that used to refuse here would still refuse: this fixture has not
+    // drifted out of the regime #2759 is about.
+    assert!(
+        certificate.gain > 1e-3 * fit.rss_pen,
+        "premise: the minted fit must be one the fixed relative bar would have refused, got \
+         gain {} against 1e-3·rss_pen {}",
+        certificate.gain,
+        1e-3 * fit.rss_pen
+    );
 }
 
 /// Perturb-and-solve posterior samples have mean ĉ and covariance EXACTLY
@@ -1474,7 +1495,7 @@ fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2
     // At level 7 the design now refuses for a DIFFERENT and equally typed
     // reason — 7387 penalized modes against 797 identifiable directions, so the
     // profiled residual interpolates and the score is flat by rank deficiency —
-    // which is `wendland_fixture_names_underresolution_before_rank_deficient_score_search`'s
+    // which is `wendland_fixture_stops_at_the_identifiability_frontier_...`'s
     // subject, not this one's. The width is not asserted against a literal here:
     // the refusal below carries the budget it was compared against, and that is
     // the honest comparison.

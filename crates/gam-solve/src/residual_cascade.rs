@@ -4574,7 +4574,12 @@ impl EvidenceScale {
     /// in `gain`, decreasing in `occam` — which is what lets a lower bound on
     /// one and an upper bound on the other CERTIFY a positive value.
     fn evidence(&self, gain: f64, occam: f64) -> f64 {
-        0.5 * (-self.dof * (-gain / self.rss_pen).ln_1p() - occam)
+        // A gain cannot exceed the residual it decreases — the objective is
+        // bounded below by zero — so the ratio is clamped into `[0, 1]` rather
+        // than allowed to hand `ln_1p` an argument below −1 and return NaN when
+        // a certified LOWER bound on the gain lands a rounding step past it.
+        let spent = (gain / self.rss_pen).clamp(0.0, 1.0);
+        0.5 * (-self.dof * (-spent).ln_1p() - occam)
     }
 }
 
@@ -5494,7 +5499,14 @@ impl CascadeRequest<'_> {
     ///
     /// holds term by term — the `rss_pen/σ̂² = dof` quadratic cancels — so the
     /// candidate set's Occam factor is READ OFF the two fits rather than formed
-    /// a second time from the Schur determinant it equals.
+    /// a second time from the Schur determinant it equals. That identity is
+    /// what fixes the comparison to ONE λ: the incumbent's, which is its own
+    /// REML optimum. The refined design's optimum is weakly higher than its
+    /// value there, so the comparison leans toward stopping, and
+    /// `the_refinement_stops_where_the_evidence_turns_over_and_the_truth_agrees_2759`
+    /// charges that lean directly — it sweeps six λ on a design strictly wider
+    /// than the one that was minted and requires that none of them win the
+    /// comparison back.
     fn candidate_level_evidence(
         &self,
         plan: &[LevelPlan],
@@ -8484,6 +8496,31 @@ mod refinement_decision_tests {
                         "{name}: the cascade stopped, but a strictly deeper design EARNS its \
                          Occam factor: {deeper_comparison}"
                     );
+
+                    // The comparison is taken at the INCUMBENT's λ, so the
+                    // standing objection is that the deeper design would win it
+                    // back at a λ of its own. Every λ tried is a valid witness
+                    // FOR the deeper design — it needs only one — so a sweep
+                    // that finds none is the strongest form this check can
+                    // take short of a global argument. (Structurally: at the
+                    // turnover the extra columns are redundant, so the score
+                    // surface barely moves and its optimum does not; a level
+                    // that mattered only through λ would have to matter and not
+                    // matter at once.)
+                    for step in [-3.0_f64, -2.0, -1.0, 1.0, 2.0, 3.0] {
+                        let Ok(other) = deeper.fit_at(fit.log_lambda + step, None) else {
+                            continue;
+                        };
+                        assert!(
+                            other.restricted_loglik <= fit.restricted_loglik,
+                            "{name}: the cascade stopped at log lambda {}, but the deeper design \
+                             wins the comparison back at {} ({} vs {})",
+                            fit.log_lambda,
+                            fit.log_lambda + step,
+                            other.restricted_loglik,
+                            fit.restricted_loglik
+                        );
+                    }
 
                     // The independent witness.
                     let stopped = held_out_rmse(&fit);
