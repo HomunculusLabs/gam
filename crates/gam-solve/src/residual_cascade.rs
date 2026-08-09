@@ -102,21 +102,44 @@
 //! Neither residual admission encloses the independent fixed-probe SLQ
 //! determinant, so neither authorizes automatic iterative-route REML (#2513).
 //!
-//! Refinement certificate. After fitting L levels, the candidate level L+1
-//! is constructed (O(n)) and the EXACT objective decrease available from
-//! adding it is bounded: for the penalized objective `F(c) = ‖√W(y−Xc)‖² +
-//! λc'Dc`, appending columns `X₂` with penalty `λd_{L+1}I` decreases the
-//! minimum by `g'S⁻¹g`, `g = X₂'W r̂`, `S` the Schur complement; since
-//! `A₁₁ ⪰ X₁'WX₁` and `X₂'W^{1/2}·proj·W^{1/2}X₂ ⪯ X₂'WX₂`, `S ⪰ λd_{L+1}I`,
-//! so the decrease is at most `‖X₂'W r̂‖²/(λ·d_{L+1})` — a computable
-//! discretization certificate. The cascade refines (adds the level, refits,
-//! re-selects λ) until that bound drops below `REFINE_TOL` of the penalized
-//! residual, the net stops producing new centers (every point is a center),
-//! or the next level reaches a structural boundary: data identifiability,
-//! certified-spectrum memory, level count, or center count. A boundary above
-//! tolerance is `Underresolved` with the retained checkpoint and the finite gain
-//! evidence; it is never sent downstream to a rank-flat score search and never
-//! converted into a fit.
+//! Refinement certificate. After fitting L levels, the candidate level L+1 is
+//! constructed (O(n)) and what it would buy is compared against what it would
+//! cost — both exactly, and both in the currency λ was already selected in.
+//! For the penalized objective `F(c) = ‖√W(y−Xc)‖² + λc'Dc`, appending columns
+//! `X₂` with penalty `λd_{L+1}I` decreases the minimum by `gain = g'S⁻¹g`,
+//! `g = X₂'W r̂`, `S = X₂'W(I−H)X₂ + λd_{L+1}I` the Schur complement, and
+//! multiplies the restricted likelihood's Occam factor by `exp(−occam/2)` with
+//! `occam = log det(S/(λd_{L+1}))` — the log-determinant of the SAME operator
+//! the gain is a quadratic form in. At the profiled σ̂² the restricted
+//! log-likelihood therefore moves by
+//!
+//! ```text
+//!     2·Δ = dof·log(rss_pen/(rss_pen − gain)) − occam
+//! ```
+//!
+//! so one more level is warranted exactly when `gain > rss_pen·(1 −
+//! e^{−occam/dof})`. That break-even gain is the tolerance: the objective
+//! decrease the level's own DIMENSION already pays for. Nothing in it is
+//! chosen — a fixed fraction of `rss_pen` charges nothing for the width of the
+//! set it is buying, which is why it demanded a level of 32790 candidate
+//! columns against 5997 identifiable directions (#2759).
+//!
+//! The cascade refines (adds the level, refits, re-selects λ) until the
+//! evidence stops improving, the net stops producing new centers (every point
+//! is a center), or the next level reaches a structural boundary: data
+//! identifiability, certified-spectrum memory, level count, or center count. A
+//! boundary reached while the evidence still improves is `Underresolved` with
+//! the retained checkpoint and that evidence; it is never sent downstream to a
+//! rank-flat score search and never converted into a fit.
+//!
+//! Both numbers come from ONE evaluation of the design with the complete
+//! candidate level appended, at the incumbent's λ — available past every
+//! capacity budget, because a single fixed-λ evaluation needs no certified
+//! spectrum and no identifiable rank. The matrix-free two-sided bracket on
+//! `gain` (below) is kept as the SCREEN that skips that evaluation: Hadamard on
+//! `S ⪯ diag(X₂'WX₂) + λd` bounds `occam` from above for free, so a gain
+//! bracket whose LOWER end already clears the break-even gain of that bound
+//! proves the level warranted without building anything.
 //!
 //! A capacity boundary is a boundary on WIDTH, and the level it stops is not
 //! all-or-nothing. When the complete candidate level would carry more penalized
@@ -174,9 +197,6 @@ const INITIAL_LEVELS: usize = 3;
 const MAX_LEVELS: usize = 16;
 /// Hard cap on total centers across all levels.
 const MAX_CENTERS: usize = 200_000;
-/// Refinement stops when the exact next-level gain bound falls below this
-/// fraction of the penalized residual.
-const REFINE_TOL: f64 = 1e-3;
 
 /// Column count up to which the normal equations go through dense Cholesky
 /// (exact logdet, no iteration); above it, PCG + SLQ. 1536² doubles ≈ 18 MB.
@@ -606,26 +626,76 @@ pub struct CascadeCertificate {
     pub logdet_method: LogdetMethod,
 }
 
-/// Discretization certificate of the refinement loop: the exact upper bound
-/// on the penalized-objective decrease available from one more level.
-#[derive(Clone, Copy, Debug)]
+/// The exact nested-model comparison one candidate set was decided on.
+///
+/// Appending the complete candidate level `X₂` (penalty `λ·d`) to the design
+/// and re-minimizing at the SAME λ decreases the penalized objective by
+/// [`Self::gain`] and multiplies the restricted likelihood's Occam factor by
+/// `exp(−occam/2)`, with
+///
+/// ```text
+///     gain  = gᵀS⁻¹g,   g = X₂ᵀW r̂,   S = X₂ᵀW(I − H)X₂ + λd·I
+///     occam = log det(S/(λd))
+/// ```
+///
+/// the two spectral functionals of ONE operator. At the profiled σ̂² the
+/// restricted log-likelihood moves by
+///
+/// ```text
+///     2·evidence = dof·log(rss_pen/(rss_pen − gain)) − occam
+/// ```
+///
+/// which is positive exactly when `gain > tolerance`. A returned fit carries
+/// the candidate set that came CLOSEST to warranting one more level — the
+/// largest [`Self::evidence`] over the next level and, when a capacity budget
+/// forced the finest level to be partial, the candidates that level left behind
+/// at its own radius — and every one of them is at or below its own tolerance.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RefinementCertificate {
-    /// Certified UPPER bound on the penalized-objective decrease still
-    /// available, maximized over every candidate set the cascade could still
-    /// add: the next level, and — when a capacity budget forced the finest
-    /// level to be partial — the candidates that level left behind at its own
-    /// radius. Every one of them is at or below [`Self::tolerance`]; this is the
-    /// largest.
-    pub next_level_gain_bound: f64,
-    /// Certified LOWER bound on the same decrease, from the same evidence
-    /// (#2759). It is what separates "this level provably cannot move the
-    /// objective" from "the bound was too loose to tell": a certificate whose
-    /// two ends are far apart passed on conservatism, and one whose ends have
-    /// met passed on the quantity itself. Reported for the same candidate set
-    /// that produced [`Self::next_level_gain_bound`].
-    pub next_level_gain_lower_bound: f64,
-    /// The absolute tolerance it was compared against (`REFINE_TOL·rss_pen`).
+    /// EXACT penalized-objective decrease the complete candidate set buys at
+    /// this fit's λ: `rss_pen − rss_pen_refined`, differenced from a design
+    /// that was actually built and solved rather than bounded.
+    pub gain: f64,
+    /// `log det(I + X₂ᵀW(I − H)X₂/(λd)) ⩾ 0`, the candidate set's Occam factor.
+    /// It is the charge for the set's DIMENSION, weighted by how far each of
+    /// its directions is identified by the data: a candidate column with no
+    /// rows in its support contributes exactly zero to it, and to the gain.
+    pub occam: f64,
+    /// Break-even gain `rss_pen·(1 − e^{−occam/dof})` — the objective decrease
+    /// this candidate set's own Occam factor already pays for. DERIVED from the
+    /// set, never chosen: there is no tolerance constant in the cascade.
     pub tolerance: f64,
+    /// Restricted log-likelihood change from appending the set, at this fit's
+    /// λ. Non-positive exactly when `gain ⩽ tolerance`, and non-positive on
+    /// every certificate a returned fit carries.
+    pub evidence: f64,
+}
+
+impl RefinementCertificate {
+    /// The certificate of a candidate set that does not exist: an empty net
+    /// certifies zero remaining gain against a zero charge.
+    const EXHAUSTED: Self = Self {
+        gain: 0.0,
+        occam: 0.0,
+        tolerance: 0.0,
+        evidence: 0.0,
+    };
+
+    /// Whether one more level is warranted — the marginal likelihood improves.
+    fn warrants_refinement(&self) -> bool {
+        self.evidence > 0.0
+    }
+}
+
+impl std::fmt::Display for RefinementCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "gain {:.6e} against break-even {:.6e} (occam {:.6e}), restricted log-likelihood \
+             {:+.6e}",
+            self.gain, self.tolerance, self.occam, self.evidence
+        )
+    }
 }
 
 /// A structural limit that prevented the cascade from adding the next
@@ -867,20 +937,16 @@ pub enum ResidualCascadeError {
         maximum_excess: f64,
         comparison_resolution: f64,
     },
-    /// Refinement could not meet its requested tolerance before a structural
-    /// capacity was reached. The checkpoint preserves all completed work while
-    /// remaining unusable as a public fit.
+    /// A structural capacity was reached while one more level was still
+    /// warranted by the marginal likelihood. The checkpoint preserves all
+    /// completed work while remaining unusable as a public fit.
     Underresolved {
         checkpoint: ResidualCascadeCheckpoint,
-        gain_bound: f64,
-        /// Certified LOWER bound on the same gain (#2759). This is what makes
-        /// the refusal a statement about the CASCADE rather than about the
-        /// certificate: while the bound was `‖g‖²/(λd)` and nothing else, "the
-        /// remaining gain exceeds the tolerance" and "the bound is too loose to
-        /// tell" were the same sentence. A lower bound above
-        /// `requested_tolerance` excludes the second reading outright.
-        gain_lower_bound: f64,
-        requested_tolerance: f64,
+        /// The comparison that says the level is still warranted, computed on a
+        /// design that was built and solved. `None` only when a structural cap
+        /// stopped the candidate set from being FORMED — then nothing about it
+        /// is computable and the refusal rests on that cap alone.
+        evidence: Option<RefinementCertificate>,
         obstruction: RefinementObstruction,
     },
 }
@@ -965,23 +1031,24 @@ impl std::fmt::Display for ResidualCascadeError {
             ),
             Self::Underresolved {
                 checkpoint,
-                gain_bound,
-                gain_lower_bound,
-                requested_tolerance,
+                evidence,
                 obstruction,
-            } => write!(
-                f,
-                "residual cascade underresolved after {} levels: the next level's gain is \
-                 certified in [{gain_lower_bound:.6e}, {gain_bound:.6e}] and exceeds requested \
-                 tolerance {requested_tolerance:.6e}{}; {obstruction}",
-                checkpoint.num_levels(),
-                if *gain_lower_bound > *requested_tolerance {
-                    " from BELOW, so this is the cascade's remaining gain and not the \
-                     certificate's conservatism"
-                } else {
-                    ""
-                }
-            ),
+            } => match evidence {
+                Some(evidence) => write!(
+                    f,
+                    "residual cascade underresolved after {} levels: one more level still earns \
+                     marginal likelihood — {evidence} — so the cascade's own evidence, not a \
+                     tolerance constant, is what this capacity refuses; {obstruction}",
+                    checkpoint.num_levels(),
+                ),
+                None => write!(
+                    f,
+                    "residual cascade underresolved after {} levels: the candidate set could not \
+                     be formed at all, so no comparison against it exists to certify the \
+                     discretization spent; {obstruction}",
+                    checkpoint.num_levels(),
+                ),
+            },
         }
     }
 }
@@ -4252,11 +4319,18 @@ impl ResidualCascadeDesign {
         fit: &ResidualCascadeFit,
         exponent: f64,
     ) -> Result<NextLevelAssessment, String> {
-        // The same threshold the refinement loop decides on, so the assessment
-        // a caller reads is the assessment the loop acted on rather than a
-        // differently-converged neighbour of it.
+        // The same screen the refinement loop stops its bracket on, so the
+        // assessment a caller reads is the assessment the loop acted on rather
+        // than a differently-converged neighbour of it.
         Ok(self
-            .plan_level_at_exponent(fit, exponent, Some(REFINE_TOL * fit.rss_pen))?
+            .plan_level_at_exponent(
+                fit,
+                exponent,
+                Some(EvidenceScale {
+                    rss_pen: fit.rss_pen,
+                    dof: (self.core.y.len() - self.core.nullity()) as f64,
+                }),
+            )?
             .assessment)
     }
 
@@ -4284,7 +4358,7 @@ impl ResidualCascadeDesign {
         &self,
         fit: &ResidualCascadeFit,
         exponent: f64,
-        decision_threshold: Option<f64>,
+        screen: Option<EvidenceScale>,
     ) -> Result<NextLevelPlan, String> {
         let core = &self.core;
         if !Arc::ptr_eq(core, &fit.core) {
@@ -4350,7 +4424,7 @@ impl ResidualCascadeDesign {
             },
             &g,
             lambda,
-            decision_threshold,
+            screen,
         )?;
         let gain_bound = bracket.upper;
         let candidate_penalized_modes = net.len();
@@ -4435,6 +4509,36 @@ impl ResidualCascadeDesign {
             complete,
             extends_last,
         })
+    }
+}
+
+/// The two scalars a gain is turned into evidence by: the incumbent's penalized
+/// residual and the restricted degrees of freedom, both of which are properties
+/// of the FIT rather than of the candidate set.
+///
+/// Passing one to a gain bracket ARMS the free screen. Hadamard on
+/// `S ⪯ diag(X₂ᵀWX₂) + λd` bounds the Occam factor from above for nothing, so
+/// the gain at which THAT bound breaks even is an upper bound on the true
+/// break-even gain: a bracket whose lower end clears it proves one more level
+/// warranted without building the refined design, and a bracket that falls
+/// below it proves nothing — which is exactly when the exact comparison has to
+/// run, and therefore exactly when further bracket iterations are waste.
+/// Without one, the bracket closes as far as the Krylov space allows, because
+/// no comparison is pending and only the number is wanted.
+#[derive(Clone, Copy, Debug)]
+struct EvidenceScale {
+    rss_pen: f64,
+    dof: f64,
+}
+
+impl EvidenceScale {
+    /// The gain at which a candidate set whose Occam factor is `occam` breaks
+    /// even: `rss_pen·(1 − e^{−occam/dof})`, the objective decrease that set's
+    /// own dimension already pays for. Below it the restricted likelihood
+    /// falls, above it the likelihood rises, and at it they are equal — which
+    /// is why this is a derivation and not a tolerance.
+    fn break_even_gain(&self, occam: f64) -> f64 {
+        -self.rss_pen * (-occam / self.dof).exp_m1()
     }
 }
 
@@ -4606,21 +4710,23 @@ struct RefinementGainBracket {
 /// certificate can never be LOOSER than the one it replaces, whatever the
 /// iteration does.
 ///
-/// # The stopping rule is the decision, not a tolerance
+/// # The stopping rule is the screen, not a tolerance
 ///
-/// Iteration stops as soon as the bracket lands entirely on one side of
-/// `decision_threshold = REFINE_TOL·rss_pen`: either the level provably cannot
-/// move the objective by that much, or it provably can. There is no accuracy
-/// constant to pick, because accuracy is not what is being asked for — a
-/// comparison is. The structural ceiling is the Krylov dimension, past which
-/// the answer is exact by construction; a stalled bracket (the gap not
-/// shrinking) is exactness reached early and stops too.
+/// With a `screen`, iteration stops as soon as the bracket lands entirely on
+/// one side of the break-even gain of the HADAMARD Occam bound: above it, one
+/// more level provably earns marginal likelihood and no refined design has to
+/// be built; below it, nothing is decided and the exact comparison has to run,
+/// so further iterations are waste. There is no accuracy constant to pick,
+/// because accuracy is not what is being asked for — a comparison is. The
+/// structural ceiling is the Krylov dimension, past which the answer is exact
+/// by construction; a stalled bracket (the gap not shrinking) is exactness
+/// reached early and stops too.
 fn certified_refinement_gain(
     core: &Core,
     level: &CandidateLevel<'_>,
     g: &[f64],
     lambda: f64,
-    decision_threshold: Option<f64>,
+    screen: Option<EvidenceScale>,
 ) -> Result<RefinementGainBracket, String> {
     let candidates = level.centers.len();
     let ridge = level.ridge;
@@ -4747,9 +4853,9 @@ fn certified_refinement_gain(
                 hadamard_occam,
             };
         }
-        // The comparison is decided: either the whole bracket clears the
-        // tolerance, or none of it does.
-        if let Some(threshold) = decision_threshold
+        // The screen is decided: either the whole bracket clears the Hadamard
+        // break-even gain, or none of it does.
+        if let Some(threshold) = screen.map(|scale| scale.break_even_gain(hadamard_occam))
             && (upper <= threshold || lower > threshold)
         {
             best.iterations = iteration + 1;
@@ -5232,52 +5338,200 @@ impl ResidualCascadeFit {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RefinementDecision {
-    Converged {
-        gain_bound: f64,
-    },
+    Converged(RefinementCertificate),
     Refine,
     Underresolved {
-        gain_bound: f64,
+        evidence: Option<RefinementCertificate>,
         obstruction: RefinementObstruction,
     },
 }
 
-
-/// Turn the typed next-level assessment into the only three legal refinement
-/// transitions. In particular, a capacity limit can yield a fit only when its
-/// already-computed gain bound independently passes the requested tolerance.
+/// Turn the typed next-level assessment and the comparison against it into the
+/// only three legal refinement transitions.
+///
+/// `evidence` is `None` in exactly two situations, and they are opposite ones:
+/// the screen already proved the level warranted (so the exact comparison was
+/// skipped as redundant, and the assessment left room to take it), or a
+/// structural cap stopped the candidate set from being formed at all (so no
+/// comparison exists). The first can only reach a `GainBound` assessment and
+/// the second only a `CapacityExceeded` one, which is what lets one `None`
+/// serve both without ambiguity.
+///
+/// A capacity limit can still yield a fit — that is the point of computing the
+/// comparison before consulting the budget: a level nobody should add does not
+/// become a refusal because there was also no room for it.
 fn decide_refinement(
     assessment: NextLevelAssessment,
-    requested_tolerance: f64,
+    evidence: Option<RefinementCertificate>,
 ) -> RefinementDecision {
     match assessment {
-        NextLevelAssessment::EmptyNet => RefinementDecision::Converged { gain_bound: 0.0 },
-        NextLevelAssessment::GainBound(gain_bound) if gain_bound <= requested_tolerance => {
-            RefinementDecision::Converged { gain_bound }
+        // Only an empty net certifies zero remaining gain outright: there is no
+        // candidate set, so there is nothing to charge and nothing to buy.
+        NextLevelAssessment::EmptyNet => {
+            RefinementDecision::Converged(RefinementCertificate::EXHAUSTED)
         }
-        NextLevelAssessment::GainBound(_) => RefinementDecision::Refine,
-        NextLevelAssessment::CapacityExceeded {
-            gain_bound,
-            obstruction: _,
-        } if gain_bound <= requested_tolerance => RefinementDecision::Converged { gain_bound },
-        NextLevelAssessment::CapacityExceeded {
-            gain_bound,
-            obstruction,
-        } => RefinementDecision::Underresolved {
-            gain_bound,
-            obstruction,
+        NextLevelAssessment::GainBound(_) => match evidence {
+            Some(evidence) if !evidence.warrants_refinement() => {
+                RefinementDecision::Converged(evidence)
+            }
+            _ => RefinementDecision::Refine,
+        },
+        NextLevelAssessment::CapacityExceeded { obstruction, .. } => match evidence {
+            Some(evidence) if !evidence.warrants_refinement() => {
+                RefinementDecision::Converged(evidence)
+            }
+            evidence => RefinementDecision::Underresolved {
+                evidence,
+                obstruction,
+            },
         },
     }
 }
 
-/// Fit the full magic-default cascade: start at `INITIAL_LEVELS`, REML-fit,
-/// and refine (add a level, refit, re-select λ) until the exact next-level
-/// gain bound certifies that one more level cannot move the penalized
-/// objective by more than `REFINE_TOL` of the penalized residual. A genuinely
-/// empty next-level net certifies zero remaining gain; a structural capacity
-/// reached before the tolerance passes is a typed
-/// [`ResidualCascadeError::Underresolved`] carrying the retained work and its
-/// evidence, never a fit.
+/// The inputs one cascade fit is derived from, kept together so that a CANDIDATE
+/// level can be materialized — built, solved, and compared — rather than only
+/// bounded. The refinement decision needs a log-determinant of the candidate
+/// Schur complement, and a log-determinant is not a quantity any matrix-free
+/// bracket produces: it needs the whole spectrum, which is to say the design.
+#[derive(Clone, Copy)]
+struct CascadeRequest<'a> {
+    xs: &'a [&'a [f64]],
+    y: &'a [f64],
+    w: &'a [f64],
+    metric: &'a [f64],
+    sobolev_s: f64,
+}
+
+impl CascadeRequest<'_> {
+    fn build(&self, plan: &[LevelPlan]) -> Result<ResidualCascadeDesign, String> {
+        ResidualCascadeDesign::build_from_plan(
+            self.xs,
+            self.y,
+            self.w,
+            self.metric,
+            self.sobolev_s,
+            plan,
+        )
+    }
+
+    /// The exact nested-model comparison for ONE pending candidate set: build
+    /// the design with the COMPLETE set appended, minimize at the incumbent's
+    /// λ, and difference the two restricted log-likelihoods.
+    ///
+    /// This is available past every capacity budget the automatic route
+    /// enforces, and that is the point. `CERTIFIED_SPECTRUM_MAX` bounds the
+    /// λ-independent Schur eigendecomposition the score SEARCH is certified in,
+    /// and `n − nullity` bounds the rank that search needs to have a stationary
+    /// point at all; a single evaluation at a FIXED λ needs neither — only a
+    /// factorization, which the sparse route supplies far wider. So the question
+    /// "does one more level explain the data better?" has an exact answer
+    /// exactly where the cascade used to have only a bound (#2759).
+    ///
+    /// At the profiled σ̂² the identity
+    ///
+    /// ```text
+    ///     2·evidence = dof·log(rss_pen/rss_pen_refined) − occam
+    /// ```
+    ///
+    /// holds term by term — the `rss_pen/σ̂² = dof` quadratic cancels — so the
+    /// candidate set's Occam factor is READ OFF the two fits rather than formed
+    /// a second time from the Schur determinant it equals.
+    fn candidate_level_evidence(
+        &self,
+        plan: &[LevelPlan],
+        exponent: f64,
+        extends_last: bool,
+        fit: &ResidualCascadeFit,
+    ) -> Result<RefinementCertificate, String> {
+        let mut refined_plan = plan.to_vec();
+        if extends_last {
+            // Re-assessing the finest radius: the COMPLETE set there is the
+            // union of what capacity let the level take and what it left
+            // behind, and asking for the whole level reproduces exactly that
+            // union. `extend_net` is greedy over a fixed order and every center
+            // it plants is more than `h` from every other, so no member of the
+            // complete set can be covered by the partial selection, and no
+            // non-member can escape being covered by one.
+            refined_plan
+                .last_mut()
+                .expect("the plan always carries a level")
+                .centers = None;
+        } else {
+            refined_plan.push(LevelPlan {
+                exponent,
+                centers: None,
+            });
+        }
+        let refined_design = self.build(&refined_plan)?;
+        let refined = refined_design.fit_at(fit.log_lambda, None)?;
+        if refined.certificate.logdet_method == LogdetMethod::Slq {
+            return Err(format!(
+                "residual cascade refinement: the candidate level's log-determinant fell back to \
+                 the stochastic estimate at {} columns, and a point estimate cannot underwrite a \
+                 convergence certificate",
+                refined_design.core.m
+            ));
+        }
+        level_evidence(
+            fit,
+            &refined,
+            (self.y.len() - refined_design.core.nullity()) as f64,
+        )
+    }
+}
+
+/// Turn one incumbent fit and one refined fit AT THE SAME λ into the comparison
+/// the refinement decides on.
+///
+/// The refined design must be the incumbent's plus a candidate set, and both
+/// must carry their own profiled σ̂²; then `rss_pen/σ̂² = dof` on both sides and
+/// the restricted log-likelihood difference is
+///
+/// ```text
+///     2·evidence = dof·log(rss_pen/rss_pen_refined) − occam
+/// ```
+///
+/// with `occam = log det(S/(λd))` the candidate set's Occam factor. That is an
+/// identity, not an approximation, so the Occam term is READ OFF the two fits
+/// rather than formed a second time from the Schur determinant it equals.
+fn level_evidence(
+    fit: &ResidualCascadeFit,
+    refined: &ResidualCascadeFit,
+    dof: f64,
+) -> Result<RefinementCertificate, String> {
+    let scale = EvidenceScale {
+        rss_pen: fit.rss_pen,
+        dof,
+    };
+    // A superset design minimizes the same objective over a superset, so the
+    // decrease is non-negative, and the Occam factor of a PSD Schur complement
+    // is too; both are clamped against their own rounding rather than trusted
+    // to stay on the right side of zero.
+    let gain = (fit.rss_pen - refined.rss_pen).max(0.0);
+    let evidence = refined.restricted_loglik - fit.restricted_loglik;
+    let occam = (dof * (fit.rss_pen / refined.rss_pen).ln() - 2.0 * evidence).max(0.0);
+    if !(gain.is_finite() && occam.is_finite() && evidence.is_finite() && dof > 0.0) {
+        return Err(format!(
+            "residual cascade refinement: the candidate level comparison is not finite \
+             (gain {gain}, occam {occam}, evidence {evidence}, dof {dof})"
+        ));
+    }
+    Ok(RefinementCertificate {
+        gain,
+        occam,
+        tolerance: scale.break_even_gain(occam),
+        evidence,
+    })
+}
+
+/// Fit the full magic-default cascade: start at `INITIAL_LEVELS`, REML-fit, and
+/// refine (add a level, refit, re-select λ) until one more level no longer
+/// earns its own Occam factor — until the marginal likelihood of the design
+/// with the complete candidate set appended, at the same λ, stops rising. A
+/// genuinely empty next-level net certifies zero remaining gain against a zero
+/// charge; a structural capacity reached while the evidence is still rising is
+/// a typed [`ResidualCascadeError::Underresolved`] carrying the retained work
+/// and that comparison, never a fit.
 pub fn fit_residual_cascade(
     xs: &[&[f64]],
     y: &[f64],
@@ -5285,6 +5539,13 @@ pub fn fit_residual_cascade(
     metric: &[f64],
     sobolev_s: f64,
 ) -> Result<ResidualCascadeFit, ResidualCascadeError> {
+    let request = CascadeRequest {
+        xs,
+        y,
+        w,
+        metric,
+        sobolev_s,
+    };
     let mut plan: Vec<LevelPlan> = (0..INITIAL_LEVELS)
         .map(|level| LevelPlan {
             exponent: level as f64,
@@ -5292,7 +5553,7 @@ pub fn fit_residual_cascade(
         })
         .collect();
     loop {
-        let design = ResidualCascadeDesign::build_from_plan(xs, y, w, metric, sobolev_s, &plan)?;
+        let design = request.build(&plan)?;
         let levels = plan.len();
         // Quasi-uniformity guard (issue #1032, caveat 2): if the metric has
         // collapsed the cloud onto a near-degenerate sheet in scaled
@@ -5324,73 +5585,97 @@ pub fn fit_residual_cascade(
         // caller that wants to watch the bound reads them off the returned fit
         // instead of scraping log lines. (A library solve never writes to
         // stderr.)
-        let requested_tolerance = REFINE_TOL * fit.rss_pen;
+        let scale = EvidenceScale {
+            rss_pen: fit.rss_pen,
+            dof: (y.len() - design.core.nullity()) as f64,
+        };
         // Everything the cascade could still add has to be certified, not just
         // the next dyadic level. When a capacity budget truncated the finest
         // level, the candidates it left behind at ITS radius are still
         // addable — so they are assessed first, and the next dyadic level only
         // after they pass. A fit is minted only when EVERY pending candidate
-        // set is below the tolerance, which is the same per-level claim the
-        // complete-level ladder always made, asserted once per set.
+        // set fails to earn its own Occam factor, which is the same per-level
+        // claim the complete-level ladder always made, asserted once per set.
         let last = plan.last().expect("the plan always carries a level");
         let mut pending: Vec<f64> = Vec::with_capacity(2);
         if last.centers.is_some() {
             pending.push(last.exponent);
         }
         pending.push(last.exponent + 1.0);
-        let mut certified_bound = 0.0_f64;
-        let mut certified_lower = 0.0_f64;
+        let mut certified: Option<RefinementCertificate> = None;
         let mut refinement: Option<(f64, bool, bool, Vec<[f64; 3]>)> = None;
         for exponent in pending {
-            let planned =
-                design.plan_level_at_exponent(&fit, exponent, Some(requested_tolerance))?;
-            // The two-sided evidence the decision below is taken on. #2759 made
-            // the gain a BRACKET rather than a one-sided bound; a run record
-            // that shows only the upper end cannot say whether a refusal was
-            // close or an order out, which is the whole point of having both
-            // ends. Reported here, at the one site that acts on it.
-            match planned.gain.as_ref() {
-                Some(bracket) => log::debug!(
-                    "[cascade] exponent={exponent} gain_bracket=[{:.6e}, {:.6e}] \
-                     cg_iterations={} hadamard_occam={:.6e} \
-                     requested_tolerance={requested_tolerance:.6e} \
-                     complete={} extends_last={}",
-                    bracket.lower,
-                    bracket.upper,
-                    bracket.iterations,
-                    bracket.hadamard_occam,
-                    planned.complete,
-                    planned.extends_last,
-                ),
-                None => log::debug!(
-                    "[cascade] exponent={exponent} gain_bracket=none (empty net, or a \
-                     proposal the center cap stopped before it was complete) \
-                     requested_tolerance={requested_tolerance:.6e}"
-                ),
-            }
+            let planned = design.plan_level_at_exponent(&fit, exponent, Some(scale))?;
             let (complete, extends_last) = (planned.complete, planned.extends_last);
-            let selection = planned.selection;
-            let certified_gain_lower = planned.gain.as_ref().map_or(0.0, |gain| gain.lower);
-            match decide_refinement(planned.assessment, requested_tolerance) {
-                RefinementDecision::Converged { gain_bound } => {
-                    if gain_bound >= certified_bound {
-                        certified_bound = gain_bound;
-                        certified_lower = certified_gain_lower;
+            let room = !planned.selection.is_empty();
+            // The free half of the comparison. `Σ_j log(diag(S)_j/λd)` bounds
+            // the Occam factor from above, so a gain bracket whose LOWER end
+            // already clears that bound's break-even gain proves the level
+            // warranted without building anything.
+            let screened = planned.gain.as_ref().is_some_and(|bracket| {
+                bracket.lower > scale.break_even_gain(bracket.hadamard_occam)
+            });
+            // Two caps stop the candidate set from being FORMED rather than
+            // merely from being taken, and both are caps on the shape of the
+            // plan itself, so no design carrying that set exists to compare
+            // against. Every other outcome admits the exact comparison.
+            let constructible = !matches!(
+                planned.assessment,
+                NextLevelAssessment::EmptyNet
+                    | NextLevelAssessment::CapacityExceeded {
+                        obstruction: RefinementObstruction::LevelCapacity { .. }
+                            | RefinementObstruction::CenterCapacity { .. },
+                        ..
+                    }
+            );
+            // The screen may only skip the exact comparison when there is room
+            // to ACT on it. A refusal must never rest on a bound while the
+            // number itself is one factorization away, which is the whole of
+            // this issue's remaining half.
+            let evidence = if !constructible || (screened && room) {
+                None
+            } else {
+                Some(request.candidate_level_evidence(&plan, exponent, extends_last, &fit)?)
+            };
+            // The comparison the decision below is taken on, plus the bracket
+            // that screened it: a run record that shows only one of them cannot
+            // say whether the exact route ran or the screen carried it.
+            log::debug!(
+                "[cascade] exponent={exponent} gain_bracket={} evidence={} complete={complete} \
+                 extends_last={extends_last} room={room}",
+                planned.gain.as_ref().map_or_else(
+                    || "none (empty net, or a proposal a structural cap stopped)".to_string(),
+                    |bracket| format!(
+                        "[{:.6e}, {:.6e}] in {} cg steps, hadamard occam {:.6e}",
+                        bracket.lower, bracket.upper, bracket.iterations, bracket.hadamard_occam
+                    )
+                ),
+                evidence.map_or_else(
+                    || "none (screened, or unformed)".to_string(),
+                    |evidence| evidence.to_string()
+                ),
+            );
+            match decide_refinement(planned.assessment, evidence) {
+                RefinementDecision::Converged(spent) => {
+                    // The binding set is the one that came CLOSEST to earning a
+                    // level, which is the largest evidence and not the largest
+                    // gain: gains from candidate sets of different width are not
+                    // comparable, and comparing them is what this issue was.
+                    if certified.is_none_or(|best| spent.evidence > best.evidence) {
+                        certified = Some(spent);
                     }
                 }
                 RefinementDecision::Refine => {
-                    refinement = Some((exponent, complete, extends_last, selection));
+                    refinement = Some((exponent, complete, extends_last, planned.selection));
                     break;
                 }
                 RefinementDecision::Underresolved {
-                    gain_bound,
+                    evidence,
                     obstruction,
                 } => {
                     return Err(ResidualCascadeError::Underresolved {
                         checkpoint: ResidualCascadeCheckpoint::new(fit),
-                        gain_bound,
-                        gain_lower_bound: certified_gain_lower,
-                        requested_tolerance,
+                        evidence,
                         obstruction,
                     });
                 }
@@ -5398,11 +5683,7 @@ pub fn fit_residual_cascade(
         }
         match refinement {
             None => {
-                fit.refinement = Some(RefinementCertificate {
-                    next_level_gain_bound: certified_bound,
-                    next_level_gain_lower_bound: certified_lower,
-                    tolerance: requested_tolerance,
-                });
+                fit.refinement = Some(certified.unwrap_or(RefinementCertificate::EXHAUSTED));
                 return Ok(fit);
             }
             Some((exponent, complete, extends_last, mut selection)) => {
@@ -5459,7 +5740,7 @@ mod refinement_decision_tests {
             let fit = design.fit_at(log_lambda, None).expect("fixed-lambda fit");
             let exponent = plan.len() as f64;
             let planned = design
-                .plan_level_at_exponent(&fit, exponent, Some(REFINE_TOL * fit.rss_pen))
+                .plan_level_at_exponent(&fit, exponent, None)
                 .expect("candidate level");
             let bracket = planned.gain.as_ref().expect("a complete candidate certifies");
             assert!(
@@ -5603,24 +5884,46 @@ mod refinement_decision_tests {
         energy / (lambda * level_weight(exponent, core.sobolev_s, core.dim))
     }
 
+    /// A comparison that says a candidate set buys `evidence` nats.
+    fn comparison(evidence: f64) -> RefinementCertificate {
+        RefinementCertificate {
+            gain: TOLERANCE + evidence,
+            occam: 1.0,
+            tolerance: TOLERANCE,
+            evidence,
+        }
+    }
+
     #[test]
-    fn only_empty_or_passing_bound_converges() {
+    fn only_an_empty_net_or_a_losing_comparison_converges() {
         assert_eq!(
-            decide_refinement(NextLevelAssessment::EmptyNet, TOLERANCE),
-            RefinementDecision::Converged { gain_bound: 0.0 }
+            decide_refinement(NextLevelAssessment::EmptyNet, None),
+            RefinementDecision::Converged(RefinementCertificate::EXHAUSTED)
         );
         assert_eq!(
-            decide_refinement(NextLevelAssessment::GainBound(0.2), TOLERANCE),
-            RefinementDecision::Converged { gain_bound: 0.2 }
+            decide_refinement(NextLevelAssessment::GainBound(0.2), Some(comparison(-1.0))),
+            RefinementDecision::Converged(comparison(-1.0))
+        );
+        // Exactly break-even is NOT an improvement: the finer prior has to earn
+        // its Occam factor, and matching it is not earning it.
+        assert_eq!(
+            decide_refinement(NextLevelAssessment::GainBound(0.2), Some(comparison(0.0))),
+            RefinementDecision::Converged(comparison(0.0))
         );
         assert_eq!(
-            decide_refinement(NextLevelAssessment::GainBound(0.3), TOLERANCE),
+            decide_refinement(NextLevelAssessment::GainBound(0.3), Some(comparison(1.0))),
+            RefinementDecision::Refine
+        );
+        // The screen skipped the exact comparison, which it may do only when it
+        // proved the level warranted AND there was room to take it.
+        assert_eq!(
+            decide_refinement(NextLevelAssessment::GainBound(0.3), None),
             RefinementDecision::Refine
         );
     }
 
     #[test]
-    fn capacity_above_tolerance_is_underresolved() {
+    fn capacity_reached_while_the_evidence_rises_is_underresolved() {
         let obstruction = RefinementObstruction::LevelCapacity {
             levels: MAX_LEVELS,
             maximum_levels: MAX_LEVELS,
@@ -5631,14 +5934,17 @@ mod refinement_decision_tests {
                     obstruction,
                     gain_bound: 0.3,
                 },
-                TOLERANCE,
+                Some(comparison(1.0)),
             ),
             RefinementDecision::Underresolved {
-                gain_bound: 0.3,
+                evidence: Some(comparison(1.0)),
                 obstruction,
             }
         );
 
+        // A cap that stopped the candidate set from being FORMED leaves nothing
+        // to compare against, and an absent comparison can never certify the
+        // discretization spent.
         let center_obstruction = RefinementObstruction::CenterCapacity {
             centers: MAX_CENTERS + 1,
             maximum_centers: MAX_CENTERS,
@@ -5649,17 +5955,22 @@ mod refinement_decision_tests {
                     obstruction: center_obstruction,
                     gain_bound: f64::INFINITY,
                 },
-                TOLERANCE,
+                None,
             ),
             RefinementDecision::Underresolved {
-                gain_bound: f64::INFINITY,
+                evidence: None,
                 obstruction: center_obstruction,
             }
         );
     }
 
+    /// A level nobody should add does not become a refusal because there was
+    /// also no room for it. This is why the exact comparison runs BEFORE the
+    /// budget is consulted, and it is the transition the whole of #2759's
+    /// second half turns on: the rank-maximal designs refuse only because the
+    /// criterion they are compared against charges nothing for width.
     #[test]
-    fn capacity_does_not_block_an_independently_passing_bound() {
+    fn capacity_does_not_block_a_losing_comparison() {
         assert_eq!(
             decide_refinement(
                 NextLevelAssessment::CapacityExceeded {
@@ -5669,9 +5980,9 @@ mod refinement_decision_tests {
                     },
                     gain_bound: 0.2,
                 },
-                TOLERANCE,
+                Some(comparison(-1.0)),
             ),
-            RefinementDecision::Converged { gain_bound: 0.2 }
+            RefinementDecision::Converged(comparison(-1.0))
         );
     }
 
@@ -5833,7 +6144,19 @@ mod refinement_decision_tests {
             let (next_rss, next_route, next_iterations) = exact_rss(&next, lambda);
             let elapsed = started.elapsed();
             let gain = current_rss - next_rss;
-            let tolerance = REFINE_TOL * current_rss;
+            // "Material" is the rung's OWN break-even gain, not a fixed fraction
+            // of the residual (#2759): a whole extra dyadic level is a wide set,
+            // and a criterion that charges nothing for its width cannot say
+            // whether the gain is signal or capacity.
+            let comparison = level_evidence(
+                &selected,
+                &next
+                    .fit_at(selected.log_lambda, None)
+                    .expect("next 2628 fixed-lambda fit"),
+                (y.len() - next.core.nullity()) as f64,
+            )
+            .expect("next 2628 level comparison");
+            let tolerance = comparison.tolerance;
             let crude = match current
                 .assess_next_level(&selected)
                 .expect("crude next-level assessment")
@@ -5845,8 +6168,8 @@ mod refinement_decision_tests {
                 other => panic!("complete 2628 fixture returned {other:?}"),
             };
             assert!(
-                gain > tolerance,
-                "the exact whole-rung gain must remain material: {gain} vs {tolerance}"
+                comparison.warrants_refinement(),
+                "the exact whole-rung gain must remain material: {comparison}"
             );
             println!(
                 "#2628-CONDITIONAL {name} current_levels={current_levels} \
@@ -5936,12 +6259,24 @@ mod refinement_decision_tests {
             let (completed_rss, completed_route, completed_iterations) =
                 exact_rss(&completed, sublevel_lambda);
             let remaining_exact_gain = sublevel_rss - completed_rss;
-            let remaining_fraction = endpoint - best_exponent;
-            let scaled_tolerance = REFINE_TOL * sublevel_rss * remaining_fraction;
+            // The endpoint's own break-even gain, from the same identity the
+            // refinement decides on. The fixed fraction it replaces needed an
+            // ad-hoc `remaining_fraction` rescaling precisely because a relative
+            // bar on `rss_pen` carries no information about the SET being
+            // bought; the Occam factor of that set does (#2759).
+            let remaining_comparison = level_evidence(
+                &sublevel_fit,
+                &completed
+                    .fit_at(sublevel_fit.log_lambda, None)
+                    .expect("completed dyadic 2628 fixed-lambda fit"),
+                (y.len() - completed.core.nullity()) as f64,
+            )
+            .expect("endpoint 2628 level comparison");
+            let scaled_tolerance = remaining_comparison.tolerance;
             assert!(
-                remaining_exact_gain > scaled_tolerance,
+                remaining_comparison.warrants_refinement(),
                 "even the rank-maximal sub-level must leave material endpoint gain: \
-                 {remaining_exact_gain} vs {scaled_tolerance}"
+                 {remaining_comparison}"
             );
             println!(
                 "#2628-SUBLEVEL {name} exponent={best_exponent:.12} \
@@ -5960,9 +6295,7 @@ mod refinement_decision_tests {
             match fit_residual_cascade(&axes, y, w, &[1.0, 1.0], 2.5) {
                 Err(ResidualCascadeError::Underresolved {
                     checkpoint,
-                    gain_bound,
-                    gain_lower_bound,
-                    requested_tolerance,
+                    evidence,
                     obstruction:
                         RefinementObstruction::IdentifiabilityCapacity {
                             candidate_columns,
@@ -5970,12 +6303,14 @@ mod refinement_decision_tests {
                             identifiable_directions,
                         },
                 }) => {
-                    // The refusal is certified from BELOW as well (#2759): the
-                    // gain the cascade cannot reach is bounded away from the
-                    // tolerance, so this is not the certificate being cautious.
-                    assert!(
-                        gain_lower_bound <= gain_bound,
-                        "the gain bracket is inverted: [{gain_lower_bound}, {gain_bound}]"
+                    // The refusal carries the comparison it was taken on, and
+                    // that comparison was computed on a design that was BUILT
+                    // (#2759): "the level still earns marginal likelihood" and
+                    // "the bound was too loose to tell" cannot be the same
+                    // sentence when the number itself is what was measured.
+                    let evidence = evidence.expect(
+                        "an identifiability capacity leaves the candidate set formable, so the \
+                         refusal must carry its exact comparison",
                     );
                     // The refusal is at the capacity FRONTIER, not before it
                     // (#2700): the automatic route takes as much of the
@@ -5994,9 +6329,9 @@ mod refinement_decision_tests {
                     );
                     assert_eq!(identifiable_directions, y.len() - next.core.nullity());
                     assert!(
-                        gain_bound > requested_tolerance,
-                        "the automatic boundary must retain an above-tolerance gain: \
-                         {gain_bound} vs {requested_tolerance}"
+                        evidence.warrants_refinement() && evidence.gain > evidence.tolerance,
+                        "the automatic boundary may refuse only while one more level still earns \
+                         its own Occam factor: {evidence}"
                     );
                 }
                 Err(other) => panic!("automatic 2628 route returned the wrong boundary: {other}"),
@@ -7700,32 +8035,178 @@ mod refinement_decision_tests {
         }
     }
 
-    /// PROBE (#2759): walk the refinement ladder past the point the tolerance
-    /// refuses at, and print — per rung — the three quantities the criterion
-    /// question turns on:
+    /// The Occam term the refinement decides on is READ OFF two restricted
+    /// log-likelihoods; this checks it against the object it claims to be, by a
+    /// route that shares no code with it.
     ///
-    ///   * the gain bracket and `REFINE_TOL·rss_pen`, the shipped comparison;
-    ///   * the RESTRICTED LIKELIHOOD of the design with the candidate level
-    ///     appended, evaluated at the SAME λ, i.e. the exact Bayes factor
-    ///     between the two nested function priors;
-    ///   * how far the fitted surface actually MOVES, on the training rows and
-    ///     on a held-out grid, when the level is appended.
+    /// `2·evidence = dof·log(rss_pen/rss_pen_refined) − occam` is an identity
+    /// only if `occam` really is `log det(S/(λd))` for the candidate Schur
+    /// complement `S = X₂ᵀW(I − H)X₂ + λd·I`. So: form that `S` DENSELY, one
+    /// column at a time, through the same matrix-free operator the gain bracket
+    /// iterates on, take its Cholesky log-determinant, and compare. One side
+    /// comes from two profiled REML evaluations of two different designs; the
+    /// other from `m₂` cascade solves. Nothing is shared but the arithmetic
+    /// they must agree on.
     ///
-    /// The claim under test is that the shipped tolerance is a bias criterion
-    /// read where added columns no longer reduce bias: if that is right, the
-    /// evidence must turn over (Δ ⩽ 0) at a rung where the gain is still many
-    /// times the tolerance, and the surface must stop moving there.
-    ///
-    /// It also measures the two things that could falsify a replacement built
-    /// on the evidence: whether the refined design would win back the
-    /// comparison at a λ OF ITS OWN (the comparison here is at the incumbent's
-    /// λ), and whether the Hadamard bound `Σ log(diag(S)/λd)` on the Occam term
-    /// is tight enough to screen a refining rung without building anything.
-    ///
-    /// Diagnostic only: it asserts that the ladder ran and that every rung
-    /// produced finite numbers, nothing about the level of any of them.
+    /// This is the gate the second half of #2759 rests on, the way
+    /// `the_refinement_gain_bracket_contains_the_objective_decrease_it_bounds_2759`
+    /// is the gate the first half rests on.
     #[test]
-    fn probe_2759_evidence_and_movement_along_the_refinement_ladder() {
+    fn the_occam_term_read_off_the_two_fits_is_the_schur_log_determinant_2759() {
+        let (x1, x2, y) = dense_fixture(18);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let metric = [1.0, 1.0];
+        let sobolev_s = 2.0;
+        let plan: Vec<LevelPlan> = (0..3)
+            .map(|level| LevelPlan {
+                exponent: level as f64,
+                centers: None,
+            })
+            .collect();
+        let design =
+            ResidualCascadeDesign::build_from_plan(&axes, &y, &weights, &metric, sobolev_s, &plan)
+                .expect("cascade design");
+        let core = &design.core;
+        let exponent = plan.len() as f64;
+        let dof = (y.len() - core.nullity()) as f64;
+        let mut checked = 0_usize;
+        for log_lambda in [-4.0_f64, -1.0, 2.0] {
+            let fit = design.fit_at(log_lambda, None).expect("fixed-lambda fit");
+            let mut extended = plan.clone();
+            extended.push(LevelPlan {
+                exponent,
+                centers: None,
+            });
+            let refined_design = ResidualCascadeDesign::build_from_plan(
+                &axes,
+                &y,
+                &weights,
+                &metric,
+                sobolev_s,
+                &extended,
+            )
+            .expect("refined design");
+            let refined = refined_design
+                .fit_at(log_lambda, None)
+                .expect("refined fixed-lambda fit");
+            let comparison =
+                level_evidence(&fit, &refined, (y.len() - refined_design.core.nullity()) as f64)
+                    .expect("level comparison");
+
+            // The independent route: `S` column by column, through the same
+            // matrix-free operator, then a dense Cholesky log-determinant.
+            let h = core.levels[0].h * 0.5_f64.powf(exponent);
+            let mut net = core.net.clone();
+            let candidates = extend_net(&mut net, &core.z, core.dim, h, &core.z_range);
+            assert!(
+                !candidates.is_empty(),
+                "premise: the fixture must offer a candidate level at exponent {exponent}"
+            );
+            let delta = OVERLAP * h;
+            let mut grid = HashGrid::new(delta, core.dim);
+            for (j, c) in candidates.iter().enumerate() {
+                grid.insert(j as u32, c);
+            }
+            let lambda = log_lambda.exp();
+            let ridge = lambda * level_weight(exponent, core.sobolev_s, core.dim);
+            let level = CandidateLevel {
+                centers: &candidates,
+                grid: &grid,
+                delta,
+                ridge,
+            };
+            let width = candidates.len();
+            let mut workspace = SchurWorkspace {
+                row: vec![0.0_f64; core.z.len()],
+                fitted: vec![0.0_f64; core.z.len()],
+                column: vec![0.0_f64; core.m],
+                warm: None,
+            };
+            let mut schur = vec![0.0_f64; width * width];
+            let mut unit = vec![0.0_f64; width];
+            let mut column = vec![0.0_f64; width];
+            for j in 0..width {
+                unit[j] = 1.0;
+                apply_candidate_schur(core, &level, lambda, &unit, &mut column, &mut workspace)
+                    .expect("schur apply");
+                for (i, &value) in column.iter().enumerate() {
+                    // `S/(λd)`: the determinant the Occam factor is of.
+                    schur[i * width + j] = value / ridge;
+                }
+                unit[j] = 0.0;
+            }
+            // The operator is symmetric in exact arithmetic; the cascade solve
+            // inside it carries `CG_RTOL`, so symmetrize rather than assert.
+            for i in 0..width {
+                for j in (i + 1)..width {
+                    let mean = 0.5 * (schur[i * width + j] + schur[j * width + i]);
+                    schur[i * width + j] = mean;
+                    schur[j * width + i] = mean;
+                }
+            }
+            let dense_occam = cholesky_logdet(&mut schur, width).expect("schur log-determinant");
+
+            // Both sides are sums of `width` logarithms of O(1) numbers built
+            // from `CG_RTOL`-certified solves, so the agreement is charged per
+            // mode rather than in absolute nats.
+            let slack = 1e-6 * (width as f64) * dense_occam.abs().max(1.0);
+            assert!(
+                (comparison.occam - dense_occam).abs() <= slack,
+                "the Occam term read off the two restricted likelihoods is {} but the candidate \
+                 Schur log-determinant is {dense_occam} at log lambda {log_lambda} (width \
+                 {width}, slack {slack})",
+                comparison.occam
+            );
+
+            // The identity the whole criterion is stated in, and the equivalence
+            // the certificate's two readings rest on.
+            let restated = 0.5
+                * (dof * (fit.rss_pen / refined.rss_pen).ln() - comparison.occam);
+            assert!(
+                (restated - comparison.evidence).abs()
+                    <= 1e-9 * comparison.evidence.abs().max(1.0),
+                "2·evidence = dof·log(rss/rss_refined) − occam failed: {restated} vs {}",
+                comparison.evidence
+            );
+            assert_eq!(
+                comparison.warrants_refinement(),
+                comparison.gain > comparison.tolerance,
+                "the evidence reading and the break-even reading disagree: {comparison}"
+            );
+            assert!(
+                comparison.occam >= 0.0 && comparison.gain >= 0.0,
+                "a PSD Schur complement cannot charge less than nothing, and a superset design \
+                 cannot minimize higher: {comparison}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "every lambda in the sweep must have been charged");
+    }
+
+    /// The refinement stops where the EVIDENCE turns over, and the held-out
+    /// truth agrees with it (#2759).
+    ///
+    /// This is the `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
+    /// regime at a third of its rows: a truth finer than the initial nets, low
+    /// noise, refined until the design is rank-maximal. The shipped
+    /// `1e-3·rss_pen` bar demanded one more level there — a candidate set of
+    /// thousands of columns against a sample that identifies `n − nullity`
+    /// directions — and refused the fit when capacity could not supply it.
+    ///
+    /// Three claims, and the third is the one that makes the other two mean
+    /// something:
+    ///
+    ///  1. a fit is minted at all, and its certificate is spent BY THE
+    ///     CRITERION (`evidence ⩽ 0`, equivalently `gain ⩽ tolerance`);
+    ///  2. the gain there is still far above the fixed relative bar that used
+    ///     to be read, so this fixture is still in the regime the issue is
+    ///     about rather than having drifted out of it;
+    ///  3. appending the complete candidate level and refitting at the same λ
+    ///     makes the HELD-OUT error worse. The criterion and the truth agree,
+    ///     and the truth is not in the criterion.
+    #[test]
+    fn the_refinement_stops_where_the_evidence_turns_over_and_the_truth_agrees_2759() {
         struct TestRng(u64);
         impl TestRng {
             fn uniform(&mut self) -> f64 {
@@ -7742,11 +8223,7 @@ mod refinement_decision_tests {
             }
         }
 
-        // The `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
-        // fixture, at a third of its rows and at its own: four cycles per axis,
-        // amplitude 1, noise 0.02.
-        for n in [2000_usize, 6000] {
-        let noise = 0.02_f64;
+        let n = 2000_usize;
         let k = 4.0 * std::f64::consts::PI;
         let f = |a: f64, b: f64| (k * a).sin() * (k * b).cos();
         let mut rng = TestRng(0x1032_000C);
@@ -7756,189 +8233,97 @@ mod refinement_decision_tests {
             let b = rng.uniform();
             x1.push(a);
             x2.push(b);
-            y.push(f(a, b) + noise * rng.normal());
+            y.push(f(a, b) + 0.02 * rng.normal());
         }
         let w = vec![1.0_f64; n];
         let axes: [&[f64]; 2] = [&x1, &x2];
         let metric = [1.0, 1.0];
         let sobolev_s = 2.0;
 
-        let grid = 25_usize;
+        let fit = fit_residual_cascade(&axes, &y, &w, &metric, sobolev_s).expect("cascade fit");
+        let certificate = fit.refinement.expect("a minted fit carries its comparison");
+        assert!(
+            !certificate.warrants_refinement() && certificate.gain <= certificate.tolerance,
+            "a minted fit's binding candidate set must not earn a level: {certificate}"
+        );
+        assert!(
+            fit.num_levels() > INITIAL_LEVELS,
+            "premise: the high-frequency truth must force refinement past the initial depth, \
+             got {} levels",
+            fit.num_levels()
+        );
+        assert_eq!(
+            fit.num_centers(),
+            n - fit.core.nullity(),
+            "premise: this fixture must stop AT the rank-maximal design, which is the regime \
+             #2759 is about"
+        );
+        // The bar that used to be read here, restated rather than imported: a
+        // fixed 1e-3 of the penalized residual. The fit is minted with a gain
+        // far above it, which is the whole finding.
+        let shipped_bar = 1e-3 * fit.rss_pen;
+        assert!(
+            certificate.gain > 20.0 * shipped_bar,
+            "premise: this fixture must still be one the fixed relative bar would refuse \
+             (gain {} vs 1e-3·rss_pen {shipped_bar})",
+            certificate.gain
+        );
+
+        // The independent witness: refine anyway and measure the held-out error.
         let held_out_rmse = |fit: &ResidualCascadeFit| -> f64 {
+            let grid = 25_usize;
             let mut sse = 0.0;
             for i in 0..grid {
                 for j in 0..grid {
                     let px = (i as f64 + 0.5) / grid as f64;
                     let py = (j as f64 + 0.5) / grid as f64;
                     let (mean, _) = fit.predict(&[px, py]).expect("predict");
-                    let err = mean - f(px, py);
-                    sse += err * err;
+                    let error = mean - f(px, py);
+                    sse += error * error;
                 }
             }
             (sse / (grid * grid) as f64).sqrt()
         };
+        let stopped = held_out_rmse(&fit);
+        assert!(
+            stopped < 0.05,
+            "premise: the cascade must resolve the planted truth before this comparison means \
+             anything, got rmse {stopped}"
+        );
 
-        let mut plan: Vec<LevelPlan> = (0..INITIAL_LEVELS)
+        let mut refined_plan: Vec<LevelPlan> = (0..fit.num_levels())
             .map(|level| LevelPlan {
                 exponent: level as f64,
                 centers: None,
             })
             .collect();
-        let mut rungs = 0_usize;
-        eprintln!("[P2759] ===== n = {n} =====");
-        eprintln!(
-            "[P2759] rung centers  cand    logL      rss_pen     shipped_tol gain_lo     \
-             gain_hi     d_reml      occam       occam_had   derived_tol move2       \
-             rmse        rmse_ext    best_dlogL  d_reml_own"
+        refined_plan.push(LevelPlan {
+            exponent: fit.num_levels() as f64,
+            centers: None,
+        });
+        let refined_design = ResidualCascadeDesign::build_from_plan(
+            &axes,
+            &y,
+            &w,
+            &metric,
+            sobolev_s,
+            &refined_plan,
+        )
+        .expect("refined design");
+        let refined = refined_design
+            .fit_at(fit.log_lambda, None)
+            .expect("refined fixed-lambda fit");
+        let refined_rmse = held_out_rmse(&refined);
+        assert!(
+            refined_rmse >= stopped,
+            "the criterion stopped, but one more level IMPROVES the held-out error \
+             ({refined_rmse} vs {stopped}) — then it stopped too early and the charge is wrong"
         );
-        loop {
-            let design =
-                ResidualCascadeDesign::build_from_plan(&axes, &y, &w, &metric, sobolev_s, &plan)
-                    .expect("design");
-            let fit = match design.fit_reml() {
-                Ok(fit) => fit,
-                Err(error) => {
-                    eprintln!("[P2759] rung {rungs}: fit_reml refused: {error}");
-                    break;
-                }
-            };
-            let shipped_tolerance = REFINE_TOL * fit.rss_pen;
-            let exponent = plan.last().expect("a level").exponent + 1.0;
-            let planned = design
-                .plan_level_at_exponent(&fit, exponent, Some(shipped_tolerance))
-                .expect("candidate level");
-            let (gain_lo, gain_hi, occam_had) = planned.gain.as_ref().map_or(
-                (f64::NAN, f64::NAN, f64::NAN),
-                |bracket| (bracket.lower, bracket.upper, bracket.hadamard_occam),
-            );
-            let candidates = match planned.assessment {
-                NextLevelAssessment::CapacityExceeded {
-                    obstruction: RefinementObstruction::IdentifiabilityCapacity {
-                        candidate_penalized_modes,
-                        ..
-                    },
-                    ..
-                } => candidate_penalized_modes,
-                _ => 0,
-            };
-
-            // The extended design, evaluated at the SAME λ: the exact nested
-            // Bayes factor the tolerance is a proxy for. This is available past
-            // every capacity budget, because a single evaluation needs no
-            // certified spectrum and no identifiable rank — only a factorization.
-            let mut extended = plan.clone();
-            extended.push(LevelPlan {
-                exponent,
-                centers: None,
-            });
-            let dof = (n - design.core.nullity()) as f64;
-            let refined_design = ResidualCascadeDesign::build_from_plan(
-                &axes,
-                &y,
-                &w,
-                &metric,
-                sobolev_s,
-                &extended,
-            );
-            let (d_reml, occam, derived_tol, move2, rmse_ext, best_delta, d_reml_own) =
-                match refined_design
-                    .as_ref()
-                    .map_err(|error| error.clone())
-                    .and_then(|refined| {
-                        refined
-                            .fit_at(fit.log_lambda, None)
-                            .map(|at_lambda| (refined, at_lambda))
-                    }) {
-                    Ok((refined_design, refined)) => {
-                        let base = design.core.residuals(&fit.coeff);
-                        let next = refined.core.residuals(&refined.coeff);
-                        let move2: f64 = base
-                            .iter()
-                            .zip(next.iter())
-                            .zip(w.iter())
-                            .map(|((a, b), weight)| weight * (a - b) * (a - b))
-                            .sum();
-                        let d_reml = refined.restricted_loglik - fit.restricted_loglik;
-                        // −2Δ = occam + dof·ln(rss_ext/rss), so the Occam term
-                        // is recovered exactly from the two fits.
-                        let occam = -2.0 * d_reml + dof * (fit.rss_pen / refined.rss_pen).ln();
-                        let derived_tol = fit.rss_pen * (1.0 - (-occam / dof).exp());
-                        // Would the refined design win the comparison back at a λ
-                        // OF ITS OWN? Every λ tried is a valid witness for it.
-                        let mut best_delta = 0.0_f64;
-                        let mut best_loglik = refined.restricted_loglik;
-                        for step in [-3.0_f64, -2.0, -1.0, 1.0, 2.0, 3.0] {
-                            if let Ok(other) = refined_design.fit_at(fit.log_lambda + step, None)
-                                && other.restricted_loglik > best_loglik
-                            {
-                                best_loglik = other.restricted_loglik;
-                                best_delta = step;
-                            }
-                        }
-                        (
-                            d_reml,
-                            occam,
-                            derived_tol,
-                            move2,
-                            held_out_rmse(&refined),
-                            best_delta,
-                            best_loglik - fit.restricted_loglik,
-                        )
-                    }
-                    Err(error) => {
-                        eprintln!("[P2759] rung {rungs}: extended fit refused: {error}");
-                        (
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                        )
-                    }
-                };
-
-            eprintln!(
-                "[P2759] {rungs:4} {:7} {candidates:7} {:+9.4} {:11.5e} {shipped_tolerance:11.5e} \
-                 {gain_lo:11.5e} {gain_hi:11.5e} {d_reml:+11.4e} {occam:11.5e} \
-                 {occam_had:11.5e} {derived_tol:11.5e} {move2:11.5e} {:11.5e} \
-                 {rmse_ext:11.5e} {best_delta:+5.1} {d_reml_own:+11.4e}",
-                design.num_centers(),
-                fit.log_lambda,
-                fit.rss_pen,
-                held_out_rmse(&fit),
-            );
-            assert!(
-                fit.rss_pen.is_finite() && fit.restricted_loglik.is_finite(),
-                "rung {rungs} produced a non-finite fit"
-            );
-            rungs += 1;
-
-            if planned.selection.is_empty() || rungs >= 8 {
-                eprintln!(
-                    "[P2759] ladder stops at rung {rungs}: selection {} centers",
-                    planned.selection.len()
-                );
-                break;
-            }
-            if planned.extends_last {
-                let last = plan.last_mut().expect("a level");
-                let mut centers = last.centers.take().unwrap_or_default();
-                centers.extend(planned.selection.iter().copied());
-                last.centers = Some(centers);
-            } else {
-                plan.push(LevelPlan {
-                    exponent,
-                    centers: if planned.complete {
-                        None
-                    } else {
-                        Some(planned.selection)
-                    },
-                });
-            }
-        }
-        assert!(rungs > 0, "the probe never completed a rung for n = {n}");
-        }
+        eprintln!(
+            "[2759] stopped at {} levels / {} centers: {certificate}; held-out rmse {stopped} \
+             -> {refined_rmse} with one more level",
+            fit.num_levels(),
+            fit.num_centers(),
+        );
     }
 }

@@ -500,10 +500,10 @@ pub(crate) fn run_report_residual_cascade(
     }
     if let Some(refinement) = fit.refinement.as_ref() {
         notes.push(format!(
-            "Refinement loop ran past the initial levels; the level-(L+1) \
-             discretization certificate bounds the remaining penalized-objective \
-             gain at {:.2e}.",
-            refinement.next_level_gain_bound,
+            "Refinement stopped where one more level stopped earning its own Occam \
+             factor: the complete candidate level buys {:.2e} of penalized objective \
+             against a break-even of {:.2e}, for {:+.2e} of restricted log-likelihood.",
+            refinement.gain, refinement.tolerance, refinement.evidence,
         ));
     }
     if args.data.is_some() {

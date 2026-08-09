@@ -229,9 +229,7 @@ fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
     match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
         Err(ResidualCascadeError::Underresolved {
             checkpoint,
-            gain_bound,
-            gain_lower_bound,
-            requested_tolerance,
+            evidence,
             obstruction:
                 RefinementObstruction::IdentifiabilityCapacity {
                     candidate_columns,
@@ -248,17 +246,19 @@ fn cascade_quality_fixture_reports_the_measured_identifiability_boundary() {
             // refuses, so the retained checkpoint is the rank-maximal design
             // rather than the 1 759-center one it used to keep.
             assert_eq!(checkpoint.num_centers(), identifiable_directions);
-            // #2759: the refusal is certified from BELOW too, so "the remaining
-            // gain exceeds the tolerance" and "the bound was too loose to tell"
-            // are no longer the same sentence.
-            assert!(
-                gain_lower_bound <= gain_bound,
-                "inverted gain bracket [{gain_lower_bound}, {gain_bound}]"
+            // #2759: the refusal carries the exact comparison it was taken on,
+            // computed on a design that was BUILT and solved at the same λ.
+            let evidence = evidence.expect(
+                "an identifiability capacity leaves the candidate set formable, so the refusal \
+                 must carry its exact comparison",
             );
             assert!(
-                gain_bound > requested_tolerance,
-                "the next level may be refused only while its honest gain bound is above \
-                 tolerance: {gain_bound} vs {requested_tolerance}"
+                evidence.evidence > 0.0 && evidence.gain > evidence.tolerance,
+                "the next level may be refused only while it still earns its own Occam factor: \
+                 gain {} vs break-even {} ({:+} nats)",
+                evidence.gain,
+                evidence.tolerance,
+                evidence.evidence
             );
         }
         Err(other) => panic!("wrong cascade refinement boundary: {other}"),

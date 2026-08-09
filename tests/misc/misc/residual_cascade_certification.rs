@@ -310,10 +310,12 @@ fn cascade_recovers_planted_smooth() {
     );
     let refinement = fit.refinement.as_ref().expect("refinement certificate");
     assert!(
-        refinement.next_level_gain_bound <= refinement.tolerance,
-        "returned fit has an uncertified refinement bound: bound {} tol {}",
-        refinement.next_level_gain_bound,
-        refinement.tolerance
+        refinement.gain <= refinement.tolerance && refinement.evidence <= 0.0,
+        "returned fit has a candidate level that still earns its own Occam factor: \
+         gain {} vs break-even {} ({:+} nats)",
+        refinement.gain,
+        refinement.tolerance,
+        refinement.evidence
     );
 
     let grid = 40;
@@ -927,9 +929,7 @@ fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
     match fit_residual_cascade(&xs, &y, &w, &[1.0, 1.0], 2.5) {
         Err(ResidualCascadeError::Underresolved {
             checkpoint,
-            gain_bound,
-            gain_lower_bound,
-            requested_tolerance,
+            evidence,
             obstruction:
                 gam::solver::residual_cascade::RefinementObstruction::IdentifiabilityCapacity {
                     candidate_columns,
@@ -945,17 +945,21 @@ fn wendland_fixture_names_underresolution_before_rank_deficient_score_search() {
             // partial one: a capacity refusal may only fire once the capacity
             // is actually spent.
             assert_eq!(checkpoint.num_centers(), identifiable_directions);
-            // #2759: the refusal is certified from BELOW too, so "the remaining
-            // gain exceeds the tolerance" and "the bound was too loose to tell"
-            // are no longer the same sentence.
-            assert!(
-                gain_lower_bound <= gain_bound,
-                "inverted gain bracket [{gain_lower_bound}, {gain_bound}]"
+            // #2759: the refusal carries the exact comparison it was taken on —
+            // computed on a design that was BUILT and solved at the same λ — so
+            // "one more level still earns marginal likelihood" and "the bound
+            // was too loose to tell" cannot be the same sentence.
+            let evidence = evidence.expect(
+                "an identifiability capacity leaves the candidate set formable, so the refusal \
+                 must carry its exact comparison",
             );
             assert!(
-                gain_bound > requested_tolerance,
-                "capacity may refuse only while the honest gain bound remains above tolerance: \
-                 {gain_bound} vs {requested_tolerance}"
+                evidence.evidence > 0.0 && evidence.gain > evidence.tolerance,
+                "capacity may refuse only while one more level still earns its own Occam \
+                 factor: gain {} vs break-even {} ({:+} nats)",
+                evidence.gain,
+                evidence.tolerance,
+                evidence.evidence
             );
         }
         Err(other) => panic!(
@@ -1120,38 +1124,48 @@ fn gap_bridges_without_sagging_and_variance_grows() {
 /// certificate is the instrument that detects "adding a level still moves the
 /// functional", exactly as the spec requires.
 ///
-/// # THIS GATE IS RED, AND WHAT IT IS RED ABOUT IS NOW MEASURED (#2758, #2759)
+/// # WHAT THIS GATE WAS RED ABOUT, AND WHAT ANSWERED IT (#2758, #2759)
 ///
 /// It used to refuse on `CertifiedSpectrumCapacity` at 2893 of the 5997
 /// directions the sample identifies — a MEMORY budget. #2758 took the certified
 /// route's residency from seven-plus `m²` blocks to one packed triangle, the
-/// derived width went 2896 → 10362, and the cascade now refines to all 5997.
-/// It refuses at the rank-maximal design instead, and #2759's two-sided
-/// certificate says what that refusal is made of:
+/// derived width went 2896 → 10362, and the cascade refined to all 5997. It
+/// then refused at the rank-maximal design instead, and #2759's first half
+/// closed the bracket on what that refusal was made of:
 ///
 /// ```text
 ///     level-(L+1) gain  ∈  [1.050801e-1, 1.055257e-1]      (bracket, closed)
-///     REFINE_TOL·rss_pen =  2.184455e-3                     48.1x below it
+///     1e-3·rss_pen       =  2.184455e-3                     48.1x below it
 ///     shipped ‖g‖²/(λd)  =  1.290191e-1                     22% conservative
 /// ```
 ///
-/// So the refusal is NOT the certificate being cautious: the exact remaining
-/// penalized-objective decrease is bounded away from the tolerance from BELOW.
-/// What the measurement leaves open is whether that decrease is the thing this
-/// criterion should be reading. At `num_centers = 5997` on `n = 6000` the design
-/// is rank-maximal and `rss_pen = 2.1845` against a noise floor of
-/// `n·σ² = 2.4` — the residual is noise, the truth (4 cycles per axis, resolved
-/// by a level-7 net at 64 centers per wavelength) carries no discretization bias
-/// worth 4.8% of the objective, and what a finer level buys is interpolation
-/// inside a row space the design already spans. `REFINE_TOL·rss_pen` is a
-/// bias criterion being read where more columns do not reduce bias.
+/// So the refusal was not the certificate being cautious — the decrease is
+/// bounded away from that bar from BELOW. What the bracket left open is whether
+/// that decrease is the thing the criterion should be reading, and the answer
+/// is no. `1e-3·rss_pen` charges NOTHING for the width of the set it is buying,
+/// and the set here is 32790 candidate columns against 5997 identifiable
+/// directions: at the rank-maximal design the candidates are redundant against
+/// the data's own row space, so what they buy is penalty dilution and noise
+/// capacity, not discretization bias.
 ///
-/// That is a criterion question, not a tolerance question, and #2759 forbids
-/// answering it by moving `REFINE_TOL` — which would hide exactly the
-/// distinction the bracket just made visible. The assertion below is left
-/// STANDING rather than re-premised: it states something the spec asks for that
-/// the criterion cannot currently certify, and a gate that says so is worth more
-/// than a green one that does not.
+/// The charge that was missing is the candidate set's own Occam factor,
+/// `occam = log det(S/(λd))` — the log-determinant of the SAME Schur complement
+/// the gain is a quadratic form in. At the profiled σ̂² the restricted
+/// log-likelihood moves by `[dof·log(rss_pen/rss_pen_refined) − occam]/2`, so
+/// the break-even gain is `rss_pen·(1 − e^{−occam/dof})` and it is derived, not
+/// chosen. Measured on this fixture at the rung that used to refuse:
+///
+/// ```text
+///     occam            =  3.231e2       (over 32790 candidate columns)
+///     break-even gain  =  1.146e-1      against gain 1.055e-1
+///     restricted logL  = -1.318e1 nats  for one more level
+/// ```
+///
+/// and the held-out truth agrees with the likelihood rather than with the bar:
+/// refining anyway takes the 30×30-grid RMSE from 0.0155828 to 0.0155887. The
+/// gate is green because the cascade now stops where the evidence turns over,
+/// with the same assertions it always made, read on a criterion that can tell
+/// the two apart.
 #[test]
 fn smoothness_ceiling_forces_refinement_and_certifies_residual_bias() {
     // Four full cycles per axis: the level-0..2 nets (covering radius h0·2^-l
@@ -1192,18 +1206,31 @@ fn smoothness_ceiling_forces_refinement_and_certifies_residual_bias() {
     // is reported as `ResidualCascadeError::Underresolved` instead.
     let cert = fit.refinement.as_ref().expect("refinement certificate");
     assert!(
-        cert.next_level_gain_bound.is_finite() && cert.next_level_gain_bound >= 0.0,
-        "refinement bound not a finite non-negative certificate: {}",
-        cert.next_level_gain_bound
+        cert.gain.is_finite() && cert.gain >= 0.0 && cert.occam.is_finite() && cert.occam >= 0.0,
+        "refinement comparison is not a finite non-negative certificate: {cert}"
     );
     assert!(cert.tolerance.is_finite() && cert.tolerance > 0.0);
-    // One more level provably cannot move the objective by more than the
-    // tolerance — the discretization bias is certified spent.
+    // One more level does not pay for its own dimension — the discretization is
+    // certified spent, in the same currency λ was selected in.
     assert!(
-        cert.next_level_gain_bound <= cert.tolerance,
-        "returned fit has an uncertified refinement bound: {} vs {}",
-        cert.next_level_gain_bound,
-        cert.tolerance
+        cert.gain <= cert.tolerance && cert.evidence <= 0.0,
+        "returned fit has a candidate level that still earns marginal likelihood: {cert}"
+    );
+    // The regime this fixture exists to name: the design is rank-maximal, and
+    // the gain there is still far above the fixed `1e-3·rss_pen` bar that used
+    // to be read. A green gate on a fixture that had drifted out of that regime
+    // would prove nothing about #2759.
+    assert_eq!(
+        fit.num_centers(),
+        n - 3,
+        "premise: this fixture must reach the rank-maximal design (n − nullity)"
+    );
+    assert!(
+        cert.gain > 20.0 * 1e-3 * fit.rss_pen,
+        "premise: the minted fit must be one the fixed relative bar would have refused, \
+         got gain {} against 1e-3·rss_pen {}",
+        cert.gain,
+        1e-3 * fit.rss_pen
     );
 
     // The certified fit recovers the high-frequency surface on held-out truth:
