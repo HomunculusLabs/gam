@@ -6475,4 +6475,134 @@ mod reference_class_invariance_tests {
             }
         }
     }
+
+    /// A deterministic two-covariate three-class dataset whose labels are DRAWN
+    /// from a smooth softmax truth.
+    ///
+    /// Drawing rather than taking the argmax is load-bearing: an argmax label is
+    /// a deterministic function of `x`, so the classes are exactly separated by
+    /// their own decision boundaries and every fit on them is legitimately on
+    /// the separation lane. Here every class keeps appreciable probability
+    /// everywhere, so **no direction separates** and the unbiased criterion has
+    /// an interior optimum. Same generator as
+    /// `tests/multinomial_parametric_penalty_2612.rs`.
+    fn softmax_drawn_two_covariate(
+        dir: &std::path::Path,
+        tag: &str,
+        n: usize,
+    ) -> gam_data::EncodedDataset {
+        const CLASS_NAMES: [&str; 3] = ["a", "b", "c"];
+        let mut lcg: u64 = 0x2612_2612_2612_2612;
+        let mut next_unit = || -> f64 {
+            lcg = lcg
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((lcg >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut csv = String::from("x1,x2,y\n");
+        for index in 0..n {
+            let x1 = -2.0 + 4.0 * (((index as f64) * 0.618_033_988_749_894_8) % 1.0);
+            let x2 = -2.0 + 4.0 * (((index as f64) * 0.414_213_562_373_095_1) % 1.0);
+            let scores = [
+                0.6 * x1 - 0.3 * x2,
+                -0.4 * x1 + 0.5 * x2,
+                0.2 * (x1 * x1 - x2 * x2) * 0.25,
+            ];
+            let shift = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<f64> = scores.iter().map(|s| (s - shift).exp()).collect();
+            let total: f64 = weights.iter().sum();
+            let mut draw = next_unit() * total;
+            let mut label = CLASS_NAMES.len() - 1;
+            for (class, weight) in weights.iter().enumerate() {
+                if draw < *weight {
+                    label = class;
+                    break;
+                }
+                draw -= weight;
+            }
+            writeln!(csv, "{x1},{x2},{}", CLASS_NAMES[label]).unwrap();
+        }
+        let path = dir.join(format!("softmax_drawn_{tag}.csv"));
+        fs::write(&path, csv).expect("write softmax-drawn csv");
+        let cols: Vec<String> = ["x1", "x2", "y"].iter().map(|s| s.to_string()).collect();
+        load_dataset_projected(&path, &cols).expect("load softmax-drawn dataset")
+    }
+
+    /// #2612 diagnostic (zz_measure): **does the probe's own cap decide the fit?**
+    ///
+    /// `fit_penalized_multinomial_formula` runs the unbiased separation probe
+    /// under `outer_max_iter.min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER)` and
+    /// routes EVERY `Err` from it into the Jeffreys/Firth refit as *separation
+    /// evidence*. A probe that stops because the cap **this call site invented**
+    /// ran out is a statement about that cap and about nothing else.
+    ///
+    /// This runs the identical probe twice on data drawn from a smooth softmax
+    /// truth — nothing separating — once at the production cap and once at the
+    /// caller's own budget, and prints each verdict together with the Fisher
+    /// separation certificate at whatever mode it produced. If the two verdicts
+    /// differ, the arming decision is the cap's.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2612_capped_probe_vs_caller_budget() {
+        let td = tempdir().expect("tempdir");
+        let train = softmax_drawn_two_covariate(td.path(), "cap2612", 600);
+        let config = FitConfig::default();
+        let request = MultinomialFitRequest {
+            init_lambda: 1.0,
+            max_iter: 100,
+            tol: 1e-8,
+            ..MultinomialFitRequest::new(&train, "y ~ s(x1, k=6) + s(x2, k=6)", &config)
+        };
+        let parts =
+            penalized_multinomial_formula_parts(&request).expect("production formula parts");
+        let caller_budget = parts.options.outer_max_iter;
+        let capped = caller_budget.min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER);
+        for (label, budget) in [("production cap", capped), ("caller budget", caller_budget)] {
+            let mut options = parts.options.clone();
+            options.outer_max_iter = budget;
+            let started = std::time::Instant::now();
+            let attempt = crate::custom_family::fit_custom_family_with_rho_prior(
+                &parts.family,
+                &parts.blocks,
+                &options,
+                gam_problem::RhoPrior::Flat,
+            );
+            let seconds = started.elapsed().as_secs_f64();
+            match attempt {
+                Ok(fit) => {
+                    let max_eta = fit
+                        .block_states
+                        .iter()
+                        .flat_map(|state| state.eta.iter())
+                        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+                    let span = fit
+                        .geometry
+                        .as_ref()
+                        .expect("probe geometry")
+                        .coefficient_gauge
+                        .t_full
+                        .clone();
+                    let evidence = multinomial_formula_fisher_separation_evidence(
+                        &parts.family,
+                        &parts.blocks,
+                        &fit.block_states,
+                        span.view(),
+                    );
+                    eprintln!(
+                        "#2612 unbiased probe [{label}, outer_max_iter={budget}]: CONVERGED in \
+                         {} outer iteration(s), {seconds:.1}s, max|eta|={max_eta:.4e}; \
+                         Fisher separation certificate = {:?}",
+                        fit.outer_iterations,
+                        evidence.as_ref().map(|e| e.as_ref().map(String::as_str)),
+                    );
+                }
+                Err(err) => eprintln!(
+                    "#2612 unbiased probe [{label}, outer_max_iter={budget}]: FAILED after \
+                     {seconds:.1}s -- the production path reads this as SEPARATION EVIDENCE: {}",
+                    format!("{err}").chars().take(700).collect::<String>(),
+                ),
+            }
+        }
+    }
 }
