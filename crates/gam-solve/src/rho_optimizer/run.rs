@@ -2447,10 +2447,16 @@ fn adjudicate_negative_curvature(
             match obj.eval_cost(&trial) {
                 Ok(cost) if cost.is_finite() => {
                     best_seen_cost = best_seen_cost.min(cost);
-                    if cost < baseline_cost - strict_floor
-                        && best.as_ref().is_none_or(|(c, _)| cost < *c)
-                    {
+                    if cost < baseline_cost - strict_floor {
                         best = Some((cost, trial));
+                        // The ladder descends in α and the reseed only has to
+                        // LEAVE the ridge — ARC refines from wherever it lands
+                        // — so the first (largest) descending step is the
+                        // escape. Continuing would spend the rest of the
+                        // falsifiability ladder confirming a claim already
+                        // confirmed, and that ladder is now derived rather than
+                        // five rungs long.
+                        break;
                     }
                 }
                 Ok(_) => nonfinite += 1,
