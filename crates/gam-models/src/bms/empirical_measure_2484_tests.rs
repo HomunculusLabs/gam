@@ -2,7 +2,7 @@
 //! latent measure, gated by finite differences of the PRODUCTION objective.
 //!
 //! Every derivative here is checked against a difference quotient of code that
-//! is on the fit path — `build_empirical_z_grid` for the measure and
+//! is on the fit path — `build_empirical_z_grid_with_alpha` for the measure and
 //! `empirical_intercept_from_marginal` + `signed_probit_logcdf_and_mills_ratio`
 //! for the row. Nothing is checked against a reimplementation of the formula it
 //! is testing, because a probe that reconstructs the object it measures is

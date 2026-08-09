@@ -5,11 +5,12 @@
 //! # Why this exists
 //!
 //! On the BMS conditional location-scale branch the second-stage latent measure
-//! is **built from the first-stage output**: `ζ = (z − m̂(C))/√v̂(C)` is compressed
-//! into an equal-mass grid by [`build_empirical_z_grid`], and the row kernel then
-//! integrates against that grid. So a row's log-likelihood depends on `ζ` twice —
-//! directly through its own `ζ_i`, and through a grid that every other `ζ_j`
-//! helped build. The Murphy–Topel chain
+//! is **built from the first-stage output**: `ζ = (z − m̂(C))/√v̂(C)` is
+//! compressed into an equal-mass grid by
+//! [`build_empirical_z_grid_with_alpha`], and the row kernel then integrates
+//! against that grid. So a row's log-likelihood depends on `ζ` twice — directly
+//! through its own `ζ_i`, and through a grid that every other `ζ_j` helped
+//! build. The Murphy–Topel chain
 //!
 //! ```text
 //!   G = ∂(score_β)/∂θ₁ = Σ_j (d score_β / d ζ_j) · (∂ζ_j/∂θ₁)
@@ -17,26 +18,27 @@
 //!
 //! therefore needs the TOTAL `d score_β / d ζ_j`, not the per-row mixed partial
 //! the standard-normal kernel supplies. The cross-row half factors as
-//! `Σ_b u_b · D_{bj}` with `u_b = ∂(score_β)/∂node_b` (owned by
-//! [`super::gradient_paths`]) and `D = ∂node/∂ζ` (owned here), which is what
-//! makes the correction assemble as one modified sensitivity matrix
+//! `Σ_b u_b · D_{bj}` with `u_b = ∂(score_β)/∂node_b` (the row side, from
+//! [`rigid_empirical_score_zeta_channels`]) and `D = ∂node/∂ζ` (the measure
+//! side, from [`EmpiricalZGridBuild::node_zeta_vjp`]), which is what makes the
+//! correction assemble as one modified sensitivity matrix
 //! `S_eff = S + (U_Q·D)ᵀ` and leaves the whole downstream congruence untouched.
 //!
 //! # Why `D` is a closed form and not a differentiated sort
 //!
-//! [`build_empirical_z_grid`] sorts the positive-weight rows by `ζ`, then walks
-//! bins of equal **weight**. Bin boundaries are therefore set by cumulative
-//! weight and are exactly independent of the `ζ` values; for a fixed sort order
-//! the allocation matrix `α` (how much of row `i`'s weight landed in bin `c`) is
-//! *exactly constant* in `ζ`, and the grid weights carry no `ζ`-sensitivity at
-//! all. Only the node VALUES move:
+//! [`build_empirical_z_grid_with_alpha`] sorts the positive-weight rows by `ζ`,
+//! then walks bins of equal **weight**. Bin boundaries are therefore set by
+//! cumulative weight and are exactly independent of the `ζ` values; for a fixed
+//! sort order the allocation matrix `α` (how much of row `i`'s weight landed in
+//! bin `c`) is *exactly constant* in `ζ`, and the grid weights carry no
+//! `ζ`-sensitivity at all. Only the node VALUES move:
 //!
 //! ```text
 //!   raw node   n_c = Σ_i α_{ci} ζ_i / W_c ,   W_c = Σ_i α_{ci}
 //!   standardized  x_b = (n_b − μ)/sd ,  μ = Σ_c w_c n_c , sd² = Σ_c w_c (n_c − μ)²
 //!
 //!   ∂n_c/∂ζ_i = α_{ci}/W_c                        =: A_{ci}
-//!   ∂x_b/∂n_c = (1/sd)·[(δ_{bc} − w_c) − x_b·w_c·x_c]  =: M_{bc}
+//!   ∂x_b/∂n_c = (1/sd)·[(δ_{bc} − w_c) − x_b·w_c·x_c] =: (1/sd)·M_{bc}
 //!   D = (1/sd)·M·A
 //! ```
 //!
@@ -101,15 +103,16 @@ pub(crate) struct EmpiricalGridTieStraddle {
     pub(crate) boundary: usize,
 }
 
-/// [`build_empirical_z_grid`] plus the fit-time provenance the Murphy–Topel
-/// correction needs to differentiate the grid in `ζ`.
+/// The equal-mass grid plus the fit-time provenance the Murphy–Topel correction
+/// needs to differentiate it in `ζ`.
 ///
 /// Fit-time only, by construction: nothing here is on the persistence wire and
 /// nothing here is needed to APPLY the measure, only to differentiate it.
 #[derive(Clone, Debug)]
 pub(crate) struct EmpiricalZGridBuild {
-    /// The measure itself — bit-identical to what [`build_empirical_z_grid`]
-    /// returns, because that function is a wrapper over this one.
+    /// The measure itself. There is exactly one builder, so the recorded
+    /// allocation below is the one the fit's own compression performed rather
+    /// than a reconstruction of it.
     pub(crate) grid: EmpiricalZGrid,
     /// The allocation `α` as `(emitted node index, ORIGINAL row index, mass)`.
     ///
@@ -225,9 +228,9 @@ impl EmpiricalZGridBuild {
 /// Equal-mass compression of `(z, weights)` into an at-most-`grid_size`-node
 /// discrete measure, WITH the allocation record that makes it differentiable.
 ///
-/// This is the real builder; [`build_empirical_z_grid`] is a thin wrapper that
-/// drops the record, so the measure a fit integrates against and the measure the
-/// correction differentiates cannot drift apart.
+/// This is the ONLY builder — `build_global_empirical_latent_measure` returns
+/// its `grid` and its record together — so the measure a fit integrates against
+/// and the measure the correction differentiates cannot drift apart.
 pub(crate) fn build_empirical_z_grid_with_alpha(
     z: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
