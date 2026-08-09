@@ -4562,6 +4562,13 @@ struct RefinementGainBracket {
     upper: f64,
     /// Conjugate-gradient steps spent closing the bracket.
     iterations: usize,
+    /// `Σ_j log(diag(S)_j / λd) ⩾ log det(S/λd)`, the Hadamard bound on the
+    /// candidate level's Occam factor. `I − H ⪯ I` makes `diag(S) ⩽
+    /// diag(X₂ᵀWX₂) + λd`, which is the Jacobi preconditioner this routine
+    /// already forms, and Hadamard's inequality bounds a PSD determinant by its
+    /// diagonal product — so this costs one pass over the candidate supports
+    /// and no solve at all.
+    hadamard_occam: f64,
 }
 
 /// The exact level-`(L+1)` gain `gᵀS⁻¹g`, bracketed.
@@ -4618,6 +4625,14 @@ fn certified_refinement_gain(
     let candidates = level.centers.len();
     let ridge = level.ridge;
     let energy: f64 = g.iter().map(|value| value * value).sum();
+    let preconditioner = level.jacobi_preconditioner(core);
+    // Hadamard on `S/λd ⪯ (diag(X₂ᵀWX₂) + λd)/λd`. Formed here because the
+    // preconditioner IS that diagonal, so the bound is a reduction over a
+    // vector this routine already has.
+    let hadamard_occam: f64 = preconditioner
+        .iter()
+        .map(|diagonal| (diagonal / ridge).max(1.0).ln())
+        .sum();
     // The `x = 0` member: rigorous on its own, and the floor every later
     // iterate is compared against.
     let zeroth = energy / ridge;
@@ -4626,6 +4641,7 @@ fn certified_refinement_gain(
             lower: 0.0,
             upper: zeroth.max(0.0),
             iterations: 0,
+            hadamard_occam,
         });
     }
 
@@ -4636,7 +4652,6 @@ fn certified_refinement_gain(
         column: vec![0.0_f64; core.m],
         warm: None,
     };
-    let preconditioner = level.jacobi_preconditioner(core);
     let mut x = vec![0.0_f64; candidates];
     let mut residual = g.to_vec();
     let mut preconditioned = vec![0.0_f64; candidates];
@@ -4655,6 +4670,7 @@ fn certified_refinement_gain(
         lower: 0.0,
         upper: zeroth,
         iterations: 0,
+        hadamard_occam,
     };
     for iteration in 0..ceiling {
         for ((target, &value), &diagonal) in preconditioned
@@ -4728,6 +4744,7 @@ fn certified_refinement_gain(
                 lower: lower.max(0.0),
                 upper,
                 iterations: iteration + 1,
+                hadamard_occam,
             };
         }
         // The comparison is decided: either the whole bracket clears the
@@ -7681,4 +7698,245 @@ mod refinement_decision_tests {
         }
     }
 
+    /// PROBE (#2759): walk the refinement ladder past the point the tolerance
+    /// refuses at, and print — per rung — the three quantities the criterion
+    /// question turns on:
+    ///
+    ///   * the gain bracket and `REFINE_TOL·rss_pen`, the shipped comparison;
+    ///   * the RESTRICTED LIKELIHOOD of the design with the candidate level
+    ///     appended, evaluated at the SAME λ, i.e. the exact Bayes factor
+    ///     between the two nested function priors;
+    ///   * how far the fitted surface actually MOVES, on the training rows and
+    ///     on a held-out grid, when the level is appended.
+    ///
+    /// The claim under test is that the shipped tolerance is a bias criterion
+    /// read where added columns no longer reduce bias: if that is right, the
+    /// evidence must turn over (Δ ⩽ 0) at a rung where the gain is still many
+    /// times the tolerance, and the surface must stop moving there.
+    ///
+    /// It also measures the two things that could falsify a replacement built
+    /// on the evidence: whether the refined design would win back the
+    /// comparison at a λ OF ITS OWN (the comparison here is at the incumbent's
+    /// λ), and whether the Hadamard bound `Σ log(diag(S)/λd)` on the Occam term
+    /// is tight enough to screen a refining rung without building anything.
+    ///
+    /// Diagnostic only: it asserts that the ladder ran and that every rung
+    /// produced finite numbers, nothing about the level of any of them.
+    #[test]
+    fn probe_2759_evidence_and_movement_along_the_refinement_ladder() {
+        struct TestRng(u64);
+        impl TestRng {
+            fn uniform(&mut self) -> f64 {
+                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) >> 11) as f64 / (1_u64 << 53) as f64
+            }
+            fn normal(&mut self) -> f64 {
+                let u1 = (self.uniform() + f64::EPSILON).min(1.0 - f64::EPSILON);
+                let u2 = self.uniform();
+                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            }
+        }
+
+        // The `smoothness_ceiling_forces_refinement_and_certifies_residual_bias`
+        // fixture, at a third of its rows and at its own: four cycles per axis,
+        // amplitude 1, noise 0.02.
+        for n in [2000_usize, 6000] {
+        let noise = 0.02_f64;
+        let k = 4.0 * std::f64::consts::PI;
+        let f = |a: f64, b: f64| (k * a).sin() * (k * b).cos();
+        let mut rng = TestRng(0x1032_000C);
+        let (mut x1, mut x2, mut y) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..n {
+            let a = rng.uniform();
+            let b = rng.uniform();
+            x1.push(a);
+            x2.push(b);
+            y.push(f(a, b) + noise * rng.normal());
+        }
+        let w = vec![1.0_f64; n];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let metric = [1.0, 1.0];
+        let sobolev_s = 2.0;
+
+        let grid = 25_usize;
+        let held_out_rmse = |fit: &ResidualCascadeFit| -> f64 {
+            let mut sse = 0.0;
+            for i in 0..grid {
+                for j in 0..grid {
+                    let px = (i as f64 + 0.5) / grid as f64;
+                    let py = (j as f64 + 0.5) / grid as f64;
+                    let (mean, _) = fit.predict(&[px, py]).expect("predict");
+                    let err = mean - f(px, py);
+                    sse += err * err;
+                }
+            }
+            (sse / (grid * grid) as f64).sqrt()
+        };
+
+        let mut plan: Vec<LevelPlan> = (0..INITIAL_LEVELS)
+            .map(|level| LevelPlan {
+                exponent: level as f64,
+                centers: None,
+            })
+            .collect();
+        let mut rungs = 0_usize;
+        eprintln!("[P2759] ===== n = {n} =====");
+        eprintln!(
+            "[P2759] rung centers  cand    logL      rss_pen     shipped_tol gain_lo     \
+             gain_hi     d_reml      occam       occam_had   derived_tol move2       \
+             rmse        rmse_ext    best_dlogL  d_reml_own"
+        );
+        loop {
+            let design =
+                ResidualCascadeDesign::build_from_plan(&axes, &y, &w, &metric, sobolev_s, &plan)
+                    .expect("design");
+            let fit = match design.fit_reml() {
+                Ok(fit) => fit,
+                Err(error) => {
+                    eprintln!("[P2759] rung {rungs}: fit_reml refused: {error}");
+                    break;
+                }
+            };
+            let shipped_tolerance = REFINE_TOL * fit.rss_pen;
+            let exponent = plan.last().expect("a level").exponent + 1.0;
+            let planned = design
+                .plan_level_at_exponent(&fit, exponent, Some(shipped_tolerance))
+                .expect("candidate level");
+            let (gain_lo, gain_hi, occam_had) = planned.gain.as_ref().map_or(
+                (f64::NAN, f64::NAN, f64::NAN),
+                |bracket| (bracket.lower, bracket.upper, bracket.hadamard_occam),
+            );
+            let candidates = match planned.assessment {
+                NextLevelAssessment::CapacityExceeded {
+                    obstruction: RefinementObstruction::IdentifiabilityCapacity {
+                        candidate_penalized_modes,
+                        ..
+                    },
+                    ..
+                } => candidate_penalized_modes,
+                _ => 0,
+            };
+
+            // The extended design, evaluated at the SAME λ: the exact nested
+            // Bayes factor the tolerance is a proxy for. This is available past
+            // every capacity budget, because a single evaluation needs no
+            // certified spectrum and no identifiable rank — only a factorization.
+            let mut extended = plan.clone();
+            extended.push(LevelPlan {
+                exponent,
+                centers: None,
+            });
+            let dof = (n - design.core.nullity()) as f64;
+            let refined_design = ResidualCascadeDesign::build_from_plan(
+                &axes,
+                &y,
+                &w,
+                &metric,
+                sobolev_s,
+                &extended,
+            );
+            let (d_reml, occam, derived_tol, move2, rmse_ext, best_delta, d_reml_own) =
+                match refined_design
+                    .as_ref()
+                    .map_err(|error| error.clone())
+                    .and_then(|refined| {
+                        refined
+                            .fit_at(fit.log_lambda, None)
+                            .map(|at_lambda| (refined, at_lambda))
+                    }) {
+                    Ok((refined_design, refined)) => {
+                        let base = design.core.residuals(&fit.coeff);
+                        let next = refined.core.residuals(&refined.coeff);
+                        let move2: f64 = base
+                            .iter()
+                            .zip(next.iter())
+                            .zip(w.iter())
+                            .map(|((a, b), weight)| weight * (a - b) * (a - b))
+                            .sum();
+                        let d_reml = refined.restricted_loglik - fit.restricted_loglik;
+                        // −2Δ = occam + dof·ln(rss_ext/rss), so the Occam term
+                        // is recovered exactly from the two fits.
+                        let occam = -2.0 * d_reml + dof * (fit.rss_pen / refined.rss_pen).ln();
+                        let derived_tol = fit.rss_pen * (1.0 - (-occam / dof).exp());
+                        // Would the refined design win the comparison back at a λ
+                        // OF ITS OWN? Every λ tried is a valid witness for it.
+                        let mut best_delta = 0.0_f64;
+                        let mut best_loglik = refined.restricted_loglik;
+                        for step in [-3.0_f64, -2.0, -1.0, 1.0, 2.0, 3.0] {
+                            if let Ok(other) = refined_design.fit_at(fit.log_lambda + step, None)
+                                && other.restricted_loglik > best_loglik
+                            {
+                                best_loglik = other.restricted_loglik;
+                                best_delta = step;
+                            }
+                        }
+                        (
+                            d_reml,
+                            occam,
+                            derived_tol,
+                            move2,
+                            held_out_rmse(&refined),
+                            best_delta,
+                            best_loglik - fit.restricted_loglik,
+                        )
+                    }
+                    Err(error) => {
+                        eprintln!("[P2759] rung {rungs}: extended fit refused: {error}");
+                        (
+                            f64::NAN,
+                            f64::NAN,
+                            f64::NAN,
+                            f64::NAN,
+                            f64::NAN,
+                            f64::NAN,
+                            f64::NAN,
+                        )
+                    }
+                };
+
+            eprintln!(
+                "[P2759] {rungs:4} {:7} {candidates:7} {:+9.4} {:11.5e} {shipped_tolerance:11.5e} \
+                 {gain_lo:11.5e} {gain_hi:11.5e} {d_reml:+11.4e} {occam:11.5e} \
+                 {occam_had:11.5e} {derived_tol:11.5e} {move2:11.5e} {:11.5e} \
+                 {rmse_ext:11.5e} {best_delta:+5.1} {d_reml_own:+11.4e}",
+                design.num_centers(),
+                fit.log_lambda,
+                fit.rss_pen,
+                held_out_rmse(&fit),
+            );
+            assert!(
+                fit.rss_pen.is_finite() && fit.restricted_loglik.is_finite(),
+                "rung {rungs} produced a non-finite fit"
+            );
+            rungs += 1;
+
+            if planned.selection.is_empty() || rungs >= 8 {
+                eprintln!(
+                    "[P2759] ladder stops at rung {rungs}: selection {} centers",
+                    planned.selection.len()
+                );
+                break;
+            }
+            if planned.extends_last {
+                let last = plan.last_mut().expect("a level");
+                let mut centers = last.centers.take().unwrap_or_default();
+                centers.extend(planned.selection.iter().copied());
+                last.centers = Some(centers);
+            } else {
+                plan.push(LevelPlan {
+                    exponent,
+                    centers: if planned.complete {
+                        None
+                    } else {
+                        Some(planned.selection)
+                    },
+                });
+            }
+        }
+        assert!(rungs > 0, "the probe never completed a rung for n = {n}");
+        }
+    }
 }
