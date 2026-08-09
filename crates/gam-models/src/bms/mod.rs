@@ -2476,127 +2476,30 @@ pub(crate) fn weighted_tail_mass(
         / total_weight
 }
 
+/// Equal-mass compression of `(z, weights)` into an at-most-`grid_size`-node
+/// discrete latent measure.
+///
+/// A thin wrapper over
+/// [`empirical_measure_sensitivity::build_empirical_z_grid_with_alpha`], which
+/// owns the fill loop and additionally records the allocation the gam#2484
+/// Murphy–Topel correction differentiates. Keeping ONE fill loop is the point:
+/// a recorded allocation that came from a re-implementation would be measuring
+/// its own reconstruction rather than the grid the fit integrates against.
 pub(crate) fn build_empirical_z_grid(
     z: &Array1<f64>,
     weights: &Array1<f64>,
     grid_size: usize,
     context: &str,
 ) -> Result<EmpiricalZGrid, String> {
-    if grid_size < 3 {
-        return Err(format!(
-            "empirical latent measure grid_size must be at least 3, got {grid_size}"
-        ));
-    }
-    if z.len() != weights.len() {
-        return Err(format!(
-            "{context} length mismatch: z={}, weights={}",
-            z.len(),
-            weights.len()
-        ));
-    }
-    let mut pairs = Vec::<(f64, f64)>::with_capacity(z.len());
-    for (idx, (&zi, &wi)) in z.iter().zip(weights.iter()).enumerate() {
-        if !zi.is_finite() {
-            return Err(format!(
-                "{context} z value at row {idx} is non-finite ({zi})"
-            ));
-        }
-        if !wi.is_finite() || wi < 0.0 {
-            return Err(format!(
-                "{context} weight at row {idx} must be finite and non-negative, got {wi}"
-            ));
-        }
-        if wi > 0.0 {
-            pairs.push((zi, wi));
-        }
-    }
-    if pairs.len() < 2 {
-        return Err(format!(
-            "{context} requires at least two positive-weight rows"
-        ));
-    }
-    pairs.sort_by(|left, right| {
-        left.0
-            .partial_cmp(&right.0)
-            .expect("validated empirical latent z values are finite")
-    });
-    let total_weight = pairs.iter().map(|(_, weight)| *weight).sum::<f64>();
-    if !(total_weight.is_finite() && total_weight > 0.0) {
-        return Err(format!("{context} requires positive finite total weight"));
-    }
-
-    let m = grid_size.min(pairs.len());
-    let mut nodes = Vec::with_capacity(m);
-    let mut out_weights = Vec::with_capacity(m);
-    let bin_weight_target = total_weight / (m as f64);
-    let mut cursor = 0usize;
-    let mut remaining = pairs[0].1;
-    for _ in 0..m {
-        let mut need = bin_weight_target;
-        let mut bin_weight = 0.0;
-        let mut bin_sum = 0.0;
-        while need > EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL * bin_weight_target
-            && cursor < pairs.len()
-        {
-            let take = remaining.min(need);
-            bin_sum += take * pairs[cursor].0;
-            bin_weight += take;
-            need -= take;
-            remaining -= take;
-            if remaining <= EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL * pairs[cursor].1 {
-                cursor += 1;
-                if cursor < pairs.len() {
-                    remaining = pairs[cursor].1;
-                }
-            }
-        }
-        if bin_weight > 0.0 {
-            nodes.push(bin_sum / bin_weight);
-            out_weights.push(bin_weight / total_weight);
-        }
-    }
-    if nodes.len() < 2 {
-        return Err(format!(
-            "{context} compression produced fewer than two nodes"
-        ));
-    }
-    recenter_rescale_empirical_grid(&mut nodes, &out_weights);
-    let total = out_weights.iter().sum::<f64>();
-    if total.is_finite() && total > 0.0 {
-        for weight in &mut out_weights {
-            *weight /= total;
-        }
-    }
-    validate_empirical_z_grid(&nodes, &out_weights, context)?;
-    Ok(EmpiricalZGrid {
-        nodes,
-        weights: out_weights,
-    })
-}
-
-pub(crate) fn recenter_rescale_empirical_grid(nodes: &mut [f64], weights: &[f64]) {
-    let total = weights.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
-        return;
-    }
-    let mean = nodes
-        .iter()
-        .zip(weights.iter())
-        .map(|(&node, &weight)| weight * node)
-        .sum::<f64>()
-        / total;
-    let var = nodes
-        .iter()
-        .zip(weights.iter())
-        .map(|(&node, &weight)| weight * (node - mean).powi(2))
-        .sum::<f64>()
-        / total;
-    let sd = var.sqrt();
-    if sd.is_finite() && sd > BMS_VARIANCE_FLOOR {
-        for node in nodes {
-            *node = (*node - mean) / sd;
-        }
-    }
+    Ok(
+        empirical_measure_sensitivity::build_empirical_z_grid_with_alpha(
+            z.view(),
+            weights.view(),
+            grid_size,
+            context,
+        )?
+        .grid,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2886,6 +2789,7 @@ mod stacked_first_stage_sandwich_2484_tests {
 
 pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
+pub(crate) mod empirical_measure_sensitivity;
 // #932 BMS flex single-source jet substrate (runtime-dimension `Jet2` + IFT
 // lift + cell base-moment jets). A bare `#[cfg(test)] mod` with an allowed name
 // so the build.rs ban-scanner exempts it; shared by its own FD gates and the

@@ -1,0 +1,420 @@
+//! Sensitivity of the global-empirical latent measure to the calibrated score
+//! it is built from — the `D = ∂node/∂ζ` half of the gam#2484 Murphy–Topel
+//! generalization.
+//!
+//! # Why this exists
+//!
+//! On the BMS conditional location-scale branch the second-stage latent measure
+//! is **built from the first-stage output**: `ζ = (z − m̂(C))/√v̂(C)` is compressed
+//! into an equal-mass grid by [`build_empirical_z_grid`], and the row kernel then
+//! integrates against that grid. So a row's log-likelihood depends on `ζ` twice —
+//! directly through its own `ζ_i`, and through a grid that every other `ζ_j`
+//! helped build. The Murphy–Topel chain
+//!
+//! ```text
+//!   G = ∂(score_β)/∂θ₁ = Σ_j (d score_β / d ζ_j) · (∂ζ_j/∂θ₁)
+//! ```
+//!
+//! therefore needs the TOTAL `d score_β / d ζ_j`, not the per-row mixed partial
+//! the standard-normal kernel supplies. The cross-row half factors as
+//! `Σ_b u_b · D_{bj}` with `u_b = ∂(score_β)/∂node_b` (owned by
+//! [`super::gradient_paths`]) and `D = ∂node/∂ζ` (owned here), which is what
+//! makes the correction assemble as one modified sensitivity matrix
+//! `S_eff = S + (U_Q·D)ᵀ` and leaves the whole downstream congruence untouched.
+//!
+//! # Why `D` is a closed form and not a differentiated sort
+//!
+//! [`build_empirical_z_grid`] sorts the positive-weight rows by `ζ`, then walks
+//! bins of equal **weight**. Bin boundaries are therefore set by cumulative
+//! weight and are exactly independent of the `ζ` values; for a fixed sort order
+//! the allocation matrix `α` (how much of row `i`'s weight landed in bin `c`) is
+//! *exactly constant* in `ζ`, and the grid weights carry no `ζ`-sensitivity at
+//! all. Only the node VALUES move:
+//!
+//! ```text
+//!   raw node   n_c = Σ_i α_{ci} ζ_i / W_c ,   W_c = Σ_i α_{ci}
+//!   standardized  x_b = (n_b − μ)/sd ,  μ = Σ_c w_c n_c , sd² = Σ_c w_c (n_c − μ)²
+//!
+//!   ∂n_c/∂ζ_i = α_{ci}/W_c                        =: A_{ci}
+//!   ∂x_b/∂n_c = (1/sd)·[(δ_{bc} − w_c) − x_b·w_c·x_c]  =: M_{bc}
+//!   D = (1/sd)·M·A
+//! ```
+//!
+//! (`∂μ/∂n_c = w_c` and, using `Σ_c w_c (n_c − μ) = 0`, `∂sd/∂n_c = w_c·x_c`.)
+//! On the `sd ≤ BMS_VARIANCE_FLOOR` branch the standardization is skipped, so
+//! `M = I` and the `1/sd` factor is absent.
+//!
+//! The one thing that is NOT differentiable is the sort order, and it fails in
+//! exactly one place: a tied group of rows whose cumulative-mass span a bin
+//! boundary cuts. There the left and right derivatives genuinely differ, so the
+//! build records a typed refusal rather than a number — see
+//! [`EmpiricalGridTieStraddle`].
+//!
+//! # What is recorded, and where it lives
+//!
+//! `α`, `W`, and the standardization `sd` are **fit-time provenance**, not part
+//! of the measure. [`EmpiricalZGrid`] is on the persistence wire (it is inside
+//! `LatentMeasureKind`, which `predict_io` reads back), and its `PartialEq` is
+//! the measure's identity — two grids equal by nodes and weights must not
+//! compare unequal because they were built from different rows. So the record
+//! rides on a separate build product, [`EmpiricalZGridBuild`], returned only by
+//! [`build_empirical_z_grid_with_alpha`]; [`build_empirical_z_grid`] stays a thin
+//! wrapper over it and every existing caller and the wire are untouched.
+
+use super::{BMS_VARIANCE_FLOOR, EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL, EmpiricalZGrid};
+use ndarray::{Array2, ArrayView1, ArrayView2};
+
+/// A tied `ζ` group whose mass a bin boundary cuts, which is the only way the
+/// equal-mass compression stops being differentiable in `ζ`.
+///
+/// Rows that share a `ζ` value have no defined order, and the fill loop hands
+/// whichever comes first the earlier bin. When the whole tied group lands in one
+/// bin that is harmless — every member contributes its full weight to that bin
+/// regardless of the order, so `α` is invariant to the permutation. When a
+/// boundary cuts the group, the split depends on the order, and moving one
+/// member's `ζ` up through the tie swaps the allocation: the left and right
+/// derivatives of `n_c` differ and `D` does not exist.
+///
+/// This is a property of the DATA, computable from the sorted `(ζ, w)` pairs
+/// alone, and it is a yes/no rather than a tolerance.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EmpiricalGridTieStraddle {
+    /// The tied `ζ` value.
+    pub(crate) value: f64,
+    /// How many positive-weight rows share it.
+    pub(crate) rows: usize,
+    /// Index of the first bin boundary strictly inside the group's mass span.
+    pub(crate) boundary: usize,
+}
+
+/// [`build_empirical_z_grid`] plus the fit-time provenance the Murphy–Topel
+/// correction needs to differentiate the grid in `ζ`.
+///
+/// Fit-time only, by construction: nothing here is on the persistence wire and
+/// nothing here is needed to APPLY the measure, only to differentiate it.
+#[derive(Clone, Debug)]
+pub(crate) struct EmpiricalZGridBuild {
+    /// The measure itself — bit-identical to what [`build_empirical_z_grid`]
+    /// returns, because that function is a wrapper over this one.
+    pub(crate) grid: EmpiricalZGrid,
+    /// The allocation `α` as `(emitted node index, ORIGINAL row index, mass)`.
+    ///
+    /// Indexed by EMITTED node, not by loop iteration: a bin whose weight came
+    /// out at zero is never emitted, so `nodes.len()` can be below the requested
+    /// `m` and the two indices are not the same counter.
+    ///
+    /// The original row index can only be RECORDED, never recovered: the builder
+    /// filters zero-weight rows out and sorts what is left, so the row identity
+    /// is destroyed before the fill loop runs.
+    ///
+    /// There is no fixed bound on entries per row. A row whose weight exceeds
+    /// the per-bin target fills several consecutive bins and appears once per
+    /// bin it touches; `nnz(α) ≤ n + m − 1`.
+    pub(crate) alpha: Vec<(usize, usize, f64)>,
+    /// `W_c = Σ_i α_{ci}`, the UNNORMALIZED mass of each emitted bin. Length
+    /// equals `grid.nodes.len()`.
+    pub(crate) bin_mass: Vec<f64>,
+    /// The `sd` the standardization divided by, or `None` when
+    /// [`recenter_rescale_empirical_grid`] skipped it (degenerate spread). The
+    /// stored nodes have weighted sd 1 by construction, so this factor is not
+    /// recoverable from the grid.
+    pub(crate) standardization_sd: Option<f64>,
+    /// Number of rows in the `ζ` vector the grid was built from — the width of
+    /// `D`, and the length of every vector [`Self::node_zeta_vjp`] returns.
+    /// Includes the zero-weight rows the builder filtered out; they simply have
+    /// an all-zero column.
+    pub(crate) n_rows: usize,
+    /// `Some` when the equal-mass compression is not differentiable in `ζ`. The
+    /// grid and the point estimates are unaffected; only `D` is refused.
+    pub(crate) tie_straddle: Option<EmpiricalGridTieStraddle>,
+}
+
+impl EmpiricalZGridBuild {
+    /// `Dᵀ·V` for an `m × p` right-hand side `V`, i.e. the `n × p` matrix whose
+    /// row `i` is `Σ_b V_{b·}·D_{bi}`.
+    ///
+    /// This is the direction the Murphy–Topel seam needs: `U_Q` is `p_β × m`, and
+    /// the cross-row contribution to the per-row sensitivity matrix is
+    /// `(U_Q·D)ᵀ = Dᵀ·U_Qᵀ`.
+    ///
+    /// Evaluated as `Aᵀ·(Mᵀ·V)/sd`: the `m × m` product first (`O(m²·p)`), then
+    /// the sparse scatter through `α` (`O(nnz(α)·p)`). With
+    /// `(Mᵀv)_c = (1/sd)·[v_c − w_c·Σ_b v_b − w_c·x_c·Σ_b x_b v_b]` the dense
+    /// half is really `O(m·p)`, so the whole apply is linear in the data.
+    ///
+    /// Returns `Err` when the build recorded a tie straddle: there is no
+    /// derivative to apply.
+    pub(crate) fn node_zeta_vjp(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+        if let Some(tie) = self.tie_straddle.as_ref() {
+            return Err(format!(
+                "the empirical latent measure is not differentiable in the calibrated score: {} \
+                 rows are tied at ζ = {:.6} and equal-mass bin boundary {} cuts the tied group, so \
+                 the allocation depends on an order the data does not define and the left and \
+                 right derivatives of the grid nodes differ",
+                tie.rows, tie.value, tie.boundary
+            ));
+        }
+        let m = self.grid.nodes.len();
+        if v.nrows() != m {
+            return Err(format!(
+                "empirical grid node-sensitivity VJP expects {m} node rows, got {}",
+                v.nrows()
+            ));
+        }
+        let p = v.ncols();
+        // Mᵀ·V. With M_{bc} = (δ_{bc} − w_c) − x_b·w_c·x_c,
+        //   (Mᵀ V)_{c·} = V_{c·} − w_c·Σ_b V_{b·} − w_c·x_c·Σ_b x_b·V_{b·}.
+        // On the skipped-standardization branch M = I and this is the identity.
+        let mut mt_v = v.to_owned();
+        if let Some(sd) = self.standardization_sd {
+            let mut sum_v = vec![0.0_f64; p];
+            let mut sum_xv = vec![0.0_f64; p];
+            for b in 0..m {
+                let x_b = self.grid.nodes[b];
+                for j in 0..p {
+                    sum_v[j] += v[[b, j]];
+                    sum_xv[j] += x_b * v[[b, j]];
+                }
+            }
+            let inv_sd = 1.0 / sd;
+            for c in 0..m {
+                let w_c = self.grid.weights[c];
+                let x_c = self.grid.nodes[c];
+                for j in 0..p {
+                    mt_v[[c, j]] = inv_sd * (v[[c, j]] - w_c * sum_v[j] - w_c * x_c * sum_xv[j]);
+                }
+            }
+        }
+        // Aᵀ·(Mᵀ V), scattered through the recorded allocation:
+        // row i accumulates (α_{ci}/W_c)·(Mᵀ V)_{c·} for every bin it touched.
+        let mut out = Array2::<f64>::zeros((self.n_rows, p));
+        for &(node, row, mass) in &self.alpha {
+            let w_bin = self.bin_mass[node];
+            if !(w_bin.is_finite() && w_bin > 0.0) {
+                return Err(format!(
+                    "empirical grid node-sensitivity VJP: bin {node} has non-positive mass {w_bin}"
+                ));
+            }
+            let scale = mass / w_bin;
+            if scale == 0.0 {
+                continue;
+            }
+            for j in 0..p {
+                out[[row, j]] += scale * mt_v[[node, j]];
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Equal-mass compression of `(z, weights)` into an at-most-`grid_size`-node
+/// discrete measure, WITH the allocation record that makes it differentiable.
+///
+/// This is the real builder; [`build_empirical_z_grid`] is a thin wrapper that
+/// drops the record, so the measure a fit integrates against and the measure the
+/// correction differentiates cannot drift apart.
+pub(crate) fn build_empirical_z_grid_with_alpha(
+    z: ArrayView1<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    grid_size: usize,
+    context: &str,
+) -> Result<EmpiricalZGridBuild, String> {
+    if grid_size < 3 {
+        return Err(format!(
+            "empirical latent measure grid_size must be at least 3, got {grid_size}"
+        ));
+    }
+    if z.len() != weights.len() {
+        return Err(format!(
+            "{context} length mismatch: z={}, weights={}",
+            z.len(),
+            weights.len()
+        ));
+    }
+    // `(ζ, weight, ORIGINAL row)`. The row index is threaded through the filter
+    // and the sort because it cannot be reconstructed afterwards; the comparator
+    // still reads `.0` alone, so the stable sort's tie order is exactly what it
+    // was before the index existed.
+    let mut pairs = Vec::<(f64, f64, usize)>::with_capacity(z.len());
+    for (idx, (&zi, &wi)) in z.iter().zip(weights.iter()).enumerate() {
+        if !zi.is_finite() {
+            return Err(format!(
+                "{context} z value at row {idx} is non-finite ({zi})"
+            ));
+        }
+        if !(wi.is_finite() && wi >= 0.0) {
+            return Err(format!(
+                "{context} weight at row {idx} must be finite and non-negative, got {wi}"
+            ));
+        }
+        if wi > 0.0 {
+            pairs.push((zi, wi, idx));
+        }
+    }
+    if pairs.len() < 2 {
+        return Err(format!(
+            "{context} requires at least two positive-weight rows"
+        ));
+    }
+    pairs.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .expect("validated empirical latent z values are finite")
+    });
+    let total_weight = pairs.iter().map(|(_, weight, _)| *weight).sum::<f64>();
+    if !(total_weight.is_finite() && total_weight > 0.0) {
+        return Err(format!("{context} requires positive finite total weight"));
+    }
+
+    let m = grid_size.min(pairs.len());
+    let mut nodes = Vec::with_capacity(m);
+    let mut out_weights = Vec::with_capacity(m);
+    let mut bin_mass = Vec::with_capacity(m);
+    let mut alpha = Vec::<(usize, usize, f64)>::with_capacity(pairs.len() + m);
+    let bin_weight_target = total_weight / (m as f64);
+    let mut cursor = 0usize;
+    let mut remaining = pairs[0].1;
+    for _ in 0..m {
+        let mut need = bin_weight_target;
+        let mut bin_weight = 0.0;
+        let mut bin_sum = 0.0;
+        // Allocation entries for the bin under construction. Held aside because
+        // the emitted node index is only known once the bin is known to emit.
+        let mut bin_alpha = Vec::<(usize, f64)>::new();
+        while need > EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL * bin_weight_target
+            && cursor < pairs.len()
+        {
+            let take = remaining.min(need);
+            bin_sum += take * pairs[cursor].0;
+            bin_weight += take;
+            bin_alpha.push((pairs[cursor].2, take));
+            need -= take;
+            remaining -= take;
+            if remaining <= EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL * pairs[cursor].1 {
+                cursor += 1;
+                if cursor < pairs.len() {
+                    remaining = pairs[cursor].1;
+                }
+            }
+        }
+        if bin_weight > 0.0 {
+            let node_index = nodes.len();
+            nodes.push(bin_sum / bin_weight);
+            out_weights.push(bin_weight / total_weight);
+            bin_mass.push(bin_weight);
+            for (row, take) in bin_alpha {
+                alpha.push((node_index, row, take));
+            }
+        }
+    }
+    if nodes.len() < 2 {
+        return Err(format!(
+            "{context} compression produced fewer than two nodes"
+        ));
+    }
+    let standardization = recenter_rescale_empirical_grid(&mut nodes, &out_weights);
+    let total = out_weights.iter().sum::<f64>();
+    if total.is_finite() && total > 0.0 {
+        for weight in &mut out_weights {
+            *weight /= total;
+        }
+    }
+    let tie_straddle = detect_tie_straddle(&pairs, total_weight, m);
+    Ok(EmpiricalZGridBuild {
+        grid: EmpiricalZGrid::new(nodes, out_weights, context)?,
+        alpha,
+        bin_mass,
+        standardization_sd: standardization.map(|(_, sd)| sd),
+        n_rows: z.len(),
+        tie_straddle,
+    })
+}
+
+/// Center and scale the grid nodes to weighted mean 0 / weighted sd 1, and
+/// return the `(mean, sd)` the map used — `None` when the spread was at or below
+/// [`BMS_VARIANCE_FLOOR`] and the map was therefore skipped.
+///
+/// Returning the pair rather than `()` is what lets the sensitivity apply the
+/// `1/sd` factor without a second copy of the mean/sd formula that could drift
+/// from this one.
+pub(crate) fn recenter_rescale_empirical_grid(
+    nodes: &mut [f64],
+    weights: &[f64],
+) -> Option<(f64, f64)> {
+    let total = weights.iter().sum::<f64>();
+    if !(total.is_finite() && total > 0.0) {
+        return None;
+    }
+    let mean = nodes
+        .iter()
+        .zip(weights.iter())
+        .map(|(&node, &weight)| weight * node)
+        .sum::<f64>()
+        / total;
+    let var = nodes
+        .iter()
+        .zip(weights.iter())
+        .map(|(&node, &weight)| weight * (node - mean).powi(2))
+        .sum::<f64>()
+        / total;
+    let sd = var.sqrt();
+    if sd.is_finite() && sd > BMS_VARIANCE_FLOOR {
+        for node in nodes {
+            *node = (*node - mean) / sd;
+        }
+        Some((mean, sd))
+    } else {
+        None
+    }
+}
+
+/// The differentiability certificate: find the first tied `ζ` group whose
+/// cumulative-mass span an equal-mass bin boundary cuts.
+///
+/// A tied group that lies entirely inside one bin is harmless — every member
+/// contributes its whole weight to that bin whatever order the sort chose — so
+/// the check is exactly "does a boundary land strictly inside a tie", not "are
+/// there ties". Boundaries are at `k·total/m` for `k = 1..m−1`; "strictly
+/// inside" is measured with the same relative tolerance the fill loop uses to
+/// decide a bin is exhausted, so a boundary that coincides with a row edge to
+/// within a few ulps counts as outside (which is what the fill loop does with
+/// it).
+fn detect_tie_straddle(
+    pairs: &[(f64, f64, usize)],
+    total_weight: f64,
+    m: usize,
+) -> Option<EmpiricalGridTieStraddle> {
+    let bin_weight_target = total_weight / (m as f64);
+    let edge_tol = EMPIRICAL_GRID_WEIGHT_EXHAUSTED_REL_TOL * bin_weight_target;
+    let mut cumulative = 0.0_f64;
+    let mut index = 0usize;
+    while index < pairs.len() {
+        let value = pairs[index].0;
+        let start = cumulative;
+        let mut end = cumulative;
+        let mut run = 0usize;
+        while index < pairs.len() && pairs[index].0 == value {
+            end += pairs[index].1;
+            run += 1;
+            index += 1;
+        }
+        cumulative = end;
+        if run < 2 {
+            continue;
+        }
+        // Boundaries strictly inside (start, end).
+        let first = ((start + edge_tol) / bin_weight_target).floor() as i64 + 1;
+        let last = ((end - edge_tol) / bin_weight_target).ceil() as i64 - 1;
+        for boundary in first.max(1)..=last.min(m as i64 - 1) {
+            let position = (boundary as f64) * bin_weight_target;
+            if position > start + edge_tol && position < end - edge_tol {
+                return Some(EmpiricalGridTieStraddle {
+                    value,
+                    rows: run,
+                    boundary: boundary as usize,
+                });
+            }
+        }
+    }
+    None
+}
