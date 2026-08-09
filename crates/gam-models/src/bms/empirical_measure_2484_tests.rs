@@ -21,6 +21,8 @@
 //!    gate: it is blind to how the channels are split and would fail on an IFT
 //!    sign error, a missing cross-row term, or a wrong `1/sd`.
 
+#![cfg(test)]
+
 use super::empirical_measure_sensitivity::{
     build_empirical_z_grid_with_alpha, rigid_empirical_score_zeta_channels,
 };
