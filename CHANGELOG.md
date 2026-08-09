@@ -285,6 +285,28 @@
   degree-2 basis. The hull edge is therefore no rougher than a knot, which is
   the most a finite-degree spline can offer.
 
+- **One sentinel, one resolver: the measure-jet auto range is now screened
+  against the response on every standard-fit branch (#2750).**
+  `length_scale == 0.0` is an unresolved request, and it had TWO resolvers — a
+  pure-geometry rule inside the basis builder (the median nearest-node spacing)
+  and the #2750 response screen — with which one a model got decided by which
+  branch of the standard-fit dispatch it happened to take. The screen ran inside
+  `fit_term_collectionwith_spatial_length_scale_optimization`, so a collection
+  carrying a latent coordinate or coefficient groups was resolved by geometry
+  alone.
+
+  That is not a tuning difference between branches. `ℓ` decides WHICH span the
+  representers occupy and a smoothing parameter cannot move a span, so the two
+  resolvers produce different models, and the measured gap between them on the
+  fixtures that do reach the screen is a factor of `1.6`–`13` in held-out error.
+
+  The screen now runs once at the top of `fit_standard_model`, before the
+  three-way dispatch and before the Tweedie-`p` profile, so every branch passes
+  it. It is idempotent by construction — it only fires on the `0.0` sentinel — so
+  the call still inside the spatial driver (reached directly by other drivers and
+  by tests) is a no-op afterwards, and the #1762 Firth retry re-enters with the
+  range already resolved instead of screening a second time.
+
 - **The measure-jet range screen's downward walk was bounded by a guard that
   could not fire (#2750).** The screen walks geometrically off either end of the
   realized scale band while that end is still the incumbent, and its own comment

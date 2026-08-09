@@ -777,6 +777,39 @@ fn estimate_tweedie_power(request: &StandardFitRequest<'_>) -> Result<f64, Strin
 pub(crate) fn fit_standard_model(
     mut request: StandardFitRequest<'_>,
 ) -> Result<StandardFitResult, String> {
+    // #2750: resolve every AUTO measure-jet representer range against the
+    // response, once, before anything reads the spec.
+    //
+    // `length_scale == 0.0` is an unresolved request, and it had TWO resolvers:
+    // a pure-geometry rule inside the basis builder (the median nearest-node
+    // spacing) and the response screen. Which one a model got depended on which
+    // branch of the dispatch below it happened to take — the screen ran inside
+    // `fit_term_collectionwith_spatial_length_scale_optimization`, so a
+    // collection carrying a latent coordinate or coefficient groups was resolved
+    // by geometry alone. `ℓ` decides WHICH span the representers occupy and λ
+    // cannot move a span, so that is not a tuning difference between branches;
+    // it is a different model. One sentinel gets one resolver, and it runs where
+    // every branch passes.
+    //
+    // Idempotent by construction: the screen only fires on the `0.0` sentinel, so
+    // the call still inside the spatial driver (reached directly by other
+    // drivers and by tests) is a no-op after this one, and the #1762 Firth retry
+    // re-enters the dispatch with the range already resolved rather than
+    // screening a second time. Failure to screen is never an error — every
+    // refusal path leaves the term at the geometry heuristic, which is the
+    // pre-#2750 behaviour.
+    let seeded = crate::fit_orchestration::drivers::seed_measure_jet_auto_ranges(
+        request.data.view(),
+        request.y.view(),
+        request.weights.view(),
+        &mut request.spec,
+    );
+    if seeded > 0 {
+        log::info!(
+            "[#2750] screened the representer range of {seeded} auto measure-jet term(s) against \
+             the response before the standard-fit dispatch"
+        );
+    }
     // #2026: magic-by-default Tweedie power. A bare `family="tweedie"`/`"tw"`
     // arrives with a placeholder power and `estimate_tweedie_p = true`; profile
     // `p` over (1, 2) by likelihood and bake the estimate into `family` so the
