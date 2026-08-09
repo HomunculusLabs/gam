@@ -68,6 +68,26 @@
   term's internal gate (same predicate, but a skip optimisation rather than a
   verdict).
 
+  **`MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER` is deleted in the same change,
+  and the measurement says it was not the cause.** The unbiased probe ran under
+  `outer_max_iter.min(20)` — a ceiling introduced as a bare one-line
+  `perf(#1082)` commit with no test and no measurement — while every `Err` from
+  it was routed on as separation evidence. SPEC forbids minting a fit from an
+  exhausted budget, so a search stopped by that ceiling returns
+  `RemlDidNotConverge`, and the ceiling could convert "this probe was still
+  descending when I stopped it" into "the data separate". Run at both budgets on
+  the same non-separating fixture it in fact decided nothing — the probe
+  certifies either way, and the reported spectra agree to four digits — which is
+  what falsified the first hypothesis on this issue. It goes anyway, because the
+  only runs it can shorten are the ones where it stops a still-descending search,
+  i.e. exactly the runs whose verdict it changes: its entire benefit is
+  co-extensive with the misdecision. SPEC: *"Wall-clock time budgets and
+  deadlines are never allowed, except in tests. In general, do not paper over
+  solver issues."* The dead helper written for that branch and never wired
+  (`multinomial_formula_unresolved_probe_separation_evidence`, kept in a test
+  module under the note that "the production routing that would consume this is
+  not currently wired") goes with it.
+
   **The fit now records which estimand it published.** `separation_evidence` is
   `None` for the unbiased penalized-REML mode and carries the certificate itself
   when the proper prior was armed. The two branches are different estimands, and
