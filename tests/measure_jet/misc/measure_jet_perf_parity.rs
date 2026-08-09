@@ -163,22 +163,89 @@ fn held_out_rmse(
     rmse(&yhat, &truth_values)
 }
 
+/// Repetition count for the interleaved timing below.
+///
+/// This is a repetition count, not a threshold: it does not appear in the bar
+/// and its only effect is how tight the minimum estimator is. Three is the
+/// smallest count for which a single preempted sample cannot be the minimum of
+/// its arm.
+const TIMING_REPLICATES: usize = 3;
+
+/// The outer work one arm spent, as the ENGINE counts it rather than as a clock
+/// measures it: outer evaluations and design realizations.
+///
+/// These are printed, never asserted. They are exact integers and immune to host
+/// load, but they are NOT comparable between the two arms: matern reaches the
+/// joint solve with its range basin already selected and certified by a separate
+/// scalar endpoint comparison (`spatial_optimization.rs`: *"The scalar Matern
+/// endpoint comparison has already selected and certified the range basin. Give
+/// its explicit theta0 the only joint start"*), so that search is inside the wall
+/// clock and outside `kappa_timing`. A counted ratio would credit matern for work
+/// it does off-counter. They are here because they are what a future regression
+/// of this gate will need read first (gam#2750).
+fn outer_work(fit: &gam::StandardFitResult) -> (usize, u64) {
+    fit.kappa_timing
+        .as_ref()
+        .map_or((0, 0), |t| (t.eval_calls, t.design_revision_delta))
+}
+
 #[test]
 fn measure_jet_single_scale_mode_is_speed_competitive() {
     init_parallelism();
     let ds = build_dataset(N_TRAIN, SIGMA, TRAIN_SEED);
 
-    let (matern_elapsed, matern_fit) = fit_and_time(MATERN_BODY, &ds);
-    drop(matern_fit);
-    let (duchon_elapsed, duchon_fit) = fit_and_time(DUCHON_BODY, &ds);
-    drop(duchon_fit);
-    let (mjs_elapsed, mjs_fit) = fit_and_time(MJS_BODY, &ds);
-    drop(mjs_fit);
-
-    let mjs_secs = mjs_elapsed.as_secs_f64();
-    let matern_secs = matern_elapsed.as_secs_f64();
-    let duchon_secs = duchon_elapsed.as_secs_f64();
-    println!("[mjs-perf] mjs={mjs_secs:.3}s matern={matern_secs:.3}s duchon={duchon_secs:.3}s");
+    // The bar below is a statement about the ESTIMATORS, and a wall clock only
+    // measures the estimators when the process has the cores to itself. This
+    // target holds 20+ tests and the harness runs them concurrently by default,
+    // so one sample measures the host's load as much as the fit. Measured on one
+    // binary, one fixture, one seed, with only the harness concurrency changing
+    // (gam#2750):
+    //
+    //     19 tests in parallel   mjs=3.367s  matern=1.513s   ratio 2.226   FAIL
+    //     --test-threads=1       mjs=0.987s  matern=0.531s   ratio 1.859   pass
+    //
+    // The verdict flipped on a setting that has nothing to do with either
+    // estimator, and the uncontended margin was 7%. So the ESTIMATOR is what
+    // changes here, never the bar: repetitions are INTERLEAVED, so any drift in
+    // host load lands on both arms in the same window, and each arm is summarized
+    // by its MINIMUM — preemption can only ADD time, so the smallest of k samples
+    // is the least contaminated one. Nothing about `2.0` moves; #2761's argument
+    // for not widening the sibling accuracy bar applies here verbatim, and this
+    // bound's own reason for existing ("guards the prior 12x regression") is
+    // untouched by measuring it more carefully.
+    let mut mjs_secs = f64::INFINITY;
+    let mut matern_secs = f64::INFINITY;
+    let mut duchon_secs = f64::INFINITY;
+    let mut mjs_work = (0usize, 0u64);
+    let mut matern_work = (0usize, 0u64);
+    for replicate in 0..TIMING_REPLICATES {
+        let (matern_elapsed, matern_fit) = fit_and_time(MATERN_BODY, &ds);
+        matern_work = outer_work(&matern_fit);
+        drop(matern_fit);
+        let (duchon_elapsed, duchon_fit) = fit_and_time(DUCHON_BODY, &ds);
+        drop(duchon_fit);
+        let (mjs_elapsed, mjs_fit) = fit_and_time(MJS_BODY, &ds);
+        mjs_work = outer_work(&mjs_fit);
+        drop(mjs_fit);
+        let (m, k, d) = (
+            mjs_elapsed.as_secs_f64(),
+            matern_elapsed.as_secs_f64(),
+            duchon_elapsed.as_secs_f64(),
+        );
+        println!("[mjs-perf] replicate {replicate}: mjs={m:.3}s matern={k:.3}s duchon={d:.3}s");
+        mjs_secs = mjs_secs.min(m);
+        matern_secs = matern_secs.min(k);
+        duchon_secs = duchon_secs.min(d);
+    }
+    println!(
+        "[mjs-perf] min over {TIMING_REPLICATES}: mjs={mjs_secs:.3}s matern={matern_secs:.3}s \
+         duchon={duchon_secs:.3}s  ratio={:.3}",
+        mjs_secs / matern_secs
+    );
+    println!(
+        "[mjs-perf] outer work (eval_calls, design_realizations): mjs={mjs_work:?} \
+         matern={matern_work:?}"
+    );
     // Speed parity is gated against MATERN, the comparable kernel-representer
     // method (#1116). Duchon's penalty is closed-form analytic (no
     // empirical-measure geometry), a different/cheaper class — measure-jet is
@@ -189,7 +256,8 @@ fn measure_jet_single_scale_mode_is_speed_competitive() {
     assert!(
         mjs_secs <= 2.0 * matern_secs,
         "measure-jet single-scale mode speed parity failed vs matern: mjs={mjs_secs:.3}s \
-         matern={matern_secs:.3}s duchon={duchon_secs:.3}s"
+         matern={matern_secs:.3}s duchon={duchon_secs:.3}s (minima over {TIMING_REPLICATES} \
+         interleaved replicates; outer work mjs={mjs_work:?} matern={matern_work:?})"
     );
 }
 
