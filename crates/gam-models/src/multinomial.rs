@@ -131,7 +131,7 @@ use std::sync::Arc;
 /// direction (complete/quasi-complete separation), no solver floor makes that
 /// direction's estimate finite. The formula REML path arms the full-span
 /// Jeffreys/Firth correction CONDITIONALLY — only on separation evidence (see
-/// [`multinomial_formula_fisher_separation_evidence`] and the two-attempt logic
+/// [`multinomial_formula_penalized_separation_evidence`] and the two-attempt logic
 /// in [`fit_penalized_multinomial_formula`]) — so an interior, well-identified
 /// fit optimizes the unbiased penalized-REML criterion with no Firth shrinkage
 /// toward the uniform simplex, while a finite-but-Fisher-underidentified or
@@ -237,14 +237,6 @@ const MULTINOMIAL_SEPARATION_ETA_THRESHOLD: f64 = 25.0;
 /// value for the OUTER loop, while it continues to drive the INNER joint-Newton
 /// KKT target unchanged.
 const MULTINOMIAL_OUTER_REML_TOL: f64 = 1e-7;
-
-/// The first multinomial formula solve is a separation probe: it is accepted
-/// when the unbiased REML criterion converges to a finite interior iterate.
-/// Near-separable data such as the penguin fixture otherwise spend the caller's
-/// full outer budget on an iterate that is discarded before the Firth/Jeffreys
-/// refit. Keep enough iterations for ordinary interior fits to certify quickly,
-/// but hand slow/non-interior probes to the proper-prior refit promptly.
-const MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER: usize = 20;
 
 /// Per-observation softmax Fisher-information scale for the λ-floor units.
 ///
@@ -486,8 +478,9 @@ fn multinomial_formula_separation_evidence(block_states: &[ParameterBlockState])
     None
 }
 
-/// Certify (quasi-)separation at a converged multinomial mode from the exact
-/// Fisher information on the fit's certified identifiable tangent span.
+/// Certify (quasi-)separation at a converged multinomial mode from the curvature
+/// the fit ACTUALLY has — the exact Fisher information PLUS the selected joint
+/// penalty — on the fit's certified identifiable tangent span.
 ///
 /// Finiteness is not an identification certificate: a tiny smoothing floor can
 /// keep every logit finite while the likelihood contributes less than one
@@ -498,11 +491,58 @@ fn multinomial_formula_separation_evidence(block_states: &[ParameterBlockState])
 /// coefficient gauge as the term that will bound the refit. Passing the fit's
 /// saved gauge is essential: an aliased raw column is not separation evidence,
 /// because it is absent from the active statistical model.
-fn multinomial_formula_fisher_separation_evidence(
+///
+/// # Why `H + S_λ` and not `H` (#2612)
+///
+/// The gate's absolute arm fires when `λ_min < 1`, i.e. when the worst-determined
+/// direction holds less than **one observation-equivalent** of curvature, and its
+/// own derivation says why that is the right scale: such a direction "is, by
+/// construction, not identified by the data and is the regime Firth exists to
+/// stabilise". It also states the premise that makes it conservative — "it never
+/// fires on a genuinely well-conditioned large-`n` fit, whose `λ_min = O(n) ≫ 1`".
+///
+/// That premise is false for **every penalized smooth basis**, and this call site
+/// used to hand the gate the bare Fisher information `H`. A `k`-dimensional
+/// spline basis has high-frequency directions the data barely resolve — that is
+/// the entire reason they are penalized — so `λ_min(H)` sits well below one
+/// observation-equivalent on ordinary, well-behaved, nowhere-separating data.
+/// Measured on labels DRAWN from a smooth softmax truth (`y ~ s(x1,k=6) +
+/// s(x2,k=6)`, `n = 600`, every class keeping appreciable probability
+/// everywhere):
+///
+/// ```text
+///   lambda_min = 4.051e-1   lambda_max = 1.575e2   ratio = 2.572e-3
+///   Jeffreys gate weight = 1   =>  "separation evidence"  =>  Firth/Jeffreys refit
+/// ```
+///
+/// The relative arm is nowhere near firing (`2.6e-3` against a `1e-6` clear
+/// knot); the verdict is the absolute arm reading a *penalized* direction as if
+/// nothing were holding it. So the "#715 arm ONLY on separation evidence" design
+/// was unconditional in practice on any multinomial GAM carrying a smooth.
+///
+/// The distinction the gate has to make is exactly the one #715 derives: a
+/// direction `v` is beyond `λ`'s reach only when `S v = 0`, because
+/// `(H + S_λ)v = Hv + λSv`. Where `Sv ≠ 0` the smoothing parameter supplies the
+/// missing curvature and the direction is identified — by the prior the model
+/// already has. Reading `H` alone cannot tell those apart; reading the penalized
+/// curvature `H + S_λ` at the selected `λ` is the same question asked of the
+/// objective that was actually optimized, and its units are unchanged (the
+/// Frobenius-normalized `S` makes `λS` directly comparable to data Fisher
+/// information — see [`MULTINOMIAL_FORMULA_FISHER_INFO_PER_OBS`]).
+///
+/// The unpenalized spectrum is reported alongside the deciding one whenever the
+/// certificate fires, because "the data do not determine this direction" and
+/// "and no `λ` repairs it" are two different statements and the verdict rests on
+/// the second. That costs one extra reduced eigendecomposition, paid only on the
+/// branch that arms.
+fn multinomial_formula_penalized_separation_evidence(
     family: &MultinomialFamily,
     specs: &[ParameterBlockSpec],
     block_states: &[ParameterBlockState],
     identifiable_span: ArrayView2<'_, f64>,
+    joint_specs: &[gam_problem::JointPenaltySpec],
+    n_penalty_components: usize,
+    joint_log_lambdas: Option<&Array1<f64>>,
 ) -> Result<Option<String>, String> {
     if let Some(evidence) = multinomial_formula_separation_evidence(block_states) {
         return Ok(Some(evidence));
@@ -520,8 +560,25 @@ fn multinomial_formula_fisher_separation_evidence(
             information.ncols()
         ));
     }
+    // The curvature the certified mode actually sits in. `multinomial_joint_
+    // penalty_operator` is the fit's ONE assembly of `S_λ` — the same matrix the
+    // influence reconstruction and the published payload read — so the arming
+    // decision and the published penalty cannot describe different priors.
+    let s_lambda = multinomial_joint_penalty_operator(
+        joint_specs,
+        joint_log_lambdas,
+        n_penalty_components,
+        coefficient_dim,
+    )
+    .map_err(|error| {
+        format!(
+            "multinomial separation certificate could not assemble the selected joint \
+             penalty: {error}"
+        )
+    })?;
+    let penalized = &information + &s_lambda;
     let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
-        information.view(),
+        penalized.view(),
         identifiable_span,
     )?;
     if !plan.is_active() {
@@ -533,20 +590,23 @@ fn multinomial_formula_fisher_separation_evidence(
     } else {
         f64::NEG_INFINITY
     };
+    // The likelihood's own contribution, so the refusal shows that the penalty
+    // was accounted for and still did not reach this direction.
+    let unpenalized = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+        information.view(),
+        identifiable_span,
+    )?;
+    let (data_min, data_max) = unpenalized.information_extrema();
     Ok(Some(format!(
-        "identifiable-span Fisher information is under-identified at the certified mode: \
-         lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
-         lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e}",
+        "identifiable-span PENALIZED curvature H+S_lambda is under-identified at the certified \
+         mode: lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
+         lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
+         (likelihood alone: lambda_min={data_min:e}, lambda_max={data_max:e} — the selected \
+         smoothing parameters do not reach this direction)",
         plan.conditioning_gate_weight()
     )))
 }
 
-/// Extra evidence used only for a NON-CONVERGED capped unbiased probe.
-///
-/// A converged finite saturated formula fit is still a valid optimum and must be
-/// scored without Firth bias. A capped probe that failed to converge while it
-/// already carries separation-scale logits is different: spending the full
-/// unbiased outer budget on the same lambda-to-zero surface is the #1082
 /// Inputs to [`fit_penalized_multinomial`].
 ///
 /// The penalty matrix `S` is shared across classes; per-class smoothing
@@ -1652,6 +1712,25 @@ pub struct MultinomialSavedModel {
     pub lambdas_per_block: Vec<usize>,
     /// Newton iterations executed; recorded for the summary report.
     pub iterations: usize,
+    /// The separation evidence that armed the Jeffreys/Firth proper prior on
+    /// this fit, or `None` when the unbiased penalized-REML criterion was
+    /// accepted with the prior disarmed (#2612).
+    ///
+    /// The two branches publish **different estimands**. Disarmed, the
+    /// coefficients are the exact penalized-REML mode with zero Firth bias;
+    /// armed, they are the mode of that objective plus the proper prior
+    /// `Φ = ½ log|ZᵀHZ|`, which pulls fitted class probabilities toward the
+    /// uniform simplex `1/K` by an `O(1/n)` amount that #715 measured as a real
+    /// truth-RMSE cost on interior data. A consumer scoring calibration, a
+    /// reader comparing two fits, and the CLI summary all need to know which
+    /// objective produced the numbers in front of them, and until #2612 the
+    /// decision existed only in a `log::info!` line the caller never sees.
+    ///
+    /// The string is the certificate itself, not a flag: a verdict that carries
+    /// the spectrum it was taken on can be checked, and one that carries only a
+    /// boolean cannot.
+    #[serde(default)]
+    pub separation_evidence: Option<String>,
     /// Penalized negative log-likelihood at the returned `β̂`.
     pub penalized_neg_log_likelihood: f64,
     /// Unpenalized deviance `−2 log L(β̂)`.
@@ -2616,8 +2695,8 @@ fn resolve_multinomial_row_weights(
 ///
 /// The Jeffreys/Firth proper prior is engaged CONDITIONALLY: attempt 1 runs
 /// the unbiased penalized-REML criterion; only on separation evidence (a failed
-/// solve, a non-finite logit, or an exact full-span Fisher conditioning
-/// certificate; see [`multinomial_formula_fisher_separation_evidence`]) is the
+/// solve, a non-finite logit, or an exact full-span PENALIZED-curvature conditioning
+/// certificate; see [`multinomial_formula_penalized_separation_evidence`]) is the
 /// fit re-solved once with the full-span Firth prior armed, which bounds the
 /// penalty-null directions no smoothing parameter can (`S v = 0` ⇒
 /// `(H + S_λ) v = H v → 0` when the softmax likelihood has no identified finite
@@ -3158,24 +3237,54 @@ pub fn fit_penalized_multinomial_formula(
     // formula-path logits can be large on valid near-separated optima and
     // should not be shrunk toward the uniform simplex once the unbiased outer
     // solve has actually certified.
-    let mut unbiased_probe_options = options.clone();
-    unbiased_probe_options.outer_max_iter = unbiased_probe_options
-        .outer_max_iter
-        .min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER);
-    // The FINAL accepted Firth/Jeffreys refit runs to the caller's full outer
-    // budget: it is the result we ship, so it must reach the genuine REML
+    //
+    // BOTH solves run on the caller's own `outer_max_iter` (#2612). The probe
+    // used to run under `outer_max_iter.min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER)`
+    // — a 20-iteration ceiling introduced as a bare one-line `perf(#1082)` change
+    // (`8d9a7b53b`, no test, no measurement) — while EVERY `Err` from it was
+    // routed below as separation evidence. Those two decisions are not
+    // independent: SPEC forbids minting a fit from an exhausted budget, so an
+    // outer search stopped by that ceiling returns `RemlDidNotConverge`, and the
+    // ceiling could therefore convert "this probe was still descending when I
+    // stopped it" into "the data separate" — and from there into a proper prior
+    // that shrinks the published probabilities toward the uniform simplex `1/K`.
+    //
+    // Nor was the ceiling saving work where it was honest. If the probe certifies
+    // within its budget the ceiling is a no-op: the search stops on its own
+    // certificate either way. The ONLY runs it shortened are the ones where it
+    // stopped a still-descending search — exactly the runs whose verdict it
+    // changed. Its entire benefit was co-extensive with the misdecision. SPEC:
+    // "Wall-clock time budgets and deadlines are never allowed, except in tests.
+    // In general, do not paper over solver issues."
+    //
+    // The FINAL accepted Firth/Jeffreys refit likewise runs to the caller's full
+    // outer budget: it is the result we ship, so it must reach the genuine REML
     // optimum, not a truncated iterate. The near-separable penguin refit that
-    // motivated #1082's wall-clock concern is now halted honestly at its true
-    // bound optimum by the KKT-stationary-at-bound guard
-    // (`CostStallGuard`, #1082 / 64711ed82) and the Newton-decrement residual
-    // certificate (363af9b56 / 2c9580b1f): on separable data the outer ARC
-    // certifies and stops early on its own, so no artificial iteration cap is
-    // needed to land in budget. On non-separable data (e.g. the
-    // `vgam_smooth_by_factor` double-penalty arm) the refit needs the caller's
-    // full budget to converge, which a `.min(20)` cap would cut off — accepting
-    // a non-converged fit, which is dishonest. So the refit keeps `options`
-    // unchanged. Only the discarded unbiased separation probe above is capped.
+    // motivated #1082's wall-clock concern is halted honestly at its true bound
+    // optimum by the KKT-stationary-at-bound guard (`CostStallGuard`, #1082 /
+    // 64711ed82) and the Newton-decrement residual certificate (363af9b56 /
+    // 2c9580b1f): on separable data the outer ARC certifies and stops early on
+    // its own, so no artificial iteration cap is needed to land in budget. On
+    // non-separable data (e.g. the `vgam_smooth_by_factor` double-penalty arm)
+    // the refit needs the caller's full budget to converge, which a `.min(20)`
+    // cap would cut off — accepting a non-converged fit, which is dishonest.
+    let unbiased_probe_options = &options;
     let firth_refit_options = &options;
+
+    // The coupled penalty specs, built ONCE. They depend only on the family's
+    // term structure, not on λ, so the same list serves the separation
+    // certificate below (at the probe's selected λ) and the published `S_λ` at
+    // the shipped fit's λ — the two cannot describe different penalty families.
+    let n_penalty_components = penalties_arc.len();
+    let joint_specs = if n_penalty_components == 0 {
+        Vec::new()
+    } else {
+        family.equivariant_class_penalty_specs().map_err(|error| {
+            EstimationError::InvalidInput(format!(
+                "multinomial REML could not rebuild the coupled joint penalty: {error}"
+            ))
+        })?
+    };
 
     let run_firth_refit =
         |evidence: String,
@@ -3234,24 +3343,22 @@ pub fn fit_penalized_multinomial_formula(
         })
     };
 
-    // #1082: the capped unbiased probe and the (separable-path) Firth decision
-    // are driven by separation scans over the full P×M logit block. The previous
-    // match recomputed `multinomial_formula_separation_evidence` /
-    // `..._unresolved_probe_separation_evidence` in BOTH the match guard AND the
-    // arm body — three to four full logit walks per fit, paid on the hot
-    // near-separable penguin path where this branch fires every iterate. Run the
-    // probe once, evaluate each scan once into a binding, and branch on the
-    // precomputed results. Behaviour is identical (same scans, same order of
-    // precedence: converged-interior, unresolved-probe-separation,
-    // no-separation-needs-full-solve, otherwise-Firth); only the duplicate
-    // O(n·classes) scans are removed.
+    // The separation scans walk the full P×M logit block, so they are evaluated
+    // ONCE into a binding and branched on, rather than recomputed in both a match
+    // guard and its arm (three to four full logit walks per fit on the hot
+    // near-separable path).
     let probe_attempt = fit_custom_family_with_rho_prior(
         &family,
         &blocks,
-        &unbiased_probe_options,
+        unbiased_probe_options,
         gam_problem::RhoPrior::Flat,
     );
-    let fit = match probe_attempt {
+    // The evidence that armed the proper prior, or `None` when the unbiased
+    // penalized-REML criterion was accepted. This is a FACT ABOUT THE FIT — the
+    // two branches publish different estimands (the unbiased mode versus the
+    // Firth-biased one) — so it is carried to the payload rather than living only
+    // in a log line the caller never sees.
+    let (fit, separation_evidence) = match probe_attempt {
         Ok(probe_fit) => {
             let identifiable_span = probe_fit
                 .geometry
@@ -3265,60 +3372,68 @@ pub fn fit_penalized_multinomial_formula(
                 .coefficient_gauge
                 .t_full
                 .view();
-            let separation = multinomial_formula_fisher_separation_evidence(
+            // #2612: a model with NO penalty component selects no smoothing
+            // parameter, so `joint_log_lambdas` is legitimately absent — the same
+            // "no penalty is a value, not an absence" the joint-penalty operator
+            // carries. Only a PENALIZED probe that reached a certified optimum
+            // without surfacing its own selected λ is a broken fit, and only that
+            // is refused. The certificate below needs those λ to form the
+            // curvature the mode actually sits in, so the check comes first.
+            let joint_log_lambdas = probe_fit.artifacts.joint_log_lambdas.as_ref();
+            if joint_log_lambdas.is_none() && n_penalty_components != 0 {
+                return Err(EstimationError::InvalidInput(format!(
+                    "multinomial unbiased fit carries {n_penalty_components} penalty \
+                     component(s) but omitted its converged joint log-lambdas"
+                )));
+            }
+            let separation = multinomial_formula_penalized_separation_evidence(
                 &family,
                 &blocks,
                 &probe_fit.block_states,
                 identifiable_span,
+                &joint_specs,
+                n_penalty_components,
+                joint_log_lambdas,
             )
             .map_err(|error| {
                 EstimationError::InvalidInput(format!(
                     "multinomial REML separation certification failed: {error}"
                 ))
             })?;
-            if separation.is_none() {
-                // Fit existence proves both optimization layers certified; no
-                // post-hoc convergence flag is needed.
-                log::info!(
-                    "multinomial REML: unbiased criterion accepted (no separation evidence; \
-                     Jeffreys/Firth prior disarmed)"
-                );
-                probe_fit
-            } else {
-                // A certified unbiased optimum can still exhibit separation;
-                // use the already-computed mode and rho as the exact Firth
-                // continuation seed. The objectives differ only by the smooth
-                // Jeffreys term, so restarting from zero would discard the
-                // strongest available local information and repeat the whole
-                // unbiased path.
-                let evidence = separation.expect("checked as present");
-                // #2612: a model with NO penalty component selects no smoothing
-                // parameter, so `joint_log_lambdas` is legitimately absent — the
-                // same "no penalty is a value, not an absence" the joint-penalty
-                // operator carries. Only a PENALIZED probe that reached a
-                // certified optimum without surfacing its own selected λ is a
-                // broken fit, and only that is refused here. The coefficient
-                // warm start is handed over either way: it is the strongest
-                // available local information about the mode, and on an
-                // unpenalized model it is the whole of it.
-                let joint_log_lambdas = probe_fit.artifacts.joint_log_lambdas.as_ref();
-                if joint_log_lambdas.is_none() && !penalties_arc.is_empty() {
-                    return Err(EstimationError::InvalidInput(format!(
-                        "multinomial unbiased fit carries {} penalty component(s) but omitted \
-                         its converged joint log-lambdas",
-                        penalties_arc.len(),
-                    )));
+            match separation {
+                None => {
+                    // Fit existence proves both optimization layers certified; no
+                    // post-hoc convergence flag is needed.
+                    log::info!(
+                        "multinomial REML: unbiased criterion accepted (no separation evidence; \
+                         Jeffreys/Firth prior disarmed)"
+                    );
+                    (probe_fit, None)
                 }
-                run_firth_refit(
-                    evidence,
-                    Some((&probe_fit.block_states, joint_log_lambdas)),
-                )?
+                Some(evidence) => {
+                    // A certified unbiased optimum can still exhibit separation;
+                    // use the already-computed mode and rho as the exact Firth
+                    // continuation seed. The objectives differ only by the smooth
+                    // Jeffreys term, so restarting from zero would discard the
+                    // strongest available local information and repeat the whole
+                    // unbiased path.
+                    let refit = run_firth_refit(
+                        evidence.clone(),
+                        Some((&probe_fit.block_states, joint_log_lambdas)),
+                    )?;
+                    (refit, Some(evidence))
+                }
             }
         }
-        Err(err) => run_firth_refit(
-            format!("unbiased-criterion REML solve failed: {err}"),
-            None,
-        )?,
+        Err(err) => {
+            let evidence = format!(
+                "the unbiased criterion has no certified optimum on the caller's own outer \
+                 budget ({} iteration(s)): {err}",
+                options.outer_max_iter,
+            );
+            let refit = run_firth_refit(evidence.clone(), None)?;
+            (refit, Some(evidence))
+        }
     };
     if let Some(err) = multinomial_formula_separation_diagnostic(
         fit.inner_cycles,
@@ -3379,7 +3494,6 @@ pub fn fit_penalized_multinomial_formula(
             "multinomial posterior covariance dimension overflowed usize".to_string(),
         )
     })?;
-    let n_penalty_components = penalties_arc.len();
     // ── The penalty operator, measured once (#2612) ──────────────────────────
     // `S_λ` is a fact about the fit in its own right: the influence-matrix
     // reconstruction below and the published predictive payload both read THIS
@@ -3387,22 +3501,12 @@ pub fn fit_penalized_multinomial_formula(
     // penalized term publishes the zero operator it has instead of being refused
     // for not having one. See `multinomial_joint_penalty_operator`.
     //
-    // The coupled spec family at the selected λ, in raw stacked (class-major)
-    // coordinates — exactly the operator the inner solve and the covariance path
-    // penalize with. Under the equivariant carrier this is K per-class specs per
-    // term, grouped term-major (`s = t·K + c`); the K = 2 degenerate arm returns
-    // one shared centered spec per term. Assembled ONCE here: it materializes
-    // `n_specs` dense `(P·M)²` matrices, and both consumers below take this one
-    // list rather than each rebuilding it.
-    let joint_specs = if n_penalty_components == 0 {
-        Vec::new()
-    } else {
-        family.equivariant_class_penalty_specs().map_err(|error| {
-            EstimationError::InvalidInput(format!(
-                "multinomial REML could not rebuild the coupled joint penalty: {error}"
-            ))
-        })?
-    };
+    // `joint_specs` was built once above the probe (it is λ-independent) and is
+    // the same list the separation certificate formed `H + S_λ` from, so the
+    // arming decision, the influence matrix and the published payload all read
+    // one penalty family. Under the equivariant carrier this is K per-class specs
+    // per term, grouped term-major (`s = t·K + c`); the K = 2 degenerate arm
+    // returns one shared centered spec per term.
     let joint_penalty = multinomial_joint_penalty_operator(
         &joint_specs,
         fit.artifacts.joint_log_lambdas.as_ref(),
@@ -3814,6 +3918,7 @@ pub fn fit_penalized_multinomial_formula(
         lambdas: lambdas_flat,
         lambdas_per_block,
         iterations: fit.inner_cycles,
+        separation_evidence,
         penalized_neg_log_likelihood: -fit.log_likelihood + 0.5 * fit.stable_penalty_term,
         deviance,
         edf_per_class,
@@ -4030,44 +4135,6 @@ pub fn predict_multinomial_formula_with_intervals(
 mod fisher_override_tests {
     use super::*;
 
-    /// Extra evidence used only for a NON-CONVERGED capped unbiased probe.
-    ///
-    /// A converged finite saturated formula fit is still a valid optimum and
-    /// must be scored without Firth bias. A capped probe that failed to
-    /// converge while it already carries separation-scale logits is different:
-    /// spending the full unbiased outer budget on the same lambda-to-zero
-    /// surface is the #1082 timeout. Route that case straight to the
-    /// proper-prior refit.
-    ///
-    /// Kept in the test module: the production routing that would consume this
-    /// (the non-converged-probe branch) is not currently wired, so the helper
-    /// is test-support only rather than dead production code.
-    fn multinomial_formula_unresolved_probe_separation_evidence(
-        block_states: &[ParameterBlockState],
-    ) -> Option<String> {
-        if let Some(evidence) = multinomial_formula_separation_evidence(block_states) {
-            return Some(evidence);
-        }
-
-        let mut best = (0.0_f64, 0usize, 0usize);
-        for (active_class, state) in block_states.iter().enumerate() {
-            for (row, &value) in state.eta.iter().enumerate() {
-                let abs = value.abs();
-                if abs > best.0 {
-                    best = (abs, row, active_class);
-                }
-            }
-        }
-        if best.0 >= MULTINOMIAL_SEPARATION_ETA_THRESHOLD {
-            Some(format!(
-                "separation-scale finite logit |eta[row {}, active class {}]| = {:.3e} \
-                 after capped unbiased probe",
-                best.1, best.2, best.0
-            ))
-        } else {
-            None
-        }
-    }
     use ndarray::Array3;
 
     fn toy() -> (Array2<f64>, Array2<f64>, Array2<f64>, Array1<f64>) {
@@ -4719,11 +4786,14 @@ mod fisher_override_tests {
         );
         let separated_specs = separated_family.build_block_specs();
         let separated_span = Array2::<f64>::eye(4);
-        let evidence = multinomial_formula_fisher_separation_evidence(
+        let evidence = multinomial_formula_penalized_separation_evidence(
             &separated_family,
             &separated_specs,
             &separated_states,
             separated_span.view(),
+            &[],
+            0,
+            None,
         )
         .expect("exact Fisher certification")
         .expect("finite quasi-separation must arm the Firth refit");
@@ -4731,18 +4801,21 @@ mod fisher_override_tests {
             evidence.contains("under-identified")
                 && evidence.contains("lambda_min")
                 && evidence.contains("Jeffreys gate weight"),
-            "the certificate must report its authoritative Fisher spectrum, got {evidence}"
+            "the certificate must report its authoritative spectrum, got {evidence}"
         );
 
         let (identified_family, identified_states) = fixture(600, false);
         let identified_specs = identified_family.build_block_specs();
         let identified_span = Array2::<f64>::eye(4);
         assert!(
-            multinomial_formula_fisher_separation_evidence(
+            multinomial_formula_penalized_separation_evidence(
                 &identified_family,
                 &identified_specs,
                 &identified_states,
                 identified_span.view(),
+                &[],
+                0,
+                None,
             )
             .expect("exact Fisher certification")
             .is_none(),
@@ -4750,39 +4823,104 @@ mod fisher_override_tests {
         );
     }
 
+    /// #2612: the certificate must judge the curvature the FIT HAS, not the
+    /// curvature the likelihood alone supplies.
+    ///
+    /// The absolute conditioning gate fires when the worst-determined direction
+    /// holds less than one observation-equivalent (`λ_min < 1`). A penalized
+    /// direction routinely sits there — that is *why* it is penalized — so a
+    /// certificate reading the bare Fisher information `H` calls every penalized
+    /// smooth "separated". The discriminator: hold the data, the mode and the
+    /// span fixed and supply ONLY the penalty the fit actually selected. If the
+    /// verdict is unchanged the certificate is ignoring `S_λ`; if it flips to
+    /// disarmed, `λ` was reaching that direction all along.
+    ///
+    /// This is a unit statement about the certificate, independent of any fit or
+    /// optimizer, so it holds even if every end-to-end fixture changes shape.
     #[test]
-    fn unresolved_probe_evidence_arms_firth_on_saturated_finite_logits() {
-        let saturated = vec![
-            ParameterBlockState {
-                beta: Array1::from_vec(vec![1.0, 2.0]),
-                eta: Array1::from_vec(vec![0.2, 4.0, -7.0]),
-            },
-            ParameterBlockState {
-                beta: Array1::from_vec(vec![-1.0, 3.0]),
-                eta: Array1::from_vec(vec![1.0, 25.5, -0.1]),
-            },
-        ];
+    fn the_separation_certificate_counts_the_penalty_the_fit_selected_2612() {
+        let rows = 400usize;
+        // Column 1 is a deliberately weak direction: `s` scales its contribution
+        // to `X'WX` by `s²`, so `λ_min(H)` lands well under one
+        // observation-equivalent while the intercept stays strongly determined.
+        let weak_scale = 2.0e-2_f64;
+        let design = Arc::new(Array2::<f64>::from_shape_fn((rows, 2), |(row, column)| {
+            if column == 0 {
+                1.0
+            } else {
+                weak_scale * ((row as f64 / rows as f64) - 0.5)
+            }
+        }));
+        let mut response = Array2::<f64>::zeros((rows, 3));
+        for row in 0..rows {
+            response[[row, row % 3]] = 1.0;
+        }
+        let family = MultinomialFamily::new(
+            response,
+            Array1::ones(rows),
+            3,
+            Arc::clone(&design),
+            Arc::new(vec![PenaltyMatrix::Dense(Array2::eye(2))]),
+        )
+        .expect("weak-direction three-class fixture");
+        let specs = family.build_block_specs();
+        let states: Vec<ParameterBlockState> = (0..2)
+            .map(|_| {
+                let beta = Array1::from_vec(vec![0.0, 0.0]);
+                let eta = design.dot(&beta);
+                ParameterBlockState { beta, eta }
+            })
+            .collect();
+        let span = Array2::<f64>::eye(4);
 
-        assert!(
-            multinomial_formula_separation_evidence(&saturated).is_none(),
-            "a converged finite saturated formula optimum remains unbiased"
+        // Without the penalty the weak direction reads as separation.
+        let unpenalized = multinomial_formula_penalized_separation_evidence(
+            &family,
+            &specs,
+            &states,
+            span.view(),
+            &[],
+            0,
+            None,
+        )
+        .expect("certification")
+        .expect(
+            "the fixture must be one the LIKELIHOOD alone cannot identify, or this test proves \
+             nothing",
         );
-        let evidence = multinomial_formula_unresolved_probe_separation_evidence(&saturated)
-            .expect("a non-converged saturated probe should arm the Firth refit");
         assert!(
-            evidence.contains("separation-scale finite logit")
-                && evidence.contains("row 1")
-                && evidence.contains("active class 1"),
-            "unresolved-probe evidence should name the saturated channel, got {evidence}"
+            unpenalized.contains("lambda_min"),
+            "the certificate must report the spectrum it decided on, got {unpenalized}"
         );
 
-        let near = vec![ParameterBlockState {
-            beta: Array1::from_vec(vec![1.0, 2.0]),
-            eta: Array1::from_vec(vec![0.2, 24.9, -24.9]),
-        }];
+        // The same mode, with a penalty on the weak direction worth many
+        // observation-equivalents. `S_λ` is what the fit's own inner solve adds
+        // to `H`, so the direction is determined and nothing is separated.
+        let mut penalty = Array2::<f64>::zeros((4, 4));
+        penalty[[1, 1]] = 1.0;
+        penalty[[3, 3]] = 1.0;
+        let spec = gam_problem::JointPenaltySpec {
+            matrix: penalty,
+            initial_log_lambda: 0.0,
+            nullspace_dim: 2,
+            label: None,
+            group: None,
+        };
+        let selected = Array1::from_vec(vec![(1.0e3_f64).ln()]);
+        let penalized = multinomial_formula_penalized_separation_evidence(
+            &family,
+            &specs,
+            &states,
+            span.view(),
+            std::slice::from_ref(&spec),
+            1,
+            Some(&selected),
+        )
+        .expect("certification");
         assert!(
-            multinomial_formula_unresolved_probe_separation_evidence(&near).is_none(),
-            "finite logits below the separation threshold still get the full unbiased retry"
+            penalized.is_none(),
+            "a direction the selected smoothing parameter determines is not separation \
+             evidence; the certificate still armed with S_lambda supplied: {penalized:?}"
         );
     }
 
@@ -5554,16 +5692,11 @@ mod reference_class_invariance_tests {
         let parts = penalized_multinomial_formula_parts(&request)
             .expect("production formula parts must build");
 
-        // Exactly the production capped unbiased probe.
-        let mut probe_options = parts.options.clone();
-        probe_options.outer_max_iter = parts
-            .options
-            .outer_max_iter
-            .min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER);
+        // Exactly the production unbiased probe.
         let probe = crate::custom_family::fit_custom_family_with_rho_prior(
             &parts.family,
             &parts.blocks,
-            &probe_options,
+            &parts.options,
             gam_problem::RhoPrior::Flat,
         );
         let probe = match probe {
@@ -5585,11 +5718,18 @@ mod reference_class_invariance_tests {
             .coefficient_gauge
             .t_full
             .clone();
-        let evidence = multinomial_formula_fisher_separation_evidence(
+        let probe_specs = parts
+            .family
+            .equivariant_class_penalty_specs()
+            .expect("coupled joint penalty specs");
+        let evidence = multinomial_formula_penalized_separation_evidence(
             &parts.family,
             &parts.blocks,
             &probe.block_states,
             span.view(),
+            &probe_specs,
+            parts.penalties_arc.len(),
+            probe.artifacts.joint_log_lambdas.as_ref(),
         );
         eprintln!(
             "#2612 unbiased probe: max|eta|={max_eta:.4e} evidence={:?}",
@@ -6528,81 +6668,119 @@ mod reference_class_invariance_tests {
         load_dataset_projected(&path, &cols).expect("load softmax-drawn dataset")
     }
 
-    /// #2612 diagnostic (zz_measure): **does the probe's own cap decide the fit?**
+    /// #2612 diagnostic (zz_measure): **which matrix decides the arming, and
+    /// what does each one say?**
     ///
-    /// `fit_penalized_multinomial_formula` runs the unbiased separation probe
-    /// under `outer_max_iter.min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER)` and
-    /// routes EVERY `Err` from it into the Jeffreys/Firth refit as *separation
-    /// evidence*. A probe that stops because the cap **this call site invented**
-    /// ran out is a statement about that cap and about nothing else.
+    /// The conditional Firth/Jeffreys engagement fires when the reduced
+    /// conditioning gate reports under-identification at the certified mode. The
+    /// gate's absolute arm fires at `λ_min < 1` — one observation-equivalent of
+    /// curvature — and until #2612 this call site handed it the bare Fisher
+    /// information `H`. A penalized spline basis has high-frequency directions
+    /// the data barely resolve BY CONSTRUCTION, so that reading calls an ordinary
+    /// smooth "separated"; reading the penalized curvature `H + S_λ` asks the
+    /// question of the objective that was actually optimized.
     ///
-    /// This runs the identical probe twice on data drawn from a smooth softmax
-    /// truth — nothing separating — once at the production cap and once at the
-    /// caller's own budget, and prints each verdict together with the Fisher
-    /// separation certificate at whatever mode it produced. If the two verdicts
-    /// differ, the arming decision is the cap's.
+    /// This prints both spectra at the same certified mode, on the same span, on
+    /// data drawn from a smooth softmax truth (nothing separates) and — when the
+    /// checked-in CSV is present — on the penguins witness, which genuinely is
+    /// quasi-separated. The two rows are the discriminator: the fix is only right
+    /// if it disarms the first and leaves the second armed.
     ///
     /// Prints only; never asserts a bound.
     #[test]
-    fn zz_measure_2612_capped_probe_vs_caller_budget() {
+    fn zz_measure_2612_arming_certificate_with_and_without_the_penalty() {
         let td = tempdir().expect("tempdir");
-        let train = softmax_drawn_two_covariate(td.path(), "cap2612", 600);
+        let synthetic = softmax_drawn_two_covariate(td.path(), "arm2612", 600);
         let config = FitConfig::default();
-        let request = MultinomialFitRequest {
-            init_lambda: 1.0,
-            max_iter: 100,
-            tol: 1e-8,
-            ..MultinomialFitRequest::new(&train, "y ~ s(x1, k=6) + s(x2, k=6)", &config)
-        };
-        let parts =
-            penalized_multinomial_formula_parts(&request).expect("production formula parts");
-        let caller_budget = parts.options.outer_max_iter;
-        let capped = caller_budget.min(MULTINOMIAL_UNBIASED_PROBE_OUTER_MAX_ITER);
-        for (label, budget) in [("production cap", capped), ("caller budget", caller_budget)] {
-            let mut options = parts.options.clone();
-            options.outer_max_iter = budget;
+        let mut cases: Vec<(&str, gam_data::EncodedDataset, &str)> = vec![(
+            "synthetic softmax-drawn (nothing separates)",
+            synthetic,
+            "y ~ s(x1, k=6) + s(x2, k=6)",
+        )];
+        if let Some(train) = penguins_stride3_train(&td) {
+            cases.push((
+                "penguins stride-3 (the quasi-separated witness)",
+                train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+            ));
+        } else {
+            eprintln!("#2612 penguins arm SKIPPED: dataset unavailable");
+        }
+
+        for (label, data, formula) in &cases {
+            let request = MultinomialFitRequest {
+                init_lambda: 1.0,
+                max_iter: 100,
+                tol: 1e-8,
+                ..MultinomialFitRequest::new(data, formula, &config)
+            };
+            let parts =
+                penalized_multinomial_formula_parts(&request).expect("production formula parts");
             let started = std::time::Instant::now();
-            let attempt = crate::custom_family::fit_custom_family_with_rho_prior(
+            let probe = crate::custom_family::fit_custom_family_with_rho_prior(
                 &parts.family,
                 &parts.blocks,
-                &options,
+                &parts.options,
                 gam_problem::RhoPrior::Flat,
             );
             let seconds = started.elapsed().as_secs_f64();
-            match attempt {
-                Ok(fit) => {
-                    let max_eta = fit
-                        .block_states
-                        .iter()
-                        .flat_map(|state| state.eta.iter())
-                        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-                    let span = fit
-                        .geometry
-                        .as_ref()
-                        .expect("probe geometry")
-                        .coefficient_gauge
-                        .t_full
-                        .clone();
-                    let evidence = multinomial_formula_fisher_separation_evidence(
-                        &parts.family,
-                        &parts.blocks,
-                        &fit.block_states,
-                        span.view(),
-                    );
+            let probe = match probe {
+                Ok(fit) => fit,
+                Err(err) => {
                     eprintln!(
-                        "#2612 unbiased probe [{label}, outer_max_iter={budget}]: CONVERGED in \
-                         {} outer iteration(s), {seconds:.1}s, max|eta|={max_eta:.4e}; \
-                         Fisher separation certificate = {:?}",
-                        fit.outer_iterations,
-                        evidence.as_ref().map(|e| e.as_ref().map(String::as_str)),
+                        "#2612 [{label}] unbiased probe FAILED after {seconds:.1}s: {}",
+                        format!("{err}").chars().take(400).collect::<String>()
                     );
+                    continue;
                 }
-                Err(err) => eprintln!(
-                    "#2612 unbiased probe [{label}, outer_max_iter={budget}]: FAILED after \
-                     {seconds:.1}s -- the production path reads this as SEPARATION EVIDENCE: {}",
-                    format!("{err}").chars().take(700).collect::<String>(),
-                ),
-            }
+            };
+            let span = probe
+                .geometry
+                .as_ref()
+                .expect("probe geometry")
+                .coefficient_gauge
+                .t_full
+                .clone();
+            let specs = parts
+                .family
+                .equivariant_class_penalty_specs()
+                .expect("coupled joint penalty specs");
+            let n_components = parts.penalties_arc.len();
+            let selected = probe.artifacts.joint_log_lambdas.as_ref();
+            // The historical reading: the likelihood alone, `S_λ` omitted.
+            let likelihood_only = multinomial_formula_penalized_separation_evidence(
+                &parts.family,
+                &parts.blocks,
+                &probe.block_states,
+                span.view(),
+                &[],
+                0,
+                None,
+            );
+            // The curvature the mode actually sits in.
+            let penalized = multinomial_formula_penalized_separation_evidence(
+                &parts.family,
+                &parts.blocks,
+                &probe.block_states,
+                span.view(),
+                &specs,
+                n_components,
+                selected,
+            );
+            let lambda_range = selected.map(|jll| {
+                let lo = jll.iter().copied().fold(f64::INFINITY, f64::min);
+                let hi = jll.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                (lo.exp(), hi.exp(), jll.len())
+            });
+            eprintln!(
+                "#2612 [{label}] probe converged in {seconds:.1}s; selected lambda \
+                 (min, max, count) = {lambda_range:?}\n    H alone      -> {:?}\n    H + S_lambda -> {:?}",
+                likelihood_only
+                    .as_ref()
+                    .map(|e| e.as_ref().map(String::as_str)),
+                penalized.as_ref().map(|e| e.as_ref().map(String::as_str)),
+            );
         }
     }
 }

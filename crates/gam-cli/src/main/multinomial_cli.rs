@@ -74,6 +74,20 @@ fn print_multinomial_fit_summary(saved: &MultinomialSavedModel) {
         saved.iterations,
         saved.deviance,
     );
+    // #2612: the two branches of the conditional Firth/Jeffreys engagement
+    // publish different estimands, and `--firth` is rejected on this family with
+    // the message "the separation stabilizer is armed automatically". A user told
+    // the decision is automatic is owed the decision.
+    match saved.separation_evidence.as_deref() {
+        Some(evidence) => cli_out!(
+            "multinomial separation | Jeffreys/Firth proper prior ARMED (coefficients carry the \
+             Firth bias correction) | evidence: {evidence}"
+        ),
+        None => cli_out!(
+            "multinomial separation | none detected; Jeffreys/Firth prior disarmed (unbiased \
+             penalized-REML mode)"
+        ),
+    }
     if let Some(edf) = saved.edf_per_class.as_ref() {
         let per_class = saved
             .class_levels

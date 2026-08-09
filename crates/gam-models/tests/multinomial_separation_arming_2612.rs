@@ -1,0 +1,301 @@
+//! #2612: the Jeffreys/Firth proper prior must be armed by **separation**, not
+//! by the ordinary shape of a penalized smooth basis.
+//!
+//! `fit_penalized_multinomial_formula` engages the Firth/Jeffreys prior
+//! CONDITIONALLY (#715 arm (b) / #753) because the prior is not free: it pulls
+//! fitted class probabilities toward the uniform simplex `1/K`, which #715
+//! measured as a real truth-RMSE cost on interior data, and it routes the fit
+//! through a lane whose outer curvature certificate is deliberately weaker (the
+//! armed Hessian omits `D²_β H_Φ` by construction). So a false positive costs a
+//! whole re-solve on a biased objective and a certificate that cannot be as
+//! strong.
+//!
+//! The decision is taken from the reduced conditioning gate at the certified
+//! mode, whose absolute arm fires when the worst-determined direction holds less
+//! than **one observation-equivalent** of curvature. Until #2612 that gate was
+//! handed the bare Fisher information `H`. A `k`-dimensional spline basis has
+//! high-frequency directions the data barely resolve BY CONSTRUCTION — that is
+//! precisely why they are penalized — so on labels DRAWN from a smooth softmax
+//! truth, with every class keeping appreciable probability everywhere and
+//! nothing separating anywhere, the certificate read
+//!
+//! ```text
+//!   lambda_min = 4.051e-1   lambda_max = 1.575e2   ratio = 2.572e-3
+//!   Jeffreys gate weight = 1   =>  "separation evidence"  =>  Firth/Jeffreys refit
+//! ```
+//!
+//! The relative arm was nowhere near firing (`2.6e-3` against a `1e-6` clear
+//! knot); the verdict was the absolute arm reading a *penalized* direction as if
+//! nothing were holding it. "Arm only on separation evidence" was therefore
+//! unconditional in practice on any multinomial GAM carrying a smooth.
+//!
+//! The distinction #715 derives is exactly the one that was missing: a direction
+//! `v` is beyond `λ`'s reach only when `S v = 0`, because `(H + S_λ)v = Hv +
+//! λSv`. The certificate now forms `H + S_λ` at the λ the mode was certified at.
+//!
+//! The two arms below are the discriminator, and a repair that satisfies one
+//! without the other is wrong in a way a single-sided test could not see:
+//!
+//! 1. data that do not separate must be fitted with the prior **disarmed**;
+//! 2. data that genuinely do separate must still **arm** it.
+//!
+//! Arm 2 uses a design with NO penalized term at all — `S_λ = 0`, so `H + S_λ =
+//! H` identically — which is the sharpest available statement that the repair
+//! did not simply make the certificate quieter: on that geometry the two
+//! certificates are the same matrix and the verdict must be unchanged.
+
+use csv::StringRecord;
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::FitConfig;
+use gam_models::multinomial::{
+    MultinomialFitRequest, MultinomialSavedModel, fit_penalized_multinomial_formula,
+    predict_multinomial_formula,
+};
+
+const CLASS_NAMES: [&str; 3] = ["a", "b", "c"];
+
+/// The true class probabilities of the generating softmax at `(x1, x2)`.
+fn truth(x1: f64, x2: f64) -> [f64; 3] {
+    let scores = [
+        0.6 * x1 - 0.3 * x2,
+        -0.4 * x1 + 0.5 * x2,
+        0.2 * (x1 * x1 - x2 * x2) * 0.25,
+    ];
+    let shift = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = scores.iter().map(|s| (s - shift).exp()).collect();
+    let total: f64 = weights.iter().sum();
+    [
+        weights[0] / total,
+        weights[1] / total,
+        weights[2] / total,
+    ]
+}
+
+fn covariates(index: usize) -> (f64, f64) {
+    // Two coprime golden-ratio-style strides: the covariates stay deterministic
+    // and well spread, so only the labels carry randomness.
+    (
+        -2.0 + 4.0 * (((index as f64) * 0.618_033_988_749_894_8) % 1.0),
+        -2.0 + 4.0 * (((index as f64) * 0.414_213_562_373_095_1) % 1.0),
+    )
+}
+
+/// Labels DRAWN from the smooth softmax truth above.
+///
+/// Drawing rather than taking the argmax is load-bearing: an argmax label is a
+/// deterministic function of `x`, so the classes would be exactly separated by
+/// their own decision boundaries and this fixture would be on the separation
+/// lane by construction — testing nothing. The draw uses a small deterministic
+/// LCG: reproducible, no RNG dependency, no seed to choose.
+fn drawn_records(n: usize) -> Vec<StringRecord> {
+    let mut rows = Vec::with_capacity(n);
+    let mut lcg: u64 = 0x2612_2612_2612_2612;
+    let mut next_unit = || -> f64 {
+        lcg = lcg
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((lcg >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    for index in 0..n {
+        let (x1, x2) = covariates(index);
+        let probabilities = truth(x1, x2);
+        let mut draw = next_unit();
+        let mut label = CLASS_NAMES.len() - 1;
+        for (class, probability) in probabilities.iter().enumerate() {
+            if draw < *probability {
+                label = class;
+                break;
+            }
+            draw -= probability;
+        }
+        rows.push(StringRecord::from(vec![
+            x1.to_string(),
+            x2.to_string(),
+            CLASS_NAMES[label].to_string(),
+        ]));
+    }
+    rows
+}
+
+/// A perfectly separated three-class design with NO penalized term.
+///
+/// `y` is a deterministic step function of `x1`, so the unpenalized softmax MLE
+/// runs `|η| → ∞`; and with no smooth in the formula there is no penalty at all,
+/// so `S_λ` is exactly the zero operator and `H + S_λ` IS `H`. Nothing about the
+/// #2612 repair can reach this fixture, which is the point.
+fn separated_records(n: usize) -> Vec<StringRecord> {
+    let mut rows = Vec::with_capacity(n);
+    for index in 0..n {
+        let x1 = -3.0 + 6.0 * (index as f64) / ((n - 1) as f64);
+        let class = if x1 < -1.0 {
+            0
+        } else if x1 < 1.0 {
+            1
+        } else {
+            2
+        };
+        rows.push(StringRecord::from(vec![
+            x1.to_string(),
+            (0.5 * x1).to_string(),
+            CLASS_NAMES[class].to_string(),
+        ]));
+    }
+    rows
+}
+
+fn fit(records: Vec<StringRecord>, formula: &str) -> MultinomialSavedModel {
+    let headers = ["x1", "x2", "y"].into_iter().map(str::to_string).collect();
+    let data =
+        encode_recordswith_inferred_schema(headers, records).expect("encode multinomial dataset");
+    let config = FitConfig::default();
+    fit_penalized_multinomial_formula(&MultinomialFitRequest {
+        data: &data,
+        formula,
+        config: &config,
+        init_lambda: 1.0,
+        max_iter: 100,
+        tol: 1e-8,
+    })
+    .unwrap_or_else(|error| panic!("multinomial formula fit `{formula}`: {error}"))
+}
+
+/// Arm 1 — a smooth multinomial on data that does not separate keeps the prior
+/// disarmed, and the fitted surface recovers the truth it was drawn from.
+#[test]
+fn a_smooth_multinomial_that_does_not_separate_keeps_the_prior_disarmed_2612() {
+    let model = fit(drawn_records(600), "y ~ s(x1, k=6) + s(x2, k=6)");
+
+    assert_eq!(
+        model.separation_evidence, None,
+        "labels drawn from a smooth softmax truth separate nowhere, so the Jeffreys/Firth \
+         proper prior must stay disarmed and the published coefficients must be the unbiased \
+         penalized-REML mode. Armed with: {:?}",
+        model.separation_evidence,
+    );
+
+    // The estimand bar, from a different direction: the fit is compared to the
+    // probabilities it was DRAWN from, so this is reference-free and it is the
+    // quantity the prior would move. An unnecessary proper prior pulls every row
+    // toward `1/K`, which shows up here as bias, not as noise.
+    let headers = ["x1", "x2", "y"].into_iter().map(str::to_string).collect();
+    let holdout_rows: Vec<StringRecord> = (0..600)
+        .map(|index| {
+            // Interleaved, so the held-out covariates are inside the training
+            // range but are not training points.
+            let (x1, x2) = covariates(index + 100_000);
+            StringRecord::from(vec![x1.to_string(), x2.to_string(), "a".to_string()])
+        })
+        .collect();
+    let holdout = encode_recordswith_inferred_schema(headers, holdout_rows)
+        .expect("encode held-out frame");
+    let predicted = predict_multinomial_formula(&model, &holdout).expect("multinomial predict");
+    assert_eq!(predicted.nrows(), 600, "held-out prediction rows");
+
+    let level_of = |name: &str| {
+        model
+            .class_levels
+            .iter()
+            .position(|level| level == name)
+            .unwrap_or_else(|| panic!("class {name} missing from {:?}", model.class_levels))
+    };
+    let columns: Vec<usize> = CLASS_NAMES.iter().map(|name| level_of(name)).collect();
+
+    let mut squared = 0.0_f64;
+    let mut worst_shrinkage = f64::NEG_INFINITY;
+    for (row, index) in (0..600).enumerate() {
+        let (x1, x2) = covariates(index + 100_000);
+        let expected = truth(x1, x2);
+        let mut mass = 0.0_f64;
+        for class in 0..3 {
+            let p = predicted[[row, columns[class]]];
+            mass += p;
+            squared += (p - expected[class]).powi(2);
+            // Shrinkage toward `1/K` is one-sided: the largest true probability
+            // is pulled DOWN. Tracking the signed gap on the truth's own argmax
+            // class separates bias from ordinary estimation error.
+            let argmax = expected
+                .iter()
+                .enumerate()
+                .fold((0usize, f64::NEG_INFINITY), |best, (c, v)| {
+                    if *v > best.1 { (c, *v) } else { best }
+                })
+                .0;
+            if class == argmax {
+                worst_shrinkage = worst_shrinkage.max(expected[class] - p);
+            }
+        }
+        assert!(
+            (mass - 1.0).abs() <= 1e-6,
+            "published probabilities must be a simplex, row {row} sums to {mass}"
+        );
+    }
+    let rmse = (squared / (600.0 * 3.0)).sqrt();
+    // The generating softmax keeps every class between roughly 0.15 and 0.6, so
+    // an intercept-only fit scores about 0.13 here and a fit shrunk to the
+    // uniform simplex scores worse still. The bar is loose enough to be about
+    // the estimand and not about the sampling noise of one draw.
+    assert!(
+        rmse <= 0.05,
+        "the fitted surface must recover the softmax truth it was drawn from; \
+         truth-RMSE = {rmse:.4}"
+    );
+    assert!(
+        worst_shrinkage <= 0.10,
+        "no held-out row's winning class may be pulled {worst_shrinkage:.4} below its true \
+         probability; that one-sided gap is what a proper prior armed on non-separated data \
+         costs"
+    );
+}
+
+/// Arm 2 — genuine separation still arms the prior, on a design where the repair
+/// provably cannot act (`S_λ = 0`, so the certificate reads the same matrix it
+/// always did).
+#[test]
+fn genuine_separation_still_arms_the_prior_2612() {
+    let model = fit(separated_records(90), "y ~ x1 + x2");
+
+    assert!(
+        model.smooth_term_spans.is_empty() && model.lambdas.is_empty(),
+        "arm 2 must carry no penalty, so that `H + S_lambda` is `H` identically; got {} span(s) \
+         and {} lambda",
+        model.smooth_term_spans.len(),
+        model.lambdas.len(),
+    );
+    let evidence = model
+        .separation_evidence
+        .as_deref()
+        .expect("a perfectly separated three-class design must arm the Jeffreys/Firth prior");
+    assert!(
+        evidence.contains("lambda_min"),
+        "the recorded evidence must be the certificate it was taken from, not a flag: {evidence}"
+    );
+
+    // And the armed fit is a fit: finite, interior, and classifying its own
+    // separable training rows correctly. A prior that bounded the runaway MLE by
+    // destroying the signal would pass the arming assertion above and fail here.
+    let headers = ["x1", "x2", "y"].into_iter().map(str::to_string).collect();
+    let frame = encode_recordswith_inferred_schema(headers, separated_records(90))
+        .expect("encode separated frame");
+    let predicted = predict_multinomial_formula(&model, &frame).expect("multinomial predict");
+    let mut correct = 0usize;
+    for (row, record) in separated_records(90).iter().enumerate() {
+        let mut best = (0usize, f64::NEG_INFINITY);
+        for class in 0..model.class_levels.len() {
+            let p = predicted[[row, class]];
+            assert!(
+                p > 0.0 && p < 1.0,
+                "the Firth-armed fit must stay strictly interior, got p={p} at row {row}"
+            );
+            if p > best.1 {
+                best = (class, p);
+            }
+        }
+        if model.class_levels[best.0] == record[2] {
+            correct += 1;
+        }
+    }
+    assert!(
+        correct >= 85,
+        "the armed fit must still classify its own separable training rows: {correct}/90"
+    );
+}
