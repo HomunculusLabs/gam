@@ -1,5 +1,81 @@
 ## Unreleased
 
+- **The multinomial's Firth/Jeffreys separation certificate now judges the
+  curvature the fit HAS (`H + S_λ`) instead of the likelihood's alone (`H`),
+  because reading `H` alone made "arm only on separation evidence" fire on every
+  multinomial GAM carrying a smooth (#2612).** The conditional engagement
+  (#715 arm (b) / #753) exists because the proper prior is not free: it pulls
+  fitted class probabilities toward the uniform simplex `1/K`, and it routes the
+  fit through a lane whose outer Hessian omits `D²_β H_Φ` by construction, so its
+  curvature certificate is deliberately weaker. A false positive costs a whole
+  re-solve on a biased objective and a certificate that cannot be as strong.
+
+  The decision came from the reduced conditioning gate at the certified mode,
+  whose absolute arm is derived from **one observation-equivalent** of curvature
+  and whose doc block states the premise that makes it conservative: *"it never
+  fires on a genuinely well-conditioned large-`n` fit, whose `λ_min = O(n) ≫ 1`"*.
+  That premise fails for every penalized smooth basis. Measured through the
+  shipped Python surface on labels DRAWN from a smooth softmax truth — every
+  class keeping appreciable probability everywhere, nothing separating anywhere:
+
+  ```text
+    y ~ x1 + x2 (parametric)       n=  300 unbiased
+    y ~ x1 + x2 (parametric)       n=  900 unbiased
+    y ~ x1 + x2 (parametric)       n= 3000 unbiased
+    y ~ s(x1,k=5)+s(x2,k=5)        n=  300 ARMED    lmin=2.115e-1  lmax=7.647e+1
+    y ~ s(x1,k=8)+s(x2,k=8)        n=  900 ARMED    lmin=4.579e-1  lmax=2.494e+2
+    y ~ s(x1,k=12)+s(x2,k=12)      n=  900 ARMED    lmin=2.531e-1  lmax=2.488e+2
+    y ~ s(x1,k=5)+s(x2,k=5)        n= 3000 ARMED    lmin=1.989e+0  lmax=8.113e+2
+  ```
+
+  Every parametric fit unbiased, every fit with a smooth armed, on identical
+  data. `λ_min` IS `O(n)` — `0.211 → 0.591 → 1.989` across `n = 300 → 900 →
+  3000` — but with a per-observation constant of `≈ 7e-4`, because the
+  least-resolved direction of a `k`-dimensional spline is barely resolved *by
+  construction*; that is why it is penalized. The premise holds only for
+  `n ≫ 1/c_k`, and `1/c_k` grows with `k` (`0.591 → 0.458 → 0.253` at fixed
+  `n = 900` as `k` goes `5 → 8 → 12`).
+
+  The distinction #715 derives is the one that was missing: a direction `v` is
+  beyond `λ`'s reach only when `S v = 0`, because `(H + S_λ)v = Hv + λSv`. Where
+  `Sv ≠ 0` the smoothing parameter supplies the missing curvature and the
+  direction is identified — by the prior the model already has. The certificate
+  now forms `H + S_λ` at the λ the mode was certified at, through
+  `multinomial_joint_penalty_operator`, the fit's ONE assembly of `S_λ`, so the
+  arming decision and the published penalty cannot describe different priors. No
+  threshold moves: the Frobenius-normalized `S` makes `λS` directly comparable to
+  data Fisher information, which `MULTINOMIAL_FORMULA_FISHER_INFO_PER_OBS`
+  already asserts. The refusal reports both spectra, because "the data do not
+  determine this direction" and "and no λ repairs it" are different statements
+  and the verdict rests on the second.
+
+  **The deciding threshold was `16`, not `1`.** The `n = 3000, k = 5` row sits at
+  `λ_min = 1.989`, above `CONDITIONING_GATE_ABSOLUTE = 1.0`, and armed anyway:
+  the arming predicate is `gate_weight != 0`, and the weight is a C¹ ramp that
+  reaches exactly zero only at `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16`. That ramp
+  is a continuity device for an always-on term (a binary gate makes `Φ(ρ)` jump,
+  the #787 regression), and reading `!= 0` as a verdict turns its far knot into a
+  decision boundary. The ramp is deliberately untouched — for the universal term
+  the weight IS the answer — and what changed is that a penalized direction now
+  carries `λ·s` observation-equivalents rather than `c_k·n`, so it is not sitting
+  near either knot for basis-shaped reasons.
+
+  **Rejected**: widening the absolute knot (derived, and not the thing that is
+  wrong); restricting the Jeffreys BASIS back to `ker(S)` (deliberately widened
+  to the full span for the BMS-probit near-separation on a penalized direction,
+  where the term is `O(1/n)` by design — it is the arming DECISION, not the
+  basis, that cannot afford a false positive); touching the universal always-on
+  term's internal gate (same predicate, but a skip optimisation rather than a
+  verdict).
+
+  **The fit now records which estimand it published.** `separation_evidence` is
+  `None` for the unbiased penalized-REML mode and carries the certificate itself
+  when the proper prior was armed. The two branches are different estimands, and
+  the decision previously existed only in a `log::info!` line the caller never
+  sees — while the CLI rejects `--firth` on this family with "the stabilizer is
+  armed automatically". A user told the decision is automatic is owed the
+  decision, and the CLI summary now reports it.
+
 - **The refinement tolerance is now DERIVED from the candidate set instead of
   being a fixed fraction of the residual, because a fixed fraction charges
   nothing for the set's width (#2759).** #2759's first half closed a two-sided
