@@ -45,45 +45,53 @@
   needs no data view, matching the other dial boxes."* For the two PENALTY dials
   that is right — `α` and `ln τ` are dimensionless and no geometry bounds them.
   For `ln ℓ` it is not: `ℓ` decides which span the representers occupy, it is a
-  LENGTH in the frame the basis is realized in, and the term already derives
-  both of its walls in `MeasureJetRangeBracket` —
+  LENGTH in the frame the basis is realized in, and both of its walls are the
+  same measured length — the median nearest-node spacing `s`, which is also the
+  auto range and the scale band's floor — read at the two ranges where the kernel
+  stops saying anything about the pair it separates:
 
-  * **floor** = the median nearest-node spacing (which is also the auto range):
-    below it neighbouring representers stop overlapping and the design
-    degenerates from a partition of unity into a bump-per-node indicator;
-  * **ceiling** = the node bounding-box diagonal: at that range every PAIR of
-    representers overlaps at `≥ exp(−1/2)`, so the block is numerically one
-    function plus the affine head and there is no distinct model past it.
+  * **floor `ℓ = s`**: neighbouring representers overlap at exactly `exp(−1/2)`;
+    below it they stop overlapping, the design degenerates from a partition of
+    unity into a bump-per-node indicator, and rows between nodes fall outside
+    every representer's support;
+  * **ceiling `ℓ = s/√(2√ε)`**: that same pair's kernel value has come within
+    `√ε` of 1, so it is no longer distinguishable from a coincident pair in the
+    arithmetic the chart is built in. `√ε` is the chart's own bar — the same
+    half-mantissa `condition_representer_section` spends.
 
-  Measured, frozen geometry read off the fitted terms:
+  So the window is `[ln s, ln s − ½ln(2√ε)]`: it TRANSLATES with the chart and
+  its width is `8.664`, a pure function of `f64::EPSILON` rather than a number
+  anybody picked.
 
-  ```text
-  fixture     m    fitted ln ℓ   geometry box        width   absolute box       width   ratio
-  perf_parity 16     −0.0404     [−0.6648, +1.6766]  2.3413  [−6.9078, +4.6052] 11.5129  4.92x
-  sweep seed1 50     +1.0922     [−2.9597, +1.2299]  4.1897  [−6.9078, +4.6052] 11.5129  2.75x
-  ```
-
-  A trust-region method scales its first step to the box it is handed. On
+  The measured harm of the absolute box was the first trial step. On
   `measure_jet_perf_parity` the first `ln ℓ` step is `−0.693`, landing at
   `ℓ = 0.488` against a floor of `0.5145` — **outside the term's own geometry** —
-  and it is rejected twelve times, every rejection a full design realization.
-  The `[KAPPA-PHASE]` trace of the whole fit is 105 outer evaluations and 57
-  design realizations, against 18 and 1 for a same-size `matern(k=16)` whose
-  `log κ` is the same kind of design-moving coordinate — to move `ln ℓ` by
-  `0.0154`.
+  and it is rejected, each rejection a full design realization; the search then
+  excursions to `ℓ = 0.34`, a range `1.5×` below the node spacing where the
+  representers no longer overlap. Clamping to the derived window:
 
-  The box is now `measure_jet_ln_range_window`: the bracket's own two walls,
-  read back rather than re-derived, WIDENED (never narrowed) to contain the
-  incumbent range — the same feasible-set rule `spatial_term_psi_search_box`
-  applies to the other spatial families (#2454). The constant is deleted; no
-  number replaces it.
+  ```text
+                          outer evals   design realizations   wall (min of 3)
+    before                    105                57                0.99 s
+    after                      58                32                0.62 s
+    matern(k=16) control       18                 1                0.52 s
+  ```
 
-  The regression test is an INVARIANCE rather than a level: the window is made
-  of lengths, so rescaling the chart by `c` must shift both ends by exactly
-  `ln c` and leave the width fixed. An absolute window fails both halves by
-  construction — the same node configuration measured in metres and in
-  millimetres would be handed two different search problems, and at `c = 10³`
-  the seed moves `6.9` log units inside a window only `11.5` wide.
+  **The ceiling is deliberately NOT the node bounding-box diagonal.** That is
+  where the response screen stops WALKING — a stopping rule for a search over
+  nodes — and a first attempt used it as the box. It railed the outer search on
+  three fixtures and refused their fits: the profiled criterion genuinely prefers
+  a range at or above the node diameter, because as `ℓ` grows the
+  gauge-quotiented representer span tends to a polynomial one, which is the right
+  basis for a smooth target. A long range is a legitimate model, so the upper end
+  has to be a feasibility statement and nothing weaker.
+
+  The regression test is an INVARIANCE rather than a level: the window is made of
+  lengths, so rescaling the chart by `c` must shift both ends by exactly `ln c`
+  and leave the width fixed. An absolute window fails both halves by
+  construction — the same node configuration in metres and in millimetres would
+  be handed two different search problems, and at `c = 10³` the seed moves `6.9`
+  log units inside a window only `11.5` wide.
 
   `[KAPPA-PHASE]` records now carry the SIGNED ψ coordinates beside `‖ψ‖`.
   A norm is the right summary for a multi-axis anisotropy block and the wrong

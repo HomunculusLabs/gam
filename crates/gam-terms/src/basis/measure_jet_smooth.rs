@@ -1152,56 +1152,65 @@ pub fn measure_jet_range_bracket(
 /// ## Why this is not an absolute interval
 ///
 /// `ℓ` is a LENGTH in the chart the basis is realized in, so a window for it is
-/// a statement about the node cloud, not about `f64`. The term already derives
-/// both of its walls, and they are the same two
-/// [`MeasureJetRangeBracket`] uses:
+/// a statement about the node cloud, not about `f64`. Both ends here are the
+/// same measured length — the median nearest-node spacing `s`, which is also
+/// [`realized_measure_jet_length_scale`]'s auto value and
+/// [`MeasureJetBand::eps`]'s floor — read at the two ranges where the kernel
+/// stops saying anything about the pair it separates:
 ///
-/// * **floor** — the median nearest-node spacing (`MeasureJetBand::eps[0]`,
-///   which is also [`realized_measure_jet_length_scale`]'s auto value). At that
-///   range neighbouring representers overlap at `exp(−1/2)`; below it they stop
-///   overlapping and the design degenerates from a partition of unity into a
-///   bump-per-node indicator.
-/// * **ceiling** — the node bounding-box diagonal. At that range EVERY pair of
-///   representers overlaps at `≥ exp(−1/2)`, so the block is numerically one
-///   function plus the affine head and there is no distinct model past it.
+/// * **floor `ℓ = s`.** Neighbouring representers overlap at exactly
+///   `exp(−1/2)`. Below it they stop overlapping, the design degenerates from a
+///   partition of unity into a bump-per-node indicator, and rows between nodes
+///   fall outside every representer's support.
+/// * **ceiling `ℓ = s/√(2√ε)`.** The same neighbouring pair's kernel value
+///   `exp(−s²/2ℓ²)` has come within `√ε` of 1, so the pair is no longer
+///   DISTINGUISHABLE from a coincident one in the arithmetic the chart is built
+///   in. Past it `K_cc` is the all-ones matrix to working precision, and the
+///   gauge annihilates exactly that (the affine span, constant included), so
+///   there is no distinct model left. `√ε` is the chart's own bar — the same
+///   half-mantissa [`condition_representer_section`] spends, and for the same
+///   reason: it is the point past which a direction cannot survive being
+///   squared into a Gram and inverted back out.
 ///
-/// Measured, against the `ln[1e-3, 1e2]` absolute window this replaces: the
-/// geometry window is `2.34` log units on `measure_jet_perf_parity` (16 nodes in
-/// 3-D) and `4.19` on the `measure_jet_formula_fit_robustness_sweep` seed-1 rows
-/// (50 nodes in 1-D), against `11.51` — **4.9× and 2.8× narrower**. A
-/// trust-region method scales its first step to the box it is handed, and the
-/// measured first `ln ℓ` step on the parity fixture is `−0.693`, which lands at
-/// `ℓ = 0.488` against a floor of `0.5145`: outside the term's own geometry, and
-/// rejected twelve times, every rejection a full design realization.
+/// The window is therefore `[ln s, ln s − ½ln(2√ε)]`: it TRANSLATES with the
+/// chart (both ends are proportional to a measured length, so an isotropic
+/// rescale by `c` shifts them both by `ln c`) and its WIDTH is `8.664`, a pure
+/// function of `f64::EPSILON` rather than a number anybody picked.
 ///
-/// ## Frames
+/// ## What this deliberately is NOT
 ///
-/// A REPLAY spec (frozen quadrature + `UserProvided` nodes) carries its range,
-/// its nodes and its band all in the standardized frame, so the window comes off
-/// the spec with no data view and no conversion. A FRESH spec's `length_scale`
-/// is an original-units request (the scale contract's asymmetric fresh/replay
-/// rule), so the window is realized from `data` in the frame the caller passed —
-/// which is the same frame the seed `ln(spec.length_scale)` is in either way.
+/// It is **not** [`MeasureJetRangeBracket::ceiling`], the node bounding-box
+/// diagonal. That is where the response SCREEN stops walking, which is a
+/// stopping rule for a search over nodes, not a wall in the model: measured on
+/// three fixtures (`measure_jet_formula_fit_robustness_sweep` seed 1,
+/// `measure_jet_web_quality`, and the two probes that score them), the profiled
+/// criterion genuinely prefers a range AT or ABOVE the node diameter, and a box
+/// that stopped there railed the outer search and refused the fit. A long range
+/// is a legitimate model — as `ℓ` grows the gauge-quotiented representer span
+/// tends to a polynomial one, which is exactly the right basis for a smooth
+/// target — so the upper end has to be a feasibility statement and nothing
+/// weaker.
 pub fn measure_jet_ln_range_window(
     data: ArrayView2<'_, f64>,
     spec: &MeasureJetBasisSpec,
 ) -> Result<(f64, f64), BasisError> {
-    let (floor, ceiling) = match (&spec.center_strategy, &spec.frozen_quadrature) {
-        (CenterStrategy::UserProvided(nodes), Some(frozen)) if !frozen.eps_band.is_empty() => {
-            (frozen.eps_band[0], bounding_box_diagonal(nodes.view()))
+    let spacing = match (&spec.center_strategy, &spec.frozen_quadrature) {
+        (CenterStrategy::UserProvided(_), Some(frozen)) if !frozen.eps_band.is_empty() => {
+            frozen.eps_band[0]
         }
-        _ => {
-            let bracket = measure_jet_range_bracket(data, spec)?;
-            (bracket.nodes[0], bracket.ceiling)
-        }
+        _ => measure_jet_range_bracket(data, spec)?.nodes[0],
     };
-    if !(floor.is_finite() && floor > 0.0 && ceiling.is_finite() && ceiling > floor) {
+    if !(spacing.is_finite() && spacing > 0.0) {
         crate::bail_invalid_basis!(
-            "measure-jet ln-range window is degenerate: floor={floor}, ceiling={ceiling}; \
-             the node cloud has no distinct range scale to search over"
+            "measure-jet ln-range window is degenerate: the node cloud reports a nearest-node \
+             spacing of {spacing}, so it has no range scale to search over"
         );
     }
-    Ok((floor.ln(), ceiling.ln()))
+    // `s / sqrt(2*sqrt(eps))`, the range at which `1 - exp(-s^2/2l^2)` reaches
+    // the chart's half-mantissa bar. Written as the quotient rather than as a
+    // precomputed multiple so the only constant in it is `f64::EPSILON`.
+    let ceiling = spacing / (2.0 * f64::EPSILON.sqrt()).sqrt();
+    Ok((spacing.ln(), ceiling.ln()))
 }
 
 /// Build the realized geometric scale band from the center set: floor at the

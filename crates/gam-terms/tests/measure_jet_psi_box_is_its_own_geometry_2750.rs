@@ -49,8 +49,14 @@ fn spec(centers: usize) -> MeasureJetBasisSpec {
     }
 }
 
+/// `ln(ceiling/floor) = -0.5*ln(2*sqrt(EPSILON))`, the window's width. It is a
+/// pure function of `f64::EPSILON` — both ends are the same measured length, so
+/// the geometry cancels out of their ratio — and it is restated here rather than
+/// imported so a change to the derivation has to face a number.
+const LN_WINDOW_WIDTH: f64 = 8.664_339_756_999_317;
+
 #[test]
-fn ln_range_window_is_exactly_the_bracket_the_screen_walks() {
+fn ln_range_window_floor_is_the_bracket_floor_and_its_width_is_pure_precision() {
     let data = chart(1.0);
     let spec = spec(40);
     let bracket = measure_jet_range_bracket(data.view(), &spec).expect("bracket realizes");
@@ -61,14 +67,40 @@ fn ln_range_window_is_exactly_the_bracket_the_screen_walks() {
         "the window floor must BE the bracket's floor node (the median nearest-node spacing), \
          not a second derivation of it"
     );
-    assert_eq!(
+    assert!(
+        (hi - lo - LN_WINDOW_WIDTH).abs() <= 1.0e-12,
+        "the width is the ratio of two multiples of the SAME measured spacing, so it carries no \
+         geometry at all: got {}, expected {LN_WINDOW_WIDTH}",
+        hi - lo
+    );
+}
+
+#[test]
+fn the_search_window_reaches_past_where_the_screen_stops_walking() {
+    // `MeasureJetRangeBracket::ceiling` (the node bounding-box diagonal) is a
+    // stopping rule for the screen's walk over NODES, not a wall in the model.
+    // Measured on three fixtures, the profiled criterion genuinely prefers a
+    // range at or above the node diameter, and a search box that stopped there
+    // railed the outer search and refused the fit. The feasibility wall is the
+    // range at which the closest pair stops being distinguishable, and it is
+    // necessarily further out.
+    let data = chart(1.0);
+    let spec = spec(40);
+    let bracket = measure_jet_range_bracket(data.view(), &spec).expect("bracket realizes");
+    let (lo, hi) = measure_jet_ln_range_window(data.view(), &spec).expect("window realizes");
+    assert!(
+        hi > bracket.ceiling.ln(),
+        "the search window must reach past the screen's walk ceiling: window hi={} \
+         (l={}), walk ceiling={} (l={})",
         hi,
+        hi.exp(),
         bracket.ceiling.ln(),
-        "the window ceiling must BE the bracket's ceiling (the node bounding-box diagonal)"
+        bracket.ceiling
     );
     assert!(
-        hi > lo,
-        "a node cloud with distinct nodes has a nondegenerate range window: [{lo}, {hi}]"
+        lo < bracket.ceiling.ln() && bracket.nodes[0] <= bracket.ceiling,
+        "the walk ceiling still sits inside the window, so every node the screen scores is \
+         reachable by the search that refines it"
     );
 }
 
@@ -141,6 +173,6 @@ fn ln_range_window_brackets_the_auto_range_it_seeds() {
     assert!(
         bracket.ceiling > bracket.nodes[bracket.nodes.len() - 1],
         "the walk ceiling (full node diameter) is above the band's top node (half of it), so \
-         the window is strictly wider than the band the screen scores on"
+         the screen may still walk past every node it scored"
     );
 }
