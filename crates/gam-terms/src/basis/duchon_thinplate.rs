@@ -2126,11 +2126,28 @@ fn select_thin_plate_knot_rows(
     // different knot set. `tie_tol` sits well above that round-off floor and far
     // below any genuine maximin gap, so near-ties are consistently resolved by
     // the invariant support-distance profile in every rotated frame.
-    let knot_scale2 = dist2_to_centroid
-        .iter()
-        .copied()
-        .fold(0.0_f64, f64::max)
-        .max(1.0);
+    //
+    // The scale is the squared radius ITSELF, with no floor (gam#2750). It used
+    // to be `.max(1.0)`, which compares a squared LENGTH against the
+    // dimensionless number one and therefore turns the tolerance ABSOLUTE for
+    // every cloud smaller than unit radius — breaking both halves of the
+    // contract above at once. Measured on a 240-row 1-D chart scaled by `c`:
+    // at `c = 1e-3` the squared radius is `2.7e-7`, so the floor holds `tie_tol`
+    // at `1e-9` while the genuine maximin gap between neighbouring candidates is
+    // `~6e-10` — the tolerance is LARGER than the gap it was required to sit far
+    // below, every candidate ties, and the support-distance profile decides a
+    // selection it was only supposed to referee. The selected knots then stop
+    // being equivariant: the same configuration in metres and in millimetres
+    // yields different knots, and hence a different median nearest-node spacing,
+    // a different auto range, and a different basis.
+    //
+    // Without the floor every ingredient scales as `c²` — the squared distances,
+    // the squared radius, and the tolerance — so the comparisons are exactly
+    // invariant. A degenerate cloud (all rows coincident) gives `radius² = 0` and
+    // `tie_tol = 0`, which is the right test there: every squared distance is
+    // exactly zero, so exact equality already ties everything, and the previous
+    // `1e-9` tied exactly the same set.
+    let knot_scale2 = dist2_to_centroid.iter().copied().fold(0.0_f64, f64::max);
     let tie_tol = KNOT_MAXIMIN_TIE_REL_TOL * knot_scale2;
 
     // Seed = centroid-nearest row; near-equidistant rows (within `tie_tol`) are

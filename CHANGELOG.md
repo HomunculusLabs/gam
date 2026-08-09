@@ -1,5 +1,37 @@
 ## Unreleased
 
+- **Farthest-point knot selection compared a squared LENGTH against the number
+  one, so it stopped being scale-equivariant below unit radius (#2750).**
+  `select_thin_plate_knots` is the shared center selector for every radial
+  spatial smooth — `thinplate`, `duchon`, `matern` and `mjs` all reach it — and
+  its maximin/centroid tie tolerance was
+
+  ```rust
+  let knot_scale2 = dist2_to_centroid.iter().copied().fold(0.0_f64, f64::max).max(1.0);
+  let tie_tol = KNOT_MAXIMIN_TIE_REL_TOL * knot_scale2;
+  ```
+
+  The constant's own doc states the requirement: it must sit "several orders of
+  magnitude above [the `ε·‖x‖²` round-off floor] yet **far below any genuine gap
+  between geometrically-distinct candidates**". `.max(1.0)` substitutes `1` for
+  `‖x‖²` for every cloud smaller than unit radius, which breaks that second half
+  outright. Measured on a 240-row 1-D chart of half-width `5.2e-4`: squared
+  radius `2.7e-7`, genuine maximin gap between neighbouring candidates `~6e-10`,
+  floored tolerance `1e-9` — **the tolerance is larger than the gap it had to sit
+  far below**. Every candidate ties, the invariant support-distance profile
+  decides a selection it was only meant to referee, and the knots come out
+  different from the ones the same configuration gets in different units.
+
+  Downstream that is not cosmetic. The knots ARE the measure-jet quadrature
+  seeds, so the median nearest-node spacing moves, and with it the auto
+  representer range, the scale band, and the `ln ℓ` search window below.
+
+  The floor is removed rather than replaced. With `tie_tol = 1e-9·‖x‖²` every
+  ingredient of the comparison scales as `c²` under an isotropic rescale, so the
+  selection commutes with it exactly. The degenerate end is unchanged: a
+  coincident cloud has `‖x‖² = 0` and now `tie_tol = 0`, but every squared
+  distance there is exactly zero, so the same candidates tie as before.
+
 - **A measure-jet term's `ln ℓ` search box was a chosen absolute interval, and
   `ℓ` is a length in the data's own chart (#2750).** Every measure-jet ψ
   coordinate got the same kind of box:
