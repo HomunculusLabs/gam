@@ -1,5 +1,60 @@
 ## Unreleased
 
+- **A chart records the `θ` it was ASKED to realize, because `ln(exp(θ))` is not
+  `θ` (#2765, #2767).** `SurvivalMarginalSlopeFrozenOffsetChart::evaluate(θ)`
+  decoded `θ → cfg` and then called the CONFIG-authored geometry builder, which
+  closes the loop by re-encoding `cfg → θ`. For a Weibull that loop is
+  `ln(exp(θ))`, and in `f64` it is not the identity: over a grid on `[-3, 3]`,
+  **17.3%** of coordinates come back a ulp or more away, and `θ = 1e-5` comes
+  back **57 269 ulps** away.
+
+  `SurvivalMarginalSlopeFamilyHyperState` stores that `theta` as the family's
+  realized coordinates, and `validate_layout` compares it to the outer manifest
+  with `to_bits()` equality — deliberately, so a workspace cannot reuse row
+  geometry from a neighbouring outer probe. So a lost ulp in a transcendental
+  round trip made the inner solve REFUSE a point the outer optimizer was only
+  trying to evaluate:
+
+  ```
+  inner solve refused this trial point: SurvivalMarginalSlopeFamily row
+  geometry does not bitwise match the family-coordinate manifest
+  ```
+
+  **The measurement, probe by probe.** From the #2765 replay fixture's terminal
+  certificate at `θ = [7.0218, 5.5967, 6.0955, 0.75749637812226, 0.0]`, step
+  `1e-5`, against the round-trip error of each displaced coordinate:
+
+  | probe | `ln(exp(θ)) − θ` | certificate |
+  |---|---|---|
+  | coord 3, side `−` | `+1` ulp | REFUSED |
+  | coord 3, side `+` | `0` | (not reported) |
+  | coord 4, side `+` | `−57 269` ulp | REFUSED |
+  | coord 4, side `−` | `+3 383` ulp | REFUSED |
+  | the seed itself | `0` | evaluates |
+
+  Four out of four, and the one exact round trip is the one that evaluated. A
+  refusal reads to Armijo as "no improvement" at *every* step size, so a
+  backtracking search halving 50 times produces `StepSizeTooSmall after 50
+  attempt(s)` and `after 0 outer iteration(s)` with no gradient defect required
+  — and it explains why the earlier #2765 probe saw trial points that were
+  genuinely better than the base rejected anyway.
+
+  **The repair is the seam, not the check.** The bitwise invariant is right and
+  stays exact; what was wrong is that the chart threw away the coordinate it was
+  handed. `build_survival_marginal_slope_baseline_geometry_at_theta` records the
+  caller's `θ` verbatim while `cfg` still drives every row's arithmetic. The
+  config-authored entry is unchanged: where a config IS the authority, deriving
+  `θ` from it is correct. Loosening the manifest comparison to a tolerance was
+  rejected — that check exists so "the same coordinates" means the same thing to
+  the family and to the outer manifest, and a tolerance trades a loud refusal
+  for a workspace that can silently serve a neighbouring probe's row geometry.
+
+  End to end on the replay fixture (n=900, Weibull baseline, `logslope_time_k`),
+  same seed, same cost `8.193691e2`, same gradient `|g| = 8.164517e0`: the outer
+  solve goes from refusing in 788 s `after 0 outer iteration(s)` to completing
+  seed 0 and moving on to seeds 1 and 2. Nothing about the value or the gradient
+  changed; the displaced points became evaluable.
+
 - **The ψ calculus and the joint-Hessian OPERATOR never got the slope's
   follow-up axis (#2765, #2767).** `c9ad097f1` generalized the survival
   marginal-slope blockwise assemblers from the four-primary frame
