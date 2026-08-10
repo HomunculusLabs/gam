@@ -187,9 +187,15 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
 
     // The load gate has to accept it, and it validates that the fitted block's
     // width is a multiple of the margin's — a payload failing that cannot be
-    // replayed under any covariate design at all.
-    let model = FittedModel::from_payload(payload.clone())
-        .expect("a saved follow-up-varying slope must load");
+    // replayed under any covariate design at all. `from_payload` is infallible
+    // (it only classifies the payload); the gate that reads the log-slope
+    // margin is `validate_for_persistence`, via
+    // `validate_survival_marginal_slope_replay_state`, so that is what has to
+    // be exercised here.
+    let model = FittedModel::from_payload(payload.clone());
+    model
+        .validate_for_persistence()
+        .expect("a saved follow-up-varying slope must pass the load gate");
 
     let p_logslope = model
         .fit_result
