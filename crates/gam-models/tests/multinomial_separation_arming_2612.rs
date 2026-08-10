@@ -33,16 +33,30 @@
 //! `v` is beyond `λ`'s reach only when `S v = 0`, because `(H + S_λ)v = Hv +
 //! λSv`. The certificate now forms `H + S_λ` at the λ the mode was certified at.
 //!
-//! The two arms below are the discriminator, and a repair that satisfies one
-//! without the other is wrong in a way a single-sided test could not see:
+//! The three arms below are the discriminator, and a repair that satisfies any
+//! two of them is wrong in a way those two could not see:
 //!
 //! 1. data that do not separate must be fitted with the prior **disarmed**;
-//! 2. data that genuinely do separate must still **arm** it.
+//! 2. data that genuinely do separate must still **arm** it;
+//! 3. and on data that separate *and* carry a smooth, the published
+//!    probabilities must be **calibrated** — because a verdict can be right and
+//!    the fit still wrong.
 //!
 //! Arm 2 uses a design with NO penalized term at all — `S_λ = 0`, so `H + S_λ =
 //! H` identically — which is the sharpest available statement that the repair
 //! did not simply make the certificate quieter: on that geometry the two
 //! certificates are the same matrix and the verdict must be unchanged.
+//!
+//! Arm 3 exists because arms 1 and 2 assert a VERDICT and the estimand is a
+//! PROBABILITY. On a quasi-separated fit carrying a smooth the certificate was
+//! right — a direction really is undetermined — and the term it armed then
+//! acted on the whole basis anyway, because `jeffreys_antiderivative` acts
+//! wherever a reduced eigenvalue is under `CONDITIONING_GATE_ABSOLUTE_CLEAR =
+//! 16` observation-equivalents and a quasi-separated softmax puts `W =
+//! diag(p) − ppᵀ ≈ 0.005` on every row, so NO direction reaches that scale.
+//! `#2612`'s repair is therefore about the SUBSPACE the verdict is taken over —
+//! `ker(S_λ)`, the directions no `λ` reaches — and the calibration gap is what
+//! says whether that landed.
 
 use csv::StringRecord;
 use gam_data::encode_recordswith_inferred_schema;
@@ -374,5 +388,154 @@ fn genuine_separation_still_arms_the_prior_2612() {
         correct >= 270,
         "the armed fit must still classify its own near-separable training rows: \
          {correct}/{ROWS}"
+    );
+}
+
+/// A genuinely QUASI-SEPARATED design that carries a SMOOTH, banded along one
+/// covariate so `W = diag(p) − ppᵀ → 0` on almost every row — the penguins
+/// geometry at a size that fits in seconds.
+///
+/// The two boundaries are perturbed inside a thin overlap band, so a handful of
+/// rows sit on the wrong side of their own boundary and the maximiser is finite
+/// (quasi-, not complete, separation).
+fn banded_records(indices: &[usize]) -> (Vec<StringRecord>, Vec<usize>) {
+    /// Overlap half-width of the two class boundaries, in covariate units.
+    const OVERLAP: f64 = 0.06;
+    // The van der Corput sequence in base 2 on `[-1, 1]`: deterministic and low
+    // discrepancy, so the fixture is bit-reproducible and every re-measurement
+    // is of the code rather than of a draw.
+    fn covariate(index: usize) -> f64 {
+        let mut numerator = 0.0_f64;
+        let mut denominator = 1.0_f64;
+        let mut n = index + 1;
+        while n > 0 {
+            denominator *= 2.0;
+            numerator += ((n % 2) as f64) / denominator;
+            n /= 2;
+        }
+        2.0 * numerator - 1.0
+    }
+    let mut labels = Vec::with_capacity(indices.len());
+    let records = indices
+        .iter()
+        .map(|&index| {
+            let x = covariate(index);
+            let wobble = if index % 7 == 0 { OVERLAP } else { -OVERLAP };
+            let class = if x < -1.0 / 3.0 + wobble {
+                0
+            } else if x < 1.0 / 3.0 + wobble {
+                1
+            } else {
+                2
+            };
+            labels.push(class);
+            StringRecord::from(vec![x.to_string(), CLASS_NAMES[class].to_string()])
+        })
+        .collect();
+    (records, labels)
+}
+
+fn banded_frame(indices: &[usize]) -> (gam_data::EncodedDataset, Vec<usize>) {
+    let (records, labels) = banded_records(indices);
+    let headers = ["x", "y"].into_iter().map(str::to_string).collect();
+    (
+        encode_recordswith_inferred_schema(headers, records).expect("encode banded frame"),
+        labels,
+    )
+}
+
+/// Arm 3 — the estimand bar, from the direction neither arming assertion can
+/// see: a quasi-separated fit that carries a SMOOTH must be CALIBRATED.
+///
+/// Arms 1 and 2 assert the arming VERDICT. A verdict can be right and the
+/// published probabilities still wrong, and on this geometry that is exactly
+/// what happened: the certificate correctly identified a direction the data do
+/// not determine, and the term it armed then acted on the WHOLE basis, because
+/// `jeffreys_antiderivative` acts wherever a reduced eigenvalue is under
+/// `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16` observation-equivalents and a
+/// quasi-separated softmax has `W = diag(p) − ppᵀ ≈ 0.005` per row, so NO
+/// direction reaches that scale. Measured on this fixture before #2612's
+/// subspace repair: held-out accuracy `0.9833` against a mean argmax
+/// probability of `0.9032` — the fit says "90% sure" and is right 98% of the
+/// time.
+///
+/// The bar is the CALIBRATION GAP, `mean argmax probability − accuracy`, which
+/// is reference-free (no comparator implementation appears in it) and is the
+/// defining property of a probabilistic classifier: a calibrated one predicts
+/// its own accuracy. On 120 held-out rows at `p ≈ 0.98` the binomial standard
+/// error of the accuracy is `sqrt(0.98·0.02/120) = 0.0128`, so `0.05` is about
+/// four standard errors — loose enough that one draw's noise cannot fail it,
+/// and six times tighter than the `-0.080` a full-span prior costs here.
+#[test]
+fn a_quasi_separated_smooth_fit_is_calibrated_2612() {
+    let (train, _) = banded_frame(&(0..180).collect::<Vec<_>>());
+    let (test, test_labels) = banded_frame(&(180..300).collect::<Vec<_>>());
+    let config = FitConfig::default();
+    let model = fit_penalized_multinomial_formula(&MultinomialFitRequest {
+        data: &train,
+        formula: "y ~ s(x, k=8)",
+        config: &config,
+        init_lambda: 1.0,
+        max_iter: 100,
+        tol: 1e-8,
+    })
+    .expect(
+        "a quasi-separated three-class fit carrying one smooth must produce a fit; this fixture \
+         produced none at all until the #2612 saddle-escape repair",
+    );
+
+    let columns: Vec<usize> = CLASS_NAMES
+        .iter()
+        .map(|name| {
+            model
+                .class_levels
+                .iter()
+                .position(|level| level == name)
+                .unwrap_or_else(|| panic!("class {name} missing from {:?}", model.class_levels))
+        })
+        .collect();
+    let predicted = predict_multinomial_formula(&model, &test).expect("held-out predict");
+    assert_eq!(predicted.nrows(), test_labels.len(), "held-out rows");
+
+    let mut correct = 0usize;
+    let mut argmax_mass = 0.0_f64;
+    for (row, &truth) in test_labels.iter().enumerate() {
+        let mut best = (0usize, f64::NEG_INFINITY);
+        for (class, &column) in columns.iter().enumerate() {
+            let p = predicted[[row, column]];
+            if p > best.1 {
+                best = (class, p);
+            }
+        }
+        argmax_mass += best.1;
+        if best.0 == truth {
+            correct += 1;
+        }
+    }
+    let rows = test_labels.len() as f64;
+    let accuracy = correct as f64 / rows;
+    let mean_argmax = argmax_mass / rows;
+    let calibration_gap = mean_argmax - accuracy;
+    let accuracy_standard_error = (accuracy * (1.0 - accuracy) / rows).sqrt().max(1e-12);
+    eprintln!(
+        "#2612 quasi-separated smooth fit: separation_evidence={:?}\n#2612 quasi-separated \
+         smooth fit: held-out accuracy={accuracy:.4} mean_argmax_p={mean_argmax:.4} \
+         calibration_gap={calibration_gap:+.4} ({:+.1} s.e.)",
+        model.separation_evidence,
+        calibration_gap / accuracy_standard_error,
+    );
+    assert!(
+        accuracy >= 0.90,
+        "the banded classes are decided by `x` except inside a thin overlap band, so a competent \
+         fit classifies well above 0.90; got {accuracy:.4}"
+    );
+    assert!(
+        calibration_gap.abs() <= 0.05,
+        "a probabilistic classifier must predict its own accuracy: mean argmax probability \
+         {mean_argmax:.4} against held-out accuracy {accuracy:.4} is a calibration gap of \
+         {calibration_gap:+.4} ({:+.1} binomial s.e.). A proper prior armed over the whole \
+         identifiable span costs exactly this, and it is invisible to an arming-verdict \
+         assertion",
+        calibration_gap / accuracy_standard_error,
     );
 }
