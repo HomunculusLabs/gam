@@ -227,38 +227,49 @@ fn a_smooth_multinomial_that_does_not_separate_keeps_the_prior_disarmed_2612() {
     let columns: Vec<usize> = CLASS_NAMES.iter().map(|name| level_of(name)).collect();
 
     let mut squared = 0.0_f64;
-    let mut worst_shrinkage = f64::NEG_INFINITY;
+    // Shrinkage toward `1/K` is a BIAS: it pulls the largest true probability
+    // down on every row. So the statistic that detects it is the SIGNED MEAN of
+    // the argmax-class gap `truth − fitted` over the held-out rows, with its own
+    // standard error — not a one-sided maximum, which is positive by
+    // construction for any estimator and grows with the row count. Both are
+    // collected; only the mean is asserted, and the extremes are printed so a
+    // reader can see which one a number is about (#2612).
+    let mut argmax_gaps: Vec<f64> = Vec::with_capacity(600);
     for (row, index) in (0..600).enumerate() {
         let (x1, x2) = covariates(index + 100_000);
         let expected = truth(x1, x2);
+        let argmax = expected
+            .iter()
+            .enumerate()
+            .fold((0usize, f64::NEG_INFINITY), |best, (c, v)| {
+                if *v > best.1 { (c, *v) } else { best }
+            })
+            .0;
         let mut mass = 0.0_f64;
         for class in 0..3 {
             let p = predicted[[row, columns[class]]];
             mass += p;
             squared += (p - expected[class]).powi(2);
-            // Shrinkage toward `1/K` is one-sided: the largest true probability
-            // is pulled DOWN. Tracking the signed gap on the truth's own argmax
-            // class separates bias from ordinary estimation error.
-            let argmax = expected
-                .iter()
-                .enumerate()
-                .fold((0usize, f64::NEG_INFINITY), |best, (c, v)| {
-                    if *v > best.1 { (c, *v) } else { best }
-                })
-                .0;
-            if class == argmax {
-                worst_shrinkage = worst_shrinkage.max(expected[class] - p);
-            }
         }
+        argmax_gaps.push(expected[argmax] - predicted[[row, columns[argmax]]]);
         assert!(
             (mass - 1.0).abs() <= 1e-6,
             "published probabilities must be a simplex, row {row} sums to {mass}"
         );
     }
     let rmse = (squared / (600.0 * 3.0)).sqrt();
+    let rows = argmax_gaps.len() as f64;
+    let mean_gap = argmax_gaps.iter().sum::<f64>() / rows;
+    let gap_variance =
+        argmax_gaps.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>() / (rows - 1.0);
+    let gap_standard_error = (gap_variance / rows).sqrt();
+    let worst_shrinkage = argmax_gaps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let worst_inflation = argmax_gaps.iter().copied().fold(f64::INFINITY, f64::min);
     eprintln!(
-        "#2612 disarmed smooth fit: held-out truth-RMSE = {rmse:.5}, worst argmax shrinkage = \
-         {worst_shrinkage:+.5}"
+        "#2612 disarmed smooth fit: held-out truth-RMSE = {rmse:.5}; argmax gap (truth-fitted) \
+         mean = {mean_gap:+.5} (s.e. {gap_standard_error:.5}, t = {:+.2}), worst shrink = \
+         {worst_shrinkage:+.5}, worst inflate = {worst_inflation:+.5}",
+        mean_gap / gap_standard_error,
     );
     // The generating softmax keeps every class between roughly 0.15 and 0.6, so
     // an intercept-only fit scores about 0.13 here and a fit shrunk to the
@@ -269,11 +280,40 @@ fn a_smooth_multinomial_that_does_not_separate_keeps_the_prior_disarmed_2612() {
         "the fitted surface must recover the softmax truth it was drawn from; \
          truth-RMSE = {rmse:.4}"
     );
+    // THE BIAS BAR, and why it is this quantity (#2612).
+    //
+    // This assertion used to read `worst_shrinkage <= 0.10`, justified as "that
+    // one-sided gap is what a proper prior armed on non-separated data costs".
+    // A one-sided maximum over 600 rows cannot support that reading: the largest
+    // of many mean-zero errors is positive by construction, and it grows with
+    // the row count, so the statistic conflates "the estimator is biased
+    // downward on the winning class" with "the estimator is unbiased and 600
+    // rows have a tail". Measured on this fixture with the prior correctly
+    // DISARMED, the gap is symmetric —
+    //
+    // ```text
+    //   mean = -0.00294 (s.e. 0.00179, t = -1.64)
+    //   worst shrink = +0.11414     worst inflate = -0.13552
+    // ```
+    //
+    // — the largest excursion is an INFLATION, larger than the shrinkage the old
+    // bar refused on, and the mean says the winning class is if anything
+    // slightly sharper than the truth. So the max was reading the tail of
+    // ordinary estimation noise at truth-RMSE 0.037.
+    //
+    // `0.02` is not a widened `0.10`; it is a bar on a different and much
+    // tighter quantity. It is eleven standard errors of the measured mean, and
+    // it sits far below what a false-positive arming costs: the same one-sided
+    // gap on the Firth-armed penguins witness is `0.137` (mean argmax
+    // probability 0.828 against accuracy 0.965), i.e. seven times this bar. A
+    // prior armed on data that does not separate cannot hide under it.
     assert!(
-        worst_shrinkage <= 0.10,
-        "no held-out row's winning class may be pulled {worst_shrinkage:.4} below its true \
-         probability; that one-sided gap is what a proper prior armed on non-separated data \
-         costs"
+        mean_gap.abs() <= 0.02,
+        "the disarmed fit must be UNBIASED on the winning class: mean argmax gap \
+         (truth − fitted) = {mean_gap:+.5} over {rows} held-out rows (s.e. \
+         {gap_standard_error:.5}). A systematic pull toward 1/K is what an unnecessary proper \
+         prior costs, and it shows up here as a nonzero mean, not as a large maximum \
+         (worst shrink {worst_shrinkage:+.5}, worst inflate {worst_inflation:+.5})"
     );
 }
 
