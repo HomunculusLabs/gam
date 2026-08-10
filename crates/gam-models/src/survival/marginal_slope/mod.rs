@@ -144,6 +144,8 @@ mod logslope_layout;
 mod newton_operators;
 mod primary_geometry;
 mod psi_terms;
+#[cfg(test)]
+mod psi_terms_fd_tests;
 mod pullback;
 pub(crate) mod row_kernel;
 mod row_math;
