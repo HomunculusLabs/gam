@@ -584,18 +584,31 @@ impl SurvivalMarginalSlopeFamily {
         dir_u: ArrayView1<'_, f64>,
         dir_v: ArrayView1<'_, f64>,
     ) -> Result<Array2<f64>, String> {
-        // Batched path delegating to the shared k=6 jet helper.
-        let r = self.row_primary_fourth_contracted_tower::<
-            STATIC_SLOPE_PRIMARIES,
-            StaticSlopeGeometry,
-        >(row, block_states, dir_u, dir_v)?;
-        let mut out = Array2::<f64>::zeros((N_PRIMARY, N_PRIMARY));
-        for a in 0..N_PRIMARY {
-            for b in 0..N_PRIMARY {
-                out[[a, b]] = r[a][b];
+        // Batched path delegating to the shared k=6 jet helper, in the family's
+        // OWN slope frame. Pinning this to `STATIC_SLOPE_PRIMARIES` evaluated
+        // the time-constant row program — a different model — whenever the slope
+        // varies along follow-up, and truncated the six-primary directions it
+        // was handed to four (#2765). Mirrors `row_primary_third_contracted`.
+        fn to_array<const P: usize>(r: [[f64; P]; P]) -> Array2<f64> {
+            let mut out = Array2::<f64>::zeros((P, P));
+            for a in 0..P {
+                for b in 0..P {
+                    out[[a, b]] = r[a][b];
+                }
             }
+            out
         }
-        Ok(out)
+        if self.slope_is_follow_up_varying() {
+            Ok(to_array(self.row_primary_fourth_contracted_tower::<
+                DYNAMIC_SLOPE_PRIMARIES,
+                DynamicSlopeGeometry,
+            >(row, block_states, dir_u, dir_v)?))
+        } else {
+            Ok(to_array(self.row_primary_fourth_contracted_tower::<
+                STATIC_SLOPE_PRIMARIES,
+                StaticSlopeGeometry,
+            >(row, block_states, dir_u, dir_v)?))
+        }
     }
 
     pub(crate) fn row_primary_fourth_contracted_general(

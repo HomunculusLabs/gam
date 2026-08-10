@@ -1,5 +1,79 @@
 ## Unreleased
 
+- **The ψ calculus and the joint-Hessian OPERATOR never got the slope's
+  follow-up axis (#2765, #2767).** `c9ad097f1` generalized the survival
+  marginal-slope blockwise assemblers from the four-primary frame
+  `(q₀, q₁, q̇₁, g)` to the six-primary one `(q₀, q₁, q̇₁, g₀, g₁, ġ₁)` by routing
+  every log-slope pullback through `logslope_layout.primary_channels()` — one
+  `(primary, design)` pair for a time-constant slope, three for a varying one —
+  and `fit_entry` then refused, by name, every surface whose chain rule was
+  still lowered through the old frame. Its own comment states the standard:
+
+  > refusing by name is honest, whereas running them would silently
+  > differentiate a model that is not the one being fitted.
+
+  Five sites did not get the treatment and are not on that refusal list. Each
+  reads the slope through the literal index `3` and a single design:
+
+  | site | what it assembled |
+  |---|---|
+  | `hessian::add_pullback_with_q_geometry` | `ph[[3,3]]` into `H_gg`; `coefficient_design()` for `H_mg` / `H_tg` |
+  | `psi_terms::accumulate_score_blockwise` | `coefficient_design().axpy_row_into(row, primary[3], …)` |
+  | `psi_terms::accumulate_score_with_q_geometry` | the same, one channel |
+  | `primary_geometry::spatial_block_primary_loading` / `primary_direction_from_psi_row` / `primary_psi_action_from_psi_row` | length-**4** vectors contracted against a length-**6** primary gradient |
+  | `timepoint_exact::row_primary_fourth_contracted` | instantiated at `STATIC_SLOPE_PRIMARIES` — the *time-constant row program* — whichever frame the family is in |
+
+  The first one is the widest: `exact_newton_joint_hessian_operator` — the
+  INNER Newton's matrix-free joint Hessian on the dynamic-q path — is one of its
+  callers. Its gradient half (`accumulate_dynamic_q_core_gradient`) and its
+  dense sibling (`accumulate_dynamic_q_core_hessian`) were both converted; the
+  operator's Hessian half was not, so on a follow-up-varying slope the inner
+  solve ran with a curvature missing the `g₁` and `ġ₁` rows and columns
+  entirely. A mode certified against the wrong curvature is not the argmin of
+  the criterion the outer search is profiling, which is exactly the
+  "`converged=true` with `last_residual_below_tol=false`" signature the #2765
+  probe recorded 55 times in one run.
+
+  **The two holes in the refusal list.** The refusal names a spatial length
+  scale on the *log-slope* surface, Gaussian-shift frailty, the score-warp /
+  link-deviation flex blocks, the CTN Stage-1 absorber, and a time-wiggle
+  baseline. It does not name:
+
+  * **a parametric baseline chart** — `baseline_exact_joint_psi_terms_with_options`
+    reaches `accumulate_score_with_q_geometry` and `add_pullback_with_q_geometry`
+    unconditionally, so a Weibull / Gompertz / Gompertz-Makeham ψ dropped two of
+    the slope's three channels. This is the configuration #2765's own acceptance
+    fixture uses (`baseline_target: "weibull"` plus `logslope_time_k`), and its
+    outer search direction was measured to be essentially pure baseline-ψ;
+  * **a spatial length scale on the MARGINAL surface** — `psi_terms_inner`
+    contracted a length-4 primary direction against a length-6 primary
+    gradient, which is a shape error rather than an approximation.
+
+  **The repair is the generalization, not a guard.** Every site above is now a
+  loop over `primary_channels()` or is sized from `core_primary_dimension()`. A
+  time-constant slope still performs exactly one rank-1 update per row and its
+  arithmetic is unchanged, so nothing about the static path changes shape or
+  cost. The log-slope-surface spatial refusal STAYS and is now enforced one
+  layer down as well: with a time margin that block's three channel designs are
+  `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, while the ψ
+  design-derivative contract carries a single `X_ψ`, so the other two channels
+  are not recoverable from what the caller holds — a fact the primary-space
+  helpers now state rather than assume. The batched ψ fast path, whose tower is
+  instantiated at `STATIC_SLOPE_PRIMARIES`, declines a follow-up-varying slope
+  and defers to the per-axis route instead of truncating it.
+
+  **The gate that was missing.** `psi_terms_inner` publishes
+  `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ ∇²_β ℓ̄`, and nothing had ever differenced them
+  against the functions they name. The shipped ψ coverage checks finiteness,
+  subsample-vs-unsampled equality, and batched-vs-per-axis agreement — a
+  *consistently* wrong derivative passes all three.
+  `marginal_slope/psi_terms_fd_tests.rs` now differences every ψ lane (marginal
+  design, log-slope design, and each baseline-chart coordinate) against the
+  family's own `(objective, score, Hessian)` triple, in BOTH slope frames, with
+  a Richardson pair certifying the oracle so a gap cannot be charged to the
+  finite difference and an unresolved component declines to grade rather than
+  fails.
+
 - **A monotone warp's corner is its boundary knot's MULTIPLICITY, and no
   extrapolation rule can remove it (#2695).** `0167ed853` gave the warp basis a
   linear tail so `I′_j` would stop stepping at the knot hull's edge, and the

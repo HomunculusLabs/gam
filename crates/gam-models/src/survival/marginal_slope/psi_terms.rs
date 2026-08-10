@@ -32,11 +32,13 @@ impl SurvivalMarginalSlopeFamily {
             primary[0] + primary[1],
             &mut score_m.view_mut(),
         )?;
-        self.logslope_layout.coefficient_design().axpy_row_into(
-            row,
-            primary[3],
-            &mut score_g.view_mut(),
-        )?;
+        // One rank-1 update per follow-up channel — exactly one when the slope
+        // is time-constant, three when it varies. Reading a single `primary[3]`
+        // against `coefficient_design()` assembled the score of a DIFFERENT
+        // model on a varying slope (#2765).
+        for &(slope_primary, design) in self.logslope_layout.primary_channels().as_slice() {
+            design.axpy_row_into(row, primary[slope_primary], &mut score_g.view_mut())?;
+        }
         Ok(())
     }
 
@@ -82,11 +84,11 @@ impl SurvivalMarginalSlopeFamily {
                 score_m.scaled_add(primary[q], jm[q]);
             }
         }
-        self.logslope_layout.coefficient_design().axpy_row_into(
-            row,
-            primary[3],
-            &mut score_g.view_mut(),
-        )?;
+        // One rank-1 update per follow-up channel; see
+        // `accumulate_score_blockwise` (#2765).
+        for &(slope_primary, design) in self.logslope_layout.primary_channels().as_slice() {
+            design.axpy_row_into(row, primary[slope_primary], &mut score_g.view_mut())?;
+        }
         Ok(())
     }
 
@@ -221,7 +223,7 @@ impl SurvivalMarginalSlopeFamily {
         let loading = if let Some(primary) = flex_primary.as_ref() {
             spatial_block_primary_loading_flex(primary, block_idx)?
         } else {
-            spatial_block_primary_loading(block_idx)?
+            spatial_block_primary_loading(self, block_idx)?
         };
         let beta_psi = match block_idx {
             1 => &block_states[1].beta,
@@ -310,7 +312,7 @@ impl SurvivalMarginalSlopeFamily {
                     } else if let Some(primary) = flex_primary.as_ref() {
                         primary_direction_from_psi_row_flex(primary, block_idx, &psi_row, beta_psi)
                     } else {
-                        primary_direction_from_psi_row(block_idx, &psi_row, beta_psi)
+                        primary_direction_from_psi_row(self, block_idx, &psi_row, beta_psi)?
                     };
 
                     let q_geom_lazy;
@@ -466,6 +468,14 @@ impl SurvivalMarginalSlopeFamily {
         if self.effective_flex_active(block_states)? || self.flex_timewiggle_active() {
             return Ok(None);
         }
+        // The batched tower is instantiated at `STATIC_SLOPE_PRIMARIES` and its
+        // per-axis contraction writes an `N_PRIMARY × N_PRIMARY` block; a
+        // follow-up-varying slope runs the six-primary frame, so this fast path
+        // does not cover it and the per-axis route (which sizes every
+        // primary-space vector from `core_primary_dimension`) does (#2765).
+        if self.slope_is_follow_up_varying() {
+            return Ok(None);
+        }
         let k = psi_indices.len();
         if k == 0 {
             return Ok(Some(Vec::new()));
@@ -500,7 +510,7 @@ impl SurvivalMarginalSlopeFamily {
                 psi_label,
                 &policy,
             ).map_err(|error| error.to_string())?;
-            let loading = spatial_block_primary_loading(block_idx)?;
+            let loading = spatial_block_primary_loading(self, block_idx)?;
             let beta_psi: &Array1<f64> = match block_idx {
                 1 => &block_states[1].beta,
                 _ => &block_states[2].beta,
@@ -580,7 +590,7 @@ impl SurvivalMarginalSlopeFamily {
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
-                        primary_direction_from_psi_row(axis.block_idx, &psi_row, axis.beta_psi);
+                        primary_direction_from_psi_row(self, axis.block_idx, &psi_row, axis.beta_psi)?;
                     let third_stack = Self::contract_row_primary_third_tower::<
                         STATIC_SLOPE_PRIMARIES,
                     >(&third_tower, &dir)?;
@@ -737,12 +747,12 @@ impl SurvivalMarginalSlopeFamily {
         let loading_i = if let Some(primary) = flex_primary.as_ref() {
             spatial_block_primary_loading_flex(primary, block_idx_i)?
         } else {
-            spatial_block_primary_loading(block_idx_i)?
+            spatial_block_primary_loading(self, block_idx_i)?
         };
         let loading_j = if let Some(primary) = flex_primary.as_ref() {
             spatial_block_primary_loading_flex(primary, block_idx_j)?
         } else {
-            spatial_block_primary_loading(block_idx_j)?
+            spatial_block_primary_loading(self, block_idx_j)?
         };
         let beta_i = match block_idx_i {
             1 => &block_states[1].beta,
@@ -878,14 +888,14 @@ impl SurvivalMarginalSlopeFamily {
                 } else if let Some(primary) = flex_primary.as_ref() {
                     primary_direction_from_psi_row_flex(primary, block_idx_i, &psi_row_i, beta_i)
                 } else {
-                    primary_direction_from_psi_row(block_idx_i, &psi_row_i, beta_i)
+                    primary_direction_from_psi_row(self, block_idx_i, &psi_row_i, beta_i)?
                 };
                 let dir_j = if let Some(lift) = psi_lift_j.as_ref() {
                     lift.dir.clone()
                 } else if let Some(primary) = flex_primary.as_ref() {
                     primary_direction_from_psi_row_flex(primary, block_idx_j, &psi_row_j, beta_j)
                 } else {
-                    primary_direction_from_psi_row(block_idx_j, &psi_row_j, beta_j)
+                    primary_direction_from_psi_row(self, block_idx_j, &psi_row_j, beta_j)?
                 };
 
                 let (psi_row_ij, dir_ij) = if same_block {
@@ -897,7 +907,7 @@ impl SurvivalMarginalSlopeFamily {
                     let d = if let Some(primary) = flex_primary.as_ref() {
                         primary_second_direction_from_psi_row_flex(primary, block_idx_i, &r, beta_i)
                     } else {
-                        primary_second_direction_from_psi_row(block_idx_i, &r, beta_i)
+                        primary_second_direction_from_psi_row(self, block_idx_i, &r, beta_i)?
                     };
                     (Some(r), d)
                 } else {
@@ -1236,7 +1246,7 @@ impl SurvivalMarginalSlopeFamily {
         let loading = if let Some(primary) = flex_primary.as_ref() {
             spatial_block_primary_loading_flex(primary, block_idx)?
         } else {
-            spatial_block_primary_loading(block_idx)?
+            spatial_block_primary_loading(self, block_idx)?
         };
         let beta_psi = match block_idx {
             1 => &block_states[1].beta,
@@ -1303,7 +1313,7 @@ impl SurvivalMarginalSlopeFamily {
                 } else if let Some(primary) = flex_primary.as_ref() {
                     primary_direction_from_psi_row_flex(primary, block_idx, &psi_row, beta_psi)
                 } else {
-                    primary_direction_from_psi_row(block_idx, &psi_row, beta_psi)
+                    primary_direction_from_psi_row(self, block_idx, &psi_row, beta_psi)?
                 };
                 let psi_action = if psi_lift.is_some() {
                     self.timewiggle_psi_action(
@@ -1318,7 +1328,7 @@ impl SurvivalMarginalSlopeFamily {
                 } else if let Some(primary) = flex_primary.as_ref() {
                     primary_psi_action_from_psi_row_flex(primary, block_idx, &psi_row, d_beta_block)
                 } else {
-                    primary_psi_action_from_psi_row(block_idx, &psi_row, d_beta_block)
+                    primary_psi_action_from_psi_row(self, block_idx, &psi_row, d_beta_block)?
                 };
                 let row_dir = self.row_primary_direction_from_flat_dynamic(
                     row,

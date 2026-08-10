@@ -357,10 +357,38 @@ pub(crate) struct TimewiggleMarginalPsiRowLift {
     pub(crate) psi_row: Array1<f64>,
 }
 
-pub(crate) fn spatial_block_primary_loading(block_idx: usize) -> Result<Array1<f64>, String> {
+/// A design-moving ψ's loading onto the row program's primary space.
+///
+/// Sized by the family's own frame (`core_primary_dimension`), not by the
+/// `N_PRIMARY` constant: a follow-up-varying slope runs the six-primary frame
+/// `(q₀, q₁, q̇₁, g₀, g₁, ġ₁)`, and a length-4 loading contracted against a
+/// length-6 primary gradient is a shape error, not an approximation (#2765).
+///
+/// The marginal block loads onto `q₀` and `q₁` in EITHER frame — the location
+/// index is what the frame does not change. The log-slope block is the one that
+/// gains channels, and a ψ that moves its design is refused by name rather than
+/// lowered through one of them: with a time margin the block's three channel
+/// designs are `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, while
+/// the ψ-derivative contract carries a single `X_ψ`, so the other two channels
+/// are not recoverable from what the caller has. `fit_entry` refuses that
+/// combination at construction; this is the same refusal one layer down, so a
+/// future caller cannot reach it silently.
+pub(crate) fn spatial_block_primary_loading(
+    family: &SurvivalMarginalSlopeFamily,
+    block_idx: usize,
+) -> Result<Array1<f64>, String> {
+    let mut out = Array1::<f64>::zeros(family.core_primary_dimension());
     match block_idx {
-        1 => Ok(Array1::from_vec(vec![1.0, 1.0, 0.0, 0.0])),
-        2 => Ok(Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0])),
+        1 => {
+            out[PRIMARY_Q0] = 1.0;
+            out[PRIMARY_Q1] = 1.0;
+            Ok(out)
+        }
+        2 => {
+            refuse_follow_up_varying_design_psi(family)?;
+            out[PRIMARY_SLOPE] = 1.0;
+            Ok(out)
+        }
         _ => Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
             reason: format!(
                 "survival marginal-slope spatial psi loading requested for unsupported block {block_idx}"
@@ -370,25 +398,47 @@ pub(crate) fn spatial_block_primary_loading(block_idx: usize) -> Result<Array1<f
     }
 }
 
+/// A ψ that moves the LOG-SLOPE design cannot be lowered through a
+/// follow-up-varying frame from a single `X_ψ`. See
+/// [`spatial_block_primary_loading`].
+fn refuse_follow_up_varying_design_psi(
+    family: &SurvivalMarginalSlopeFamily,
+) -> Result<(), String> {
+    if family.logslope_layout.is_follow_up_varying() {
+        return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+            reason: "a follow-up-varying log-slope carries three channel designs \
+                     (X_cov ⊗ B_entry, X_cov ⊗ B_exit, X_cov ⊗ B′_exit) and the ψ \
+                     design-derivative contract carries one X_ψ, so a spatial \
+                     length scale on the log-slope surface cannot be lowered \
+                     through this frame"
+                .to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Derive a primary-space direction from a precomputed psi design row and beta,
 /// avoiding a redundant psi design row build inside `row_primary_psi_direction`.
 pub(crate) fn primary_direction_from_psi_row(
+    family: &SurvivalMarginalSlopeFamily,
     block_idx: usize,
     psi_row: &Array1<f64>,
     beta_block: &Array1<f64>,
-) -> Array1<f64> {
-    let mut out = Array1::<f64>::zeros(N_PRIMARY);
+) -> Result<Array1<f64>, String> {
+    let mut out = Array1::<f64>::zeros(family.core_primary_dimension());
     let value = psi_row.dot(beta_block);
     // Only blocks 1 and 2 carry a loading onto primary space (see
     // `spatial_block_primary_loading`); every other block leaves the direction
     // at zero.
     if block_idx == 1 {
-        out[0] = value;
-        out[1] = value;
+        out[PRIMARY_Q0] = value;
+        out[PRIMARY_Q1] = value;
     } else if block_idx == 2 {
-        out[3] = value;
+        refuse_follow_up_varying_design_psi(family)?;
+        out[PRIMARY_SLOPE] = value;
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn spatial_block_primary_loading_flex(
@@ -437,22 +487,24 @@ pub(crate) fn primary_direction_from_psi_row_flex(
 
 /// Derive a primary-space psi action on a direction from a precomputed psi design row.
 pub(crate) fn primary_psi_action_from_psi_row(
+    family: &SurvivalMarginalSlopeFamily,
     block_idx: usize,
     psi_row: &Array1<f64>,
     d_beta_block: ndarray::ArrayView1<'_, f64>,
-) -> Array1<f64> {
-    let mut out = Array1::<f64>::zeros(N_PRIMARY);
+) -> Result<Array1<f64>, String> {
+    let mut out = Array1::<f64>::zeros(family.core_primary_dimension());
     let value = psi_row.dot(&d_beta_block);
     // Only blocks 1 and 2 carry a loading onto primary space (see
     // `spatial_block_primary_loading`); every other block contributes nothing
     // to the psi action.
     if block_idx == 1 {
-        out[0] = value;
-        out[1] = value;
+        out[PRIMARY_Q0] = value;
+        out[PRIMARY_Q1] = value;
     } else if block_idx == 2 {
-        out[3] = value;
+        refuse_follow_up_varying_design_psi(family)?;
+        out[PRIMARY_SLOPE] = value;
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn primary_psi_action_from_psi_row_flex(
@@ -477,11 +529,12 @@ pub(crate) fn primary_psi_action_from_psi_row_flex(
 
 /// Derive a primary-space second-order direction from a precomputed second psi design row.
 pub(crate) fn primary_second_direction_from_psi_row(
+    family: &SurvivalMarginalSlopeFamily,
     block_idx: usize,
     psi_second_row: &Array1<f64>,
     beta_block: &Array1<f64>,
-) -> Array1<f64> {
-    primary_direction_from_psi_row(block_idx, psi_second_row, beta_block)
+) -> Result<Array1<f64>, String> {
+    primary_direction_from_psi_row(family, block_idx, psi_second_row, beta_block)
 }
 
 pub(crate) fn primary_second_direction_from_psi_row_flex(
