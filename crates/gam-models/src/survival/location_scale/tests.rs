@@ -9620,14 +9620,14 @@ fn joint_hessian_is_continuous_as_q0_crosses_the_link_warp_knot_hull_2695() {
     );
 }
 
-/// TEMPORARY gam#2695 probe — does `H` close across an INTERIOR knot, and at
-/// what degree? Prints; asserts only non-vacuity.
+/// TEMPORARY gam#2695 probe — does `H` close across a knot the crossing row's
+/// `q₀` walks over, by degree, by warp amplitude, and by knot convention?
 ///
-/// The hull-edge pin above is the tail's contract. This asks the other half of
-/// the same question: the composed warp is `C^{d-1}` at its own interior knots,
-/// and `H = ∇²(−ℓ)` reads `w‴`, so at `d = 2` and `d = 3` the observed
-/// information — and therefore `Φ`, and therefore the inner objective — steps
-/// at every interior knot a row's `q₀` crosses, with no tail involved.
+/// The crossing row must be an EVENT row: the `log g` channel that carries
+/// `m1 = 1 + Σ βw_j I′_j(q1)` — and with it the `I″` term that has no `βw`
+/// factor — is added only when `w·d ≠ 0`, so a censored crossing row measures
+/// the warp's VALUE channel alone and reports "continuous" for the wrong
+/// reason. (It did: the first run of this probe crossed row 1, `event = 0`.)
 #[test]
 fn probe_2695_joint_hessian_across_an_interior_knot() {
     let primaries: Vec<[f64; SLS_ROW_K]> = vec![
@@ -9641,86 +9641,102 @@ fn probe_2695_joint_hessian_across_an_interior_knot() {
     let n = primaries.len();
     let q0_slope = |row: usize| -> f64 { -primaries[row][3] * (-primaries[row][6]).exp() };
     const B_STAR: f64 = 1.0;
-    const CROSSING_ROW: usize = 1;
+    // event = 1.0, so the `log g` channel is live on the row that crosses.
+    const CROSSING_ROW: usize = 2;
 
     for degree in 2..=5usize {
-        for warp_amplitude in [1.0e-6_f64, 3.0e-1] {
-            // Put an INTERIOR knot exactly on row 1's q0 at beta_thr = 1, with the
-            // hull edges far away on both sides so no tail is involved.
-            let centre = q0_slope(CROSSING_ROW) * B_STAR;
-            let left = centre - 2.0;
-            let right = centre + 2.0;
-            let mut knot_values = vec![left; degree + 1];
-            knot_values.push(centre - 1.0);
-            knot_values.push(centre);
-            knot_values.push(centre + 1.0);
-            knot_values.extend(std::iter::repeat_n(right, degree + 1));
-            let knots = Array1::from_vec(knot_values);
-
-            let seed_q0 = Array1::from_shape_fn(n, |i| q0_slope(i) * B_STAR);
-            let xwiggle = survival_wiggle_basis_with_options(
-                seed_q0.view(),
-                &knots,
-                degree,
-                BasisOptions::value(),
-            )
-            .expect("link wiggle design");
-            let pw = xwiggle.ncols();
-            let inverse_link = residual_distribution_inverse_link(ResidualDistribution::Gaussian);
-            let mut family =
-                survival_ls_joint_oracle_family(&inverse_link, &primaries, &event, &weight);
-            family.x_link_wiggle = Some(DesignMatrix::Dense(
-                gam_linalg::matrix::DenseDesignMatrix::from(xwiggle.clone()),
-            ));
-            family.wiggle_knots = Some(knots.clone());
-            family.wiggle_degree = Some(degree);
-            let beta_w =
-                Array1::from_shape_fn(pw, |j| warp_amplitude * (1.0 + 0.3 * (j as f64)));
-
-            let hessian_at = |beta_thr: f64| -> Array2<f64> {
-                let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
-                    let mut eta = Array1::<f64>::zeros(3 * n);
-                    for i in 0..n {
-                        eta[i] = primaries[i][first] * scale;
-                        eta[n + i] = primaries[i][second] * scale;
-                        eta[2 * n + i] = primaries[i][deriv] * scale;
-                    }
-                    eta
+        for warp_amplitude in [1.0e-6_f64, 3.0e-2] {
+            for clamped in [true, false] {
+                let centre = q0_slope(CROSSING_ROW) * B_STAR;
+                let knots = if clamped {
+                    let left = centre - 2.0;
+                    let right = centre + 2.0;
+                    let mut values = vec![left; degree + 1];
+                    values.push(centre - 1.0);
+                    values.push(centre);
+                    values.push(centre + 1.0);
+                    values.extend(std::iter::repeat_n(right, degree + 1));
+                    Array1::from_vec(values)
+                } else {
+                    // A simple-knot warp vector whose grid lands ON `centre`.
+                    let spans = 4usize;
+                    let width = 1.0_f64;
+                    Array1::from_shape_fn(spans + 1 + 2 * degree, |i| {
+                        centre + width * (i as f64 - (degree + 2) as f64)
+                    })
                 };
-                let states = vec![
-                    ParameterBlockState { beta: array![1.0], eta: stacked(0, 1, 2, 1.0) },
-                    ParameterBlockState {
-                        beta: array![beta_thr],
-                        eta: stacked(3, 4, 5, beta_thr),
-                    },
-                    ParameterBlockState { beta: array![1.0], eta: stacked(6, 7, 8, 1.0) },
-                    ParameterBlockState {
-                        beta: beta_w.clone(),
-                        eta: xwiggle.dot(&beta_w),
-                    },
-                ];
-                family
-                    .exact_newton_joint_hessian(&states)
-                    .expect("joint hessian across the interior knot")
-                    .expect("the family exposes an exact joint hessian")
-            };
 
-            let gap = |h: f64| -> f64 {
-                let plus = hessian_at(B_STAR + h);
-                let minus = hessian_at(B_STAR - h);
-                plus.iter()
-                    .zip(minus.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0_f64, f64::max)
-            };
-            let coarse = gap(1.0e-3);
-            let fine = gap(1.0e-5);
-            println!(
-                "[2695-INT] degree={degree} pw={pw} betaw={warp_amplitude:.1e} \
-                 gapH(1e-3)={coarse:.6e} gapH(1e-5)={fine:.6e} ratio={:.3e} \
-                 (100x = continuous, 1x = a jump)",
-                coarse / fine.max(f64::MIN_POSITIVE)
-            );
+                let seed_q0 = Array1::from_shape_fn(n, |i| q0_slope(i) * B_STAR);
+                let xwiggle = survival_wiggle_basis_with_options(
+                    seed_q0.view(),
+                    &knots,
+                    degree,
+                    BasisOptions::value(),
+                )
+                .expect("link wiggle design");
+                let pw = xwiggle.ncols();
+                let inverse_link =
+                    residual_distribution_inverse_link(ResidualDistribution::Gaussian);
+                let mut family =
+                    survival_ls_joint_oracle_family(&inverse_link, &primaries, &event, &weight);
+                family.x_link_wiggle = Some(DesignMatrix::Dense(
+                    gam_linalg::matrix::DenseDesignMatrix::from(xwiggle.clone()),
+                ));
+                family.wiggle_knots = Some(knots.clone());
+                family.wiggle_degree = Some(degree);
+                let beta_w =
+                    Array1::from_shape_fn(pw, |j| warp_amplitude * (1.0 + 0.3 * (j as f64)));
+
+                let hessian_at = |beta_thr: f64| -> Result<Array2<f64>, String> {
+                    let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
+                        let mut eta = Array1::<f64>::zeros(3 * n);
+                        for i in 0..n {
+                            eta[i] = primaries[i][first] * scale;
+                            eta[n + i] = primaries[i][second] * scale;
+                            eta[2 * n + i] = primaries[i][deriv] * scale;
+                        }
+                        eta
+                    };
+                    let states = vec![
+                        ParameterBlockState { beta: array![1.0], eta: stacked(0, 1, 2, 1.0) },
+                        ParameterBlockState {
+                            beta: array![beta_thr],
+                            eta: stacked(3, 4, 5, beta_thr),
+                        },
+                        ParameterBlockState { beta: array![1.0], eta: stacked(6, 7, 8, 1.0) },
+                        ParameterBlockState {
+                            beta: beta_w.clone(),
+                            eta: xwiggle.dot(&beta_w),
+                        },
+                    ];
+                    family
+                        .exact_newton_joint_hessian(&states)
+                        .and_then(|h| h.ok_or_else(|| "no joint hessian".to_string()))
+                };
+
+                let gap = |h: f64| -> Result<f64, String> {
+                    let plus = hessian_at(B_STAR + h)?;
+                    let minus = hessian_at(B_STAR - h)?;
+                    Ok(plus
+                        .iter()
+                        .zip(minus.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0_f64, f64::max))
+                };
+                let label = if clamped { "clamped" } else { "warp" };
+                match (gap(1.0e-3), gap(1.0e-5)) {
+                    (Ok(coarse), Ok(fine)) => println!(
+                        "[2695-INT] degree={degree} knots={label} pw={pw} \
+                         betaw={warp_amplitude:.1e} gapH(1e-3)={coarse:.6e} \
+                         gapH(1e-5)={fine:.6e} ratio={:.3e} (100x = continuous, 1x = a jump)",
+                        coarse / fine.max(f64::MIN_POSITIVE)
+                    ),
+                    (Err(error), _) | (_, Err(error)) => println!(
+                        "[2695-INT] degree={degree} knots={label} pw={pw} \
+                         betaw={warp_amplitude:.1e} REFUSED: {error}"
+                    ),
+                }
+            }
         }
     }
 }

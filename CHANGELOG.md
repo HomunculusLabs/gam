@@ -1,5 +1,73 @@
 ## Unreleased
 
+- **A monotone warp's corner is its boundary knot's MULTIPLICITY, and no
+  extrapolation rule can remove it (#2695).** `0167ed853` gave the warp basis a
+  linear tail so `I′_j` would stop stepping at the knot hull's edge, and the
+  witness fit. It did not close the issue: a warp with real amplitude still
+  refused at degree 2, 3 and 4, all on OBJECTIVE rejections, while the same data
+  fitted cleanly with the `linkwiggle(...)` term removed.
+
+  **What no degree helps means, measured.** `f19e2bee4` reads the one-sided gap
+  in `I^(k)` across a point at `h = 1e-3` and `h = 1e-6`; a ratio of `1e3` says
+  the gap falls with `h` (continuous), `1e0` says it does not (a step):
+
+  | degree | interior knot | hull edge (linear tail) |
+  |---|---|---|
+  | 2 | steps at order **2** (2.0) | steps at order **2** (2.0) |
+  | 3 | steps at order **3** (6.0) | steps at order **2** (6.0) |
+  | 4 | steps at order **4** (24) | steps at order **2** (12) |
+  | 5 | no step at `k ≤ 4` | steps at order **2** (20) |
+
+  The hull edge steps at order 2 at EVERY degree — the tail zeroes `I″` while
+  the interior one-sided `I″(right⁻)` is `2, 6, 12, 20`. That is why the
+  four-arm degree sweep found no degree that helps: raising the degree moves the
+  INTERIOR step up the tower and leaves the edge exactly where it was.
+
+  **Why order 2 is the order that bites.** `m1 = 1 + Σ_j βw_j·I′_j(q1)` enters
+  the event Jacobian `g = η_t′ + m1·q̇₀`, so `∂²m1/∂βw_j∂β_thr = I″_j·∂q1/∂β_thr`
+  is an entry of the observed information `H` carrying `I″_j` with **no `βw`
+  factor** — it survives at `βw = 0`. `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is inside the
+  accept test, so a step in `I″` is a step in the OBJECTIVE, and
+  `actual/predicted` cannot approach `1` at any step size. (The channel is live
+  only on EVENT rows: `log g` is added when `w·d ≠ 0`, so a censored crossing row
+  reports "continuous" for the wrong reason.)
+
+  **Why a better tail is not available.** At a clamped edge most columns have
+  `I′ = 0` and `I″ ≠ 0` — at degree 2 the right edge carries `I′ = [0, 0, 0, 2]`
+  and `I″ = [0, 0, −1, 2]`. A monotone `C²` extension of a column with
+  `I′(e) = 0` and `I″(e) < 0` **does not exist**: `C²` forces
+  `I′(e+ε) ≈ I″(e)·ε < 0`. The corner is not the extrapolation rule; it is the
+  boundary knot's multiplicity (`degree + 1` on a clamped vector), and the cure
+  is a knot vector whose ends are SIMPLE.
+
+  **The repair.** Two pieces, one contract — *the warp is one `C^{degree−1}`
+  function on all of `ℝ`*:
+
+  * `gam_terms::basis::ispline_ramp_basis_dense` evaluates the I-spline as what
+    it is — `I_c(x) = ∫_{t_{c+1}}^{x} M_{c+1}`, exactly `0` before that support
+    and `1` after — for ANY knot vector. `create_ispline_dense` computes the
+    same right-cumulative sum but reads it only where the degree-`bs` B-splines
+    are a partition of unity and imposes `0`/`1` outside by convention; that
+    convention is exactly right on a clamped vector (pinned: the two agree to
+    `1e-12` at every degree, inside the hull and outside it) and wrong on any
+    other, because a ramp whose support runs past that interval gets truncated
+    mid-rise. Evaluating on a padded knot vector removes the truncation without
+    changing a single clamped value.
+  * `gam_terms::basis::monotone_warp_knots` builds the warp's knots as
+    `num_internal_knots + 1` uniform spans across the seed range, continued by
+    `degree` further spans at the same width on each side, all knots simple. The
+    column count is unchanged (`num_internal_knots + degree` either way), so
+    nothing downstream changes shape.
+
+  `monotone_wiggle_basis_with_derivative_order` is now one call into the ramp
+  evaluator: the hull, the clamp, the linear tail and the `orders ≥ 2 → 0` rule
+  are all deleted, not patched. Warp blocks (survival link and time wiggle,
+  GAMLSS, BMS) build their knots with the warp generator;
+  `initializewiggle_knots_from_seed` stays clamped for bases evaluated on FIXED
+  data — a response transform — where a boundary knot's multiplicity is
+  invisible because the evaluation point never moves across it.
+
+
 - **A negative-curvature saddle escape now judges its own trial against the
   CRITERION's resolution, and the adjudication is no longer gated by the
   reseed's one-shot budget (#2612).** `adjudicate_negative_curvature` derives

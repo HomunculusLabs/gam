@@ -692,7 +692,7 @@ impl BinomialLocationScaleWiggleFamily {
         degree: usize,
         num_internal_knots: usize,
     ) -> Result<Array1<f64>, String> {
-        initializewiggle_knots_from_seed(q_seed, degree, num_internal_knots)
+        crate::wiggle::monotone_warp_knots_from_seed(q_seed, degree, num_internal_knots)
     }
 
     pub(crate) fn wiggle_basiswith_options(

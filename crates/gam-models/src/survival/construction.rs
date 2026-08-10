@@ -3964,7 +3964,7 @@ pub fn build_survival_timewiggle_from_baseline(
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
-    let knots = crate::wiggle::initializewiggle_knots_from_seed(
+    let knots = crate::wiggle::monotone_warp_knots_from_seed(
         seed.view(),
         cfg.degree,
         cfg.num_internal_knots,

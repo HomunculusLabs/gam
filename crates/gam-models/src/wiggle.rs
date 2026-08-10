@@ -1,10 +1,7 @@
 use crate::parameter_block::ParameterBlockInput;
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use gam_solve::pirls::LinearInequalityConstraints;
-use gam_terms::basis::{
-    BasisOptions, Dense, KnotSource, create_basis, create_ispline_derivative_dense,
-    ispline_function_penalties,
-};
+use gam_terms::basis::ispline_function_penalties;
 use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
 
@@ -59,12 +56,13 @@ pub(crate) struct SelectedWiggleBasis {
     pub penalty_metadata: WigglePenaltyMetadata,
 }
 
-// #1521: relocated DOWN into `gam_terms::basis` (was a gamlss/wiggle helper).
-// The knot-generation primitive carries no model-family type, so family modules
-// and this module's own callers consume it from the basis layer via this
-// re-export — keeping every `crate::wiggle::initializewiggle_knots_from_seed`
-// call site (gamlss / bms / transformation-normal) resolving unchanged.
-pub(crate) use gam_terms::basis::initializewiggle_knots_from_seed;
+// gam#2695: the WARP knot generator. A monotone warp is composed onto a
+// β-dependent index, so a boundary knot's multiplicity is a step in the basis's
+// own derivative tower and therefore in the inner objective. Warp blocks build
+// their knots here; the clamped `gam_terms::basis::initializewiggle_knots_from_seed`
+// stays for bases evaluated on FIXED data — a response transform — where the
+// evaluation point never moves across that boundary.
+pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 
 #[inline]
 pub(crate) fn monotone_wiggle_internal_degree(degree: usize) -> Result<usize, String> {
@@ -329,7 +327,7 @@ pub fn buildwiggle_block_input_from_seed(
     seed: ArrayView1<'_, f64>,
     cfg: &WiggleBlockConfig,
 ) -> Result<(ParameterBlockInput, Array1<f64>), String> {
-    let knots = initializewiggle_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
+    let knots = monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
     let block = buildwiggle_block_input_from_knots(
         seed,
         &knots,
@@ -348,110 +346,43 @@ pub(crate) fn monotone_wiggle_basis_from_knots(
     monotone_wiggle_basis_with_derivative_order(seed, knots, degree, 0)
 }
 
-/// The modelling interval `[left, right]` of a monotone-wiggle knot vector —
-/// the hull outside which the raw I-spline basis is constant.
+/// A monotone warp basis and every derivative order of it, as ONE function on
+/// all of `ℝ`.
 ///
-/// `None` when the vector is too short or the hull is degenerate; the caller
-/// then evaluates the raw basis, which owns that error.
-fn monotone_wiggle_knot_hull(knots: &Array1<f64>, internal_degree: usize) -> Option<(f64, f64)> {
-    let bs_degree = internal_degree.checked_add(1)?;
-    let num_bspline_basis = knots.len().checked_sub(bs_degree + 1)?;
-    let left = *knots.get(bs_degree)?;
-    let right = *knots.get(num_bspline_basis)?;
-    (left.is_finite() && right.is_finite() && left < right).then_some((left, right))
-}
-
-/// The raw, saturating I-spline value basis — `gam_terms`'s own convention,
-/// used here only as the interior half of the warp below.
-fn monotone_wiggle_saturating_value(
-    seed: ArrayView1<'_, f64>,
-    knots: &Array1<f64>,
-    internal_degree: usize,
-) -> Result<Array2<f64>, String> {
-    let (basis, _) = create_basis::<Dense>(
-        seed,
-        KnotSource::Provided(knots.view()),
-        internal_degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(basis.as_ref().clone())
-}
-
-/// A monotone warp basis and every derivative order of it, as ONE `C¹`
-/// function on all of `ℝ`: the I-spline inside its knot hull, extended
-/// LINEARLY outside it.
+/// # What a warp needs that a shape basis does not (gam#2695)
 ///
-/// # Why a linear tail rather than the raw basis's saturation (gam#2695)
-///
-/// `create_ispline_dense` is CONSTANT outside `[left, right]` and says so; its
-/// own doc records the reason (saturation keeps the entries inside `[0, 1]`)
-/// and tells callers who need something else to "clamp inputs and add their own
-/// extrapolation correction". This is that correction, and the warp is the
-/// caller that needs it, because a constant-extended I-spline has a **corner**
-/// at each end of the hull: `I_j` is continuous there while `I'_j` steps from
-/// its interior one-sided slope straight to `0`.
-///
-/// A corner in a *shape basis on fixed data* is harmless — the evaluation point
-/// never moves. A corner in a *warp* is not, because the warp is composed onto
-/// the model's own index, `q = q₀ + Σ_j βw_j·I_j(q₀)`, and `q₀ = −η_t·e^{−η_ls}`
-/// moves with β while the hull is frozen at the seed `q₀`. Every quantity the
-/// joint-Newton machinery builds from the composition then inherits the corner,
-/// and two of them carry `I'_j` with **no `βw` factor at all**:
+/// A shape basis is evaluated on fixed data: its evaluation point never moves,
+/// so how smooth it is at a knot is invisible. A WARP is composed onto the
+/// model's own index — `q = q₀ + Σ_j βw_j·I_j(q₀)` with
+/// `q₀ = −η_t·e^{−η_ls}` — so `q₀` moves with β while the knots stay where the
+/// seed put them, and the inner objective differentiates the composition:
 ///
 /// ```text
-///     ∂²q/∂β_thr ∂βw_j = I'_j(q₀)·∂q₀/∂β_thr        ∂q̇/∂βw_j = I'_j(q₀)·r
+///     ℓ            reads  w′        (the event Jacobian q̇ = (1 + w′)·r)
+///     ∇ℓ           reads  w″
+///     H            reads  w‴        and Φ = ½Σ g(λ(Z_JᵀHZ_J)) reads H
+///     ∇Φ = ∂H/∂β   reads  w⁗
 /// ```
 ///
-/// so the observed information jumps by `O(1)` across the hull edge **even when
-/// the warp is switched off**. The Firth/Jeffreys value `Φ = ½Σ g(λ(Z_JᵀHZ_J))`
-/// is part of the inner objective the trust region accepts on, so the objective
-/// itself is discontinuous there. Measured on
-/// `survival_location_scale_saved_fit_preserves_linkwiggle_metadata`: one row's
-/// exit `q₀` sits `1.3e-7` from `right`, `I'_3` steps `9.9999823e-1 → 0`, `H₅₅`
-/// jumps by `1.0000`, `Φ` drops `0.5522`, and `actual_reduction` is negative
-/// while `predicted_reduction` is positive at every radius down to `1e-12`.
-/// Raising the spline degree does not touch it — measured at degree 2, 3, 4
-/// and 5, all refusing — because the corner is a property of the extrapolation
-/// convention, not of the polynomial degree.
+/// `Φ` is part of the objective the trust region accepts on, so a STEP in any
+/// of `w′ … w‴` is a step in the objective, and `actual/predicted` cannot
+/// approach `1` at any step size. The warp must therefore be `C³`, and each
+/// column is `C^{degree−1−m}` at a knot of multiplicity `m`.
 ///
-/// # The extension, and why it is the right one
+/// # Why this is one line now
 ///
-/// With `x̄ = clamp(x, left, right)`:
-///
-/// ```text
-///     I_j(x)   = I_j(x̄) + I'_j(x̄)·(x − x̄)
-///     I'_j(x)  = I'_j(x̄)
-///     I⁽ᵏ⁾_j(x) = I⁽ᵏ⁾_j(x) for x ∈ [left, right],  0 outside      (k ≥ 2)
-/// ```
-///
-/// * **Interior-identical.** For `x ∈ [left, right]` every order is
-///   bit-identical to the raw basis (`x̄ = x`, `x − x̄ = 0`), so no fit whose
-///   rows stay inside the hull changes at all.
-/// * **`C¹` on `ℝ`.** Value and first derivative agree at the join by
-///   construction — the linear piece is the basis's own first-order Taylor
-///   expansion about the boundary, so the two halves are one differentiable
-///   function rather than two functions that happen to meet.
-/// * **Monotone.** An I-spline is non-decreasing, so `I'_j(left) ≥ 0` and
-///   `I'_j(right) ≥ 0`: the tails have non-negative constant slope, and
-///   `w = Σ_j βw_j·I_j` with `βw ≥ 0` stays non-decreasing on all of `ℝ`. That
-///   is the property the monotone cone exists to guarantee, and it is preserved
-///   exactly; the `[0, 1]` RANGE is not, and is not what a warp needs (a warp
-///   is a monotone reparametrisation of an unbounded index, not a probability).
-/// * **No constants.** The slope, the join point and the anchor are all read
-///   off the basis; nothing is chosen.
-///
-/// This is the standard convention for a spline *transformation* as opposed to
-/// a spline *shape*: restricted / linear-tail splines are what flexible
-/// parametric survival models (Royston–Parmar, the sibling arm in this crate)
-/// use for exactly this reason.
-///
-/// Orders `k ≥ 2` are zero outside the hull because the tail is linear. That
-/// leaves `I''_j` discontinuous at the join — but `I''_j` reaches the objective
-/// only through `m₂ = Σ_j βw_j·I''_j`, i.e. weighted by the warp amplitude, in
-/// exactly the same way it is discontinuous at every INTERIOR knot of a
-/// degree-2 basis. The hull edge is therefore no rougher than a knot after
-/// this, which is the most a finite-degree spline can offer.
+/// It used to be the clamped I-spline inside its knot hull plus a hand-written
+/// linear tail outside it, because `create_ispline_dense` is constant outside
+/// the hull and a constant-extended I-spline has a corner there. The tail moved
+/// the corner from order 1 to order 2 and no further, and it could not move it
+/// further: at a clamped edge most columns have `I′ = 0` and `I″ ≠ 0`, and a
+/// monotone `C²` extension of a column with `I′(e) = 0 > I″(e)` does not exist
+/// (`I′` would have to go negative immediately). The corner is the boundary
+/// knot's MULTIPLICITY, not the extrapolation rule, and the cure is a knot
+/// vector whose ends are simple — [`gam_terms::basis::monotone_warp_knots`] —
+/// evaluated by [`gam_terms::basis::ispline_ramp_basis_dense`], which is the
+/// same ramp on all of `ℝ` and reproduces the clamped convention bit for bit
+/// wherever that convention was right.
 pub fn monotone_wiggle_basis_with_derivative_order(
     seed: ArrayView1<'_, f64>,
     knots: &Array1<f64>,
@@ -459,58 +390,13 @@ pub fn monotone_wiggle_basis_with_derivative_order(
     derivative_order: usize,
 ) -> Result<Array2<f64>, String> {
     let internal_degree = monotone_wiggle_internal_degree(degree)?;
-    let Some((left, right)) = monotone_wiggle_knot_hull(knots, internal_degree) else {
-        // Degenerate hull: defer to the raw basis, which owns the diagnosis.
-        return if derivative_order == 0 {
-            monotone_wiggle_saturating_value(seed, knots, internal_degree)
-        } else {
-            create_ispline_derivative_dense(seed, knots, internal_degree, derivative_order)
-                .map_err(|e| e.to_string())
-        };
-    };
-    // `clamp` propagates NaN, and every branch below leaves a non-finite row to
-    // the raw evaluator's own handling rather than inventing a tail for it.
-    let clamped = seed.mapv(|x| if x.is_finite() { x.clamp(left, right) } else { x });
-    if derivative_order >= 2 {
-        let mut interior =
-            create_ispline_derivative_dense(clamped.view(), knots, internal_degree, derivative_order)
-                .map_err(|e| e.to_string())?;
-        for (row, &x) in seed.iter().enumerate() {
-            if !(x >= left && x <= right) {
-                interior.row_mut(row).fill(0.0);
-            }
-        }
-        return Ok(interior);
-    }
-    let slope = create_ispline_derivative_dense(clamped.view(), knots, internal_degree, 1)
-        .map_err(|e| e.to_string())?;
-    if derivative_order == 1 {
-        return Ok(slope);
-    }
-    let mut value = monotone_wiggle_saturating_value(clamped.view(), knots, internal_degree)?;
-    if value.dim() != slope.dim() {
-        return Err(format!(
-            "monotone wiggle value/derivative shape mismatch: value {:?}, derivative {:?}",
-            value.dim(),
-            slope.dim()
-        ));
-    }
-    for (row, (&x, &x_bar)) in seed.iter().zip(clamped.iter()).enumerate() {
-        if !x.is_finite() {
-            continue;
-        }
-        let offset = x - x_bar;
-        if offset == 0.0 {
-            continue;
-        }
-        for col in 0..value.ncols() {
-            let s = slope[[row, col]];
-            if s != 0.0 {
-                value[[row, col]] += s * offset;
-            }
-        }
-    }
-    Ok(value)
+    gam_terms::basis::ispline_ramp_basis_dense(
+        seed,
+        knots.view(),
+        internal_degree,
+        derivative_order,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The `β ≥ 0` system a monotone-wiggle block is subject to, as an explicit
@@ -635,7 +521,7 @@ pub(crate) fn select_wiggle_basis_from_seed(
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
-    let knots = initializewiggle_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
+    let knots = monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
     let canonical = canonical_wiggle_function_penalties(
         &knots,
         cfg.degree,
@@ -656,6 +542,7 @@ pub(crate) fn select_wiggle_basis_from_seed(
 mod tests {
     use super::*;
     use crate::model_types::PenaltySpec;
+    use gam_terms::basis::initializewiggle_knots_from_seed;
     use ndarray::Array1;
 
     fn dense_penalty(spec: &PenaltySpec) -> &Array2<f64> {
@@ -1023,124 +910,104 @@ mod tests {
     }
 }
 
-/// gam#2695 — the monotone warp basis is ONE `C¹` function on `ℝ`.
+/// gam#2695 — the monotone warp basis is ONE `C^{degree−1}` function on `ℝ`.
 ///
-/// The composed warp `q = q₀ + Σ_j βw_j·I_j(q₀)` is differentiated by the
-/// joint-Newton machinery in a state where `q₀` moves with β while the knot
-/// hull is frozen at the seed `q₀`, so the basis is evaluated on both sides of
-/// the hull edge during a single inner solve. A basis with a corner there hands
-/// the solver a first derivative that jumps, and — because two of the warp's
-/// chain-rule channels carry `I'_j` with no `βw` factor — an observed
-/// information, and hence a Firth objective, that jumps with it.
+/// The composed warp `q = q₀ + Σ_j βw_j·I_j(q₀)` is differentiated three times
+/// by the joint-Newton machinery — `ℓ` reads `w′`, `∇ℓ` reads `w″`, and `H`
+/// (which the Firth value `Φ = ½Σ g(λ(Z_JᵀHZ_J))` is a function of, inside the
+/// accept test) reads `w‴` — in a state where `q₀` moves with β while the knots
+/// stay where the seed put them. A basis that STEPS at any of those orders puts
+/// that step into the objective, and `actual/predicted` then cannot approach
+/// `1` at any step size.
 ///
 /// These pins are stated on the basis itself, where the contract lives, rather
 /// than on the fit that exposed it.
 #[cfg(test)]
-mod linear_tail_warp_basis_2695_tests {
+mod warp_basis_smoothness_2695_tests {
     use super::*;
-    use ndarray::{Array1, array};
-
-    /// A clamped degree-2 (public) knot vector with two internal knots — the
-    /// shipped `linkwiggle(degree=2, internal_knots=2)` shape — over `[-1, 2]`.
-    fn knots() -> Array1<f64> {
-        array![-1.0, -1.0, -1.0, 0.0, 1.0, 2.0, 2.0, 2.0]
-    }
+    use gam_terms::basis::monotone_warp_knots;
+    use ndarray::Array1;
 
     const DEGREE: usize = 2;
-    const LEFT: f64 = -1.0;
-    const RIGHT: f64 = 2.0;
+
+    /// The shipped `linkwiggle(degree=2, internal_knots=2)` shape over
+    /// `[-1, 2]`, built by the WARP generator: simple knots throughout, the
+    /// grid continued by `degree` spans at each end.
+    fn knots() -> Array1<f64> {
+        monotone_warp_knots(-1.0, 2.0, DEGREE, 2).expect("warp knots")
+    }
 
     fn basis_at(x: f64, order: usize) -> Array1<f64> {
-        let seed = array![x];
+        let seed = Array1::from_elem(1, x);
         monotone_wiggle_basis_with_derivative_order(seed.view(), &knots(), DEGREE, order)
             .expect("warp basis")
             .row(0)
             .to_owned()
     }
 
-    /// Positive control: the interior is bit-identical to the raw saturating
-    /// basis, so nothing below asserts a property of a basis that changed
-    /// everywhere.
+    /// The contract, at every knot and every order the objective reads.
+    ///
+    /// Scale-free: the one-sided gap must FALL with the step. A step leaves it
+    /// flat, which is what the clamped vector does at order 2 — see
+    /// `gam_terms::basis::ispline_ramp::tests::the_clamped_vector_steps_at_order_two_at_every_degree`
+    /// for that negative control.
     #[test]
-    fn the_interior_is_bitwise_unchanged_by_the_tail() {
-        let internal_degree = monotone_wiggle_internal_degree(DEGREE).expect("internal degree");
-        let inside = Array1::from_vec(vec![-1.0, -0.5, 0.0, 0.75, 1.5, 2.0]);
-        let extended =
-            monotone_wiggle_basis_with_derivative_order(inside.view(), &knots(), DEGREE, 0)
-                .expect("extended value");
-        let raw = monotone_wiggle_saturating_value(inside.view(), &knots(), internal_degree)
-            .expect("raw value");
-        assert_eq!(extended.dim(), raw.dim());
-        for (a, b) in extended.iter().zip(raw.iter()) {
-            assert_eq!(
-                a.to_bits(),
-                b.to_bits(),
-                "inside the hull the tail must change nothing: {a} vs {b}"
-            );
-        }
-    }
-
-    /// The defect, at the boundary the witness actually sits on: the first
-    /// derivative must not step across the hull edge.
-    #[test]
-    fn the_first_derivative_is_continuous_across_both_hull_edges() {
-        let h = 1.0e-7;
-        for edge in [LEFT, RIGHT] {
-            let inner = basis_at(if edge == LEFT { edge + h } else { edge - h }, 1);
-            let outer = basis_at(if edge == LEFT { edge - h } else { edge + h }, 1);
-            let at = basis_at(edge, 1);
-            for j in 0..at.len() {
-                let scale = 1.0 + at[j].abs();
+    fn every_derivative_below_the_degree_is_continuous_at_every_knot() {
+        let knots = knots();
+        for order in 0..DEGREE {
+            for &knot in knots.iter() {
+                let gap = |h: f64| -> f64 {
+                    let lo = basis_at(knot - h, order);
+                    let hi = basis_at(knot + h, order);
+                    lo.iter()
+                        .zip(hi.iter())
+                        .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()))
+                };
+                let coarse = gap(1.0e-3);
+                let fine = gap(1.0e-6);
                 assert!(
-                    (outer[j] - at[j]).abs() <= 1.0e-9 * scale,
-                    "I'_{j} steps at the {edge} hull edge: outside={:.9e} at-edge={:.9e} \
-                     (inside={:.9e})",
-                    outer[j],
-                    at[j],
-                    inner[j],
-                );
-                assert!(
-                    (inner[j] - at[j]).abs() <= 1.0e-6 * scale,
-                    "I'_{j} is not one-sided-continuous inside the {edge} hull edge: \
-                     inside={:.9e} at-edge={:.9e}",
-                    inner[j],
-                    at[j],
+                    fine <= coarse / 100.0 + 1.0e-12,
+                    "order {order} steps at knot {knot}: gap {coarse:.3e} at h=1e-3 and \
+                     {fine:.3e} at h=1e-6, a ratio of {:.2e} against the 1000x a continuous \
+                     derivative must give",
+                    coarse / fine.max(f64::MIN_POSITIVE),
                 );
             }
         }
     }
 
-    /// Non-vacuity for the test above: the boundary slope is materially
-    /// non-zero, so "continuous" is not being satisfied by a basis whose
-    /// derivative is zero on both sides anyway.
+    /// Non-vacuity for the pin above: the basis MOVES across those knots, so
+    /// "continuous" is not being satisfied by a table of zeros.
     #[test]
-    fn the_boundary_slope_the_tail_carries_is_materially_nonzero() {
-        for edge in [LEFT, RIGHT] {
-            let slope = basis_at(edge, 1);
-            let worst = slope.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+    fn the_basis_moves_materially_across_its_own_knots() {
+        let knots = knots();
+        let low = basis_at(knots[0] - 1.0, 0);
+        let high = basis_at(knots[knots.len() - 1] + 1.0, 0);
+        for j in 0..low.len() {
             assert!(
-                worst > 0.1,
-                "the {edge} hull edge must carry a real slope for the continuity pin to \
-                 mean anything; got max |I'| = {worst:.3e}"
+                (high[j] - low[j]).abs() > 0.5,
+                "column {j} must traverse its whole ramp across the knot vector; got \
+                 {:.3e} -> {:.3e}",
+                low[j],
+                high[j],
             );
         }
     }
 
     /// Value and derivative are one function: a central difference of the
-    /// VALUE reproduces the reported DERIVATIVE, on both tails and across each
-    /// join.
+    /// VALUE reproduces the reported DERIVATIVE, inside the knots and outside.
     #[test]
     fn the_value_and_its_reported_derivative_are_one_function() {
         let cbrt_eps = f64::EPSILON.cbrt();
-        for &x in &[-4.0, -2.5, LEFT, -0.25, 0.5, 1.25, RIGHT, 3.0, 6.0] {
+        for &x in &[-6.0_f64, -2.5, -1.0, -0.25, 0.5, 1.25, 2.0, 3.0, 7.0] {
             let h = cbrt_eps * (1.0 + x.abs());
             let analytic = basis_at(x, 1);
             let plus = basis_at(x + h, 0);
             let minus = basis_at(x - h, 0);
             for j in 0..analytic.len() {
-                // The joins are `C¹` but not `C²`, so a difference straddling
-                // one is only first-order accurate; keep the bound at the
-                // straddling accuracy rather than the interior one.
+                // A degree-2 warp is `C¹` but not `C²`, so a difference
+                // straddling a knot is only first-order accurate; keep the
+                // bound at the straddling accuracy rather than the interior one.
                 let fd = (plus[j] - minus[j]) / (2.0 * h);
                 let tol = 1.0e-4 * (1.0 + analytic[j].abs());
                 assert!(
@@ -1154,7 +1021,7 @@ mod linear_tail_warp_basis_2695_tests {
     }
 
     /// The warp stays a warp: every column is non-decreasing on all of `ℝ`, so
-    /// `w = Σ βw_j I_j` with `βw ≥ 0` is monotone outside the hull too.
+    /// `w = Σ βw_j I_j` with `βw ≥ 0` is monotone everywhere.
     #[test]
     fn every_column_is_non_decreasing_on_the_whole_line() {
         let grid = Array1::linspace(-8.0, 9.0, 341);
@@ -1184,40 +1051,29 @@ mod linear_tail_warp_basis_2695_tests {
         }
     }
 
-    /// The tail really is linear, and it is the basis's OWN boundary slope —
-    /// not a re-anchored or rescaled one.
+    /// Outside its own support a ramp is EXACTLY `0` or `1`, with every
+    /// derivative exactly zero — the property that lets the warp be extended to
+    /// all of `ℝ` with no tail convention at all.
     #[test]
-    fn the_tail_is_the_basis_own_first_order_expansion() {
-        for (edge, x) in [(LEFT, -5.0), (RIGHT, 7.5)] {
-            let anchor = basis_at(edge, 0);
-            let slope = basis_at(edge, 1);
-            let far = basis_at(x, 0);
-            for j in 0..far.len() {
-                let expected = anchor[j] + slope[j] * (x - edge);
-                assert!(
-                    (far[j] - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()),
-                    "column {j} at x={x}: tail={:.12e}, first-order expansion about {edge} \
-                     = {expected:.12e}",
-                    far[j],
-                );
-            }
-        }
-    }
-
-    /// Orders `≥ 2` are exactly zero on the linear tail, which is what makes
-    /// the tail linear rather than merely close to it.
-    #[test]
-    fn the_second_and_third_derivatives_vanish_on_the_tail() {
-        for order in [2usize, 3] {
-            for x in [-6.0, -3.0, 4.0, 11.0] {
-                let row = basis_at(x, order);
-                for (j, value) in row.iter().enumerate() {
+    fn each_column_is_flat_outside_its_own_support() {
+        let knots = knots();
+        for far in [knots[0] - 3.0, knots[knots.len() - 1] + 3.0] {
+            let value = basis_at(far, 0);
+            for order in 1..=3usize {
+                let derivative = basis_at(far, order);
+                for j in 0..derivative.len() {
                     assert_eq!(
-                        value.to_bits(),
-                        0.0f64.to_bits(),
-                        "order {order} column {j} at x={x} must be +0.0 on the tail, got {value}"
+                        derivative[j], 0.0,
+                        "column {j} order {order} at x={far} must be exactly zero"
                     );
                 }
+            }
+            for j in 0..value.len() {
+                assert!(
+                    value[j] == 0.0 || value[j] == 1.0,
+                    "column {j} at x={far} must be exactly 0 or 1, got {}",
+                    value[j]
+                );
             }
         }
     }

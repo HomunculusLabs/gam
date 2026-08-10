@@ -115,7 +115,7 @@ fn dispersion_tweedie_nll_tower(
     dispersion_tweedie_nll_generic::<gam_math::jet_tower::Tower4<2>>(yi, eta_mu, eta_d, p, wi)
 }
 use crate::wiggle::{
-    initializewiggle_knots_from_seed, monotone_wiggle_internal_degree, split_wiggle_penalty_orders,
+    monotone_wiggle_internal_degree, split_wiggle_penalty_orders,
 };
 use gam_data::encode_recordswith_inferred_schema;
 use gam_terms::basis::{

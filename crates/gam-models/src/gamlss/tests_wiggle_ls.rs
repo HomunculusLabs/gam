@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 use super::*;
+use gam_terms::basis::initializewiggle_knots_from_seed;
 
 /// Build the nontrivial-design BLS Wiggle family + designs + wiggle block
 /// shared by the FD-gradient and FD-joint-Hessian tests below.
