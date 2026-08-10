@@ -183,11 +183,21 @@ silently reinterpreted:
   per coordinate) cannot take a single time margin;
 - a non-zero smooth anchor, coefficient bounds, or linear constraints on the
   log-slope surface are stated in the covariate coordinate chart, and the time
-  tensor product is a different chart;
-- a fit that used the margin cannot be **saved** yet: the on-disk contract
-  rebuilds the log-slope block from its covariate term spec, which would
-  evaluate a different model at predict. The fit itself is valid — read the
-  coefficients and the slope surface off the fit result.
+  tensor product is a different chart.
+
+Saving and prediction carry the margin. The resolved knots ride on the saved
+model next to the threshold and log-σ margins, and predict rebuilds the block as
+`X_cov ⊗ᵣ B(log t)` against *those* knots, so a prediction sample can never move
+the basis by re-estimating quantiles. Two consequences worth stating, because
+they are what makes the replay faithful rather than merely well-typed:
+
+- a predicted survival curve evaluates `b(t)` **at each time on the curve**, not
+  at the row's observed exit time. `S(t) = Φ(−η(t))` with `η(t) = q(t)c(t) +
+  b(t)z`, so freezing `b` at the exit time would return a different model at
+  every point of the curve but one;
+- the leave-one-out (`--alo`) replay rebuilds all three follow-up channels —
+  entry, exit, and exit-rate — because that is what the row program reads. With
+  only the exit channel it would report the influence of a time-constant slope.
 
 ## Externally calibrated score (raw `z_column`)
 

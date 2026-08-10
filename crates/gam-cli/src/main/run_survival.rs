@@ -1144,6 +1144,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                         .to_string(),
                     resolved_marginalspec,
                     resolved_logslopespec,
+                    logslope_time_basis: fit.logslope_time_basis.clone(),
                     logslope_formula,
                     z_column: z_column_name.clone(),
                     latent_z_normalization: SavedLatentZNormalization {

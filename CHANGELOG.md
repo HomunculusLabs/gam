@@ -1,5 +1,46 @@
 ## Unreleased
 
+- **A follow-up-varying marginal slope can now be SAVED, predicted from, and
+  leave-one-out replayed (#2765, #2767).** `logslope_time_k` fitted a real model
+  since the kernel work landed, but persistence refused it outright: the on-disk
+  contract rebuilt the log-slope block from its covariate term spec alone, which
+  names `p_cov` columns against a `p_cov · p_time` coefficient vector. A fitted
+  surface that cannot leave the process is half a feature.
+
+  **What was missing was one fact, not one code path.** The block's authority is
+  the covariate spec *plus* the resolved time margin, and only the first half was
+  persisted. `logslope_time_basis` (degree + knots) now rides on the saved model
+  beside the threshold and log-σ margins it was built by the same primitive as,
+  and every consumer rebuilds `X_cov ⊗ᵣ B(log t)` from it. The knots are fit-time
+  values, so a prediction sample can never move the basis by re-estimating
+  quantiles — the same contract the location-scale margins already hold.
+
+  **Two places where "replay it" is not the obvious thing.**
+
+  A predicted survival curve evaluates `b` **at each time on the curve**, not at
+  the row's observed exit time. The family is `S(t) = Φ(−η(t))` with
+  `η(t) = q(t)·c(t) + b(t)·z`; freezing `b` at `t_exit` would return a curve
+  assembled from a different model at every point but one. The per-`(row, t)`
+  evaluator therefore re-tensors the row's covariate factor against the margin at
+  the time being predicted, exactly as it already rebuilds the time basis there.
+
+  The leave-one-out (`--alo`) replay re-evaluates the row program, which reads
+  the slope at entry, at exit, and as an exit-time rate — three channels, because
+  the likelihood is `log S(t₁) − log S(t₀)` and an event row also carries
+  `log η′(t₁)`. Handing it the exit design alone would not have been an
+  approximation; it would have reported the influence of a time-CONSTANT slope,
+  and the widths would have agreed while it did so. All three channels are
+  rebuilt, and the ALO input refuses a follow-up triple whose shapes disagree
+  rather than indexing through them.
+
+  **What guards the replay.** One function evaluates the log-slope time axis, so
+  the batch replay and the per-cell replay cannot ask for different bases; a test
+  asserts the replayed exit margin is the fit-time margin *bit for bit* rather
+  than merely close, because a margin that is nearly right is a model that is
+  quietly wrong. Load-time validation refuses a saved block whose width is not a
+  multiple of its own margin — a payload in that state cannot be replayed under
+  any covariate design at all.
+
 - **The multinomial's Firth/Jeffreys separation certificate now judges the
   curvature the fit HAS (`H + S_λ`) instead of the likelihood's alone (`H`),
   because reading `H` alone made "arm only on separation evidence" fire on every

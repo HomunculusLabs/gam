@@ -504,6 +504,17 @@ pub struct FittedModelPayload {
     pub logslope_baseline: Option<f64>,
     #[serde(default)]
     pub logslope_baselines: Option<Vec<f64>>,
+    /// Resolved follow-up time margin of the survival marginal-slope log-slope
+    /// block (gam#2765, gam#2767). `None` is the time-constant slope every model
+    /// saved before this existed carries.
+    ///
+    /// With a margin present the fitted block's design is `X_cov ⊗ᵣ B(log t)`
+    /// while `resolved_termspec_logslope` still names only the covariate factor,
+    /// so prediction MUST rebuild the tensor product against these knots. They
+    /// are fit-time values, never prediction-time estimates — the same contract
+    /// `threshold_time_basis` / `log_sigma_time_basis` hold for location-scale.
+    #[serde(default)]
+    pub logslope_time_basis: Option<SurvivalCovariateTimeBasis>,
     #[serde(default)]
     pub score_warp_runtime: Option<SavedCompiledFlexBlock>,
     #[serde(default)]
@@ -876,6 +887,7 @@ impl FittedModelPayload {
             marginal_baseline: None,
             logslope_baseline: None,
             logslope_baselines: None,
+            logslope_time_basis: None,
             score_warp_runtime: None,
             link_deviation_runtime: None,
             influence_absorber_width: None,
@@ -1333,12 +1345,12 @@ fn validate_survival_covariate_time_basis(
             .degree
             .checked_add(2)
             .ok_or_else(|| FittedModelError::SchemaMismatch {
-                reason: format!("location-scale survival saved {label} degree overflows"),
+                reason: format!("saved {label} degree overflows"),
             })?;
     if basis.knots.len() < minimum_knots {
         return Err(FittedModelError::SchemaMismatch {
             reason: format!(
-                "location-scale survival saved {label} knot vector has length {}, but degree {} requires at least {minimum_knots}",
+                "saved {label} knot vector has length {}, but degree {} requires at least {minimum_knots}",
                 basis.knots.len(),
                 basis.degree
             ),
@@ -1350,7 +1362,7 @@ fn validate_survival_covariate_time_basis(
     {
         return Err(FittedModelError::SchemaMismatch {
             reason: format!(
-                "location-scale survival saved {label} knots must be finite, nondecreasing, and span a nonzero interval"
+                "saved {label} knots must be finite, nondecreasing, and span a nonzero interval"
             ),
         });
     }
@@ -1393,7 +1405,8 @@ fn validate_survival_location_scale_saved_fit(
         "log-sigma",
     )?;
     if let Some(basis) = structure.threshold_time_basis.as_ref() {
-        let width = validate_survival_covariate_time_basis(basis, "threshold time basis")?;
+        let width =
+            validate_survival_covariate_time_basis(basis, "location-scale survival threshold time basis")?;
         if p_threshold % width != 0 {
             return Err(FittedModelError::SchemaMismatch {
                 reason: format!(
@@ -1403,7 +1416,8 @@ fn validate_survival_location_scale_saved_fit(
         }
     }
     if let Some(basis) = structure.log_sigma_time_basis.as_ref() {
-        let width = validate_survival_covariate_time_basis(basis, "log-sigma time basis")?;
+        let width =
+            validate_survival_covariate_time_basis(basis, "location-scale survival log-sigma time basis")?;
         if p_log_sigma % width != 0 {
             return Err(FittedModelError::SchemaMismatch {
                 reason: format!(
@@ -1653,6 +1667,27 @@ fn validate_survival_marginal_slope_replay_state(
                 "survival marginal-slope saved {fit_label} scalar latent-score covariance must be a finite non-negative 1x1 matrix"
             ),
         });
+    }
+    // gam#2765 / gam#2767: with a follow-up margin the log-slope block's design
+    // is `X_cov ⊗ᵣ B(log t)`, so its coefficient count is `p_cov · p_time` and
+    // must be divisible by the saved margin's width. A model whose block width
+    // is not a multiple of its own margin cannot be replayed under ANY covariate
+    // design, so this is a corrupt-payload check, not a compatibility one — and
+    // catching it here is what stops the predictor from silently reshaping a
+    // coefficient vector against the wrong factorization.
+    if let Some(basis) = payload.logslope_time_basis.as_ref() {
+        let width = validate_survival_covariate_time_basis(
+            basis,
+            &format!("survival marginal-slope {fit_label} log-slope time basis"),
+        )?;
+        let p_logslope = fit.blocks[2].beta.len();
+        if width == 0 || p_logslope % width != 0 {
+            return Err(FittedModelError::SchemaMismatch {
+                reason: format!(
+                    "survival marginal-slope saved {fit_label} log-slope width {p_logslope} is not divisible by its saved time-margin width {width}"
+                ),
+            });
+        }
     }
     match (
         payload.influence_absorber_width,

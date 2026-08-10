@@ -4130,6 +4130,138 @@ pub fn replay_time_varying_survival_covariate_template(
     )
 }
 
+/// The log-slope block's follow-up margin evaluated at arbitrary times
+/// (gam#2765, gam#2767).
+///
+/// The margin is a B-spline in `log t` on the fit's own knots. At fit time the
+/// knots are placed by quantile and the design is a by-product of that build; at
+/// prediction time the knots are read back from the saved model and the SAME
+/// spec is re-evaluated, so a prediction sample can never move the basis. This
+/// is the only B-spline evaluation on the log-slope time axis, so the batch
+/// replay below and the per-`(row, t)` survival-curve replay cannot disagree
+/// about which basis they are asking for.
+pub fn logslope_time_margin_rows(
+    time_basis: &SurvivalCovariateTimeBasis,
+    times: ndarray::ArrayView1<'_, f64>,
+) -> Result<Array2<f64>, String> {
+    let log_times = times.mapv(|t| t.max(1e-12).ln());
+    let knots = Array1::from_vec(time_basis.knots.clone());
+    let build = build_bspline_basis_1d(
+        log_times.view(),
+        &BSplineBasisSpec {
+            degree: time_basis.degree,
+            penalty_order: 2,
+            knotspec: BSplineKnotSpec::Provided(knots),
+            double_penalty: false,
+            identifiability: BSplineIdentifiability::None,
+            boundary: OneDimensionalBoundary::Open,
+            boundary_conditions: BSplineBoundaryConditions::default(),
+        },
+    )
+    .map_err(|e| format!("failed to replay the log-slope time margin: {e}"))?;
+    Ok(build.design.to_dense())
+}
+
+/// All three follow-up channels of a log-slope block, replayed from the saved
+/// margin (gam#2765, gam#2767).
+///
+/// The row program reads the slope at three places — the row's entry time, its
+/// exit time, and the exit-time rate — because the likelihood is
+/// `log S(t₁) − log S(t₀)` and an event row also carries `log η′(t₁)`. Any
+/// consumer that re-evaluates that program off a saved model (the leave-one-out
+/// replay, above all) needs all three; handing it the exit design alone would
+/// silently evaluate a time-CONSTANT slope, which is a different model.
+pub struct LogslopeFollowUpReplayDesigns {
+    pub entry: DesignMatrix,
+    pub exit: DesignMatrix,
+    pub derivative_exit: DesignMatrix,
+}
+
+/// Replay every follow-up channel of a log-slope block from its saved margin.
+pub fn replay_logslope_follow_up_designs(
+    age_entry: &Array1<f64>,
+    age_exit: &Array1<f64>,
+    time_basis: &SurvivalCovariateTimeBasis,
+    covariate_design: &DesignMatrix,
+) -> Result<LogslopeFollowUpReplayDesigns, String> {
+    let template = replay_time_varying_survival_covariate_template(
+        age_entry, age_exit, time_basis, "logslope",
+    )?;
+    let SurvivalCovariateTermBlockTemplate::TimeVarying {
+        time_basis_entry,
+        time_basis_exit,
+        time_basis_derivative_exit,
+        ..
+    } = &template
+    else {
+        return Err(
+            "replaying a log-slope time margin produced a time-constant template".to_string(),
+        );
+    };
+    if covariate_design.nrows() != time_basis_exit.nrows() {
+        return Err(format!(
+            "log-slope follow-up replay has {} covariate rows against {} time rows",
+            covariate_design.nrows(),
+            time_basis_exit.nrows(),
+        ));
+    }
+    if covariate_design.ncols() == 0 || time_basis_exit.ncols() == 0 {
+        return Err(format!(
+            "a follow-up-varying log-slope needs a non-empty tensor product, got {}x{}",
+            covariate_design.ncols(),
+            time_basis_exit.ncols(),
+        ));
+    }
+    let kron = |basis: &Array2<f64>| {
+        crate::survival::location_scale::rowwise_kronecker(covariate_design, basis)
+    };
+    Ok(LogslopeFollowUpReplayDesigns {
+        entry: kron(time_basis_entry),
+        exit: kron(time_basis_exit),
+        derivative_exit: kron(time_basis_derivative_exit),
+    })
+}
+
+/// The log-slope block's fitted design, rebuilt from the covariate factor and
+/// the fit's own resolved time margin (gam#2765, gam#2767).
+///
+/// A follow-up-varying log-slope block does not own the covariate design its
+/// term spec describes; it owns the row-wise Kronecker product
+/// `X_cov ⊗ᵣ B(log t)`, evaluated at the time each row's slope is being read
+/// at. At fit time that is the row's EXIT time, which is the convention the
+/// block's `ParameterBlockSpec` eta already uses; at prediction time it is
+/// whichever time the survival curve is being evaluated at, because `b(t)` moves
+/// along the curve exactly as `q(t)` does.
+///
+/// Rebuilding it from the term spec alone — `p_cov` columns against a
+/// `p_cov · p_time` coefficient vector — is the failure this function exists to
+/// make impossible.
+pub fn replay_logslope_time_margin_design(
+    times: ndarray::ArrayView1<'_, f64>,
+    time_basis: &SurvivalCovariateTimeBasis,
+    covariate_design: &DesignMatrix,
+) -> Result<DesignMatrix, String> {
+    if covariate_design.nrows() != times.len() {
+        return Err(format!(
+            "log-slope time-margin replay has {} covariate rows against {} times",
+            covariate_design.nrows(),
+            times.len(),
+        ));
+    }
+    let time_design = logslope_time_margin_rows(time_basis, times)?;
+    if covariate_design.ncols() == 0 || time_design.ncols() == 0 {
+        return Err(format!(
+            "a follow-up-varying log-slope needs a non-empty tensor product, got {}x{}",
+            covariate_design.ncols(),
+            time_design.ncols(),
+        ));
+    }
+    Ok(crate::survival::location_scale::rowwise_kronecker(
+        covariate_design,
+        &time_design,
+    ))
+}
+
 fn finish_time_varying_survival_covariate_template(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
@@ -4227,6 +4359,11 @@ mod tests {
     use super::{
         center_survival_time_designs_at_anchor, evaluate_survival_time_basis_row,
         resolved_survival_time_basis_config_from_build,
+    };
+    use super::{
+        DesignMatrix, SurvivalCovariateTermBlockTemplate,
+        build_time_varying_survival_covariate_template, logslope_time_margin_rows,
+        replay_logslope_follow_up_designs, replay_logslope_time_margin_design,
     };
     use crate::probability::normal_cdf;
     use crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD;
@@ -6531,5 +6668,140 @@ mod tests {
         )
         .expect_err("length mismatch must error");
         assert!(err.contains("length mismatch"), "err={err}");
+    }
+
+    // ── gam#2765 / gam#2767: the log-slope follow-up margin replays exactly ──
+
+    /// The predict-time replay must reproduce the fit-time margin bit for bit.
+    ///
+    /// This is the property the whole persistence contract rests on: at fit time
+    /// the knots are placed by QUANTILE from the training exit times, and the
+    /// design is a by-product of that build; at predict time only the knots
+    /// survive, and the design is rebuilt from them. If those two designs are not
+    /// the same matrix on the same rows, every saved follow-up-varying slope
+    /// evaluates a different model than the one that was fitted — silently,
+    /// because the widths still agree.
+    #[test]
+    fn logslope_time_margin_replay_reproduces_the_fit_time_design_2765() {
+        let age_exit = Array1::from_iter((1..=40).map(|i| 0.25 + 0.35 * f64::from(i)));
+        let age_entry = age_exit.mapv(|t| (t - 0.2).max(1e-3));
+        let fitted = build_time_varying_survival_covariate_template(
+            &age_entry,
+            &age_exit,
+            5,
+            3,
+            "logslope",
+        )
+        .expect("fit-time log-slope margin");
+        let SurvivalCovariateTermBlockTemplate::TimeVarying {
+            time_basis,
+            time_basis_entry,
+            time_basis_exit,
+            time_basis_derivative_exit,
+            ..
+        } = &fitted
+        else {
+            panic!("a time-varying request must produce a time-varying template");
+        };
+
+        let replayed_exit = logslope_time_margin_rows(time_basis, age_exit.view())
+            .expect("replayed exit margin");
+        assert_eq!(replayed_exit.dim(), time_basis_exit.dim());
+        for (fit_value, replay_value) in time_basis_exit.iter().zip(replayed_exit.iter()) {
+            assert_eq!(
+                fit_value.to_bits(),
+                replay_value.to_bits(),
+                "the replayed exit margin must be the fitted one, not merely close"
+            );
+        }
+
+        // And the full three-channel replay the leave-one-out path consumes.
+        let covariate = DesignMatrix::from(Array2::<f64>::from_shape_fn(
+            (age_exit.len(), 2),
+            |(row, col)| if col == 0 { 1.0 } else { (row as f64) * 0.05 - 1.0 },
+        ));
+        let replay =
+            replay_logslope_follow_up_designs(&age_entry, &age_exit, time_basis, &covariate)
+                .expect("three-channel replay");
+        let p_time = time_basis_exit.ncols();
+        assert_eq!(replay.exit.ncols(), 2 * p_time);
+        for (channel, fitted_margin) in [
+            (&replay.entry, time_basis_entry),
+            (&replay.exit, time_basis_exit),
+            (&replay.derivative_exit, time_basis_derivative_exit),
+        ] {
+            let dense = channel
+                .try_to_dense_arc("replayed log-slope channel")
+                .expect("dense channel");
+            let covariate_dense = covariate
+                .try_to_dense_arc("covariate factor")
+                .expect("dense covariate");
+            for row in 0..age_exit.len() {
+                for cov_col in 0..2 {
+                    for time_col in 0..p_time {
+                        let expected =
+                            covariate_dense[[row, cov_col]] * fitted_margin[[row, time_col]];
+                        let got = dense[[row, cov_col * p_time + time_col]];
+                        assert!(
+                            (expected - got).abs() <= 1e-15 * (1.0 + expected.abs()),
+                            "row-wise Kronecker mismatch at ({row}, {cov_col}, {time_col}): \
+                             expected {expected} got {got}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exit design a batch replay produces is the same one a single-row
+    /// replay produces at that row's time. The survival-curve path replays one
+    /// `(row, t)` cell at a time, so if these disagreed a predicted curve would
+    /// not pass through the batch-predicted point.
+    #[test]
+    fn logslope_time_margin_row_replay_matches_the_batch_replay_2765() {
+        let age_exit = Array1::from_iter((1..=12).map(|i| 0.4 + 0.6 * f64::from(i)));
+        let age_entry = age_exit.mapv(|t| (t - 0.15).max(1e-3));
+        let fitted =
+            build_time_varying_survival_covariate_template(&age_entry, &age_exit, 6, 2, "logslope")
+                .expect("fit-time log-slope margin");
+        let time_basis = fitted
+            .resolved_time_basis()
+            .expect("a time-varying template resolves a basis")
+            .clone();
+        let covariate = DesignMatrix::from(Array2::<f64>::from_shape_fn(
+            (age_exit.len(), 2),
+            |(row, col)| if col == 0 { 1.0 } else { 0.3 * (row as f64) },
+        ));
+        let batch = replay_logslope_time_margin_design(age_exit.view(), &time_basis, &covariate)
+            .expect("batch replay")
+            .try_to_dense_arc("batch replay")
+            .expect("dense batch");
+        let covariate_dense = covariate
+            .try_to_dense_arc("covariate")
+            .expect("dense covariate");
+        for row in 0..age_exit.len() {
+            let single_covariate = DesignMatrix::from(
+                covariate_dense
+                    .row(row)
+                    .to_owned()
+                    .into_shape_with_order((1, 2))
+                    .expect("single covariate row"),
+            );
+            let single = replay_logslope_time_margin_design(
+                Array1::from_elem(1, age_exit[row]).view(),
+                &time_basis,
+                &single_covariate,
+            )
+            .expect("single-row replay")
+            .try_to_dense_arc("single-row replay")
+            .expect("dense single row");
+            for col in 0..batch.ncols() {
+                assert_eq!(
+                    batch[[row, col]].to_bits(),
+                    single[[0, col]].to_bits(),
+                    "single-row replay disagrees with the batch at ({row}, {col})"
+                );
+            }
+        }
     }
 }

@@ -28,6 +28,14 @@ use gam::{
 };
 
 const N: usize = 2_400;
+/// Polynomial degree of the slope's follow-up margin. Bound to a constant so
+/// the request and the assertion on the RESOLVED margin cannot drift: this test
+/// previously asked for a quadratic margin and asserted a cubic one, which is
+/// two different claims about the same object.
+const LOGSLOPE_TIME_DEGREE: usize = 2;
+/// Columns in that margin. `k >= degree + 1` is the admission rule; four columns
+/// over a quadratic margin leaves one internal knot.
+const LOGSLOPE_TIME_K: usize = 4;
 /// Slope at `t = 1` (`log t = 0`).
 const SLOPE_LEVEL: f64 = 0.85;
 /// Slope drift per unit `log t`. Negative = the score's effect attenuates.
@@ -192,8 +200,8 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
         // time surface, which is also a smooth function of `log t`: the two are
         // separated by the `z` interaction, not by their time shapes, so a very
         // rich margin buys nothing and costs conditioning.
-        logslope_time_k: Some(4),
-        logslope_time_degree: 2,
+        logslope_time_k: Some(LOGSLOPE_TIME_K),
+        logslope_time_degree: LOGSLOPE_TIME_DEGREE,
         // Keep the baseline time surface only as flexible as the planted
         // `q(t) = a₀ + a₁·log t` needs.
         time_num_internal_knots: 3,
@@ -216,15 +224,21 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
         panic!("expected a SurvivalMarginalSlope fit result");
     };
 
-    // The resolved margin is carried on the fit result so a predictor could
-    // replay it against the same knots.
+    // The resolved margin is carried on the fit result so a predictor replays it
+    // against the same knots.
     let basis = fit
         .logslope_time_basis
         .as_ref()
         .expect("a fit with logslope_time_k must carry its resolved time margin");
     assert_eq!(
-        basis.degree, 3,
+        basis.degree, LOGSLOPE_TIME_DEGREE,
         "the resolved margin must keep the requested degree"
+    );
+    assert_eq!(
+        basis.knots.len(),
+        LOGSLOPE_TIME_K + LOGSLOPE_TIME_DEGREE + 1,
+        "a `k`-column B-spline of this degree owns `k + degree + 1` knots, and \
+         those knots are the whole authority a predictor gets"
     );
 
     // With an intercept-only log-slope covariate formula the tensored design IS

@@ -452,6 +452,26 @@ fn build_saved_marginal_slope_survival_alo_input(
         "saved survival marginal-slope ALO model is missing its fitted logslope baseline"
             .to_string()
     })?;
+    // gam#2765 / gam#2767: the leave-one-out replay re-evaluates the row
+    // program, which reads the slope at entry, at exit, and as an exit-time
+    // rate. Replaying only the exit channel would compute the influence of a
+    // time-CONSTANT slope, so all three are rebuilt from the saved margin.
+    let logslope_replay = match model.logslope_time_basis.as_ref() {
+        None => None,
+        Some(time_basis) => Some(
+            gam::families::survival::replay_logslope_follow_up_designs(
+                &age_entry,
+                &age_exit,
+                time_basis,
+                &logslope_build.design,
+            )?,
+        ),
+    };
+    let logslope_exit_design = logslope_replay
+        .as_ref()
+        .map_or_else(|| logslope_build.design.clone(), |replay| replay.exit.clone());
+    let logslope_follow_up = logslope_replay
+        .map(|replay| (replay.entry, replay.derivative_exit));
 
     let time_config = load_survival_time_basis_config_from_model(model)?;
     let mut time_build = build_survival_time_basis(&age_entry, &age_exit, time_config, None)?;
@@ -517,7 +537,7 @@ fn build_saved_marginal_slope_survival_alo_input(
     if fit.blocks.len() < 3
         || fit.blocks[0].beta.len() != time_build.x_exit_time.ncols()
         || fit.blocks[1].beta.len() != marginal_build.design.ncols()
-        || fit.blocks[2].beta.len() != logslope_build.design.ncols()
+        || fit.blocks[2].beta.len() != logslope_exit_design.ncols()
     {
         return Err(format!(
             "saved survival marginal-slope ALO fitted/design topology mismatch: blocks={}, time={}/{}, marginal={}/{}, logslope={}/{}",
@@ -527,7 +547,7 @@ fn build_saved_marginal_slope_survival_alo_input(
             fit.blocks.get(1).map_or(0, |block| block.beta.len()),
             marginal_build.design.ncols(),
             fit.blocks.get(2).map_or(0, |block| block.beta.len()),
-            logslope_build.design.ncols(),
+            logslope_exit_design.ncols(),
         ));
     }
     let input = gam_predict::SavedMarginalSlopeSurvivalAloInput::new(
@@ -541,7 +561,8 @@ fn build_saved_marginal_slope_survival_alo_input(
         derivative_offset_exit,
         marginal_build.design,
         marginal_offset,
-        logslope_build.design,
+        logslope_exit_design,
+        logslope_follow_up,
         logslope_offset,
     )?;
     Ok(gam_predict::SavedModelAloInput::survival(
@@ -2499,6 +2520,21 @@ pub(crate) fn run_predict_survival(
                 "survival CLI marginal-slope logslope block",
             )
             .map_err(|error| error.to_string())?;
+        // gam#2765 / gam#2767. The term spec names the covariate factor; when
+        // the fit gave the slope a follow-up margin the coefficients live
+        // against `X_cov ⊗ᵣ B(log t)` at each row's exit time, so the design has
+        // to be rebuilt as that product against the fit's OWN knots. The offset
+        // is composed before this deliberately: an external log-slope offset is
+        // a contribution to `g` itself, not to a coefficient, so it is
+        // time-constant and does not ride the margin.
+        let logslope_design_matrix = match model.logslope_time_basis.as_ref() {
+            None => logslope_design.design.clone(),
+            Some(time_basis) => gam::families::survival::replay_logslope_time_margin_design(
+                age_exit.view(),
+                time_basis,
+                &logslope_design.design,
+            )?,
+        };
         let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
         let (predictor, pred_input, predictor_fit) = build_saved_survival_marginal_slope_predictor(
             model,
@@ -2506,7 +2542,7 @@ pub(crate) fn run_predict_survival(
             z_name,
             &z,
             &cov_design.design,
-            &logslope_design.design,
+            &logslope_design_matrix,
             &time_build,
             &eta_offset_entry,
             &eta_offset_exit,

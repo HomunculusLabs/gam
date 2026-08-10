@@ -20,6 +20,16 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     pub marginal_design: &'a DesignMatrix,
     pub marginal_offset: &'a Array1<f64>,
     pub logslope_design: &'a DesignMatrix,
+    /// The other two follow-up channels of a slope that varies along follow-up
+    /// (gam#2765, gam#2767): the same coefficients read against the time margin
+    /// at the row's ENTRY time, and against the exit-time derivative of that
+    /// margin. `None` is the time-constant slope, where `g₀ = g₁` and `ġ₁ = 0`
+    /// identically.
+    ///
+    /// Passing `None` for a fit that HAS a margin does not merely lose
+    /// precision — it replays a different model, so the caller must supply these
+    /// whenever the saved model carries a log-slope time basis.
+    pub logslope_follow_up: Option<(&'a DesignMatrix, &'a DesignMatrix)>,
     pub logslope_offset: &'a Array1<f64>,
     pub latent_z: &'a Array1<f64>,
     pub event: &'a Array1<f64>,
@@ -332,8 +342,16 @@ pub fn replay_saved_survival_marginal_slope_alo(
     let z_matrix = input.latent_z.clone().insert_axis(Axis(1));
     let score_covariance =
         MarginalSlopeCovariance::diagonal(Array1::from_vec(vec![input.score_variance]))?;
-    let logslope_layout = LogslopeTopology::shared()
-        .materialize_identity(input.logslope_design.clone(), input.logslope_offset)?;
+    let logslope_layout = {
+        let shared = LogslopeTopology::shared()
+            .materialize_identity(input.logslope_design.clone(), input.logslope_offset)?;
+        match input.logslope_follow_up {
+            None => shared,
+            Some((entry, derivative_exit)) => {
+                shared.with_follow_up(entry.clone(), derivative_exit.clone())?
+            }
+        }
+    };
     let family = SurvivalMarginalSlopeFamily {
         n,
         event: Arc::new(input.event.clone()),
@@ -502,6 +520,7 @@ mod tests {
                 marginal_design: &marginal_design,
                 marginal_offset: &zero,
                 logslope_design: &logslope_design,
+                logslope_follow_up: None,
                 logslope_offset: &zero,
                 latent_z: &latent_z,
                 event: &events,

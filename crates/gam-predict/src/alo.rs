@@ -79,6 +79,9 @@ pub struct SavedMarginalSlopeSurvivalAloInput {
     marginal_design: DesignMatrix,
     marginal_offset: Array1<f64>,
     logslope_design: DesignMatrix,
+    /// Entry-time and exit-derivative log-slope designs for a slope that varies
+    /// along follow-up (gam#2765, gam#2767). `None` is the time-constant slope.
+    logslope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
     logslope_offset: Array1<f64>,
 }
 
@@ -397,6 +400,7 @@ impl SavedMarginalSlopeSurvivalAloInput {
         marginal_design: DesignMatrix,
         marginal_offset: Array1<f64>,
         logslope_design: DesignMatrix,
+        logslope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
         logslope_offset: Array1<f64>,
     ) -> Result<Self, String> {
         let n = event.len();
@@ -432,6 +436,25 @@ impl SavedMarginalSlopeSurvivalAloInput {
                 logslope_design.ncols(),
             ));
         }
+        if let Some((entry, derivative_exit)) = logslope_follow_up.as_ref() {
+            // A follow-up channel that is not the same map at a different time
+            // is not a follow-up channel. Checking the shape here means the
+            // replay can index all three without a per-row guard.
+            if entry.nrows() != n
+                || derivative_exit.nrows() != n
+                || entry.ncols() != logslope_design.ncols()
+                || derivative_exit.ncols() != logslope_design.ncols()
+            {
+                return Err(format!(
+                    "saved survival marginal-slope ALO log-slope follow-up channels are {}x{} and {}x{} against an exit design of {n}x{}",
+                    entry.nrows(),
+                    entry.ncols(),
+                    derivative_exit.nrows(),
+                    derivative_exit.ncols(),
+                    logslope_design.ncols(),
+                ));
+            }
+        }
         if let Some((row, value)) = event
             .iter()
             .copied()
@@ -454,6 +477,7 @@ impl SavedMarginalSlopeSurvivalAloInput {
             marginal_design,
             marginal_offset,
             logslope_design,
+            logslope_follow_up,
             logslope_offset,
         })
     }
@@ -2868,6 +2892,10 @@ fn compute_saved_marginal_slope_survival_alo(
             marginal_design: &input.marginal_design,
             marginal_offset: &input.marginal_offset,
             logslope_design: &input.logslope_design,
+            logslope_follow_up: input
+                .logslope_follow_up
+                .as_ref()
+                .map(|(entry, derivative_exit)| (entry, derivative_exit)),
             logslope_offset: &input.logslope_offset,
             latent_z: &normalized_z,
             event: &input.event,

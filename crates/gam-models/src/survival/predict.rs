@@ -32,6 +32,7 @@ use crate::survival::construction::{
     require_structural_survival_time_basis, resolved_survival_time_basis_config_from_build,
     survival_derivative_guard_for_likelihood, survival_likelihood_modename,
 };
+use crate::survival::location_scale::SurvivalCovariateTimeBasis;
 use crate::survival::latent::fixed_latent_hazard_frailty;
 use crate::survival::lognormal_kernel::FrailtySpec;
 use crate::survival::{CompetingRisksCifResult, assemble_competing_risks_cif_from_endpoints};
@@ -2165,6 +2166,7 @@ pub fn predict_survival(
             &eta_offset_entry,
             &eta_offset_exit,
             &derivative_offset_exit,
+            &age_exit,
         )?)
     } else {
         None
@@ -2244,6 +2246,7 @@ pub fn predict_survival(
                             &r_eta_exit,
                             &r_deriv_exit,
                             effective_primary_offset[i],
+                            t_query,
                         )
                     }
                     SurvivalLikelihoodMode::Transformation | SurvivalLikelihoodMode::Weibull => {
@@ -2921,7 +2924,18 @@ struct MarginalSlopePredictContext {
     /// Covariate design (n × p_marginal), kept operator-backed when possible.
     cov_design: DesignMatrix,
     /// Logslope design (n × p_logslope), kept operator-backed when possible.
+    /// With a follow-up margin present this is the tensor product at each row's
+    /// own exit time; the per-`(row, t)` curve replay rebuilds it at `t` from
+    /// `logslope_cov_design` instead (gam#2765, gam#2767).
     logslope_design: DesignMatrix,
+    /// The COVARIATE factor of the log-slope design (n × p_cov), which is what
+    /// the saved term spec describes. Equal to `logslope_design` when the slope
+    /// is time-constant.
+    logslope_cov_design: DesignMatrix,
+    /// The fit's resolved log-slope follow-up margin, when it has one. `None`
+    /// is a slope that is constant within a person, and then the row's design
+    /// does not depend on the evaluation time at all.
+    logslope_time_basis: Option<SurvivalCovariateTimeBasis>,
     /// Per-row covariate eta = `cov_design[i] · beta_marginal`. Used to
     /// pre-compute `q_exit_base`.
     cov_eta: Array1<f64>,
@@ -2956,6 +2970,7 @@ fn build_marginal_slope_predict_context(
     eta_offset_entry: &Array1<f64>,
     eta_offset_exit: &Array1<f64>,
     derivative_offset_exit: &Array1<f64>,
+    age_exit: &Array1<f64>,
 ) -> Result<MarginalSlopePredictContext, SurvivalPredictError> {
     let z_name = model
         .z_column
@@ -2980,6 +2995,21 @@ fn build_marginal_slope_predict_context(
             "survival marginal-slope logslope block",
         )
         .map_err(|error| error.to_string())?;
+    // gam#2765 / gam#2767: the term spec names the covariate factor only. With a
+    // follow-up margin the fitted coefficients live against `X_cov ⊗ᵣ B(log t)`,
+    // so keep BOTH — the factor, which the per-`(row, t)` replay re-tensors at
+    // the time being predicted, and the product at each row's own exit time,
+    // which is what the predictor's width contract is stated against.
+    let logslope_time_basis = model.logslope_time_basis.clone();
+    let logslope_cov_design = logslope_design.design.clone();
+    let logslope_exit_design = match logslope_time_basis.as_ref() {
+        None => logslope_cov_design.clone(),
+        Some(time_basis) => crate::survival::construction::replay_logslope_time_margin_design(
+            age_exit.view(),
+            time_basis,
+            &logslope_cov_design,
+        )?,
+    };
 
     let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
     let (predictor, _pred_input, _predictor_fit) = build_saved_survival_marginal_slope_predictor(
@@ -2988,7 +3018,7 @@ fn build_marginal_slope_predict_context(
         z_name,
         &z_raw,
         cov_design,
-        &logslope_design.design,
+        &logslope_exit_design,
         time_build,
         eta_offset_entry,
         eta_offset_exit,
@@ -3021,7 +3051,9 @@ fn build_marginal_slope_predict_context(
         beta_marginal,
         saved_timewiggle,
         cov_design: cov_design.clone(),
-        logslope_design: logslope_design.design.clone(),
+        logslope_design: logslope_exit_design,
+        logslope_cov_design,
+        logslope_time_basis,
         cov_eta,
         z_raw,
         noise_offset: effective_noise_offset,
@@ -3045,6 +3077,7 @@ fn evaluate_marginal_slope_row(
     r_eta_exit: &Array1<f64>,
     r_deriv_exit: &Array1<f64>,
     primary_offset_row: f64,
+    evaluation_time: f64,
 ) -> Result<(f64, f64, f64), SurvivalPredictError> {
     let beta_time = &ctx.beta_time;
     let p_time_base = row_time.x_exit_time.ncols();
@@ -3148,11 +3181,36 @@ fn evaluate_marginal_slope_row(
     //                  + offset_noise.
     // We feed the actual saved logslope row + the row's noise offset, matching
     // exactly the CLI's `pred_input.design_noise` / `offset_noise` slice.
-    let logslope_row = design_row_owned(
-        &ctx.logslope_design,
-        row_index,
-        "survival marginal logslope row",
-    )?;
+    // gam#2765 / gam#2767: with a follow-up margin the slope is `b(t)`, so the
+    // row's design has to be re-tensored at the time the curve is being
+    // evaluated at rather than frozen at the row's own exit time. Reading the
+    // exit-time row here would return `S(t)` computed with `b(t_exit)` — a
+    // different model at every point of the curve except one.
+    let logslope_row = match ctx.logslope_time_basis.as_ref() {
+        None => design_row_owned(
+            &ctx.logslope_design,
+            row_index,
+            "survival marginal logslope row",
+        )?,
+        Some(time_basis) => {
+            let cov_row = design_row_owned(
+                &ctx.logslope_cov_design,
+                row_index,
+                "survival marginal logslope covariate row",
+            )?;
+            let cov_row_design = DesignMatrix::from(
+                cov_row
+                    .into_shape_with_order((1, ctx.logslope_cov_design.ncols()))
+                    .map_err(|e| format!("survival marginal logslope covariate row shape: {e}"))?,
+            );
+            let tensored = crate::survival::construction::replay_logslope_time_margin_design(
+                Array1::from_elem(1, evaluation_time).view(),
+                time_basis,
+                &cov_row_design,
+            )?;
+            design_row_owned(&tensored, 0, "survival marginal logslope row at t")?
+        }
+    };
     let mut logslope_design_2d = Array2::<f64>::zeros((1, logslope_row.len()));
     logslope_design_2d.row_mut(0).assign(&logslope_row);
 
