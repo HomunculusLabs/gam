@@ -857,6 +857,17 @@ where
 /// satisfies the exact `conditioning_gate_skips` predicate by at least `MARGIN×`
 /// — the exact path would skip, so skipping cheaply is byte-identical. The
 /// converse cases never skip, preserving exactness where the term bites.
+///
+/// AND THIS DOES NOT DEPEND ON `Z_J = I` (gam#2612). The gate is evaluated on
+/// the REDUCED information `H_id = Z_Jᵀ H Z_J`, and for any `Z_J` with
+/// orthonormal columns the Rayleigh quotient bounds (Cauchy interlacing) give
+///   `λ_min(H_id) ≥ λ_min(H)` and `λ_max(H_id) ≤ λ_max(H)`,
+/// so both the absolute and the relative conditioning of `H_id` are at least as
+/// good as `H`'s:
+///   `λ_min(H_id) ≥ λ_min_lb` and `λ_min(H_id)/λ_max(H_id) ≥ λ_min_lb/λ_max_ub`.
+/// A skip certified from `H`'s bounds therefore certifies the reduced gate on
+/// ANY span, and a family that scopes `Z_J` to the directions its penalty does
+/// not reach keeps this pre-check exactly as safe as it was on the full span.
 pub fn jeffreys_term_skippable_via_matvec<HvFn>(hv: HvFn, p: usize) -> Result<bool, String>
 where
     HvFn: FnMut(&Array1<f64>) -> Result<Array1<f64>, String>,
@@ -897,6 +908,13 @@ where
 /// the term [`joint_jeffreys_term`] would form is exactly the zero term. A `true`
 /// here is therefore byte-identical to forming the gated-off term, with NO
 /// conservative margin needed (the eigenvalues are exact, not bounded).
+///
+/// On a NARROWER span (gam#2612) the answer stays sound rather than exact: by
+/// Cauchy interlacing `λ_min(Z_JᵀHZ_J) ≥ λ_min(H)` and `λ_max(Z_JᵀHZ_J) ≤
+/// λ_max(H)`, so the reduced information is at least as well conditioned both
+/// absolutely and relatively, and a `true` from `H`'s exact spectrum still
+/// certifies that the reduced gate is off. The direction that would be unsound —
+/// skipping when the REDUCED spectrum is worse than the full one — cannot occur.
 ///
 /// This is what lets a small fit SKIP the always-on Jeffreys term on its
 /// well-conditioned cycles instead of paying the full `O(p·n·special-fn)` all-axes
