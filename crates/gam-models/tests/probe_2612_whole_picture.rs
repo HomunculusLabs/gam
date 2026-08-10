@@ -541,6 +541,33 @@ fn zz_probe_2612_every_fixture_in_one_run() {
         report_scores("B banded quasi-separated", &model, &banded_test, &labels);
     }
 
+    // B'. THE COUNTERFACTUAL. The same banded law at growing `n`, which is the
+    // only knob that moves the arming decision without moving the geometry: the
+    // certificate is taken on `ker(S_lambda)` — the class intercepts — and their
+    // information is `sum_n w_n`, so it grows with `n` and eventually crosses
+    // the gate's one-observation-equivalent knot. At n=180 it measured 0.984,
+    // just under. Whatever `n` disarms it gives the ARMED and DISARMED fits on
+    // ONE law, which is what says whether the calibration deficit belongs to the
+    // proper prior or to the geometry.
+    for n_train in [180usize, 360, 720, 1440] {
+        let (train, _) = banded_frame(&(0..n_train).collect::<Vec<_>>());
+        let (test, test_labels) = banded_frame(&(n_train..(n_train + 240)).collect::<Vec<_>>());
+        let label = format!("B' banded n_train={n_train}");
+        if let Some(model) = fit_or_report(&label, &train, "cls ~ s(x, k=8)") {
+            let labels: Vec<usize> = test_labels
+                .iter()
+                .map(|&class| {
+                    model
+                        .class_levels
+                        .iter()
+                        .position(|level| *level == format!("class{class}"))
+                        .expect("class level present")
+                })
+                .collect();
+            report_scores(&label, &model, &test, &labels);
+        }
+    }
+
     // C. the penguins witness, at the stride the failing arm uses.
     for stride in [3usize, 4] {
         let (train, test, species) = penguins_split(stride);
