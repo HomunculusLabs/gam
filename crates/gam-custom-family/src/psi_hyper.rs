@@ -1660,15 +1660,28 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     // evaluations already pass through the monotone caller-authority rule in
     // `derivative_quality_options_and_warm_start`; this local branch must not
     // impose a second, competing coefficient-quality policy.
+    // gam#2612: the paragraph above assumes the residual can REACH the floor.
+    // A family whose objective saturates first cannot, and then this tightening
+    // does not buy a more exact derivative — it destroys the fit, because every
+    // trial point reports `converged=false` and the outer search sees nothing
+    // feasible. `inner_kkt_certifiable_floor` is that family's MEASURED
+    // statement of the smallest residual its objective can certify, and the
+    // target becomes the tighter-of-the-two-that-is-still-attainable. Default
+    // `None` leaves every existing derivative lane byte-identical.
     const JOINT_LAML_DERIV_INNER_TOL_FLOOR: f64 = 1e-11;
+    let certifiable_floor = family
+        .inner_kkt_certifiable_floor()
+        .filter(|floor| floor.is_finite() && *floor > 0.0)
+        .unwrap_or(0.0);
+    let derivative_inner_floor = JOINT_LAML_DERIV_INNER_TOL_FLOOR.max(certifiable_floor);
     let tighten_inner_for_deriv = psi_dim == 0
         && include_logdet_h
         && inner_quality_mode != EvalMode::ValueOnly
         && family.has_explicit_joint_hessian()
-        && options.inner_tol > JOINT_LAML_DERIV_INNER_TOL_FLOOR;
+        && options.inner_tol > derivative_inner_floor;
     let tightened_options = tighten_inner_for_deriv.then(|| {
         let mut tightened = options.clone();
-        tightened.inner_tol = JOINT_LAML_DERIV_INNER_TOL_FLOOR;
+        tightened.inner_tol = derivative_inner_floor;
         tightened.inner_max_cycles = tightened.inner_max_cycles.max(200);
         tightened
     });

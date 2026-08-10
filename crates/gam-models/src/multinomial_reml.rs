@@ -2558,6 +2558,23 @@ impl CustomFamily for MultinomialFamily {
         self.equivariant_class_penalty_specs()
     }
 
+    /// The measured floor `MULTINOMIAL_FORMULA_INNER_TOL` already states
+    /// (#2612).
+    ///
+    /// That constant is a measurement of THIS objective: the softmax Fisher
+    /// weight `W = diag(p) − ppᵀ` collapses on saturated rows, so a
+    /// near-separable fit reaches the objective's f64 noise floor before a
+    /// tighter KKT target can be met, and demanding a residual below it is
+    /// "certifiable-never". The ρ-only LAML derivative lane was overriding it
+    /// with `1e-11` — six orders below the value measured to be unreachable —
+    /// and the Firth-armed penguins refit then plateaued at a residual of
+    /// `9.84e-7` with the trust radius collapsed to `1e-12`, producing no fit at
+    /// all. Declaring the floor here makes the derivative lane ask for what this
+    /// family can certify.
+    fn inner_kkt_certifiable_floor(&self) -> Option<f64> {
+        Some(crate::multinomial::MULTINOMIAL_FORMULA_INNER_TOL)
+    }
+
     /// The directions the multinomial's smoothing reaches, as one λ-free
     /// aggregate (#2612).
     ///

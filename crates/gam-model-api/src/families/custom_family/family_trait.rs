@@ -1419,6 +1419,42 @@ pub trait CustomFamily {
         Ok(Vec::new())
     }
 
+    /// The smallest inner KKT residual this family's objective can CERTIFY —
+    /// its measured floating-point noise floor, not a preference (gam#2612).
+    ///
+    /// The ρ-only LAML derivative lane tightens the inner solve to
+    /// `JOINT_LAML_DERIV_INNER_TOL_FLOOR = 1e-11` (gam#1820), on the ground that
+    /// "the joint-Newton mode converges quadratically, so tightening the
+    /// derivative-path inner solve to a stationarity floor costs ~one extra
+    /// step". That premise assumes the residual can get there at all. For a
+    /// family whose objective saturates first it cannot, and the tightening then
+    /// replaces a converged fit with no fit: every trial point reports
+    /// `converged=false`, the outer search sees only infeasible points, and the
+    /// whole fit fails.
+    ///
+    /// The multinomial formula path already measured its own floor and wrote it
+    /// down — `MULTINOMIAL_FORMULA_INNER_TOL = 1e-5`, whose doc block says the
+    /// softmax Fisher weight collapses on saturated rows so a near-separable fit
+    /// "reaches the OBJECTIVE's f64 noise floor before the default
+    /// `inner_tol = 1e-6` KKT target" and that "demanding a residual below the
+    /// floating-point noise floor is certifiable-never". The derivative lane
+    /// then overrode that measured `1e-5` with `1e-11`, six orders below it.
+    /// Measured on the Firth-armed penguins refit: the residual plateaus at
+    /// `9.84e-7` (relative `6.83e-7`) against a scaled target of `1.44e-11`, the
+    /// trust radius collapses to `1e-12`, and the cycle exits on repeated
+    /// objective rejections — exactly the state `MULTINOMIAL_FORMULA_INNER_TOL`
+    /// exists to prevent.
+    ///
+    /// Returning `Some(floor)` makes the derivative lane target
+    /// `max(1e-11, floor)`. Default `None` — no family declares a floor, so
+    /// every existing derivative lane is byte-unchanged. This is not a knob to
+    /// loosen a solve with: it is a MEASUREMENT of the objective, and a family
+    /// that returns a value it has not measured is lying about its own
+    /// arithmetic.
+    fn inner_kkt_certifiable_floor(&self) -> Option<f64> {
+        None
+    }
+
     /// The aggregate penalty whose KERNEL is the Jeffreys/Firth term's span
     /// `Z_J` — the directions no smoothing parameter reaches (gam#2612).
     ///
