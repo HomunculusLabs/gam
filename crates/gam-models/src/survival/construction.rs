@@ -3430,15 +3430,56 @@ pub fn build_survival_marginal_slope_baseline_geometry(
     age_exit: &Array1<f64>,
     cfg: &SurvivalBaselineConfig,
 ) -> Result<Option<SurvivalMarginalSlopeOffsetGeometry>, String> {
+    let Some(theta) = survival_baseline_theta_from_config(cfg)? else {
+        // A linear baseline has no hyperparameter chart. The length check below
+        // is not reached in that case, and must not be: this arm is the
+        // "no chart" answer, not an error.
+        if age_entry.len() != age_exit.len() {
+            return Err(
+                "survival marginal-slope baseline geometry requires matching entry/exit lengths"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    build_survival_marginal_slope_baseline_geometry_at_theta(age_entry, age_exit, cfg, theta)
+}
+
+/// The θ-authored entry: realize the same geometry, but record the caller's own
+/// `theta` VERBATIM instead of re-deriving it from `cfg`.
+///
+/// The two differ, and the difference is not academic. A chart evaluation is
+/// `θ → cfg → rows`, and the config-authored entry above closes the loop with
+/// `cfg → θ`. For a Weibull that loop is `ln(exp(θ))`, which is **not** the
+/// identity in `f64`: measured over a grid on `[-3, 3]`, **17.3%** of
+/// coordinates come back a ulp or more away, and `θ = 1e-5` comes back 57 269
+/// ulps away.
+///
+/// `SurvivalMarginalSlopeFamilyHyperState` stores this `theta` as the family's
+/// realized coordinates and `validate_layout` compares them to the outer
+/// manifest with `to_bits()` equality — deliberately, so a workspace cannot
+/// reuse row geometry from a neighbouring outer probe. With a re-derived `θ`
+/// that exactness invariant fails for reasons that have nothing to do with the
+/// geometry, and the inner solve refuses a point the outer optimizer is merely
+/// trying to evaluate. See the #2765 measurement: at the acceptance fixture's
+/// checkpoint the certificate probe refused coordinate 3 side `−` (round trip
+/// `+1` ulp) and coordinate 4 on BOTH sides (`−57269` and `+3383` ulps), and
+/// evaluated cleanly everywhere the round trip happened to be exact.
+///
+/// So: when a caller HAS a θ, that θ is the authority. `cfg` still drives every
+/// row's arithmetic; only the recorded coordinates change.
+pub fn build_survival_marginal_slope_baseline_geometry_at_theta(
+    age_entry: &Array1<f64>,
+    age_exit: &Array1<f64>,
+    cfg: &SurvivalBaselineConfig,
+    theta: Array1<f64>,
+) -> Result<Option<SurvivalMarginalSlopeOffsetGeometry>, String> {
     if age_entry.len() != age_exit.len() {
         return Err(
             "survival marginal-slope baseline geometry requires matching entry/exit lengths"
                 .to_string(),
         );
     }
-    let Some(theta) = survival_baseline_theta_from_config(cfg)? else {
-        return Ok(None);
-    };
     if theta.iter().any(|value| !value.is_finite()) {
         return Err(
             "survival marginal-slope baseline theta coordinates must be finite".to_string(),
@@ -3650,10 +3691,15 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
         theta: &Array1<f64>,
     ) -> Result<SurvivalMarginalSlopeOffsetGeometry, String> {
         let config = survival_baseline_config_from_theta(self.target, theta)?;
-        let mut geometry = build_survival_marginal_slope_baseline_geometry(
+        // θ-authored: this chart was ASKED to realize `theta`, so `theta` is
+        // what the geometry records. Re-deriving it from `config` closes a
+        // `ln(exp(·))` loop that is not the identity in `f64`, and the family's
+        // `to_bits()` manifest check then refuses the point (#2765).
+        let mut geometry = build_survival_marginal_slope_baseline_geometry_at_theta(
             &self.age_entry,
             &self.age_exit,
             &config,
+            theta.clone(),
         )?
         .ok_or_else(|| {
             "survival marginal-slope nonlinear baseline chart lost its theta coordinates"
@@ -5407,6 +5453,82 @@ mod tests {
                 ((q_p - q_m) / (2.0 * h), (qt_p - qt_m) / (2.0 * h))
             })
             .collect()
+    }
+
+    /// A frozen chart evaluated at `θ` records `θ` BITWISE (#2765).
+    ///
+    /// `SurvivalMarginalSlopeFamilyHyperState` stores the geometry's `theta` as
+    /// the family's realized coordinates, and `validate_layout` compares them
+    /// to the outer manifest with `to_bits()` equality — on purpose, so a
+    /// workspace cannot reuse row geometry from a neighbouring outer probe.
+    /// The chart used to close a `θ → cfg → θ` loop, which for a Weibull is
+    /// `ln(exp(θ))` and is not the identity in `f64`. The exactness invariant
+    /// then failed for a reason that has nothing to do with the geometry, the
+    /// inner solve refused a point the outer optimizer was merely trying to
+    /// evaluate, and the line search read that refusal as "no improvement" —
+    /// 50 times, at every halving.
+    ///
+    /// The witnesses below are the coordinates the #2765 acceptance fixture
+    /// actually refused at, with their measured round-trip error. The test
+    /// asserts the round trip really is lossy at each (so it cannot quietly
+    /// stop being a witness) and then that the chart is exact anyway.
+    #[test]
+    fn a_frozen_baseline_chart_records_the_theta_it_was_asked_for_2765() {
+        let age_entry = array![0.0, 0.75, 2.0];
+        let age_exit = array![1.5, 3.0, 5.5];
+        let initial_config = SurvivalBaselineConfig {
+            target: SurvivalBaselineTarget::Weibull,
+            scale: Some(2.0),
+            shape: Some(1.3),
+            rate: None,
+            makeham: None,
+        };
+        let baseline = build_survival_marginal_slope_baseline_geometry(
+            &age_entry,
+            &age_exit,
+            &initial_config,
+        )
+        .expect("initial baseline geometry")
+        .expect("Weibull is a nonlinear chart");
+        let chart = SurvivalMarginalSlopeFrozenOffsetChart::new(
+            &age_entry,
+            &age_exit,
+            &initial_config,
+            &baseline.offset_entry,
+            &baseline.offset_exit,
+            &baseline.derivative_offset_exit,
+        )
+        .expect("freeze the Weibull chart");
+
+        // `θ₄ = ±1e-5` are the two coordinates the acceptance fixture's
+        // certificate probe refused on BOTH sides; `1e-5` comes back 57_269
+        // ulps away from itself through `ln(exp(·))`.
+        for theta in [
+            array![0.7574963781222602_f64, 1.0e-5],
+            array![0.7574963781222602_f64, -1.0e-5],
+            array![0.7574863781222603_f64, 0.0],
+        ] {
+            let lossy = theta
+                .iter()
+                .any(|value| value.exp().ln().to_bits() != value.to_bits());
+            assert!(
+                lossy,
+                "this witness has stopped being one: every coordinate of {theta:?} now \
+                 survives ln(exp(·)) bitwise, so it can no longer show the defect"
+            );
+            let realized = chart
+                .evaluate(&theta)
+                .expect("the chart evaluates inside its domain");
+            for (axis, (want, got)) in theta.iter().zip(realized.theta.iter()).enumerate() {
+                assert_eq!(
+                    want.to_bits(),
+                    got.to_bits(),
+                    "chart axis {axis}: asked for {want:?}, recorded {got:?} — a chart must \
+                     record the coordinate it was ASKED to realize, because the family's \
+                     manifest check is bitwise"
+                );
+            }
+        }
     }
 
     #[test]
