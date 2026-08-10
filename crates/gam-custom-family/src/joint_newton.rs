@@ -1457,7 +1457,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             // the un-augmented `½ log|H+Sλ|` plus the value-only Firth penalty already
             // in `penalty_value`; the load-bearing H_Φ is restored for the real fit
             // (gam#729/#808).
-            match build_joint_jeffreys_subspace(family, specs, &ranges)? {
+            match build_joint_jeffreys_subspace(specs, &ranges)? {
                 Some(z_joint) => {
                     custom_family_joint_jeffreys_term(family, states, specs, &ranges, &z_joint)?
                         .map(|(_phi, _grad, hphi)| hphi)

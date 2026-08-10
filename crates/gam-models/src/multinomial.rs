@@ -157,7 +157,7 @@ const MULTINOMIAL_FORMULA_RIDGE_FLOOR: f64 = 1.0e-4;
 /// plateaus while still resolving β to ~1e-6 in the relevant metric — the
 /// LAML criterion consumes β̂ with error O(residual²/curvature), far below
 /// any quantity the outer ρ-search can read.
-pub(crate) const MULTINOMIAL_FORMULA_INNER_TOL: f64 = 1.0e-5;
+const MULTINOMIAL_FORMULA_INNER_TOL: f64 = 1.0e-5;
 
 /// Formula-adapter penalty calibration for multinomial softmax REML.
 ///

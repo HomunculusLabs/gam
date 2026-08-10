@@ -73,7 +73,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // cycle), exhausting the inner budget before the algorithm converges
     // while contributing essentially zero to the gradient/curvature.
     let joint_jeffreys_subspace = if family.joint_jeffreys_term_required() {
-        build_joint_jeffreys_subspace(family, specs, &ranges)?
+        build_joint_jeffreys_subspace(specs, &ranges)?
     } else {
         None
     };
