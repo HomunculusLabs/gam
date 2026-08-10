@@ -689,37 +689,31 @@ fn multinomial_formula_penalized_separation_evidence(
         plan.is_under_identified(),
         plan.reduced_information_is_singular(),
     );
-    // SINGULAR, not merely under-identified (#2612). A proper prior is REQUIRED
-    // exactly when the posterior would otherwise be improper — when the
-    // objective is non-coercive on a direction and no finite mode exists there
-    // at any λ. A direction carrying positive curvature already has a finite
-    // mode and a normalisable posterior, and its WIDTH is then a property of the
-    // model the caller asked for: SPEC makes the posterior mean the published
-    // estimand, `multinomial_predictive` computes it exactly as a ratio of
-    // normalising constants with a per-row measured error, and a wide direction
-    // therefore shows up as a less confident published probability all by
-    // itself. Replacing that with a Firth-shrunk mode double-counts the same
-    // uncertainty and reports it as a different model.
-    //
-    // Measured on the two witnesses, on the unreached subspace (the class
-    // intercepts, `2/16` and `2/74`):
+    // UNDER-IDENTIFIED, not merely singular (#2612). "Improper" is the
+    // mathematically minimal reason to add a prior, and it was measured here and
+    // rejected: with the certificate keyed on singularity instead, penguins
+    // disarms and produces a beautiful MODE — held-out plug-in log-loss 0.02481
+    // against nnet::multinom's 0.09494, calibration gap +0.010, in 4.0 s — and
+    // then cannot publish a probability at all, because
+    // `predict_multinomial_formula` is the posterior MEAN and that posterior is
+    // not describable:
     //
     // ```text
-    //   banded quasi-separated:  H+S_lambda in [9.841e-1, 6.564e0]
-    //   penguins stride-3:       H+S_lambda in [2.863e-3, 9.642e-1]
+    //   penguins stride-3: row 24 predictive mass 0.944  (defect 5.6e-2)
+    //   penguins stride-4: row 20 predictive mass 0.517  (defect 4.8e-1)
+    //   banded n_train=360, 720: augmented mode did not converge in 100 Newton
+    //                            iterations
     // ```
     //
-    // Both are under one observation-equivalent — the data genuinely do not
-    // determine them — and both are strictly positive, so both posteriors are
-    // proper. Armed anyway, the published probabilities cost 8.0 and 13.7
-    // calibration points against held-out accuracy; disarmed, the same geometry
-    // at the next sample size measures `-0.007` and `+0.001`.
-    //
-    // The unpenalized quasi-separated design is unchanged and must be: there
-    // `S_λ = 0`, the unreached subspace is everything, and the likelihood's own
-    // `λ_min` sits at machine zero (measured: `-7.8e-18`), so it is singular and
-    // still arms.
-    if !plan.reduced_information_is_singular() {
+    // A posterior that is proper only because a direction carries 2.9e-3
+    // observation-equivalents is proper in name: the mode exists, and nothing
+    // else about it does. The mass-defect identity refuses rather than lying,
+    // which is the right behaviour and also the proof — the estimand this path
+    // publishes cannot be computed there. So the criterion stays the gate's own
+    // derived one, at ONE observation-equivalent, and what #2612 changes is
+    // WHERE it is asked (the directions no lambda reaches) and where the term it
+    // arms is allowed to act (the same subspace).
+    if !plan.is_under_identified() {
         return Ok(None);
     }
     let (lambda_min, lambda_max) = plan.information_extrema();
@@ -743,8 +737,7 @@ fn multinomial_formula_penalized_separation_evidence(
     let (data_min, data_max) = unpenalized.information_extrema();
     Ok(Some(format!(
         "no smoothing parameter reaches {}/{} identifiable direction(s), and on that subspace \
-         the penalized curvature H+S_lambda is SINGULAR at the certified mode (no finite mode \
-         exists there at any lambda): \
+         the penalized curvature H+S_lambda is under-identified at the certified mode: \
          lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
          lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
          (whole identifiable span: H+S_lambda in [{span_min:e}, {span_max:e}], likelihood alone \
