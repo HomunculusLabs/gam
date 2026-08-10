@@ -2068,7 +2068,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         }
     }
     let jeffreys_curvature = if family.joint_jeffreys_term_required() {
-        let z_joint = build_joint_jeffreys_subspace(specs, ranges)?.ok_or_else(|| {
+        let z_joint = build_joint_jeffreys_subspace(family, specs, ranges)?.ok_or_else(|| {
             "fresh exact joint-mode curvature certificate: Jeffreys family has no coefficient subspace"
                 .to_string()
         })?;

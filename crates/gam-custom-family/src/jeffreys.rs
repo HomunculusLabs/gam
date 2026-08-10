@@ -29,13 +29,48 @@ pub(crate) fn block_param_ranges(specs: &[ParameterBlockSpec]) -> Vec<(usize, us
 ///
 /// The Jeffreys conditioning gate, not the smoothing penalty null space,
 /// decides whether this basis contributes at the current iterate.
-pub(crate) fn build_joint_jeffreys_subspace(
+pub(crate) fn build_joint_jeffreys_subspace<F: CustomFamily + ?Sized>(
+    family: &F,
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
 ) -> Result<Option<Array2<f64>>, CustomFamilyError> {
     let total_p = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     if total_p == 0 {
         return Ok(None);
+    }
+    // gam#2612: a family whose smoothing rides on a JOINT penalty bundle
+    // (gam#1587) leaves every per-block `penalties` list empty, so the
+    // block-diagonal assembly below sees no penalty and hands back the full
+    // identifiable span — and the term then acts on every direction the joint
+    // penalty already bounds. `jeffreys_span_aggregate_penalty` is that family's
+    // own statement of which directions its penalty reaches. It is λ-free (any
+    // positive combination of the joint specs has the same kernel), hence
+    // constant in `β` and `ρ`, so every `Φ` derivative formula below and
+    // downstream is unchanged in form: they all differentiate through `H` with
+    // `Z_J` held fixed.
+    if let Some(aggregate) = family
+        .jeffreys_span_aggregate_penalty()
+        .map_err(|reason| CustomFamilyError::DimensionMismatch { reason })?
+    {
+        if aggregate.dim() != (total_p, total_p) {
+            return Err(CustomFamilyError::DimensionMismatch {
+                reason: format!(
+                    "jeffreys span aggregate penalty is {:?}, expected ({total_p}, {total_p})",
+                    aggregate.dim()
+                ),
+            });
+        }
+        let subspace =
+            gam_solve::estimate::reml::jeffreys_subspace::jeffreys_subspace_from_penalty(
+                aggregate.view(),
+            )?;
+        if subspace.span_dim() == 0 {
+            // Every direction is reached by some smoothing parameter, so the
+            // model already carries a proper prior everywhere and there is
+            // nothing for this term to bound.
+            return Ok(None);
+        }
+        return Ok(Some(subspace.columns));
     }
     let mut per_block: Vec<Array2<f64>> = Vec::with_capacity(specs.len());
     let mut m_total = 0usize;
@@ -601,7 +636,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     if !family.joint_jeffreys_term_required() {
         return Ok(None);
     }
-    let z_joint = match build_joint_jeffreys_subspace(specs, ranges)? {
+    let z_joint = match build_joint_jeffreys_subspace(family, specs, ranges)? {
         Some(z) => z,
         None => return Ok(None),
     };
@@ -706,7 +741,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
     if !family.joint_jeffreys_term_required() {
         return Ok(None);
     }
-    let z_joint = match build_joint_jeffreys_subspace(specs, ranges)? {
+    let z_joint = match build_joint_jeffreys_subspace(family, specs, ranges)? {
         Some(z) => z,
         None => return Ok(None),
     };
