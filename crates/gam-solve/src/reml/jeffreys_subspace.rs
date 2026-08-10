@@ -1258,6 +1258,37 @@ impl JointJeffreysPlan {
         self.reduced_dim != 0 && self.gate_weight == 1.0
     }
 
+    /// Whether the reduced information is SINGULAR at this plan's own numerical
+    /// zero — i.e. whether the objective it summarises is non-coercive on this
+    /// span, so that no finite mode exists there at all (gam#2612).
+    ///
+    /// This is a strictly stronger statement than [`Self::is_under_identified`],
+    /// and the difference is the difference between "wide" and "unbounded". A
+    /// consumer deciding whether to add a PROPER PRIOR needs this one: a prior
+    /// is REQUIRED exactly when the posterior would otherwise be improper, and
+    /// a direction carrying any positive curvature already has a finite mode and
+    /// a normalisable posterior — whose width is then a property of the model
+    /// the caller asked for, to be integrated rather than replaced. A consumer
+    /// deciding how much of a term is WARRANTED still needs
+    /// [`Self::conditioning_gate_weight`]; a consumer stating "the data do not
+    /// determine this direction" still needs `is_under_identified`.
+    ///
+    /// The zero is `floor = max(REDUCED_INFO_RELATIVE_FLOOR·λ_max,
+    /// REDUCED_INFO_ABSOLUTE_FLOOR)` — the same floor this plan already uses to
+    /// keep the Jeffreys log-determinant finite, i.e. the scale at which it has
+    /// already decided an eigenvalue is indistinguishable from zero. A
+    /// degenerate spectrum (`λ_max ≤ 0`, or a non-finite `λ_min`) is singular
+    /// here too.
+    pub fn reduced_information_is_singular(&self) -> bool {
+        if self.reduced_dim == 0 {
+            return false;
+        }
+        if !self.lambda_min.is_finite() || self.lambda_max <= 0.0 {
+            return true;
+        }
+        self.lambda_min <= self.floor
+    }
+
     /// Exact extreme eigenvalues of the reduced Fisher information used by the
     /// conditioning gate.
     ///

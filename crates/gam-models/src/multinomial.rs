@@ -683,11 +683,43 @@ fn multinomial_formula_penalized_separation_evidence(
     let (unreached_min, unreached_max) = plan.information_extrema();
     log::info!(
         "multinomial separation certificate: on the unreached subspace H+S_lambda lies in \
-         [{unreached_min:e}, {unreached_max:e}], gate weight {:e}, under_identified={}",
+         [{unreached_min:e}, {unreached_max:e}], gate weight {:e}, under_identified={}, \
+         singular={}",
         plan.conditioning_gate_weight(),
         plan.is_under_identified(),
+        plan.reduced_information_is_singular(),
     );
-    if !plan.is_under_identified() {
+    // SINGULAR, not merely under-identified (#2612). A proper prior is REQUIRED
+    // exactly when the posterior would otherwise be improper — when the
+    // objective is non-coercive on a direction and no finite mode exists there
+    // at any λ. A direction carrying positive curvature already has a finite
+    // mode and a normalisable posterior, and its WIDTH is then a property of the
+    // model the caller asked for: SPEC makes the posterior mean the published
+    // estimand, `multinomial_predictive` computes it exactly as a ratio of
+    // normalising constants with a per-row measured error, and a wide direction
+    // therefore shows up as a less confident published probability all by
+    // itself. Replacing that with a Firth-shrunk mode double-counts the same
+    // uncertainty and reports it as a different model.
+    //
+    // Measured on the two witnesses, on the unreached subspace (the class
+    // intercepts, `2/16` and `2/74`):
+    //
+    // ```text
+    //   banded quasi-separated:  H+S_lambda in [9.841e-1, 6.564e0]
+    //   penguins stride-3:       H+S_lambda in [2.863e-3, 9.642e-1]
+    // ```
+    //
+    // Both are under one observation-equivalent — the data genuinely do not
+    // determine them — and both are strictly positive, so both posteriors are
+    // proper. Armed anyway, the published probabilities cost 8.0 and 13.7
+    // calibration points against held-out accuracy; disarmed, the same geometry
+    // at the next sample size measures `-0.007` and `+0.001`.
+    //
+    // The unpenalized quasi-separated design is unchanged and must be: there
+    // `S_λ = 0`, the unreached subspace is everything, and the likelihood's own
+    // `λ_min` sits at machine zero (measured: `-7.8e-18`), so it is singular and
+    // still arms.
+    if !plan.reduced_information_is_singular() {
         return Ok(None);
     }
     let (lambda_min, lambda_max) = plan.information_extrema();
@@ -711,7 +743,8 @@ fn multinomial_formula_penalized_separation_evidence(
     let (data_min, data_max) = unpenalized.information_extrema();
     Ok(Some(format!(
         "no smoothing parameter reaches {}/{} identifiable direction(s), and on that subspace \
-         the penalized curvature H+S_lambda is under-identified at the certified mode: \
+         the penalized curvature H+S_lambda is SINGULAR at the certified mode (no finite mode \
+         exists there at any lambda): \
          lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
          lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
          (whole identifiable span: H+S_lambda in [{span_min:e}, {span_max:e}], likelihood alone \
