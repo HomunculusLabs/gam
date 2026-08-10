@@ -397,10 +397,25 @@ fn hyper_layout(axis: PsiAxis) -> CustomFamilyHyperLayout {
         .expect("one design ψ axis")
 }
 
-/// The family's own `(objective, score, Hessian)` triple at displacement `t`.
+/// The family's own `(objective, score, Hessian)` triple at displacement `t`,
+/// in the NEGATIVE-log-likelihood sign the ψ terms are stated in.
 ///
 /// All three come from the hooks the outer assembly reads, so a derivative that
-/// matches these matches the function the criterion is actually built on.
+/// matches these matches the function the criterion is actually built on. The
+/// sign is not cosmetic and is worth stating once:
+///
+/// * `psi_terms_inner` accumulates the row program's `(nll, ∂nll/∂π, ∂²nll/∂π²)`
+///   tower (`rigid_row_order2` returns the row NEGATIVE log-likelihood), and
+///   `build_psi_hyper_coords` folds its `objective_psi` into `a` beside
+///   `+½ βᵀS_ψβ` — so `a` is `∂_ψ(NLL + penalty)`, the criterion's own sign;
+/// * `exact_newton_joint_gradient_evaluation` publishes the opposite one:
+///   `log_likelihood = −Σ nll` and `gradient = −row_kernel_gradient = +∇_β ℓ`;
+/// * `exact_newton_joint_hessian` publishes `H = −∇²_β ℓ`, i.e. already NLL-signed
+///   (its trait doc states `H = -∇² log L`).
+///
+/// Differencing two of the three in one convention and the third in the other
+/// would fail this gate by an exact factor of `−1` and say nothing about the
+/// derivative, so the conversion happens here, once.
 fn objective_score_hessian(
     axis: PsiAxis,
     frame: SlopeFrame,
@@ -417,7 +432,7 @@ fn objective_score_hessian(
         .exact_newton_joint_hessian(&states)
         .expect("joint hessian")
         .expect("survival marginal-slope publishes an explicit joint hessian");
-    (evaluation.log_likelihood, evaluation.gradient, hessian)
+    (-evaluation.log_likelihood, -evaluation.gradient, hessian)
 }
 
 /// Central difference plus its Richardson partner, so the gate reports the
@@ -679,6 +694,105 @@ fn baseline_psi_terms_match_finite_difference_follow_up_axis1_2765() {
 #[test]
 fn baseline_psi_terms_match_finite_difference_follow_up_axis2_2765() {
     run_first_order_gate(PsiAxis::Baseline(2), SlopeFrame::FollowUpVarying);
+}
+
+// ── The frame reduction: no finite difference required ──────────────────────
+
+/// A follow-up-varying layout whose margin is CONSTANT in time **is** a
+/// time-constant slope, and the two frames must publish the same ψ terms.
+///
+/// With `B_entry = B_exit` and `B′_exit = 0` the six-primary frame satisfies
+/// `g₀ = g₁` and `ġ₁ = 0` identically, so the model is literally the static
+/// one — no approximation, no limit. This is the reduction the #2765 claim
+/// comment promised ("the static fit must come out bit-identical where the time
+/// basis is constant"), and it is the sharpest available check on the ψ lane
+/// because it needs no oracle: a site that reads the slope through one channel
+/// index gets `g₀`'s design and drops `g₁`'s, and here those two designs are
+/// EQUAL, so the answer is short by exactly the dropped channels' contribution
+/// rather than by something that could be argued to be small.
+#[test]
+fn a_constant_follow_up_margin_reproduces_the_static_frame_2765() {
+    let static_family = family_at(PsiAxis::Baseline(0), SlopeFrame::Static, 0.0);
+    let mut degenerate = family_at(PsiAxis::Baseline(0), SlopeFrame::Static, 0.0);
+    let exit = degenerate
+        .logslope_layout
+        .coefficient_design()
+        .to_dense()
+        .to_owned();
+    degenerate.logslope_layout = degenerate
+        .logslope_layout
+        .clone()
+        .with_follow_up(
+            DesignMatrix::from(exit),
+            DesignMatrix::from(Array2::zeros((N_ROWS, 2))),
+        )
+        .expect("a constant margin is a valid follow-up layout");
+    assert!(
+        degenerate.logslope_layout.is_follow_up_varying(),
+        "the degenerate layout must still take the six-primary frame, or this \
+         test compares the static path with itself"
+    );
+
+    for axis in 0..3 {
+        let options = BlockwiseFitOptions::default();
+        let want = static_family
+            .baseline_exact_joint_psi_terms_with_options(
+                &states_at(&static_family),
+                axis,
+                &options,
+            )
+            .expect("static baseline ψ terms")
+            .expect("terms");
+        let got = degenerate
+            .baseline_exact_joint_psi_terms_with_options(
+                &states_at(&degenerate),
+                axis,
+                &options,
+            )
+            .expect("degenerate follow-up baseline ψ terms")
+            .expect("terms");
+
+        let total = states_at(&static_family)
+            .iter()
+            .map(|state| state.beta.len())
+            .sum::<usize>();
+        let dense = |terms: &ExactNewtonJointPsiTerms| match terms.hessian_psi_operator.as_ref() {
+            Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+            None => terms.hessian_psi.clone(),
+        };
+        let (want_h, got_h) = (dense(&want), dense(&got));
+
+        let scale = want.objective_psi.abs().max(1e-12);
+        assert!(
+            (want.objective_psi - got.objective_psi).abs() <= 1e-12 * scale,
+            "baseline axis {axis}: objective_psi differs between frames on a \
+             CONSTANT margin: static={:.9e} follow-up={:.9e}",
+            want.objective_psi,
+            got.objective_psi,
+        );
+        let score_scale = max_abs(want.score_psi.iter()).max(1e-12);
+        for i in 0..want.score_psi.len() {
+            assert!(
+                (want.score_psi[i] - got.score_psi[i]).abs() <= 1e-10 * score_scale,
+                "baseline axis {axis}: score_psi[{i}] differs between frames on a \
+                 CONSTANT margin: static={:.9e} follow-up={:.9e}",
+                want.score_psi[i],
+                got.score_psi[i],
+            );
+        }
+        let hessian_scale = max_abs(want_h.iter()).max(1e-12);
+        for r in 0..total {
+            for c in 0..total {
+                assert!(
+                    (want_h[[r, c]] - got_h[[r, c]]).abs() <= 1e-10 * hessian_scale,
+                    "baseline axis {axis}: hessian_psi[{r},{c}] differs between frames \
+                     on a CONSTANT margin: static={:.9e} follow-up={:.9e}",
+                    want_h[[r, c]],
+                    got_h[[r, c]],
+                );
+            }
+        }
+    }
 }
 
 // ── The degenerate end of the same contract ─────────────────────────────────

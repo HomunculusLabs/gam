@@ -119,8 +119,7 @@ use crate::wiggle::{
 };
 use gam_data::encode_recordswith_inferred_schema;
 use gam_terms::basis::{
-    CenterStrategy, Dense, KnotSource, MaternBasisSpec, MaternIdentifiability, MaternNu,
-    create_basis,
+    CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternNu,
 };
 use gam_terms::smooth::{ShapeConstraint, SmoothBasisSpec, SmoothTermSpec};
 use gam_test_support::{binomial_location_scale_base_fixture, no_densify_design};
