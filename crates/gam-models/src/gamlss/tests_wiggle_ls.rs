@@ -908,9 +908,7 @@ pub(crate) fn degeneratewiggle_seed_uses_broad_fallback_domain() {
 #[test]
 pub(crate) fn wiggle_block_design_matches_ispline_basis() {
     let q_seed = Array1::linspace(-1.0, 1.0, 11);
-    // A COMPOSED warp: the inner objective reads its second derivative, so the
-    // block refuses below degree 3 (gam#2695).
-    let degree = 3usize;
+    let degree = 2usize;
     let num_internal_knots = 4usize;
     let penalty_order = 2usize;
 
@@ -925,7 +923,8 @@ pub(crate) fn wiggle_block_design_matches_ispline_basis() {
     // The reference is the warp basis's OWN definition — the ramp on all of `ℝ`
     // (gam#2695). `create_basis(i_spline)` reads that same right-cumulative sum
     // only on the interval where the B-splines are a partition of unity, which
-    // is not where a warp's simple-ended knot vector puts its ramps.
+    // is not where a warp's simple-ended knot vector puts its ramps, so it is
+    // the wrong oracle for a block the warp generator built.
     let expected = crate::wiggle::monotone_wiggle_basis_with_derivative_order(
         q_seed.view(),
         &knots,
@@ -1028,7 +1027,7 @@ pub(crate) fn wiggle_geometry_and_generative_use_same_sigma_link_as_core() {
 
     let q_seed = Array1::linspace(-1.5, 1.5, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
             .expect("wiggle block");
 
     let family = BinomialLocationScaleWiggleFamily {
@@ -1038,7 +1037,7 @@ pub(crate) fn wiggle_geometry_and_generative_use_same_sigma_link_as_core() {
         threshold_design: None,
         log_sigma_design: None,
         wiggle_knots: knots,
-        wiggle_degree: 3,
+        wiggle_degree: 2,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
     };
 

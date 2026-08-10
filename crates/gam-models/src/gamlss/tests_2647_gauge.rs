@@ -56,7 +56,7 @@ pub(crate) fn joint_penalized_hessian_is_nonsingular_where_the_likelihood_alone_
         Array2::<f64>::zeros((n, 0)),
     ));
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 4, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 4, 2, false)
             .expect("wiggle block");
     let p_t = threshold_design.ncols();
     let p_w = wiggle_block.design.ncols();
@@ -69,7 +69,7 @@ pub(crate) fn joint_penalized_hessian_is_nonsingular_where_the_likelihood_alone_
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         wiggle_knots: knots,
-        wiggle_degree: 3,
+        wiggle_degree: 2,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
     };
     let block = |name: &str, design: DesignMatrix| ParameterBlockSpec {

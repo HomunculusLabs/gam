@@ -198,7 +198,23 @@ pub(crate) fn custom_family_joint_jeffreys_value<
     }
     let h_joint = match family.joint_jeffreys_information_with_specs(states, specs) {
         Ok(Some(h)) if h.nrows() == total_p && h.ncols() == total_p => h,
-        _ => return 0.0,
+        // TEMPORARY gam#2695 instrument. This arm turns a FAILURE into a
+        // different objective value: Φ silently becomes 0 at this trial point
+        // while the baseline carried a finite one, so `actual` jumps by |Φ|
+        // with the model and likelihood both accepting — exactly the
+        // `[0,0,2,0]` partition. Print it so the live-warp fixture can say
+        // whether that is what it is doing.
+        other => {
+            log::info!(
+                "[P2695-PHI0] information unavailable at trial point: {}",
+                match other {
+                    Ok(Some(h)) => format!("shape {:?} != ({total_p},{total_p})", h.dim()),
+                    Ok(None) => "family exposes no joint Hessian".to_string(),
+                    Err(error) => format!("error: {error}"),
+                }
+            );
+            return 0.0;
+        }
     };
     match gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
         h_joint.view(),
@@ -206,7 +222,10 @@ pub(crate) fn custom_family_joint_jeffreys_value<
         |_: &Array1<f64>| Ok(None),
     ) {
         Ok((phi, _grad, _hphi)) => phi * family.joint_jeffreys_term_strength(),
-        Err(_) => 0.0,
+        Err(error) => {
+            log::info!("[P2695-PHI0] jeffreys term refused at trial point: {error}");
+            0.0
+        }
     }
 }
 
