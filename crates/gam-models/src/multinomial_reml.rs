@@ -782,18 +782,44 @@ fn softmax_fisher_perturbation<S: FisherPerturbation>(
 /// numerical-zero directions than their structural claim (which is why the
 /// family no longer carries one).
 pub(crate) fn measured_penalty_rank(s: &Array2<f64>) -> Result<usize, String> {
+    Ok(s.nrows() - measured_penalty_nullspace(s)?.ncols())
+}
+
+/// An orthonormal basis of the numerical NULL SPACE of a PSD penalty operator —
+/// the directions no smoothing parameter reaches, because `S v = 0` implies
+/// `(H + S_λ)v = Hv` for every `λ` (#715's derivation, gam#2612).
+///
+/// This is the same measurement [`measured_penalty_rank`] reports as a count,
+/// and the two share one classification rule so a caller that needs the
+/// SUBSPACE and a caller that needs its DIMENSION can never disagree about
+/// which directions are penalized. The rule is the relative one a PSD Gram
+/// admits: an eigenvalue at or below `100·p·ε·λ_max` is zero at the precision
+/// its own assembly carries.
+///
+/// Returns a `p × k` matrix whose columns span `ker(S)`; `k = 0` means every
+/// direction is penalized, and `k = p` (the zero operator) means none is.
+pub(crate) fn measured_penalty_nullspace(s: &Array2<f64>) -> Result<Array2<f64>, String> {
     let p = s.nrows();
     if p == 0 {
-        return Ok(0);
+        return Ok(Array2::zeros((0, 0)));
     }
     use gam_linalg::faer_ndarray::FaerEigh;
-    let (eigenvalues, _) = FaerEigh::eigh(s, faer::Side::Lower)
-        .map_err(|e| format!("penalty rank eigendecomposition failed: {e}"))?;
+    let (eigenvalues, eigenvectors) = FaerEigh::eigh(s, faer::Side::Lower)
+        .map_err(|e| format!("penalty null-space eigendecomposition failed: {e}"))?;
     let max_abs = eigenvalues
         .iter()
         .fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
     let tol = 100.0 * (p as f64) * f64::EPSILON * max_abs;
-    Ok(eigenvalues.iter().filter(|&&ev| ev > tol).count())
+    let null_columns: Vec<usize> = (0..eigenvalues.len())
+        .filter(|&i| eigenvalues[i] <= tol)
+        .collect();
+    let mut basis = Array2::<f64>::zeros((p, null_columns.len()));
+    for (target, &source) in null_columns.iter().enumerate() {
+        for row in 0..p {
+            basis[[row, target]] = eigenvectors[[row, source]];
+        }
+    }
+    Ok(basis)
 }
 
 /// The reference-symmetric class-space metric `M = I_m − J_m/K` (`m = K−1`

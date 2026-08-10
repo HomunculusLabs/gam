@@ -545,6 +545,60 @@ fn multinomial_formula_separation_evidence(block_states: &[ParameterBlockState])
 /// "and no `λ` repairs it" are two different statements and the verdict rests on
 /// the second. That costs one extra reduced eigendecomposition, paid only on the
 /// branch that arms.
+///
+/// # And the SUBSPACE, not only the verdict (#2612)
+///
+/// Reading `H + S_λ` fixed which matrix the verdict is taken on. It did not fix
+/// which directions the verdict is taken *over*, and that is the second half of
+/// the same sentence: `(H + S_λ)v = Hv + λSv`, so a direction is beyond every
+/// `λ`'s reach **exactly when `S_λ v = 0`**. Where `S_λ v ≠ 0` the model already
+/// carries a proper prior on `v`; the posterior there is proper, and
+/// [`crate::multinomial_predictive`] integrates it EXACTLY — the published
+/// probability is a ratio of normalising constants with a per-row measured error,
+/// not a Gaussian approximation — so a diffuse penalized direction already shows
+/// up in the published probability as the width it is. Arming a second, much
+/// stronger prior there is not stabilisation; it is a different model.
+///
+/// That distinction is not cosmetic, because the term this certificate arms does
+/// not act only on the direction that armed it. `jeffreys_antiderivative`
+/// saturates at `Λ = CONDITIONING_GATE_ABSOLUTE_CLEAR = 16` observation-
+/// equivalents: below `Λ` a direction earns the full `1/λ` prior push, above it
+/// essentially none. The full-span choice was justified by "the Jeffreys score is
+/// `O(1)` against the data's `O(n)` Fisher information, so on a data-identified
+/// direction its only effect is the `O(1/n)` Firth bias correction". **On a
+/// quasi-separated multinomial the data's information is not `O(n)` in ANY
+/// direction**: the softmax Fisher weight `W = diag(p) − p pᵀ` collapses to
+/// `≈ 0.005` per row on a confident fit, so measured at the penguins witness's
+/// certified unbiased mode,
+///
+/// ```text
+///   likelihood alone:  lambda_min = -8.8e-19   lambda_max =    1.4423
+///   H + S_lambda:      lambda_min =  1.92e-4   lambda_max = 2298.5
+/// ```
+///
+/// — `λ_max(H) = 1.44` over a **74-dimensional** span at `n = 228`, i.e. every
+/// direction of the basis sits inside the window where the prior acts at full
+/// strength, while the fit's own penalty already bounds most of them up to
+/// `2298`. The armed fit then publishes mean argmax probability `0.828` against
+/// held-out accuracy `0.965`: a 13.7-point calibration deficit, in the MODE
+/// (plug-in `0.20755` against posterior-mean `0.20917`), which is the
+/// under-confidence #2612 is named for.
+///
+/// So the certificate is taken on the subspace no `λ` reaches. With NO penalised
+/// component that subspace is the whole identifiable span and this is byte-for-
+/// byte the previous decision — which is why a quasi-separated design carrying no
+/// penalty still arms, and must. `ker(S_λ)` is measured by the same relative rule
+/// [`crate::multinomial_reml::measured_penalty_rank`] reports as a count, so the
+/// dimension and the basis can never disagree.
+///
+/// REJECTED: handing the Jeffreys TERM `H + S_λ` instead of `H` (the honest
+/// completion, and the right long-run answer) — the term's information would then
+/// depend explicitly on `ρ`, and the outer hypergradient carries no explicit-`ρ`
+/// channel for it, so the analytic gradient would silently stop matching its own
+/// value; that is a larger change than this issue can verify. Widening the gate's
+/// knots (they are derived, and they are not what is wrong). Reading the
+/// deficient subspace of `H + S_λ` itself (it moves with `β` and `ρ`, so the
+/// Jeffreys derivative tower would no longer be differentiating a fixed span).
 fn multinomial_formula_penalized_separation_evidence(
     family: &MultinomialFamily,
     specs: &[ParameterBlockSpec],
@@ -587,9 +641,34 @@ fn multinomial_formula_penalized_separation_evidence(
         )
     })?;
     let penalized = &information + &s_lambda;
+    // The subspace no `λ` reaches. `S_λ` is PSD, so `ker(S_λ)` is exactly the
+    // eigenvectors at (relative) zero, classified by the same rule
+    // `measured_penalty_rank` reports as a count. With no penalised component
+    // `S_λ` is the zero operator and this is the whole identifiable span, which
+    // is what makes the unpenalised quasi-separated design's verdict unchanged.
+    let reduced_penalty = identifiable_span
+        .t()
+        .dot(&s_lambda.dot(&identifiable_span));
+    let unreached = crate::multinomial_reml::measured_penalty_nullspace(&reduced_penalty)
+        .map_err(|error| {
+            format!("multinomial separation certificate could not measure ker(S_lambda): {error}")
+        })?;
+    log::info!(
+        "multinomial separation certificate: {}/{} identifiable direction(s) are unreached by \
+         any smoothing parameter (S_lambda v = 0)",
+        unreached.ncols(),
+        reduced_penalty.nrows(),
+    );
+    // Every direction is penalised: the model's own prior is proper everywhere,
+    // and whatever width is left belongs to the posterior the predictive
+    // integrates exactly.
+    if unreached.ncols() == 0 {
+        return Ok(None);
+    }
+    let unreached_span = identifiable_span.dot(&unreached);
     let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
         penalized.view(),
-        identifiable_span,
+        unreached_span.view(),
     )?;
     // The DECISION, not the contribution: `is_under_identified` is the gate's
     // derived predicate at one observation-equivalent, while `is_active` is
@@ -601,6 +680,13 @@ fn multinomial_formula_penalized_separation_evidence(
     // `0.783`, because the ramp has not finished tapering. Choosing an
     // estimand on the support of a smoothing device is the same category error
     // as choosing one on a cost cap.
+    let (unreached_min, unreached_max) = plan.information_extrema();
+    log::info!(
+        "multinomial separation certificate: on the unreached subspace H+S_lambda lies in \
+         [{unreached_min:e}, {unreached_max:e}], gate weight {:e}, under_identified={}",
+        plan.conditioning_gate_weight(),
+        plan.is_under_identified(),
+    );
     if !plan.is_under_identified() {
         return Ok(None);
     }
@@ -610,20 +696,29 @@ fn multinomial_formula_penalized_separation_evidence(
     } else {
         f64::NEG_INFINITY
     };
-    // The likelihood's own contribution, so the refusal shows that the penalty
-    // was accounted for and still did not reach this direction.
+    // Both wider readings, so the refusal shows what it did NOT decide on: the
+    // whole penalized span (which the model's own prior bounds) and the
+    // likelihood alone (which is not the curvature the fit has).
+    let whole_penalized = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+        penalized.view(),
+        identifiable_span,
+    )?;
+    let (span_min, span_max) = whole_penalized.information_extrema();
     let unpenalized = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
         information.view(),
         identifiable_span,
     )?;
     let (data_min, data_max) = unpenalized.information_extrema();
     Ok(Some(format!(
-        "identifiable-span PENALIZED curvature H+S_lambda is under-identified at the certified \
-         mode: lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
+        "no smoothing parameter reaches {}/{} identifiable direction(s), and on that subspace \
+         the penalized curvature H+S_lambda is under-identified at the certified mode: \
+         lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
          lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
-         (likelihood alone: lambda_min={data_min:e}, lambda_max={data_max:e} — the selected \
-         smoothing parameters do not reach this direction)",
-        plan.conditioning_gate_weight()
+         (whole identifiable span: H+S_lambda in [{span_min:e}, {span_max:e}], likelihood alone \
+         in [{data_min:e}, {data_max:e}])",
+        unreached.ncols(),
+        reduced_penalty.nrows(),
+        plan.conditioning_gate_weight(),
     )))
 }
 
