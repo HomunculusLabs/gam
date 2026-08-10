@@ -68,6 +68,50 @@
   invisible because the evaluation point never moves across it.
 
 
+- **The multinomial's Firth/Jeffreys separation certificate is now taken on
+  `ker(S_λ)` — the directions no smoothing parameter reaches — instead of the
+  whole identifiable span (#2612).** `27301d428` fixed which *matrix* the arming
+  verdict is taken on (`H + S_λ`, the curvature the fit has). This is the rest of
+  the same sentence #715 derives: `(H + S_λ)v = Hv + λSv`, so a direction is
+  beyond every `λ`'s reach exactly when `S_λ v = 0`. Where `S_λ v ≠ 0` the model
+  already carries a proper prior on `v`, and since the ratio-of-normalising-
+  constants predictive landed, that width is integrated exactly rather than
+  approximated — so it is already in the published probability.
+
+  Measured, the certificate now names the subspace it decided on: `2/16`
+  unreached directions on a one-smooth quasi-separated fixture (`H + S_λ` there
+  in `[9.84e-1, 6.56e0]`) and `2/74` on the penguins witness (`[2.86e-3,
+  9.64e-1]`) — in both cases the class intercepts, holding under one
+  observation-equivalent apiece. The refusal also reports what it did *not*
+  decide on (the whole penalized span, and the likelihood alone), and both
+  branches log the unreached dimension, so a disarmed fit says why it disarmed.
+
+  `jeffreys_subspace_from_penalty` now computes the kernel its own return type
+  has always advertised instead of discarding its argument and returning `I_p`;
+  the zero operator short-circuits to an exact identity, so every existing caller
+  is byte-identical. `multinomial_reml::measured_penalty_nullspace` delegates to
+  it, so "which directions does this penalty reach" has one answer in one place.
+
+  **Recorded and NOT landed, with the controlled measurement.** Restricting the
+  *term* to that same subspace — the natural completion, since
+  `jeffreys_antiderivative` acts wherever a reduced eigenvalue is under
+  `CONDITIONING_GATE_ABSOLUTE_CLEAR = 16` and a quasi-separated softmax has
+  `λ_max(H) = 1.44` over a 74-dimensional span at `n = 228`, so the term acts on
+  the entire basis — fixes the calibration outright: an armed quasi-separated
+  smooth fit goes from a held-out calibration gap of `−0.0802` to `−0.0151` and
+  log-loss `0.13224 → 0.07682`. It also costs the penguins witness its fit. The
+  full-span term is incidentally a *regulariser of the inner problem*: with it
+  the joint Newton reaches the LAML derivative lane's `1e-11`; without it the
+  residual plateaus at `9.84e-7`, and loosening the target to the objective's own
+  measured floor (`MULTINOMIAL_FORMULA_INNER_TOL = 1e-5`) then desyncs the
+  analytic outer gradient by exactly the amount #1820 documents, so the outer
+  line search terminates with `StepSizeTooSmall` at `|g| = 1.76e-1`. The span
+  cannot be narrowed until the inner joint-Newton can certify a near-separable
+  multinomial mode to the accuracy the derivative lane needs — iterative
+  refinement on the inner KKT solve, not a looser target.
+  `a_quasi_separated_smooth_fit_is_calibrated_2612` is left RED against a
+  four-standard-error bar as the standing measurement of that gap.
+
 - **A negative-curvature saddle escape now judges its own trial against the
   CRITERION's resolution, and the adjudication is no longer gated by the
   reseed's one-shot budget (#2612).** `adjudicate_negative_curvature` derives
