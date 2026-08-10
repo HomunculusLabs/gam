@@ -692,6 +692,7 @@ impl BinomialLocationScaleWiggleFamily {
         degree: usize,
         num_internal_knots: usize,
     ) -> Result<Array1<f64>, String> {
+        crate::wiggle::validate_composed_warp_degree(degree, "the binomial link warp")?;
         crate::wiggle::monotone_warp_knots_from_seed(q_seed, degree, num_internal_knots)
     }
 

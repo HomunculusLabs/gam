@@ -190,6 +190,41 @@ pub fn ispline_ramp_basis_dense(
         )));
     }
 
+    // The documented endpoint convention, kept (gam#2695).
+    //
+    // `create_ispline_derivative_dense` returns the INTERIOR one-sided slope at
+    // the top of a clamped knot vector, and says why: "`right` is routinely the
+    // largest observed value (knot vectors are built from the data range), and
+    // the transformation-normal shape derivative `h'(y)` must stay positive
+    // there." The padded evaluation below reads the RIGHT-hand limit at that
+    // point instead, which on a clamped vector is `0` — the padding turns the
+    // repeated boundary knot into an interior knot of multiplicity `bs + 1`,
+    // where the ramp's derivative is genuinely two-valued.
+    //
+    // So rows sitting exactly on a REPEATED top knot are read from the original
+    // vector, where `create_basis` evaluates that same one-sided limit. A
+    // simple-ended (warp) vector has no repeated top knot and never takes this
+    // path: its ramp has settled there, and `0` is the correct value, not a
+    // truncation.
+    let top = knot_vector[knot_vector.len() - 1];
+    let top_is_repeated = knot_vector.len() >= 2 && knot_vector[knot_vector.len() - 2] == top;
+    let left_limit_rows: Vec<usize> = if top_is_repeated && derivative_order >= 1 {
+        (0..data.len()).filter(|&row| data[row] == top).collect()
+    } else {
+        Vec::new()
+    };
+    let left_limit_table = if left_limit_rows.is_empty() {
+        None
+    } else {
+        let points = Array1::from_elem(1, top);
+        Some(bspline_derivative_dense_any_order(
+            points.view(),
+            knot_vector,
+            bs_degree,
+            derivative_order,
+        )?)
+    };
+
     let mut out = Array2::<f64>::zeros((data.len(), num_ramps));
     // Right-cumulative sums, one pass per row: `sum_at[j] = Σ_{l ≥ j+pad} dB_l`
     // is the derivative tower of `Σ_{l ≥ j} B_l` on the ORIGINAL indexing, and
@@ -228,6 +263,18 @@ pub fn ispline_ramp_basis_dense(
             } else {
                 sum_at[index]
             };
+        }
+    }
+    if let Some(table) = left_limit_table.as_ref() {
+        for &row in &left_limit_rows {
+            let mut running = 0.0_f64;
+            for column in (1..num_bspline).rev() {
+                let term = table[[0, column]];
+                if term.is_finite() {
+                    running += term;
+                }
+                out[[row, column - 1]] = running;
+            }
         }
     }
     Ok(out)
@@ -337,6 +384,60 @@ mod tests {
                     "value column {col} at x={} : ramp {value:.12e} vs clamped {:.12e}",
                     x[row],
                     legacy[[row, col]],
+                );
+            }
+        }
+    }
+
+    /// The endpoint convention `create_ispline_derivative_dense` documents is
+    /// kept: at the top of a CLAMPED vector — routinely the largest observed
+    /// value — the derivative is the interior one-sided slope, not the
+    /// right-hand limit `0`.
+    #[test]
+    fn a_clamped_top_knot_still_reports_its_interior_one_sided_slope() {
+        for ispline_degree in 1..=4usize {
+            let knots = clamped(ispline_degree + 1, &[0.0, 1.0], -1.0, 2.0);
+            let at_top = array![2.0];
+            let inside = array![2.0 - 1.0e-9];
+            let ramp_at_top =
+                ispline_ramp_basis_dense(at_top.view(), knots.view(), ispline_degree, 1)
+                    .expect("ramp slope at the top");
+            let ramp_inside =
+                ispline_ramp_basis_dense(inside.view(), knots.view(), ispline_degree, 1)
+                    .expect("ramp slope inside");
+            let worst = (0..ramp_at_top.ncols())
+                .map(|c| (ramp_at_top[[0, c]] - ramp_inside[[0, c]]).abs())
+                .fold(0.0_f64, f64::max);
+            let scale = (0..ramp_at_top.ncols())
+                .map(|c| ramp_at_top[[0, c]].abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                scale > 0.1,
+                "the clamped top must carry a real slope for this pin to bite; got {scale:.3e}"
+            );
+            assert!(
+                worst <= 1.0e-6 * (1.0 + scale),
+                "the clamped top slope must be the interior one-sided value: at-top vs \
+                 inside differ by {worst:.3e}"
+            );
+        }
+    }
+
+    /// The same point on a SIMPLE-ended warp vector is genuinely zero — the
+    /// ramp has settled there — so the convention above is a clamped-vector
+    /// rule and not a blanket one.
+    #[test]
+    fn a_simple_top_knot_reports_zero_because_the_ramp_has_settled() {
+        for degree in 2..=5usize {
+            let knots = monotone_warp_knots(-1.0, 2.0, degree, 2).expect("warp knots");
+            let at_top = array![knots[knots.len() - 1]];
+            let slope = ispline_ramp_basis_dense(at_top.view(), knots.view(), degree - 1, 1)
+                .expect("ramp slope at the top");
+            for c in 0..slope.ncols() {
+                assert_eq!(
+                    slope[[0, c]],
+                    0.0,
+                    "column {c} at the simple top knot must be exactly zero"
                 );
             }
         }

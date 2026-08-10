@@ -511,6 +511,62 @@ pub fn split_wiggle_penalty_orders(
     Ok((primary_order, extras))
 }
 
+/// The order the inner objective differentiates a COMPOSED warp to before it
+/// reaches the object it accepts on.
+///
+/// `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is inside the trust region's accept test, and `H`
+/// is the second derivative of `−ℓ`. The composed warp reaches `H` through
+///
+/// ```text
+///     ∂²m1 / ∂βw_j ∂β_thr  =  I″_j(q1) · ∂q1/∂β_thr,
+///     m1 = 1 + Σ_j βw_j·I′_j(q1),   g = η_t′ + m1·q̇₀
+/// ```
+///
+/// an entry carrying `I″_j` with NO `βw` factor — it survives at `βw = 0`. So
+/// the objective reads the warp's SECOND derivative.
+const COMPOSED_WARP_OBJECTIVE_DERIVATIVE_ORDER: usize = 2;
+
+/// The smallest degree a warp composed onto a β-dependent index can be built at.
+///
+/// A degree-`d` I-spline is `C^{d−1}`, so its `k`-th derivative is continuous
+/// only for `d ≥ k + 1`. With `k` fixed at
+/// [`COMPOSED_WARP_OBJECTIVE_DERIVATIVE_ORDER`] by the objective, the floor is
+/// derived rather than chosen.
+///
+/// Below it the objective is DISCONTINUOUS wherever a row's index crosses a
+/// knot — measured on the survival location-scale joint Hessian, which steps by
+/// `O(1)` at degree 2 at both `βw ≈ 0` and `βw = 3e-2`, on the warp knot vector
+/// as much as on a clamped one (gam#2695,
+/// `a_degree_two_composed_warp_steps_even_on_the_warp_knot_vector_2695`). A
+/// trust region cannot make `actual/predicted → 1` against a step, so a fit
+/// built here does not converge; refusing at construction says why in one line
+/// instead of after a budget of rejected cycles.
+///
+/// This is a property of COMPOSED warps only. A wiggle evaluated on FIXED data
+/// — the survival time warp on `h_base` — never moves across its own knots, so
+/// it keeps the `degree ≥ 2` floor [`monotone_wiggle_internal_degree`] states.
+pub(crate) fn composed_warp_minimum_degree() -> usize {
+    COMPOSED_WARP_OBJECTIVE_DERIVATIVE_ORDER + 1
+}
+
+/// Refuse a composed-warp degree the inner objective cannot differentiate.
+pub(crate) fn validate_composed_warp_degree(degree: usize, context: &str) -> Result<(), String> {
+    let minimum = composed_warp_minimum_degree();
+    if degree < minimum {
+        return Err(format!(
+            "{context} needs degree >= {minimum}, got {degree}: the warp is composed onto a \
+             β-dependent index and the inner objective reads its derivative of order \
+             {COMPOSED_WARP_OBJECTIVE_DERIVATIVE_ORDER} (the Firth value is a function of the \
+             observed information, and `d²m1/dβw dβ_thr = I''(q) dq/dβ_thr` carries it with no \
+             βw factor). A degree-{degree} I-spline is C^{} there, so that derivative STEPS at \
+             every knot a row's index crosses and the objective is discontinuous — the trust \
+             region cannot converge against a step at any radius",
+            degree - 1,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn select_wiggle_basis_from_seed(
     seed: ArrayView1<'_, f64>,
     cfg: &WiggleBlockConfig,
@@ -521,6 +577,7 @@ pub(crate) fn select_wiggle_basis_from_seed(
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
+    validate_composed_warp_degree(cfg.degree, "a composed monotone warp block")?;
     let knots = monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
     let canonical = canonical_wiggle_function_penalties(
         &knots,
