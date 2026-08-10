@@ -2417,9 +2417,46 @@ fn adjudicate_negative_curvature(
         }
         alpha *= 0.5;
     }
-    // A strict-decrease floor at the objective's roundoff resolution: a reseed
-    // that only matches the checkpoint to roundoff is not a real escape.
-    let strict_floor = baseline_cost.abs().max(1.0) * (16.0 * f64::EPSILON);
+    // The strict-decrease floor is the CRITERION's resolution, not the
+    // arithmetic's (#2612).
+    //
+    // The ladder above stops at `α_min = sqrt(2·objective_resolution/|λ_min|)`
+    // on the stated ground that below it "the claim predicts nothing the
+    // criterion can represent". A trial's MEASURED decrease is the same kind of
+    // quantity as the claim's predicted one, so it has to be judged against the
+    // same resolution: a step that lowers the objective by less than the
+    // criterion can resolve has not descended, it has reproduced the noise the
+    // ladder's own stopping rule was derived from. Accepting it as an escape
+    // spends the one-shot reseed on a number the criterion cannot distinguish
+    // from zero, and the retry — which cannot adjudicate again — then refuses on
+    // the matrix's word, which is the state this whole block exists to prevent.
+    //
+    // Measured before this changed, with the floor at `16ε|V|` (roundoff) while
+    // the ladder's limit used `objective_resolution`, i.e. the same function
+    // holding two notions of "a decrease the criterion can represent" ten orders
+    // apart:
+    //
+    // ```text
+    //   penguins stride-3, unbiased probe: λ_min = −6.35e−7 … −1.99e−6,
+    //     four reseeds minted on decreases 2e−6 … 4e−6 of an objective ≈ 2.158,
+    //     against objective_resolution = 1.228e−3 — three orders BELOW it;
+    //   banded quasi-separated, armed refit: λ_min = −9.19e−3 … −1.12e−2,
+    //     three reseeds on decreases 3.4e−4, 1.4e−4, 5.0e−5 of ≈ 53.66,
+    //     against a measured cost-stall noise floor of 1.91e−4.
+    // ```
+    //
+    // Both fits then refused for lack of a certified optimum, and the fit that
+    // shipped was the Firth/Jeffreys-armed one.
+    //
+    // Roundoff remains the hard lower limit — where `objective_resolution` is
+    // absent or non-positive there is nothing derived to use, and a decrease
+    // under `16ε|V|` is not a decrease under any reading.
+    let roundoff_floor = baseline_cost.abs().max(1.0) * (16.0 * f64::EPSILON);
+    let strict_floor = if objective_resolution.is_finite() && objective_resolution > 0.0 {
+        objective_resolution.max(roundoff_floor)
+    } else {
+        roundoff_floor
+    };
     let mut best: Option<(f64, Array1<f64>)> = None;
     // #2665 bookkeeping: "no descending trial", "every trial clamped back onto
     // rho" and "every trial evaluated non-finite" are three different failures
@@ -4869,11 +4906,21 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // Moving it here changes nothing about a real saddle: a descending trial
     // still mints the same one-shot reseed, and the refusal that follows is
     // still the refusal a genuinely indefinite point earns.
+    // The ADJUDICATION is a measurement and is NOT gated by `allow_tail_snap`
+    // (#2612). That flag is the one-shot budget for the RESEED — it exists so
+    // the retry pass cannot mint a second escape and recurse. Adjudicating
+    // cannot recurse: it evaluates a bounded, derived ladder of trial points and
+    // its only two outcomes here are "a descent exists" (which still needs the
+    // budget to be spent, and is refused below when there is none) and "the
+    // criterion contradicts the matrix" (which publishes no reseed at all).
+    // Gating the measurement on the reseed budget made the retry pass refuse on
+    // the matrix's word for want of a measurement it could have made for free —
+    // the same "nobody looked" / "it was measured and it is a saddle" collapse
+    // `CurvatureEvidence` was introduced to prevent.
     let strict_curvature_refused =
         config.require_measured_psd && certificate.hessian_psd() == Some(false);
     result.saddle_escape_reseed = None;
-    if allow_tail_snap
-        && certificate.is_stationary()
+    if certificate.is_stationary()
         && (!certificate.curvature_not_refused() || strict_curvature_refused)
         && let Some(hessian) = result.final_hessian.clone()
         && let Some(gradient) = result.final_gradient.clone()
@@ -4901,7 +4948,22 @@ fn certify_outer_optimality_at_terminal_fidelity(
             context,
         ) {
             SaddleAdjudication::Descended(point) => {
-                result.saddle_escape_reseed = Some(point);
+                // The reseed — and only the reseed — is one-shot. On the retry
+                // pass the descent is still a real finding: the criterion agrees
+                // with the matrix, so the refusal that follows is the refusal a
+                // genuine saddle earns, and it is recorded as such rather than
+                // as an escape that was never run.
+                if allow_tail_snap {
+                    result.saddle_escape_reseed = Some(point);
+                } else {
+                    log::info!(
+                        "[CERTIFICATE] {context}: the criterion CONFIRMS the reported negative \
+                         curvature (a feasible trial along its eigenvector lowers the objective \
+                         by more than the criterion's resolution), and the one-shot escape \
+                         reseed has already been spent on this fit. The refusal that follows is \
+                         a measured saddle, not an unmeasured one (#2612)."
+                    );
+                }
             }
             SaddleAdjudication::Contradicted {
                 probed,
@@ -5086,9 +5148,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
         if certificate.is_stationary()
             && (!certificate.curvature_not_refused() || strict_curvature_refused)
         {
-            let escape_blocker = if !allow_tail_snap {
-                Some("allow_tail_snap=false (retry pass: the escape is one-shot and cannot recurse)")
-            } else if result.final_hessian.is_none() {
+            // `allow_tail_snap` is no longer a blocker here: the adjudication
+            // runs on every refusal (#2612) and only the RESEED is one-shot, so
+            // the two remaining conjuncts are the only ways the measurement can
+            // fail to happen at all.
+            let escape_blocker = if result.final_hessian.is_none() {
                 Some("final_hessian=None (no terminal Hessian retained on this route)")
             } else if result.final_gradient.is_none() {
                 Some("final_gradient=None (no terminal gradient retained on this route)")
