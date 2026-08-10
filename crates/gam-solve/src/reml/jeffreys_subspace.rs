@@ -975,6 +975,18 @@ impl JeffreysSubspace {
 /// the reduced-Fisher Cholesky in [`joint_jeffreys_term`] (which simply omits the
 /// `Φ` value contribution for a not-yet-SPD trial point while the step machinery
 /// still bounds the coefficient).
+/// (gam#2612) The body computes what the type says: an orthonormal basis of
+/// `ker(S_aggregate)`. Passing the ZERO operator therefore returns `I_p`, which
+/// is what every current caller does and why this is behaviour-preserving —
+/// `build_joint_jeffreys_subspace` hands it a zero matrix and gets the full span
+/// back, bit for bit. What changes is that a caller who has a real aggregate can
+/// now ask for the directions it does not reach, instead of the function
+/// discarding the argument.
+///
+/// A PSD Gram's numerical null space is its eigenvectors at (relative) zero;
+/// `100·p·ε·λ_max` is the classification, the same relative rule the penalty-rank
+/// measurements use — an eigenvalue at or below it is zero at the precision the
+/// aggregate's own assembly carries.
 pub fn jeffreys_subspace_from_penalty(
     aggregate_penalty: ArrayView2<'_, f64>,
 ) -> Result<JeffreysSubspace, String> {
@@ -991,9 +1003,34 @@ pub fn jeffreys_subspace_from_penalty(
             columns: Array2::zeros((0, 0)),
         });
     }
-    Ok(JeffreysSubspace {
-        columns: Array2::eye(p),
-    })
+    // The zero operator is the overwhelmingly common argument and its kernel is
+    // the whole space; answering it directly keeps the identity EXACT (no
+    // eigensolver rotation of an arbitrary basis) so the historical callers are
+    // byte-identical rather than merely equivalent.
+    if aggregate_penalty.iter().all(|value| *value == 0.0) {
+        return Ok(JeffreysSubspace {
+            columns: Array2::eye(p),
+        });
+    }
+    let mut symmetric = aggregate_penalty.to_owned();
+    symmetrize_contiguous(&mut symmetric);
+    let (eigenvalues, eigenvectors) = symmetric.eigh(Side::Lower).map_err(|e| {
+        format!("jeffreys_subspace: aggregate-penalty eigendecomposition failed: {e}")
+    })?;
+    let max_abs = eigenvalues
+        .iter()
+        .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+    let tolerance = 100.0 * (p as f64) * f64::EPSILON * max_abs;
+    let null_columns: Vec<usize> = (0..eigenvalues.len())
+        .filter(|&i| eigenvalues[i] <= tolerance)
+        .collect();
+    let mut columns = Array2::<f64>::zeros((p, null_columns.len()));
+    for (target, &source) in null_columns.iter().enumerate() {
+        for row in 0..p {
+            columns[[row, target]] = eigenvectors[[row, source]];
+        }
+    }
+    Ok(JeffreysSubspace { columns })
 }
 
 /// One authoritative reduced-information artifact for a joint Jeffreys term.

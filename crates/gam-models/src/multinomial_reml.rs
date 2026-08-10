@@ -799,27 +799,13 @@ pub(crate) fn measured_penalty_rank(s: &Array2<f64>) -> Result<usize, String> {
 /// Returns a `p × k` matrix whose columns span `ker(S)`; `k = 0` means every
 /// direction is penalized, and `k = p` (the zero operator) means none is.
 pub(crate) fn measured_penalty_nullspace(s: &Array2<f64>) -> Result<Array2<f64>, String> {
-    let p = s.nrows();
-    if p == 0 {
-        return Ok(Array2::zeros((0, 0)));
-    }
-    use gam_linalg::faer_ndarray::FaerEigh;
-    let (eigenvalues, eigenvectors) = FaerEigh::eigh(s, faer::Side::Lower)
-        .map_err(|e| format!("penalty null-space eigendecomposition failed: {e}"))?;
-    let max_abs = eigenvalues
-        .iter()
-        .fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
-    let tol = 100.0 * (p as f64) * f64::EPSILON * max_abs;
-    let null_columns: Vec<usize> = (0..eigenvalues.len())
-        .filter(|&i| eigenvalues[i] <= tol)
-        .collect();
-    let mut basis = Array2::<f64>::zeros((p, null_columns.len()));
-    for (target, &source) in null_columns.iter().enumerate() {
-        for row in 0..p {
-            basis[[row, target]] = eigenvectors[[row, source]];
-        }
-    }
-    Ok(basis)
+    // The Jeffreys geometry owns this classification, because the same subspace
+    // is what the term's own `Z_J` is built from; asking there keeps one rule
+    // for "which directions does this penalty reach" across both crates.
+    Ok(
+        gam_solve::estimate::reml::jeffreys_subspace::jeffreys_subspace_from_penalty(s.view())?
+            .columns,
+    )
 }
 
 /// The reference-symmetric class-space metric `M = I_m − J_m/K` (`m = K−1`
