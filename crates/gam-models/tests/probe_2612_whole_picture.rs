@@ -460,8 +460,20 @@ fn zz_probe_2612_every_fixture_in_one_run() {
                     .expect("class level")
             })
             .collect();
-        let posterior = predict_multinomial_formula(&model, &holdout).ok();
-        let plugin = predict_multinomial_formula_plugin(&model, &holdout).ok();
+        let posterior = match predict_multinomial_formula(&model, &holdout) {
+            Ok(prediction) => Some(prediction),
+            Err(error) => {
+                println!("[2612] posterior-mean prediction unavailable: {error}");
+                None
+            }
+        };
+        let plugin = match predict_multinomial_formula_plugin(&model, &holdout) {
+            Ok(prediction) => Some(prediction),
+            Err(error) => {
+                println!("[2612] plug-in prediction unavailable: {error}");
+                None
+            }
+        };
         for (estimand, predicted) in [("posterior-mean", &posterior), ("plug-in", &plugin)] {
             let Some(predicted) = predicted else { continue };
             let mut squared = 0.0_f64;
