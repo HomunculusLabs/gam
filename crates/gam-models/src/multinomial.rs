@@ -6803,4 +6803,168 @@ mod reference_class_invariance_tests {
             );
         }
     }
+
+    /// #2612 diagnostic (zz_measure): **what does arming the proper prior
+    /// actually cost, on the fixtures this issue is decided on?**
+    ///
+    /// Everything else on this thread compares one published fit to a reference
+    /// or to a bar. This runs the SAME data through BOTH criteria — the
+    /// unbiased penalized REML solve and the Firth/Jeffreys-armed one — from one
+    /// set of `penalized_multinomial_formula_parts`, and reports the quantities
+    /// the under-confidence is measured in, on the training rows, with no
+    /// reference tool anywhere:
+    ///
+    ///   * whether each solve produced a fit at all, and the error when it did
+    ///     not;
+    ///   * `max|eta|` and the MEAN ARGMAX PROBABILITY, whose gap to the training
+    ///     accuracy IS the calibration error, plus the training log-loss;
+    ///   * how much of the reduced spectrum the Jeffreys term can actually act
+    ///     on. `jeffreys_antiderivative` saturates at `Λ =
+    ///     CONDITIONING_GATE_ABSOLUTE_CLEAR = 16` observation-equivalents, so a
+    ///     direction above `Λ` earns essentially no prior push and one below it
+    ///     earns the full `1/λ`. The count of eigenvalues under `Λ` is therefore
+    ///     the term's effective dimension — its prior strength in
+    ///     pseudo-observations — and it is reported for the LIKELIHOOD's
+    ///     information `H` (which is what the term is handed) beside the
+    ///     PENALIZED curvature `H + S_λ` (which is what the fit actually has,
+    ///     and what #2612 made the arming DECISION read).
+    ///
+    /// Prints only.
+    #[test]
+    fn zz_measure_2612_what_arming_costs_on_both_criteria() {
+        let td = tempdir().expect("tempdir");
+        let config = FitConfig::default();
+        let mut cases: Vec<(&str, gam_data::EncodedDataset, &str)> = vec![(
+            "synthetic softmax-drawn (nothing separates)",
+            softmax_drawn_two_covariate(td.path(), "cost2612", 600),
+            "y ~ s(x1, k=6) + s(x2, k=6)",
+        )];
+        if let Some(train) = penguins_stride3_train(&td) {
+            cases.push((
+                "penguins stride-3 (the quasi-separated witness)",
+                train,
+                "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+                 + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)",
+            ));
+        } else {
+            eprintln!("#2612 penguins arm SKIPPED: dataset unavailable");
+        }
+
+        for (label, data, formula) in &cases {
+            let request = MultinomialFitRequest {
+                init_lambda: 1.0,
+                max_iter: 100,
+                tol: 1e-8,
+                ..MultinomialFitRequest::new(data, formula, &config)
+            };
+            let parts =
+                penalized_multinomial_formula_parts(&request).expect("production formula parts");
+            for armed in [false, true] {
+                let family = if armed {
+                    parts.family.clone().with_joint_jeffreys_term(true)
+                } else {
+                    parts.family.clone()
+                };
+                let started = std::time::Instant::now();
+                let outcome = crate::custom_family::fit_custom_family_with_rho_prior(
+                    &family,
+                    &parts.blocks,
+                    &parts.options,
+                    gam_problem::RhoPrior::Flat,
+                );
+                let seconds = started.elapsed().as_secs_f64();
+                let criterion = if armed { "ARMED  " } else { "unbiased" };
+                let fit = match outcome {
+                    Ok(fit) => fit,
+                    Err(err) => {
+                        eprintln!(
+                            "#2612 [{label}] {criterion}: NO FIT after {seconds:.1}s: {}",
+                            format!("{err}").chars().take(300).collect::<String>()
+                        );
+                        continue;
+                    }
+                };
+                // Training-row calibration, straight off the fitted logits: the
+                // reference class is pinned at eta = 0, so the published
+                // probability of each row is the softmax over [eta_a, 0].
+                let m = fit.block_states.len();
+                let rows = fit.block_states[0].eta.len();
+                let mut max_abs_eta = 0.0_f64;
+                let mut mean_argmax = 0.0_f64;
+                let mut correct = 0usize;
+                let mut log_loss = 0.0_f64;
+                let class_index = &parts.training_class_index;
+                for row in 0..rows {
+                    let mut active: Vec<f64> = Vec::with_capacity(m);
+                    for state in &fit.block_states {
+                        let value = state.eta[row];
+                        max_abs_eta = max_abs_eta.max(value.abs());
+                        active.push(value);
+                    }
+                    let probabilities =
+                        softmax_with_reference(&active).expect("finite fitted logits");
+                    let mut best = (0usize, f64::NEG_INFINITY);
+                    for (class, p) in probabilities.iter().enumerate() {
+                        if *p > best.1 {
+                            best = (class, *p);
+                        }
+                    }
+                    mean_argmax += best.1;
+                    let truth = class_index[row] as usize;
+                    if best.0 == truth {
+                        correct += 1;
+                    }
+                    log_loss -= probabilities[truth].max(1e-15).ln();
+                }
+                let rows_f = rows as f64;
+                let accuracy = correct as f64 / rows_f;
+                let mean_argmax = mean_argmax / rows_f;
+                // The term's effective dimension, on both matrices.
+                let spectrum = |penalized: bool| -> Option<(usize, usize, usize, f64, f64)> {
+                    let information = parts
+                        .family
+                        .joint_jeffreys_information_with_specs(&fit.block_states, &parts.blocks)
+                        .ok()
+                        .flatten()?;
+                    let dim = information.nrows();
+                    let mut matrix = information;
+                    if penalized {
+                        let specs = parts.family.equivariant_class_penalty_specs().ok()?;
+                        let s_lambda = multinomial_joint_penalty_operator(
+                            &specs,
+                            fit.artifacts.joint_log_lambdas.as_ref(),
+                            parts.penalties_arc.len(),
+                            dim,
+                        )
+                        .ok()?;
+                        matrix = &matrix + &s_lambda;
+                    }
+                    let span = fit.geometry.as_ref()?.coefficient_gauge.t_full.view();
+                    let reduced = span.t().dot(&matrix.dot(&span));
+                    let (evals, _) = reduced.eigh(faer::Side::Lower).ok()?;
+                    let under_cap = evals.iter().filter(|v| **v < 16.0).count();
+                    let under_one = evals.iter().filter(|v| **v < 1.0).count();
+                    Some((
+                        evals.len(),
+                        under_cap,
+                        under_one,
+                        evals.iter().copied().fold(f64::INFINITY, f64::min),
+                        evals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    ))
+                };
+                eprintln!(
+                    "#2612 [{label}] {criterion}: fit in {seconds:.1}s, max|eta|={max_abs_eta:.3e}\n    \
+                     training acc={accuracy:.4} mean_argmax_p={mean_argmax:.4} \
+                     calib_gap={:+.4} logloss={:.5}\n    \
+                     H       spectrum: {:?}\n    \
+                     H+S_lam spectrum: {:?}\n    \
+                     (dim, #below cap 16, #below 1, lambda_min, lambda_max)",
+                    mean_argmax - accuracy,
+                    log_loss / rows_f,
+                    spectrum(false),
+                    spectrum(true),
+                );
+            }
+        }
+    }
 }
