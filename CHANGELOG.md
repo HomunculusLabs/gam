@@ -1,5 +1,43 @@
 ## Unreleased
 
+- **A negative-curvature saddle escape now judges its own trial against the
+  CRITERION's resolution, and the adjudication is no longer gated by the
+  reseed's one-shot budget (#2612).** `adjudicate_negative_curvature` derives
+  where to stop probing from the criterion's own resolution — the ladder ends at
+  `α_min = sqrt(2·objective_resolution/|λ_min|)`, on the stated ground that below
+  it "the claim predicts nothing the criterion can represent" — and then decided
+  whether a probe had DESCENDED against `16·ε·|V|`, the arithmetic's resolution.
+  One function, two notions of "a decrease the criterion can represent", ten
+  orders of magnitude apart.
+
+  Measured on the two fixtures #2612 is decided on: the penguins witness's
+  unbiased probe minted four escape reseeds at `λ_min` of `−6.4e−7 … −2.0e−6`
+  (machine zero against `‖H‖ ≈ 1`) on objective decreases of `2e−6 … 4e−6`
+  against a resolution of `1.228e−3`; a one-smooth quasi-separated fixture minted
+  three on decreases of `3.4e−4`, `1.4e−4` and `5.0e−5` against a *measured*
+  cost-stall noise floor of `1.91e−4`. Each reseed spent the one-shot budget, and
+  the retry pass — which `allow_tail_snap` forbade from adjudicating at all —
+  then refused on the matrix's word. Both fits died; the fit that shipped was the
+  Firth/Jeffreys-armed one.
+
+  At `λ_min = −6.4e−7` the claim's predicted decrease at the LARGEST feasible
+  step is `3.2e−7`: it was unfalsifiable over its whole derived range, which is
+  exactly the state `CurvatureEvidence::CriterionContradicted` exists to record.
+  The strict-decrease floor is now `objective_resolution` — the same
+  `rel_cost_tolerance`-anchored anchor the ladder's own limit is derived from —
+  floored at the arithmetic roundoff that remains the hard lower limit, so no
+  constant is introduced. And the adjudication runs on every refusal: that flag
+  is the one-shot budget for the RESEED, and gating a MEASUREMENT on it made the
+  retry pass refuse for want of a measurement it could have made for free.
+  `Descended` still spends the budget, and on the retry pass now records that the
+  criterion CONFIRMS the curvature, so a measured saddle and an unmeasured one
+  stay distinguishable.
+
+  Effect: a one-smooth quasi-separated multinomial (`cls ~ s(x, k=8)`) that
+  produced no fit at all now fits in 7.5 s, and the penguins witness's unbiased
+  criterion reaches a certified stationary optimum instead of exhausting its
+  strategy fallbacks.
+
 - **A follow-up-varying marginal slope can now be SAVED, predicted from, and
   leave-one-out replayed (#2765, #2767).** `logslope_time_k` fitted a real model
   since the kernel work landed, but persistence refused it outright: the on-disk
