@@ -421,12 +421,14 @@ pub(super) fn build_deviation_block_from_knots_and_design_seed(
         ));
     }
     let penalty_orders = resolve_deviation_operator_orders(cfg)?;
-    let knots =
-        crate::wiggle::monotone_warp_knots_from_seed(
-            knot_seed.view(),
-            cfg.degree,
-            cfg.num_internal_knots,
-        )?;
+    // Clamped ends: the BMS anchored-cubic SAVED-MODEL replay reconstructs the
+    // deviation on that convention, so its knots cannot move before it reads the
+    // ramp definition (gam#2695).
+    let knots = gam_terms::basis::initializewiggle_knots_from_seed(
+        knot_seed.view(),
+        cfg.degree,
+        cfg.num_internal_knots,
+    )?;
     // The smoothness-null-space drop must remove the union of null spaces
     // across all configured penalties, which (for nested null spaces of
     // increasing-order derivative penalties) equals the largest order's

@@ -247,7 +247,15 @@ pub(crate) fn select_survival_link_wiggle_basis_from_pilot(
             .zip(eta_log_sigma.iter())
             .map(|(&threshold, &ls)| survival_q0_from_eta(threshold, ls)),
     );
-    select_wiggle_basis_from_seed(q_seed.view(), wiggle_cfg, wiggle_penalty_orders)
+    // The composed link warp: `q = q₀ + Σ βw_j·I_j(q₀)` with `q₀` moving with β,
+    // so the inner objective differentiates the basis and a clamped boundary
+    // knot's multiplicity is a step in `H` and hence in the objective (gam#2695).
+    crate::wiggle::select_wiggle_basis_from_seed_with_knots(
+        q_seed.view(),
+        wiggle_cfg,
+        wiggle_penalty_orders,
+        crate::wiggle::WarpKnotEnds::Simple,
+    )
 }
 
 pub(crate) fn linkwiggle_block_input_from_selected_basis(

@@ -516,12 +516,51 @@ pub(crate) fn select_wiggle_basis_from_seed(
     cfg: &WiggleBlockConfig,
     penalty_orders: &[usize],
 ) -> Result<SelectedWiggleBasis, String> {
+    select_wiggle_basis_from_seed_with_knots(seed, cfg, penalty_orders, WarpKnotEnds::Clamped)
+}
+
+/// Which end condition the warp's knot vector carries.
+///
+/// A boundary knot of multiplicity `degree + 1` makes the ramp `C^{-1}` there:
+/// `I'` steps from `0` outside to its interior one-sided value inside, and `I''`
+/// steps by `2, 6, 12, 20` at degree `2, 3, 4, 5`. That step reaches the inner
+/// objective through `H` (gam#2695), so a warp the objective differentiates
+/// needs [`WarpKnotEnds::Simple`].
+///
+/// [`WarpKnotEnds::Clamped`] is not a second opinion about the mathematics — it
+/// is where a subsystem's SAVED-MODEL runtime still reconstructs its deviation
+/// on the clamped convention (the BMS anchored-cubic replay and the
+/// marginal-slope deviation runtime both do) and has to move to the ramp
+/// definition before its knots can. Each one is its own piece of work; doing it
+/// half-way would leave a fit and its replay reading different functions, which
+/// is the fault this issue is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WarpKnotEnds {
+    Clamped,
+    Simple,
+}
+
+pub(crate) fn select_wiggle_basis_from_seed_with_knots(
+    seed: ArrayView1<'_, f64>,
+    cfg: &WiggleBlockConfig,
+    penalty_orders: &[usize],
+    ends: WarpKnotEnds,
+) -> Result<SelectedWiggleBasis, String> {
     let (primary_order, extra_orders) =
         split_wiggle_penalty_orders(cfg.penalty_order, penalty_orders)?;
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
-    let knots = monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?;
+    let knots = match ends {
+        WarpKnotEnds::Simple => {
+            monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?
+        }
+        WarpKnotEnds::Clamped => gam_terms::basis::initializewiggle_knots_from_seed(
+            seed,
+            cfg.degree,
+            cfg.num_internal_knots,
+        )?,
+    };
     let canonical = canonical_wiggle_function_penalties(
         &knots,
         cfg.degree,

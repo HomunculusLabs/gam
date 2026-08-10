@@ -76,7 +76,7 @@ use crate::survival::time_constraints::{
 
 use crate::wiggle::{
     SelectedWiggleBasis, WiggleBlockConfig, monotone_wiggle_basis_with_derivative_order,
-    monotone_wiggle_nonnegative_constraints, select_wiggle_basis_from_seed,
+    monotone_wiggle_nonnegative_constraints,
     validate_monotone_wiggle_beta_nonnegative,
 };
 
