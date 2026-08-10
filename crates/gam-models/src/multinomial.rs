@@ -6952,17 +6952,96 @@ mod reference_class_invariance_tests {
                         evals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                     ))
                 };
+                // WHO BOUNDS THE WORST DIRECTION. #715's derivation says a
+                // direction `v` is beyond lambda's reach exactly when `S v = 0`,
+                // because `(H + S_lambda)v = Hv + lambda*Sv`. So take the
+                // eigenvector of the reduced `H + S_lambda` that achieves
+                // `lambda_min` -- the direction the arming decision is taken on
+                // -- and split its curvature into the data's share and the
+                // penalty's. A direction whose bound is ENTIRELY the penalty's
+                // already has a proper prior and needs no second one; a
+                // direction the penalty does not reach at all is the regime
+                // Firth exists for. Reported beside the penalty-NULL spectrum
+                // `Z_ker' H Z_ker`, which is the same statement taken as a
+                // subspace instead of one vector.
+                let attribution = || -> Option<String> {
+                    let information = parts
+                        .family
+                        .joint_jeffreys_information_with_specs(&fit.block_states, &parts.blocks)
+                        .ok()
+                        .flatten()?;
+                    let dim = information.nrows();
+                    let specs = parts.family.equivariant_class_penalty_specs().ok()?;
+                    let s_lambda = multinomial_joint_penalty_operator(
+                        &specs,
+                        fit.artifacts.joint_log_lambdas.as_ref(),
+                        parts.penalties_arc.len(),
+                        dim,
+                    )
+                    .ok()?;
+                    let span = fit.geometry.as_ref()?.coefficient_gauge.t_full.view();
+                    let h_red = span.t().dot(&information.dot(&span));
+                    let s_red = span.t().dot(&s_lambda.dot(&span));
+                    let penalized = &h_red + &s_red;
+                    let (evals, evecs) = penalized.eigh(faer::Side::Lower).ok()?;
+                    let mut worst = 0usize;
+                    for i in 1..evals.len() {
+                        if evals[i] < evals[worst] {
+                            worst = i;
+                        }
+                    }
+                    let v = evecs.column(worst).to_owned();
+                    let data_share = v.dot(&h_red.dot(&v));
+                    let penalty_share = v.dot(&s_red.dot(&v));
+                    // The penalty's own spectrum decides which directions it
+                    // reaches at all. `S_red` is PSD, so its null space is the
+                    // eigenvectors at (numerically) zero, classified relatively
+                    // against its own largest eigenvalue -- the same relative
+                    // rule the joint-penalty validator uses.
+                    let (s_evals, s_evecs) = s_red.eigh(faer::Side::Lower).ok()?;
+                    let s_max = s_evals.iter().copied().fold(0.0_f64, f64::max);
+                    let rank_tol = (dim as f64) * f64::EPSILON * s_max.max(1.0);
+                    let null_columns: Vec<usize> = (0..s_evals.len())
+                        .filter(|&i| s_evals[i] <= rank_tol)
+                        .collect();
+                    let (null_min, null_max) = if null_columns.is_empty() {
+                        (f64::NAN, f64::NAN)
+                    } else {
+                        let mut z = Array2::<f64>::zeros((s_evecs.nrows(), null_columns.len()));
+                        for (j, &col) in null_columns.iter().enumerate() {
+                            for i in 0..s_evecs.nrows() {
+                                z[[i, j]] = s_evecs[[i, col]];
+                            }
+                        }
+                        let reduced = z.t().dot(&h_red.dot(&z));
+                        let (e, _) = reduced.eigh(faer::Side::Lower).ok()?;
+                        (
+                            e.iter().copied().fold(f64::INFINITY, f64::min),
+                            e.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                        )
+                    };
+                    Some(format!(
+                        "worst direction of H+S_lam: v'Hv={data_share:.6e} \
+                         v'S_lam v={penalty_share:.6e} (penalty share \
+                         {:.4}); ker(S_lam) dim={}/{dim}, Z_ker' H Z_ker \
+                         lambda in [{null_min:.6e}, {null_max:.6e}]",
+                        penalty_share / (data_share + penalty_share),
+                        null_columns.len(),
+                    ))
+                };
                 eprintln!(
                     "#2612 [{label}] {criterion}: fit in {seconds:.1}s, max|eta|={max_abs_eta:.3e}\n    \
                      training acc={accuracy:.4} mean_argmax_p={mean_argmax:.4} \
                      calib_gap={:+.4} logloss={:.5}\n    \
                      H       spectrum: {:?}\n    \
                      H+S_lam spectrum: {:?}\n    \
-                     (dim, #below cap 16, #below 1, lambda_min, lambda_max)",
+                     (dim, #below cap 16, #below 1, lambda_min, lambda_max)\n    \
+                     {}",
                     mean_argmax - accuracy,
                     log_loss / rows_f,
                     spectrum(false),
                     spectrum(true),
+                    attribution().unwrap_or_else(|| "attribution unavailable".to_string()),
                 );
             }
         }
