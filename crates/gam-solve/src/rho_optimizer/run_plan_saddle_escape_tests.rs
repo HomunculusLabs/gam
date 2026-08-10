@@ -699,3 +699,112 @@ fn escape_reaches_a_descent_below_the_old_fixed_ladder_2612() {
          would mean the well moved: {reseed:?}"
     );
 }
+
+// ─── #2612: a decrease the criterion cannot resolve is not an escape ──────────
+//
+// The two tests above pin the ladder's REACH. This one pins its ACCEPTANCE, and
+// it is the production failure's exact shape: a genuinely negative eigenvalue,
+// a ladder rung that genuinely lands inside the well, and a measured decrease
+// that is BELOW the criterion's own resolution.
+//
+//   f(ρ) = ½ρ₀² + 0.02ρ₁⁴ − 5e-5·ρ₁²        H = diag(1, 0.24ρ₁² − 1e-4)
+//
+// At ρ = 0 the curvature is `−1e-4` — four orders above the
+// `sqrt(EPSILON)·max(1,|H_kk|) ≈ 1.5e-8` roundoff margin, so this is a
+// certified strict saddle and not a flat direction. The well is WIDE
+// (`f < 0` for `|ρ₁| < 0.05`) and SHALLOW (`min f = −3.125e-8`), so:
+//
+//   * `α_min = sqrt(2·1e-7/1e-4) = 4.47e-2`, so the ladder runs
+//     `1 → 0.5 → … → 0.03125` and the last rung lands INSIDE the well;
+//   * the decrease there is `2.976e-8`, against `objective_resolution = 1e-7`.
+//
+// With the acceptance floor at the ARITHMETIC's resolution (`16ε|V|` ≈ 3.6e-15,
+// what it used to be) that rung reads as a descent, the one-shot reseed is spent
+// on it, and the retry — which used to be forbidden from adjudicating — refuses
+// on the matrix's word. That is exactly what penguins' unbiased probe did four
+// times over, at `λ_min ≈ −1e-6` and decreases of `2e-6` against a `1.228e-3`
+// resolution.
+//
+// With the floor at the CRITERION's resolution the same rung is what it is: a
+// number the criterion cannot distinguish from zero. The claim is unfalsifiable
+// over its whole derived range, the verdict is withdrawn, and the point
+// certifies.
+fn unresolvable_well_cost(rho: &Array1<f64>) -> f64 {
+    let r0 = rho[0];
+    let r1 = rho[1];
+    0.5 * r0 * r0 + 0.02 * r1 * r1 * r1 * r1 - 5.0e-5 * r1 * r1
+}
+
+fn unresolvable_well_eval(rho: &Array1<f64>) -> OuterEval {
+    let r0 = rho[0];
+    let r1 = rho[1];
+    OuterEval {
+        cost: unresolvable_well_cost(rho),
+        gradient: array![r0, 0.08 * r1 * r1 * r1 - 1.0e-4 * r1],
+        hessian: HessianValue::Dense(array![[1.0, 0.0], [0.0, 0.24 * r1 * r1 - 1.0e-4]]),
+        inner_beta_hint: None,
+    }
+}
+
+#[test]
+fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
+    // Pin the fixture's own arithmetic first, so a failure below is about the
+    // acceptance floor and not about the well having moved.
+    let rung = unresolvable_well_cost(&array![0.0, 0.031_25]);
+    assert!(
+        rung < 0.0,
+        "the ladder's last rung must land INSIDE the well, or this test would be about the \
+         ladder's reach instead of its acceptance (f={rung:.6e})"
+    );
+    assert!(
+        rung.abs() < 1.0e-7,
+        "and the decrease there must be BELOW the criterion's resolution, or the descent is \
+         real and must be minted (f={rung:.6e})"
+    );
+
+    let problem = OuterProblem::new(2)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_initial_rho(array![0.0, 0.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(unresolvable_well_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(unresolvable_well_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = audit_stationary_point(&mut obj, array![0.0, 0.0], "unresolvable-well #2612")
+        .expect(
+            "a point whose only available descent is below the criterion's own resolution must \
+             not be refused: no optimizer can reach past it, so the negative direction has no \
+             operational content",
+        );
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified point carries its certificate");
+    assert!(
+        cert.certifies(),
+        "the certificate must accept: {}",
+        cert.summary()
+    );
+    assert_eq!(
+        cert.curvature,
+        CurvatureEvidence::CriterionContradicted,
+        "the verdict must be recorded as WITHDRAWN, not as a PSD claim — the matrix is still \
+         indefinite and nothing here showed the point is a minimum: {}",
+        cert.summary()
+    );
+    assert!(
+        result.saddle_escape_reseed.is_none(),
+        "the one-shot reseed must NOT be spent on a decrease the criterion cannot resolve; \
+         spending it is what left the retry pass with nothing to adjudicate: {:?}",
+        result.saddle_escape_reseed
+    );
+}
