@@ -4996,7 +4996,26 @@ fn certify_outer_optimality_at_terminal_fidelity(
                                 (forward.gradient[i] - backward.gradient[i]) / (2.0 * step);
                         }
                     }
-                    _ => complete = false,
+                    // A refusal here is EVIDENCE, not an absence of it: an
+                    // objective that cannot be evaluated a step away from the
+                    // point it just refused explains a failed line search on its
+                    // own, with no gradient defect anywhere. Swallowing the
+                    // reason left the reader with "could not evaluate" and
+                    // nothing to act on, so name the coordinate, the side, the
+                    // step, and what the evaluator actually said.
+                    (forward, backward) => {
+                        complete = false;
+                        for (side, outcome) in [("+", forward), ("-", backward)] {
+                            if let Err(error) = outcome {
+                                log::info!(
+                                    "[CERTIFICATE] {context}: the FD-vs-analytic Hessian probe \
+                                     could not evaluate the objective at coordinate {k} \
+                                     (rho[{k}]={:.6e}, side {side}, step {step:.3e}): {error}",
+                                    result.rho[k],
+                                );
+                            }
+                        }
+                    }
                 }
             }
             // Re-own the checkpoint: the probes above were derivative-bearing
