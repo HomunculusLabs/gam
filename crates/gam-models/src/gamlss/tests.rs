@@ -589,7 +589,7 @@ pub(crate) fn binomial_wiggle_joint_hessian_reduces_to_nonwiggle_at_zero_betaw_9
     let weights = Array1::from_iter((0..n).map(|i| 0.5 + 0.2 * i as f64));
     let q_seed = Array1::linspace(-1.0, 1.0, n);
     let (_wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
 
     for link in [
@@ -608,7 +608,7 @@ pub(crate) fn binomial_wiggle_joint_hessian_reduces_to_nonwiggle_at_zero_betaw_9
             threshold_design: Some(threshold_design),
             log_sigma_design: Some(log_sigma_design),
             wiggle_knots: knots.clone(),
-            wiggle_degree: 2,
+            wiggle_degree: 3,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
         };
         // βw = 0 ⇒ etaw = 0, m = 1, g2 = 0, q = q0.
@@ -2659,7 +2659,7 @@ pub(crate) fn bls_wiggle_workspace_fixture_with_link(
     let eta_ls = xls.dot(&beta_ls);
     let q_seed = Array1::linspace(-1.0, 1.0, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let y = Array1::from_iter((0..n).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
     let weights = Array1::from_elem(n, 1.0);
@@ -2674,7 +2674,7 @@ pub(crate) fn bls_wiggle_workspace_fixture_with_link(
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
     };
     let q0 = Array1::from_iter(
@@ -3204,7 +3204,7 @@ pub(crate) fn gaussian_location_scale_wiggle_workspace_matvec_matches_dense() {
 
     let q_seed = Array1::linspace(-1.0, 1.0, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let wiggle_design_dense = match wiggle_block.design.as_dense_ref() {
         Some(d) => d.clone(),
@@ -3225,7 +3225,7 @@ pub(crate) fn gaussian_location_scale_wiggle_workspace_matvec_matches_dense() {
         mu_design: Some(mu_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
         cached_row_scalars: std::sync::RwLock::new(None),
     };
@@ -3347,7 +3347,7 @@ pub(crate) fn gls_wiggle_workspace_fixture() -> (
     let eta_ls = xls.dot(&beta_ls);
     let q_seed = Array1::linspace(-1.0, 1.0, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let pw = wiggle_block.design.ncols();
     let beta_w = Array1::from_shape_fn(pw, |j| 0.05 * ((j + 1) as f64).sin());
@@ -3362,7 +3362,7 @@ pub(crate) fn gls_wiggle_workspace_fixture() -> (
         mu_design: Some(mu_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
         cached_row_scalars: std::sync::RwLock::new(None),
     };
@@ -4523,7 +4523,7 @@ pub(crate) fn binomial_location_scalewiggle_term_builder_requires_exact_spatial_
     let n = 8usize;
     let q_seed = Array1::linspace(-1.25, 1.25, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let builder = BinomialLocationScaleWiggleTermBuilder {
         y: Array1::from_elem(n, 0.0),
@@ -4534,7 +4534,7 @@ pub(crate) fn binomial_location_scalewiggle_term_builder_requires_exact_spatial_
         mean_offset: Array1::zeros(n),
         noise_offset: Array1::zeros(n),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         wiggle_block,
     };
     assert!(builder.exact_spatial_joint_supported());
@@ -4606,7 +4606,7 @@ pub(crate) fn binomial_location_scalewiggle_builder_populateswarm_start_betas() 
     let weights = Array1::from_elem(n, 1.0);
     let q_seed = Array1::linspace(-1.25, 1.25, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let builder = BinomialLocationScaleWiggleTermBuilder {
         mean_offset: Array1::zeros(y.len()),
@@ -4617,7 +4617,7 @@ pub(crate) fn binomial_location_scalewiggle_builder_populateswarm_start_betas() 
         meanspec: simple_matern_term_collection(&[0, 1], 0.45),
         noisespec: simple_matern_term_collection(&[0, 1], 0.8),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         wiggle_block,
     };
     let mean_design =
@@ -4732,7 +4732,7 @@ pub(crate) fn binomial_location_scalewiggle_exact_newton_spatial_joint_hyper_ret
     let noisespec = simple_matern_term_collection(&[0, 1], 0.8);
     let q_seed = Array1::linspace(-1.5, 1.5, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 4, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 4, 2, false)
             .expect("wiggle block");
     let builder = BinomialLocationScaleWiggleTermBuilder {
         mean_offset: Array1::zeros(y.len()),
@@ -4743,7 +4743,7 @@ pub(crate) fn binomial_location_scalewiggle_exact_newton_spatial_joint_hyper_ret
         meanspec: meanspec.clone(),
         noisespec: noisespec.clone(),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         wiggle_block,
     };
     let mean_design =
@@ -4974,7 +4974,7 @@ pub(crate) fn binomial_location_scalewiggle_family_exposes_joint_psi_hook_surfac
     let noisespec = simple_matern_term_collection(&[0, 1], 0.7);
     let q_seed = Array1::linspace(-1.25, 1.25, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let builder = BinomialLocationScaleWiggleTermBuilder {
         mean_offset: Array1::zeros(y.len()),
@@ -4985,7 +4985,7 @@ pub(crate) fn binomial_location_scalewiggle_family_exposes_joint_psi_hook_surfac
         meanspec: meanspec.clone(),
         noisespec: noisespec.clone(),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         wiggle_block,
     };
     let mean_design =
@@ -5460,7 +5460,7 @@ pub(crate) fn binomial_location_scalewiggle_termswith_matern_spatial_blocks_fit_
     let weights = Array1::from_elem(n, 1.0);
     let q_seed = Array1::linspace(-1.5, 1.5, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 4, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 4, 2, false)
             .expect("wiggle block");
     let spec = BinomialLocationScaleWiggleTermSpec {
         y,
@@ -5471,7 +5471,7 @@ pub(crate) fn binomial_location_scalewiggle_termswith_matern_spatial_blocks_fit_
         threshold_offset: Array1::zeros(n),
         log_sigma_offset: Array1::zeros(n),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         wiggle_block,
     };
     let fit = fit_binomial_location_scalewiggle_terms(
@@ -5534,7 +5534,7 @@ pub(crate) fn binomial_location_scalewiggle_optimum_is_budget_independent_2647()
             threshold_offset: Array1::zeros(n),
             log_sigma_offset: Array1::zeros(n),
             wiggle_knots: knots,
-            wiggle_degree: 2,
+            wiggle_degree: 3,
             wiggle_block,
         };
         let options = BlockwiseFitOptions {
@@ -5585,7 +5585,7 @@ pub(crate) fn wiggle_family_evaluate_returns_exact_newton_blocks() {
     let log_sigma_block = intercept_block(n);
     let q_seed = Array1::linspace(-1.5, 1.5, n);
     let (wiggle_block, knots) =
-        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 3, 3, 2, false)
             .expect("wiggle block");
     let threshold_design = threshold_block.design.clone();
     let log_sigma_design = log_sigma_block.design.clone();
@@ -5596,7 +5596,7 @@ pub(crate) fn wiggle_family_evaluate_returns_exact_newton_blocks() {
         threshold_design: Some(threshold_design),
         log_sigma_design: Some(log_sigma_design),
         wiggle_knots: knots,
-        wiggle_degree: 2,
+        wiggle_degree: 3,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
     };
 

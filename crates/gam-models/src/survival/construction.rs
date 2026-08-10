@@ -3964,7 +3964,12 @@ pub fn build_survival_timewiggle_from_baseline(
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
-    let knots = crate::wiggle::monotone_warp_knots_from_seed(
+    // A FIXED-index warp: `h = h_base + B(h_base)·β_w` composes onto the
+    // BASELINE offsets, which are computed from time and do not move with β. So
+    // the evaluation point never crosses a knot during a solve and the boundary
+    // knot's multiplicity is invisible — this block keeps the clamped generator
+    // rather than the simple-ended warp one (gam#2695).
+    let knots = gam_terms::basis::initializewiggle_knots_from_seed(
         seed.view(),
         cfg.degree,
         cfg.num_internal_knots,
