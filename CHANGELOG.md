@@ -1,5 +1,119 @@
 ## Unreleased
 
+- **One sentinel, one resolver — the marginal-slope branch never reached the
+  measure-jet range screen (#2754, #2761).** `length_scale == 0.0` is an
+  UNRESOLVED representer range, and the tree carries two resolvers for it: the
+  pure-geometry median-nearest-node rule inside the basis builder, and the
+  #2750 response screen. `fit_standard_model` runs the screen so that every
+  standard-fit branch gets the same one. The Bernoulli marginal-slope family has
+  its own entry point and never passed through it, so the identical declaration
+  on byte-identical rows realized two different spans:
+
+  ```text
+  [2754 geometry gaussian-seed] ell=2.5197  m=(10,2) extent=[2.671, 2.726] band0=1.0807
+  [2754 geometry bms-marginal ] ell=1.0807  m=(10,2) extent=[2.671, 2.726] band0=1.0807
+  [2754 geometry bms-logslope ] ell=1.0807  m=(10,2) extent=[2.671, 2.726] band0=1.0807
+  ```
+
+  Same 10 centers, same extent, same band floor, **2.33× apart in ℓ** — and the
+  BMS value is exactly `eps_band[0]`, which is the geometry heuristic's own
+  output by construction, i.e. the fingerprint of a term that reached no
+  resolver at all. `ℓ` decides WHICH span the representers occupy and `λ` cannot
+  move a span, so this is not a tuning difference between entry points; it is a
+  different model reached by typing a different family name. It is also exactly
+  the mechanism #2761 named: #2750 measured the geometry heuristic sitting 21.7
+  nats away from the criterion's global optimum, and #2761 measured its span
+  floor four orders above the chosen range's.
+
+  **What the range was worth on this fixture, before the fix.** The parity test
+  cites a length-scale sweep (`zz_mjs_lengthscale_sweep_1041`) for the claim
+  that "the auto ℓ is already the BEST — every explicit ℓ is worse". That test
+  is not in the tree; `grep` finds only the citation. Rebuilt as
+  `examples/probe_2754_bms_length_scale_sweep.rs` on the parity fixture's own
+  data law and its own held-out score, the claim inverts — the auto range is the
+  WORST of the eleven measured:
+
+  | ℓ (standardized) | held-out marginal RMSE |
+  |---|---|
+  | 1.08 (auto / geometry) | 0.04441 |
+  | 2.14 | 0.04157 |
+  | 8.56 | 0.04170 |
+  | 17.12 | 0.04011 |
+  | 25.68 | 0.03985 |
+  | 68.48 | 0.03788 |
+  | matérn(k=10) | 0.05234 |
+  | duchon(k=10) | 0.03705 |
+
+  **Not in tension with the ℓ-learning freeze** two screens above it in the same
+  function. The freeze is about the SEARCH: a design-moving dial on covariates
+  shared by the coupled marginal/log-slope pair lets the outer optimizer trade
+  one surface against the other into a separation-scale runaway. The screen is
+  about the SEED, runs once before the fit, and hands the frozen dial a
+  data-chosen basin. Freezing a dial is a reason to seed it better, not worse.
+
+  **Each surface is screened against its own target.** The marginal block takes
+  `y`. The log-slope block cannot: `β` never appears in `E[y | x]`, so ranking
+  its spans against `y` ranks them by their fit to the MARGINAL surface. It
+  takes the first-order score surrogate `s = (y − ȳ)(z − z̄)`, whose conditional
+  mean is the planted log-slope surface times a strictly positive smooth
+  modulation —
+
+  ```text
+  Cov(y, z | x) = E[ z·F(α(x) + β(x)·z) ] = F'(α(x))·β(x) + O(β³)
+  ```
+
+  by expanding the link about `α(x)` (the odd moments of `z` kill the even
+  terms). The profiled Gaussian REML the screen ranks with is invariant to a
+  global rescale of its response, so the unknown `E[z²]` and `F'` scales are
+  both free. `logslope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754`
+  checks that derivation against a 200k-row probit sample rather than asserting
+  it, and scores the binned surrogate against BOTH candidate truths so the
+  separation from `E[y | x]` is the thing being pinned.
+
+  Gated by `measure_jet_auto_range_is_the_same_through_every_family_entry_point_2754`,
+  which asserts EXACT `f64` equality of the realized range across the two entry
+  points — the screen is a deterministic function of (feature columns, response,
+  weights, spec), so handed the same four it must return the same number, and a
+  tolerance would hide a second resolver that happens to land nearby on one
+  fixture. It asserts the realized geometry matches first, so a range difference
+  cannot be explained away as the two entries having realized different center
+  layouts.
+
+  The same bypass was in `fit_transformation_normal`, fixed in the same lane:
+  its covariate surface enters the linear predictor of the transformed response,
+  so `response` is its own screening target. The reached/unreached inventory now
+  lives in the doc comment on `seed_measure_jet_auto_ranges` itself — three
+  entry points screen (standard, BMS, CTN), five still take the geometry
+  heuristic (survival marginal-slope, the two latent families, the
+  location-scale families, survival-transformation) and are marked **not
+  derived** rather than fixed: for those the raw response is not a readout of
+  the surface being screened (a survival marginal-slope block is modulated by
+  the risk set in `age_entry`/`age_exit`; a location-scale SCALE block enters
+  through a variance, so ranking its spans against `y` ranks them by their fit
+  to the LOCATION surface). Inventing one target per family without a fixture
+  that can grade it would be landing an unmeasured modelling choice in five
+  places at once; the honest state is that the table says so out loud.
+
+- **The #1041 parity bar is now policed by a statistic that can resolve it
+  (#2754).** The gate fitted ONE draw and compared one ratio to `1.10`; the
+  ratio's sampling spread under redraws of the identical generator had never
+  been measured. The argument on #2754 used the BETWEEN-method spread
+  (matérn/duchon = 1.42×) as if it were a noise estimate, and it is not — two
+  estimators differing by 1.42× says nothing about how much ONE estimator moves
+  when only the draw changes. Measured, the within-method sd of the log ratio is
+  **0.119** at a mean ratio of 0.97, so the single-draw gate sat ~1.1 sd below
+  its own bar and failed about **one run in eight** for no reason but the draw.
+
+  The bar is unchanged at `1.10×` and the comparator stays Matérn: it is the
+  only statement in the tree that measure-jet must remain competitive with its
+  own estimator class as both change. What changed is the instrument. The gate
+  now reports the mean log-ratio over `REPLICATES` independent draws and asserts
+  both that it clears the bar and that it clears it **by at least three standard
+  errors** — #2754's finding made permanent, so a fixture whose noise grows
+  relative to the margin it polices says "under-powered" in as many words
+  instead of flipping a coin, and says it about the FIXTURE rather than the
+  estimator. `REPLICATES` is derived from `3·sd/√k ≤ margin`, not chosen.
+
 - **A chart records the `θ` it was ASKED to realize, because `ln(exp(θ))` is not
   `θ` (#2765, #2767).** `SurvivalMarginalSlopeFrozenOffsetChart::evaluate(θ)`
   decoded `θ → cfg` and then called the CONFIG-authored geometry builder, which
