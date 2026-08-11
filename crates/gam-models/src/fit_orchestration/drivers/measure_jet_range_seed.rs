@@ -451,3 +451,146 @@ pub(crate) fn seed_measure_jet_auto_ranges(
     }
     seeded
 }
+
+#[cfg(test)]
+mod marginal_slope_screen_response_tests {
+    use super::*;
+
+    fn splitmix(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn unit(state: &mut u64) -> f64 {
+        ((splitmix(state) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    fn normal(state: &mut u64) -> f64 {
+        let u1 = unit(state).max(1.0e-300);
+        let u2 = unit(state);
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
+
+    fn normal_cdf(x: f64) -> f64 {
+        0.5 * (1.0 + statrs::function::erf::erf(x / std::f64::consts::SQRT_2))
+    }
+
+    fn normal_pdf(x: f64) -> f64 {
+        (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    }
+
+    fn pearson(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len() as f64;
+        let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+        let mut sab = 0.0;
+        let mut saa = 0.0;
+        let mut sbb = 0.0;
+        for (x, y) in a.iter().zip(b) {
+            sab += (x - ma) * (y - mb);
+            saa += (x - ma) * (x - ma);
+            sbb += (y - mb) * (y - mb);
+        }
+        sab / (saa.sqrt() * sbb.sqrt())
+    }
+
+    /// The derivation the log-slope screening surrogate rests on, checked
+    /// against a probit sample rather than asserted: binning `s = (y−ȳ)(z−z̄)`
+    /// by `x` must recover `F'(α(x))·β(x)`, NOT `α(x)`.
+    ///
+    /// This is the property that makes the surrogate the right ranking target
+    /// for the log-slope span. Screening against `y` — the only other response
+    /// on hand at that point in the fit — recovers `α` instead, which is a
+    /// different function; the test pins the separation by scoring the binned
+    /// surrogate against BOTH candidate truths on the same bins.
+    #[test]
+    fn logslope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754() {
+        const N: usize = 200_000;
+        const BINS: usize = 20;
+        let alpha_true = |x: f64| -0.2 + 0.7 * (std::f64::consts::PI * x).sin();
+        let beta_true = |x: f64| 0.2 + 0.9 * x;
+
+        let mut state = 0x2754_2026_0811_0001_u64;
+        let mut xs = vec![0.0; N];
+        let mut zs = vec![0.0; N];
+        let mut ys = vec![0.0; N];
+        for i in 0..N {
+            let x = unit(&mut state);
+            let z = normal(&mut state);
+            let p = normal_cdf(alpha_true(x) + beta_true(x) * z);
+            xs[i] = x;
+            zs[i] = z;
+            ys[i] = f64::from(unit(&mut state) < p);
+        }
+        let weights = Array1::<f64>::ones(N);
+        let y = Array1::from(ys.clone());
+        let z = Array1::from(zs.clone());
+        let surrogate =
+            marginal_slope_logslope_screen_response(y.view(), z.view(), weights.view())
+                .expect("a non-degenerate driver must produce a surrogate");
+        assert_eq!(surrogate.len(), N);
+
+        // Bin by x and average, so what is compared is the CONDITIONAL mean the
+        // derivation is about rather than the per-row noise it sits under.
+        let mut bin_sum = vec![0.0; BINS];
+        let mut bin_count = vec![0.0; BINS];
+        let mut bin_x = vec![0.0; BINS];
+        for i in 0..N {
+            let b = ((xs[i] * BINS as f64) as usize).min(BINS - 1);
+            bin_sum[b] += surrogate[i];
+            bin_x[b] += xs[i];
+            bin_count[b] += 1.0;
+        }
+        let binned: Vec<f64> = (0..BINS).map(|b| bin_sum[b] / bin_count[b]).collect();
+        let centers: Vec<f64> = (0..BINS).map(|b| bin_x[b] / bin_count[b]).collect();
+        // The derivation's predicted conditional mean, and the response the
+        // surrogate exists to avoid.
+        let predicted: Vec<f64> = centers
+            .iter()
+            .map(|&x| normal_pdf(alpha_true(x)) * beta_true(x))
+            .collect();
+        let marginal: Vec<f64> = centers.iter().map(|&x| normal_cdf(alpha_true(x))).collect();
+
+        let to_predicted = pearson(&binned, &predicted);
+        let to_marginal = pearson(&binned, &marginal);
+        println!(
+            "[#2754 surrogate] corr(binned s, F'(alpha)*beta)={to_predicted:.4} \
+             corr(binned s, marginal E[y|x])={to_marginal:.4}"
+        );
+        assert!(
+            to_predicted > 0.95,
+            "the log-slope screening surrogate must track F'(alpha)*beta (got {to_predicted:.4}); \
+             the derivation behind `marginal_slope_logslope_screen_response` is what the screen's \
+             ranking rests on"
+        );
+        assert!(
+            to_predicted > to_marginal + 0.2,
+            "the surrogate must separate the log-slope surface from the marginal one: \
+             corr to F'(alpha)*beta = {to_predicted:.4} vs corr to E[y|x] = {to_marginal:.4}"
+        );
+    }
+
+    /// A driver with no variation carries no log-slope signal, so the surrogate
+    /// declines instead of handing the screen a constant every span fits equally.
+    #[test]
+    fn logslope_screen_surrogate_declines_a_degenerate_driver_2754() {
+        let y = Array1::from(vec![0.0, 1.0, 1.0, 0.0]);
+        let z = Array1::from(vec![0.5, 0.5, 0.5, 0.5]);
+        let w = Array1::<f64>::ones(4);
+        assert!(
+            marginal_slope_logslope_screen_response(y.view(), z.view(), w.view()).is_none(),
+            "a constant latent driver must not be screened against"
+        );
+        // Weighted means, not arithmetic ones: a weighted fit screens on its own
+        // measure. With all mass on rows 0 and 1 the centering must use those.
+        let w2 = Array1::from(vec![1.0, 1.0, 0.0, 0.0]);
+        let z2 = Array1::from(vec![-1.0, 1.0, 7.0, -7.0]);
+        let s = marginal_slope_logslope_screen_response(y.view(), z2.view(), w2.view())
+            .expect("a varying driver must produce a surrogate");
+        // y_bar = 0.5, z_bar = 0.0 under w2.
+        assert!((s[0] - 0.5).abs() < 1e-12, "s[0]={} != 0.5", s[0]);
+        assert!((s[1] - 0.5).abs() < 1e-12, "s[1]={} != 0.5", s[1]);
+    }
+}

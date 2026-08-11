@@ -5,6 +5,7 @@ mod measure_jet_ell_outer_gradient_fd_2761;
 mod measure_jet_formula_fit_robustness_sweep;
 mod measure_jet_near_miss_decoupling;
 mod measure_jet_perf_parity;
+mod measure_jet_range_resolver_entry_point_invariance_2754;
 mod measure_jet_scale_smoke;
 mod measure_jet_web_quality;
 mod probe_2750_psi_box;
