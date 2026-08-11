@@ -198,6 +198,42 @@ fn measure_jet_auto_range_is_the_same_through_every_family_entry_point_2754() {
          model, not a different tuning."
     );
 
+    // Arm 3 — the transformation-normal entry, which builds its bootstrap
+    // covariate design straight from the caller's spec and took the same bypass.
+    // Its covariate surface enters the linear predictor of the transformed
+    // response, so it screens against the same `y`, so it must land on the same
+    // number. A refusal here is reported rather than asserted away: CTN can
+    // decline a fixture for reasons that have nothing to do with the range, and
+    // a silent `continue` would let this arm rot into a no-op.
+    let ctn_config = FitConfig {
+        family: Some("transformation-normal".to_string()),
+        ..FitConfig::default()
+    };
+    match fit_from_formula(
+        &format!("y ~ mjs(x1, x2, centers={CENTERS}, learn_length_scale=false)"),
+        &ds,
+        &ctn_config,
+    ) {
+        Ok(FitResult::TransformationNormal(fit)) => {
+            let ctn_ell = realized_ell(&fit.covariate_spec_resolved, "transformation-normal");
+            println!("[#2754 entry-point] transformation-normal ell={ctn_ell:.6}");
+            assert_eq!(
+                standard_ell, ctn_ell,
+                "the same mjs declaration on the same rows realized two different representer \
+                 ranges through the standard entry ({standard_ell:.6}) and the \
+                 transformation-normal entry ({ctn_ell:.6}), both of which screen against `y`"
+            );
+        }
+        Ok(other) => panic!(
+            "family=\"transformation-normal\" returned the wrong variant: {:?}",
+            std::mem::discriminant(&other)
+        ),
+        Err(e) => panic!(
+            "the transformation-normal arm of this gate must fit — it is the arm that pins the \
+             CTN half of the resolver hole: {e}"
+        ),
+    }
+
     // The log-slope block is screened against its own target (the first-order
     // score surrogate), so it is NOT required to equal the marginal's range.
     // What it must not be is the unscreened geometry heuristic, which is the
