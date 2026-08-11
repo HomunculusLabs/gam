@@ -3482,8 +3482,10 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // The blockwise path takes ONE step per block per cycle rather
                 // than a backtracking ladder, so it has no shrink sequence to
                 // read a resolution off (gam#2612). `0.0` means "nothing
-                // measured", which leaves this site byte-identical.
+                // measured", which leaves this site byte-identical — and with
+                // nothing measured the residual flag cannot be consulted.
                 0.0,
+                false,
             );
             block_max_step[b] = trust_update.radius;
             if !accepted {

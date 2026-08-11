@@ -1934,6 +1934,7 @@ pub(crate) fn update_joint_trust_region_radius(
     objective_scale: f64,
     objective_tol: f64,
     measured_resolution: f64,
+    residual_above_tolerance: bool,
 ) -> JointTrustRegionUpdate {
     // Round-off-aware trust-region radius control, delegated to the shared
     // `opt::TrustRegionPolicy::noise_aware` controller. The
@@ -1988,7 +1989,43 @@ pub(crate) fn update_joint_trust_region_radius(
     // the iterate inches down a negative-curvature direction at a frozen
     // radius and converges linearly. That is a landscape problem, not a
     // controller one, and neither side of this predicate fixes it.
-    let hit_boundary = step_norm >= 0.99 * old_radius && predicted_reduction > objective_tol;
+    // ... AND `objective_tol` STOPS BEING AN APPLICABLE STANDARD ONCE THE
+    // OBJECTIVE STOPS BEING READABLE (gam#2612).
+    //
+    // Everything above is right about what `objective_tol` is for. It is
+    // convergence-aware damping against the OBJECTIVE, and the inner solve does
+    // not certify on the objective — it certifies on the stationarity residual.
+    // While the two agree about where the solve is, damping on one governs the
+    // other. They stop agreeing exactly where `ObjectiveResolutionWitness` has
+    // MEASURED that a single evaluation of `F` carries more rounding than the
+    // model's whole predicted decrease: there, `predicted_reduction <=
+    // objective_tol` is not "the model has run out of useful descent", it is
+    // "the objective has run out of digits", and it holds for every remaining
+    // cycle no matter how far the residual still is from its own target.
+    //
+    // Measured on the penguins witness with the measurement in place and this
+    // clause absent: the ratchet is gone and every cycle accepts (`rho = 1`,
+    // `hold_inside`), but the radius that the ratchet already collapsed can
+    // never grow back — `pred = 3.2e-12` against an `objective_tol` four
+    // decades above it — so the Newton proposal `|prop|inf = 1.365e-4` is
+    // served in `|d|inf = 1.9e-6` slices, a 70x truncation, and the residual
+    // contracts at ~0.95/cycle instead of squaring: `3.57e-6` to `3.72e-7`
+    // over 140 cycles and then flat, terminating on the cycle budget.
+    //
+    // So in that regime the boundary IS the binding constraint and growth is
+    // justified by the criterion the solve is actually judged on: the step sits
+    // on the boundary, the model predicts a genuine (if unreadable) decrease,
+    // and the residual is still above its tolerance. All three are required.
+    // Outside it — anywhere no ladder has measured a resolution, which is every
+    // solve whose cycles accept on the first attempt — `measured_resolution` is
+    // `0`, the clause cannot fire, and the gam#2600 / wine-arm behaviour above
+    // is byte-identical.
+    let objective_unreadable_at_this_step = measured_resolution > 0.0
+        && predicted_reduction > 0.0
+        && predicted_reduction <= measured_resolution
+        && residual_above_tolerance;
+    let hit_boundary = step_norm >= 0.99 * old_radius
+        && (predicted_reduction > objective_tol || objective_unreadable_at_this_step);
     // THE NOISE FLOOR IS MEASURED WHEN IT CAN BE (gam#2612). The controller
     // sizes its floor as `|objective_scale| × noise_floor_rel`, so passing the
     // measured ABSOLUTE resolution as a ratio against the same scale makes its
