@@ -7436,8 +7436,9 @@ mod tests {
 #[cfg(test)]
 mod log_survival_panel_2714_tests {
     use super::{
-        LOG_SURVIVAL_PANEL_MAX_NODES, LOG_SURVIVAL_PANEL_MIN_NODES, LogSurvivalBranch,
-        QuadratureContext, log_survival_jet, log_survival_panel,
+        LOG_SURVIVAL_PANEL_MAX_NODES, LOG_SURVIVAL_PANEL_MIN_NODES,
+        LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION, LogSurvivalBranch, QuadratureContext,
+        log_survival_jet, log_survival_panel,
     };
 
     /// `(mu, sigma, ln S)` — 60-digit mpmath reference for
@@ -7576,6 +7577,223 @@ mod log_survival_panel_2714_tests {
             );
         }
         println!("[2714] worst |analytic - FD| / |analytic| = {worst:.3e}");
+    }
+
+    /// `(mu, sigma, ln|σ^j ∂_μ^j S| for j = 0..=4, sign of each)` — 50-digit
+    /// mpmath reference for the SAME object the panel tower produces,
+    /// `σ^j ∂_μ^j S = ∫ He_j(z) φ(z) exp(−e^{μ+σz}) dz`.
+    ///
+    /// Computed peak-shifted, on a window carrying 95 e-folds plus the
+    /// order's own `j·ln(2+|z⋆|)` padding, and cross-checked at two working
+    /// precisions and two quadrature degrees.
+    ///
+    /// This is the oracle the tower has never had. Its existing gate is a
+    /// central difference of the shipped `ln S` against the shipped order-1
+    /// entry — necessary (it is the assertion whose absence let #2714 live)
+    /// but self-referential past order 1 and blind to orders 2–4 entirely,
+    /// which are exactly the orders `log_kernel_bundle` asks for.
+    const LOG_SURVIVAL_TOWER_REFERENCE: &[(f64, f64, [f64; 5], [f64; 5])] = &[
+        (-20.0, 0.002, [-2.0611577447499165e-9, -26.214606100483358, -32.429214200966715, -38.643822303511239, -44.858430410178095], [1.0, -1.0, -1.0, -1.0, -1.0]),
+        (-8.0, 0.15, [-0.00033925658129652018, -9.8862169612318004, -11.783683981303588, -13.681498274811226, -15.580007954561913], [1.0, -1.0, -1.0, -1.0, -1.0]),
+        (-8.0, 8.0, [-0.19812134534958133, -1.3528211702547069, -1.452147542328205, -3.240571743395306, -0.71024921821004234], [1.0, -1.0, -1.0, 1.0, 1.0]),
+        (-3.0, 0.02, [-0.049796530739250832, -6.9616394585654159, -10.92476204736755, -14.944640460549261, -19.104083600790619], [1.0, -1.0, -1.0, -1.0, -1.0]),
+        (-3.0, 0.5, [-0.055971877835218903, -3.6398579829672956, -4.4066491238893504, -5.2575250298329575, -6.3338354346007994], [1.0, -1.0, -1.0, -1.0, -1.0]),
+        (-3.0, 20.0, [-0.60124121574363753, -0.9283108111246211, -3.0420009372801215, -0.94719003039898553, -1.9515751519096107], [1.0, -1.0, -1.0, 1.0, 1.0]),
+        (-1.0, 0.005, [-0.36788234795427693, -6.666196411633682, -12.423205395414024, -20.715002885443461, -22.768239058212055], [1.0, -1.0, -1.0, -1.0, 1.0]),
+        (0.0, 0.05, [-0.99999922167489372, -3.9969814880950871, -13.681704026824476, -9.9897069128682089, -12.994203213800263], [1.0, -1.0, 1.0, 1.0, 1.0]),
+        (0.0, 1.0, [-0.96297240050030377, -1.3514828821346528, -3.4776689251068834, -2.0721333282379262, -4.077937287249247], [1.0, -1.0, 1.0, 1.0, -1.0]),
+        (0.0, 8.0, [-0.75101079589424262, -0.93383523622026295, -3.6184199118831959, -0.96301212066547202, -2.5659122387330754], [1.0, -1.0, 1.0, 1.0, -1.0]),
+        (1.0, 0.15, [-2.6680552858141743, -3.6128621614846425, -5.0108306306587141, -8.9368697272493613, -7.5728553818569553], [1.0, -1.0, 1.0, -1.0, -1.0]),
+        (1.8, 0.15, [-5.7427204044350835, -5.9515476490674363, -6.340239096657947, -7.0035313750765859, -8.252090685678664], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (1.8, 0.5, [-4.2572540292268353, -3.8392878811891043, -3.6246169834513785, -3.7636817578612526, -5.1584862006168726], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (3.2, 0.005, [-24.525318121110852, -26.624235940415906, -28.764769508877318, -30.95061498411088, -33.186272517159154], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (3.2, 0.15, [-20.146318679697758, -19.21570557965608, -18.328812156432285, -17.490308387278464, -16.706077981177801], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (3.2, 2.0, [-2.9809436264637528, -2.3631698967287561, -1.9865287099827521, -2.1204144743340792, -2.9045009851726548], [1.0, -1.0, 1.0, -1.0, -1.0]),
+        (3.2, 4.0, [-1.691825149278477, -1.3630396002384465, -1.5160548511506286, -2.9955755434621241, -0.80260762836904534], [1.0, -1.0, 1.0, 1.0, -1.0]),
+        (5.0, 1.0, [-11.281113553701783, -9.9522520507276806, -8.6794206852298702, -7.4721966945023752, -6.3443308739944037], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (8.0, 0.05, [-1113.5944371649733, -1110.1523256471932, -1106.7108385495186, -1103.2699768904941, -1099.8297416923265], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (8.0, 0.5, [-70.979888517598404, -68.673129437259724, -66.374650578770375, -64.084648631557826, -61.803330805347407], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (8.0, 4.0, [-3.9201018255002301, -3.0676533191912935, -2.3815942308869494, -1.9700438387194749, -2.2785027569363032], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (8.0, 60.0, [-0.8137859923376214, -0.92937929368933511, -2.8751091738859909, -0.95047056774657423, -1.7838093439866154], [1.0, -1.0, 1.0, 1.0, -1.0]),
+        (12.0, 0.002, [-128982.43390858436, -128977.07394828311, -128971.7139945779, -128966.35404746883, -128960.99410695599], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (12.0, 1.0, [-58.196695615981018, -55.917604210289579, -53.648028066976042, -51.388233991426026, -49.138505716496612], [1.0, -1.0, 1.0, -1.0, 1.0]),
+        (-50.0, 8.0, [-7.3280087932324622e-10, -19.248520695018656, -17.486423137639009, -15.749919102771783, -14.041433160139017], [1.0, -1.0, -1.0, -1.0, -1.0]),
+        (20.0, 0.05, [-31356.538203405772, -31351.094833958202, -31345.651481726192, -31340.208146710605, -31334.764828912308], [1.0, -1.0, 1.0, -1.0, 1.0]),
+    ];
+
+    /// #2714 / #2610: the whole μ-derivative tower is graded against an
+    /// EXTERNAL oracle, at every order `log_kernel_bundle` actually asks for.
+    ///
+    /// The tower's shipped gate finite-differences `ln S` against the order-1
+    /// entry. That catches the defect this issue names, and it cannot catch a
+    /// tower that is self-consistent and wrong at order 2, 3 or 4 — which are
+    /// the orders `LogKernelSumJet` reads (`max_k = k + 4`) and which the
+    /// log-σ curvature is built out of. A sign flip at order 3 would leave the
+    /// FD gate green and turn every latent-survival Hessian upside down.
+    ///
+    /// Certification is graded together with accuracy on purpose: the point of
+    /// [`LogSurvivalJet::certified_scaled_mu_derivatives`] is that admitted
+    /// entries are AT the working floor, so "admitted" and "accurate to 1e-13"
+    /// must be the same statement about the same rows.
+    #[test]
+    fn log_survival_tower_matches_a_high_precision_reference_2714() {
+        let ctx = QuadratureContext::new();
+        let mut worst_certified = 0.0_f64;
+        let mut worst_certified_at = (f64::NAN, f64::NAN, 0usize);
+        let mut certified_rows = 0usize;
+        let mut refused_rows = 0usize;
+        for &(mu, sigma, expected_log, expected_sign) in LOG_SURVIVAL_TOWER_REFERENCE {
+            let jet = log_survival_jet(&ctx, mu, sigma, 4);
+            let certified = jet.certified_scaled_mu_derivatives(4).is_some();
+            if certified {
+                certified_rows += 1;
+            } else {
+                refused_rows += 1;
+            }
+            if !certified {
+                // A refused row is refused precisely because its signed sum
+                // cancelled past the point where f64 resolves it — at
+                // `(mu=-20, sigma=0.002)` order 4 the cancellation is ~45
+                // nats, so neither the magnitude NOR the sign of that entry is
+                // a number. Grading it would be grading noise; what the
+                // refusal path owes is in the companion test below, which
+                // checks that the cancellation it reports actually bounds the
+                // error it made.
+                continue;
+            }
+            for order in 0..=4 {
+                let entry = jet.scaled_mu_derivatives[order];
+                assert_eq!(
+                    entry.sign, expected_sign[order],
+                    "#2714: sigma^{order} d^{order} S/d mu^{order} at (mu={mu}, \
+                     sigma={sigma}) is certified and has sign {} against the \
+                     high-precision {}. A sign error in the tower is not an \
+                     accuracy question — it reverses the curvature every \
+                     latent-survival row hands the joint Newton.",
+                    entry.sign, expected_sign[order]
+                );
+                // The entries are log-magnitudes, so a difference of logs IS
+                // the relative error of the magnitude they encode. The bar is
+                // the same one the `ln S` table uses: `1e-13` of the entry's
+                // own magnitude, floored at `1e-13` absolute. An entry
+                // reported as a logarithm cannot be closer to the truth than
+                // the ulp of that logarithm, and `|ln| = 1.3e5` occurs here.
+                let error = (entry.log_abs - expected_log[order]).abs();
+                let bar = 1.0e-13 * expected_log[order].abs().max(1.0);
+                assert!(
+                    error <= bar,
+                    "#2714: sigma^{order} d^{order} S/d mu^{order} at (mu={mu}, \
+                     sigma={sigma}) is CERTIFIED by its own measured \
+                     cancellation ({:.3} nats) and yet lands {error:.3e} from \
+                     the reference against a bar of {bar:.3e}. Certification \
+                     means 'this entry is at the working floor'; if it is not, \
+                     the gate that replaced the sigma >= 8 constant is weaker \
+                     than the constant was.",
+                    entry.log_cancellation
+                );
+                let relative = error / expected_log[order].abs().max(1.0);
+                if relative > worst_certified {
+                    worst_certified = relative;
+                    worst_certified_at = (mu, sigma, order);
+                }
+            }
+        }
+        // NON-VACUITY, both ways: the gate has to admit and it has to refuse.
+        // A table on which everything is certified says nothing about the
+        // refusal path, and one on which nothing is says nothing at all.
+        assert!(
+            certified_rows > 0 && refused_rows > 0,
+            "#2714: the tower reference must straddle the certification gate — \
+             got {certified_rows} certified and {refused_rows} refused rows"
+        );
+        let (mu, sigma, order) = worst_certified_at;
+        println!(
+            "[2714] tower: {certified_rows} certified / {refused_rows} refused; \
+             worst certified error {worst_certified:.3e} at (mu={mu}, sigma={sigma}, j={order})"
+        );
+    }
+
+    /// #2714: the cancellation the tower reports is an HONEST error bar, not a
+    /// label.
+    ///
+    /// `certified_scaled_mu_derivatives` replaced a `sigma >= 8` constant with
+    /// a measured quantity, and the whole argument for that replacement is one
+    /// error model: a signed log-sum-exp returns a result whose relative error
+    /// is `≈ ε · Σ|terms| / |Σ terms|`, i.e. `ε · e^cancellation`. The
+    /// admission bar `6.1` is the solve of `ε · e^cond = 1e-13` — so if the
+    /// model over-promises, the bar is calibrated against a fiction and the
+    /// refusal path is wrong in both directions at once.
+    ///
+    /// This grades the model where it is checkable, INCLUDING at rows the gate
+    /// refuses (which the accuracy test above cannot assert on): the achieved
+    /// error must sit under the predicted bar across the whole table, at every
+    /// order, with a slack that covers the `√n` accumulation the single-`ε`
+    /// model omits.
+    #[test]
+    fn log_survival_tower_cancellation_bounds_its_own_error_2714() {
+        /// Slack over `ε · e^cancellation`. The model prices one rounding per
+        /// term; an `n`-term compensationless sum accumulates like `√n · ε`,
+        /// and `n` reaches [`LOG_SURVIVAL_PANEL_MAX_NODES`] = 4097, so `√n ≈
+        /// 64`. Rounded up to 128 — one doubling of margin over the bound the
+        /// model itself implies, which is the point at which a violation is a
+        /// statement about the model rather than about the last two bits.
+        const ERROR_MODEL_SLACK: f64 = 128.0;
+        // Floor on the predicted bar. At zero cancellation the model predicts
+        // `ε`, but the entries are LOGARITHMS: an entry whose `|ln|·||` is
+        // 1.3e5 cannot be closer to the reference than the ulp of its own
+        // magnitude, so the bar is `max(e^cancellation, |log_abs|)` — the
+        // larger of the cancellation the sum suffered and the resolution of
+        // the number it is reported in.
+        let ctx = QuadratureContext::new();
+        let mut worst_ratio = 0.0_f64;
+        let mut worst_at = (f64::NAN, f64::NAN, 0usize);
+        let mut observed_max_cancellation = 0.0_f64;
+        for &(mu, sigma, expected_log, _) in LOG_SURVIVAL_TOWER_REFERENCE {
+            let jet = log_survival_jet(&ctx, mu, sigma, 4);
+            for order in 0..=4 {
+                let entry = jet.scaled_mu_derivatives[order];
+                if !entry.log_cancellation.is_finite() {
+                    continue;
+                }
+                observed_max_cancellation =
+                    observed_max_cancellation.max(entry.log_cancellation);
+                let predicted = ERROR_MODEL_SLACK
+                    * f64::EPSILON
+                    * entry.log_cancellation.exp().max(entry.log_abs.abs().max(1.0));
+                let error = (entry.log_abs - expected_log[order]).abs();
+                let ratio = error / predicted;
+                if ratio > worst_ratio {
+                    worst_ratio = ratio;
+                    worst_at = (mu, sigma, order);
+                }
+                assert!(
+                    error <= predicted,
+                    "#2714: the tower's own cancellation bar is not honest at \
+                     (mu={mu}, sigma={sigma}, j={order}): it reports \
+                     {:.4} nats of cancellation, which the signed-log-sum-exp \
+                     error model prices at {predicted:.3e}, and the achieved \
+                     error against the high-precision reference is \
+                     {error:.3e}. The admission bar \
+                     LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION is derived FROM \
+                     that model, so a model that under-predicts makes the bar \
+                     meaningless.",
+                    entry.log_cancellation
+                );
+            }
+        }
+        assert!(
+            observed_max_cancellation > LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION,
+            "#2714: no row of the reference reaches the admission bar \
+             ({LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION} nats), so this test \
+             never grades the model in the regime the bar exists for — worst \
+             observed cancellation was {observed_max_cancellation:.3}"
+        );
+        let (mu, sigma, order) = worst_at;
+        println!(
+            "[2714] cancellation bar: worst achieved/predicted = {worst_ratio:.3e} \
+             at (mu={mu}, sigma={sigma}, j={order}); max cancellation \
+             {observed_max_cancellation:.3} nats"
+        );
     }
 
     /// #2714, the smoothness half: `ln S` has no step in it.
