@@ -18,6 +18,11 @@
 //!   ...on the SAME 10 centers, the same extent, the same band floor 1.0807.
 //! ```
 //!
+//! (Those digits are from `examples/probe_2754_bms_length_scale_sweep.rs` on the
+//! #1041 parity fixture, which is where the defect was found. This file's own
+//! fixture is smaller and prints its own numbers; what it asserts is the
+//! equality, not the value.)
+//!
 //! `ell` decides WHICH span the representers occupy and `lambda` cannot move a
 //! span, so that is not a tuning difference between entry points; it is a
 //! different model reached by typing a different family name. gam#2750 measured
@@ -75,15 +80,24 @@ fn alpha_true(x1: f64, x2: f64) -> f64 {
 }
 
 /// Two responses on one set of rows, because the families being compared do not
-/// accept the same one: `y` is the binary probit draw the marginal-slope family
-/// requires, and `w` is a continuous surface-plus-noise response, which is what
-/// a transformation-normal model is for. Handing CTN a two-atom `y` is a
-/// degenerate transformation problem and it refuses to fit one — measured, not
-/// assumed: it burns 324 inner cycles and comes back
-/// `rejected_by_nonconvergence`. So each entry point is compared against a
-/// standard fit **on its own response**, which is the contract anyway: the
-/// screen is a function of (columns, response, weights, spec), so equality is
-/// only required where all four match.
+/// accept the same one, and each entry point is therefore compared against a
+/// standard fit **on its own response**. That is the contract anyway: the screen
+/// is a function of (columns, response, weights, spec), so equality is only
+/// required where all four match.
+///
+/// `y` is the binary probit draw the marginal-slope family requires. Handing
+/// that to CTN is a degenerate transformation problem and it refuses — measured,
+/// not assumed: 324 inner cycles, `rejected_by_nonconvergence`.
+///
+/// `w` is what CTN is FOR: a right-skewed positive response,
+/// `w = exp(0.8·α(x1,x2) + 0.5·N(0,1))`, whose transformation to normality is
+/// nontrivial and whose noise is large enough that smoothing has work to do.
+/// The obvious alternative — `α(x1,x2) + 0.1·N(0,1)`, a near-noiseless Gaussian
+/// — was tried first and is the wrong fixture for this family: the outer search
+/// rails at the box floor on three of five coordinates (`ρ = −10`, i.e. λ ≈ 0)
+/// and declines to mint a fit, because a `p_resp × p_cov` tensor can interpolate
+/// a smooth surface at that noise level and the REML optimum is genuinely at the
+/// edge. A gate has to run its family on a problem that family can solve.
 fn dataset() -> gam::data::EncodedDataset {
     let mut rng = SplitMix64::new(0x2754_2026_0811_0007);
     let headers = vec![
@@ -101,7 +115,7 @@ fn dataset() -> gam::data::EncodedDataset {
             let z = rng.next_normal();
             let p = normal_cdf(alpha_true(x1, x2) + beta_true(x1) * z).clamp(1e-9, 1.0 - 1e-9);
             let y = f64::from(rng_y.next_unit() < p);
-            let w = alpha_true(x1, x2) + 0.1 * rng_y.next_normal();
+            let w = (0.8 * alpha_true(x1, x2) + 0.5 * rng_y.next_normal()).exp();
             csv::StringRecord::from(vec![
                 format!("{x1:.17e}"),
                 format!("{x2:.17e}"),
