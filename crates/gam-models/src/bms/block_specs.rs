@@ -2044,6 +2044,71 @@ pub fn fit_bernoulli_marginal_slope_terms(
         &spec.latent_z_policy,
     )?;
     spec.z = z_standardized;
+    // #2750/#2754/#2761: resolve every AUTO measure-jet representer range
+    // against the response before any design is built here.
+    //
+    // `length_scale == 0.0` is an UNRESOLVED request with two resolvers: the
+    // pure-geometry rule inside the basis builder (the median nearest-node
+    // spacing) and the response screen. `fit_standard_model` runs the screen so
+    // that every standard-fit branch gets the same one — but this family has its
+    // own entry point and never passed through it, so the identical
+    // `mjs(x1, x2, centers=10)` declaration on byte-identical rows realized
+    // ℓ = 1.0807 here against ℓ = 2.5197 through the Gaussian entry, with the
+    // SAME 10 centers, the same extent and the same band floor. ℓ decides WHICH
+    // span the representers occupy and λ cannot move a span, so that is not a
+    // tuning difference between entry points; it is a different model reached by
+    // typing a different family name.
+    //
+    // This is NOT in tension with the ℓ-learning freeze above. The freeze is
+    // about the SEARCH: a design-moving dial on covariates shared by the coupled
+    // marginal/log-slope pair lets the outer optimizer trade one surface against
+    // the other into a separation-scale runaway. The screen is about the SEED:
+    // it runs once, before the fit, and hands the frozen dial a data-chosen
+    // basin instead of a geometry heuristic the repo has already measured
+    // landing in the wrong one (#2750: 21.7 nats deeper elsewhere; #2761: a
+    // span floor 4 orders lower). Freezing a dial is a reason to seed it better,
+    // not a reason to seed it worse.
+    //
+    // Each surface is screened against its OWN target: the marginal block
+    // against `y`, the log-slope block against the first-order score surrogate
+    // `(y − ȳ)(z − z̄)`, whose conditional mean is `F'(α(x))·β(x)` (see
+    // `marginal_slope_logslope_screen_response`). Screening the log-slope span
+    // against `y` would rank spans by their fit to the MARGINAL surface.
+    //
+    // Runs after the latent-z standardization so the surrogate is built on the
+    // same `z` the family fits, and after the flex pilot so an initializer that
+    // already wrote a range wins (the screen only fires on the `0.0` sentinel).
+    // Failure to screen is never an error: every refusal path leaves the term at
+    // the geometry heuristic, which is exactly the pre-#2750 behaviour.
+    {
+        let marginal_seeded = crate::fit_orchestration::drivers::seed_measure_jet_auto_ranges(
+            data_view,
+            spec.y.view(),
+            spec.weights.view(),
+            &mut spec.marginalspec,
+        );
+        let logslope_seeded = match
+            crate::fit_orchestration::drivers::marginal_slope_logslope_screen_response(
+                spec.y.view(),
+                spec.z.view(),
+                spec.weights.view(),
+            ) {
+            Some(surrogate) => crate::fit_orchestration::drivers::seed_measure_jet_auto_ranges(
+                data_view,
+                surrogate.view(),
+                spec.weights.view(),
+                &mut spec.logslopespec,
+            ),
+            None => 0,
+        };
+        if marginal_seeded + logslope_seeded > 0 {
+            log::info!(
+                "[BMS spatial] #2750 screened the representer range of {marginal_seeded} marginal \
+                 + {logslope_seeded} log-slope auto measure-jet term(s) against the response \
+                 before the BMS design build"
+            );
+        }
+    }
     let sigma_learnable = matches!(
         &spec.frailty,
         FrailtySpec::GaussianShift {

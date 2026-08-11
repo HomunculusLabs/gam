@@ -300,6 +300,78 @@ fn screen_measure_jet_range(
     Some(chosen.0.exp())
 }
 
+/// The screening response for the LOG-SLOPE surface of a marginal-slope family.
+///
+/// The marginal-slope construction is `η_i = α(x_i) + β(x_i)·z_i` with a
+/// binomial link `F`, so the log-slope surface `β` never appears in `E[y | x]`
+/// and screening its span against `y` would rank spans by how well they carry
+/// the MARGINAL surface — the wrong function. What `β` does appear in is the
+/// conditional covariance of the response with the latent driver: for
+/// `z ⟂ x` with `E[z] = 0`, `Var(z) = 1`,
+///
+/// ```text
+///   Cov(y, z | x) = E[ z·F(α(x) + β(x)·z) ]
+///                 = F'(α(x))·β(x)·E[z²] + O(β³·E[z⁴])
+///                 = F'(α(x))·β(x) + O(β³),
+/// ```
+///
+/// by expanding `F` about `α(x)` (the odd moments of `z` kill the even terms).
+/// So the empirical cross-product `s_i = (y_i − ȳ)·(z_i − z̄)` has conditional
+/// mean `F'(α(x))·β(x)` to first order: the planted log-slope surface times a
+/// strictly positive, smooth modulation. A span that represents `β` well
+/// represents `F'(α)·β` well, which is exactly the ranking a SEED needs — the
+/// joint ψ/ρ search that follows is the estimator.
+///
+/// Two properties make this usable as-is rather than as an approximation to be
+/// corrected: the profiled Gaussian REML the screen ranks with is invariant to
+/// a global rescaling of its response (a rescale shifts the criterion by a
+/// constant and moves `argmin` nowhere), so the unknown `E[z²]` factor and the
+/// `F'` scale are both free; and `ȳ`/`z̄` are the weighted means, so a
+/// weighted fit screens on its own measure.
+///
+/// The `z ⟂ x` step is the one assumption. When the latent driver correlates
+/// with the covariates the surrogate picks up `(E[y|x] − ȳ)(E[z|x] − z̄)`,
+/// which is a marginal-surface term. That is a bias in a SEED's ranking, not in
+/// an estimand — the alternative on offer is screening against `y`, which is
+/// that same wrong function with none of the right one added, or not screening
+/// at all, which is the pure-geometry heuristic gam#2750 measured landing in
+/// the wrong basin.
+pub(crate) fn marginal_slope_logslope_screen_response(
+    y: ArrayView1<'_, f64>,
+    z: ArrayView1<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> Option<Array1<f64>> {
+    let n = y.len();
+    if n == 0 || z.len() != n || weights.len() != n {
+        return None;
+    }
+    if !y.iter().chain(z.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let total: f64 = weights.iter().filter(|w| w.is_finite()).sum();
+    if !(total.is_finite() && total > 0.0) {
+        return None;
+    }
+    let mean = |v: ArrayView1<'_, f64>| -> f64 {
+        v.iter()
+            .zip(weights.iter())
+            .map(|(a, w)| if w.is_finite() { a * w } else { 0.0 })
+            .sum::<f64>()
+            / total
+    };
+    let (y_bar, z_bar) = (mean(y), mean(z));
+    let surrogate =
+        Array1::from_iter((0..n).map(|i| (y[i] - y_bar) * (z[i] - z_bar)));
+    // A degenerate driver (no variation left after centering) carries no
+    // log-slope signal at all; screening on a constant would rank every span
+    // identically and is better declined than reported.
+    let spread = surrogate
+        .iter()
+        .map(|v| (v - surrogate.sum() / n as f64).abs())
+        .fold(0.0_f64, f64::max);
+    (spread > 0.0).then_some(surrogate)
+}
+
 /// Screen every AUTO measure-jet representer range in `spec` against the
 /// response and write the winner back, in the spec's own ORIGINAL input units.
 ///
