@@ -1,16 +1,16 @@
 # python-contracts full-suite triage (#1512) — recovered summary
 
 collected            1478
-passed               1252
+passed               1255
 skipped              79
-failed (diagnosed)   107
+failed (diagnosed)   106
 errored (diagnosed)  0
-CENSORED             40   (worker killed at the per-test bound;
+CENSORED             38   (worker killed at the per-test bound;
                           the JUnit records no reason and time=0.000)
 
 faulthandler dumps in the step log: 41
 
-## The 40 censored tests, with the frame each was stuck in
+## The 38 censored tests, with the frame each was stuck in
 
 Recovered from the faulthandler dumps, which fire before the kill and
 write straight to fd 2. A test listed here is NOT a crashed interpreter:
@@ -76,17 +76,15 @@ it is a call that had not returned when the bound expired.
       test_isometry_on_circle_recovers_planted_geometry_normalized_reference
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
 
-[2] tests.test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage
-      test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data
-          stuck in gamfit/_api.py:1277 in fit
-      test_estimated_power_strictly_beats_pinned_1p5_in_low_mean_stratum
-          stuck in gamfit/_api.py:1277 in fit
-
 [2] tests.test_sae_manifold_single_circle_default_795
       test_single_circle_positive_isometry_recovers_honest_chart_span
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
       test_single_circle_quickstart_converges_with_default_regularizers
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
+
+[1] tests.bug_hunt_2299_affine_design_link_wiggle_test
+      test_link_wiggle_affine_design_offset_separation_red_gate
+          stuck in gamfit/_api.py:1277 in fit
 
 [1] tests.bug_hunt_double_penalty_inflates_edf_instead_of_shrinking_test
       test_bspline_double_penalty_does_not_inflate_linear_edf
@@ -107,10 +105,6 @@ it is a call that had not returned when the bound expired.
 [1] tests.bug_hunt_sae_manifold_fit_tiny_ordered_beta_bernoulli_circle_process_kill_2089_test
       test_tiny_ordered_beta_bernoulli_circle_fit_does_not_kill_the_process
           stuck in (no gamfit frame)
-
-[1] tests.bug_hunt_smooth_significance_ref_df_floor_and_null_fpr_test
-      test_null_false_positive_rate_is_calibrated
-          stuck in gamfit/_model.py:640 in smooth_significance
 
 [1] tests.bug_hunt_smooth_significance_ref_df_tracks_edf_not_basis_dim_test
       test_nonconverged_flat_fit_is_not_flagged_significant
@@ -143,30 +137,30 @@ it is a call that had not returned when the bound expired.
 ## Entry-point census over the censored population
 
     29  gamfit/_sae_manifold.py:220 in sae_manifold_fit
-     8  gamfit/_api.py:1277 in fit
-     2  gamfit/_model.py:640 in smooth_significance
+     7  gamfit/_api.py:1277 in fit
      1  (no gamfit frame)
+     1  gamfit/_model.py:640 in smooth_significance
 
 ## 20 slowest tests that DID report a duration
 
-      255.3s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_offset_separation_red_gate
-      214.8s  tests.bug_hunt_transformation_normal_predict_returns_pit_of_response_not_conditional_mean_test::test_transformation_normal_predict_returns_conditional_mean_not_pit
-      195.3s  tests.test_sae_manifold_oos_reencode_issue_2132::test_selected_rho_survives_save_load_roundtrip
-      182.7s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
-      180.6s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
-      176.9s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
-      172.0s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
-      136.0s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[1]
-      108.7s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
-       90.7s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate
+      288.4s  tests.bug_hunt_transformation_normal_predict_returns_pit_of_response_not_conditional_mean_test::test_transformation_normal_predict_returns_conditional_mean_not_pit
+      228.2s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
+      180.9s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
+      158.2s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
+      152.8s  tests.bug_hunt_flexible_link_engages_and_predicts_test::test_flexible_link_engages_predicts_and_is_monotone_on_probit_data
+      129.3s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[1]
+      128.1s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
+      112.2s  tests.test_sae_manifold_oos_reencode_issue_2132::test_selected_rho_survives_save_load_roundtrip
+      107.8s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
        90.0s  tests.test_survival_marginal_slope_clustered_pc_808::test_survival_marginal_slope_clustered_pc_converges_808
-       73.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
-       72.3s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
-       69.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
-       69.6s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
-       63.6s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
-       60.9s  tests.test_python_api::test_transformation_normal_predicts_without_raw_pgs
+       77.2s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
+       71.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
+       71.1s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
+       70.1s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
        60.1s  tests.test_survival_save_load_roundtrip::test_survival_marginal_slope_save_load_predict_roundtrips
+       55.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
+       55.3s  tests.test_python_api::test_transformation_normal_predicts_without_raw_pgs
+       53.2s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate
        45.1s  tests.test_survival_api_regressions::test_survival_marginal_slope_fit_returns
-       36.8s  tests.test_bug_hunt_dispersion_location_scale_observation_interval_symmetric::test_location_scale_band_matches_standard_path_skew_on_identical_data
+       42.9s  tests.test_bug_hunt_dispersion_location_scale_observation_interval_symmetric::test_location_scale_band_matches_standard_path_skew_on_identical_data
 
