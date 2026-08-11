@@ -114,6 +114,44 @@
   instead of flipping a coin, and says it about the FIXTURE rather than the
   estimator. `REPLICATES` is derived from `3·sd/√k ≤ margin`, not chosen.
 
+- **The range screen's walk stopped at a proxy for the wall, and on a frozen
+  dial a stopping rule IS the wall (#2761).** The #2750 response screen walks
+  geometrically past the top band node while its criterion improves, and stopped
+  at the node bounding-box diameter, on the argument that at a range that long
+  every representer pair overlaps at `≥ exp(−1/2)` so "there is no distinct
+  model past it". Two places in the tree already recorded the opposite —
+  `measure_jet_ln_range_window`'s docs (*"measured on three fixtures, the
+  profiled criterion genuinely prefers a range AT or ABOVE the node
+  diameter"*) and a test that pinned the search window as strictly wider,
+  calling the diameter *"a stopping rule for the screen's walk over NODES, not a
+  wall in the model"*. Those reconcile only while something else keeps searching
+  past the stopping rule; on a term whose `ℓ` dial is frozen (the marginal-slope
+  pair, or any `learn_length_scale=false`) nothing does.
+
+  Derived on the #1041 parity fixture from the shipped numbers and the walk's
+  own control flow: band `[1.08074, 1.43607, 1.90823]`, `log_step = 0.284265`,
+  diameter `3.81645`, walk nodes `2.53562`, `3.36930`, `4.47708`; the range the
+  screen chose was `3.36930` — the last node below the diameter, to every
+  printed digit. The walk pushes a node and only then breaks if it failed to
+  improve, so an argmin that IS the last pushed node improved, and the loop
+  therefore left through the ceiling test with the criterion still descending.
+
+  `measure_jet_range_feasibility_ceiling(spacing)` is now the single definition
+  of `spacing/√(2√ε)`, read by both the outer search's window and the screen's
+  new `MeasureJetRangeBracket::feasibility_ceiling`; the diameter survives as
+  `node_diameter`, reported as the geometric fact it is and no longer
+  load-bearing. **Measured after the change rather than assumed from the shape
+  of the defect:** the node the walk can now score, `4.47708`, does NOT improve,
+  so the criterion has an interior optimum here and the old ceiling cut just
+  past it. What the change buys is the parabolic refinement, which cannot fire
+  on an argmin that is the last element — a stop that cannot be stepped past
+  also cannot be refined at. It lands at `ℓ = 3.10543` with a better criterion
+  value and held-out RMSE `0.04185 → 0.04179`. The much larger held-out number
+  further out on the same sweep (`0.03788` at `ℓ = 68.5`, `edf = 7.47`, not
+  degenerate) is explicitly NOT what this recovers: the criterion does not want
+  to go there, and that gap is a question about the screening criterion rather
+  than about where the walk stops.
+
 - **A chart records the `θ` it was ASKED to realize, because `ln(exp(θ))` is not
   `θ` (#2765, #2767).** `SurvivalMarginalSlopeFrozenOffsetChart::evaluate(θ)`
   decoded `θ → cfg` and then called the CONFIG-authored geometry builder, which
