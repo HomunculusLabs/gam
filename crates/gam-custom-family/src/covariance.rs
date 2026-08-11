@@ -1731,7 +1731,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
     if family.joint_jeffreys_term_required() {
         let jeffreys_ranges = block_param_ranges(specs);
         if let Some(z_joint) =
-            crate::jeffreys::build_joint_jeffreys_subspace(specs, &jeffreys_ranges)?
+            crate::jeffreys::build_joint_jeffreys_subspace(family, specs, &jeffreys_ranges)?
             && let Some((_, gradient, hphi, completion)) =
                 crate::jeffreys::custom_family_joint_jeffreys_term_with_exact_completion(
                     family,

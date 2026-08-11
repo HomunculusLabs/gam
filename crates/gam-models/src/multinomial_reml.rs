@@ -2558,6 +2558,67 @@ impl CustomFamily for MultinomialFamily {
         self.equivariant_class_penalty_specs()
     }
 
+    /// The directions the multinomial's smoothing reaches, as one λ-free
+    /// aggregate (#2612).
+    ///
+    /// Every joint spec is `(r_c r_cᵀ) ⊗ S_t` for a term `t` and a class
+    /// contrast `r_c`, and `Σ_c r_c r_cᵀ` is exactly the centered class metric
+    /// `M = I − J/K`, which is positive definite. So
+    ///
+    /// ```text
+    ///     Σ_{t,c} (r_c r_cᵀ) ⊗ S_t  =  M ⊗ Σ_t S_t
+    /// ```
+    ///
+    /// and, because `M` is PD, `ker(M ⊗ Σ_t S_t) = ℝ^{K−1} ⊗ ker(Σ_t S_t)` —
+    /// the unpenalized columns of the shared design, replicated across the
+    /// active classes. Every positive combination `Σ λ_{t,c} (r_c r_cᵀ) ⊗ S_t`
+    /// has the SAME kernel, so this aggregate answers "which directions does the
+    /// smoothing reach" without knowing a single λ; it is therefore constant in
+    /// both `β` and `ρ`, which is what keeps the Jeffreys derivative tower valid
+    /// unchanged.
+    ///
+    /// Built directly rather than by summing `equivariant_class_penalty_specs`,
+    /// which materialises `K · T` dense `(K−1)P`-square matrices and is called
+    /// on paths that run per inner-Newton cycle: this is one `P`-square sum and
+    /// one `(K−1)`-square metric.
+    fn jeffreys_span_aggregate_penalty(&self) -> Result<Option<Array2<f64>>, String> {
+        if self.penalties.is_empty() {
+            // No penalized component: nothing is reached, and the span stays the
+            // full identifiable one exactly as before.
+            return Ok(None);
+        }
+        let p = self.design.ncols();
+        let m = self.active_classes();
+        let mut term_sum = Array2::<f64>::zeros((p, p));
+        for penalty in self.penalties.iter() {
+            let dense = penalty.to_dense();
+            if dense.dim() != (p, p) {
+                return Err(format!(
+                    "multinomial Jeffreys span aggregate: penalty component is {:?}, expected \
+                     ({p}, {p})",
+                    dense.dim()
+                ));
+            }
+            term_sum += &dense;
+        }
+        let metric = centered_class_metric(m, self.total_classes);
+        let mut aggregate = Array2::<f64>::zeros((m * p, m * p));
+        for a in 0..m {
+            for b in 0..m {
+                let scale = metric[[a, b]];
+                if scale == 0.0 {
+                    continue;
+                }
+                for i in 0..p {
+                    for j in 0..p {
+                        aggregate[[a * p + i, b * p + j]] = scale * term_sum[[i, j]];
+                    }
+                }
+            }
+        }
+        Ok(Some(aggregate))
+    }
+
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
         // H = X^T W(β) X with W depending on softmax probabilities of β.
         true

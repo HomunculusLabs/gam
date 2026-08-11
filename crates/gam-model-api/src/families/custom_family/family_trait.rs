@@ -1419,6 +1419,50 @@ pub trait CustomFamily {
         Ok(Vec::new())
     }
 
+    /// The aggregate penalty whose KERNEL is the Jeffreys/Firth term's span
+    /// `Z_J` — the directions no smoothing parameter reaches (gam#2612).
+    ///
+    /// # Why a family has to say this
+    ///
+    /// The Jeffreys term exists to bound directions nothing else bounds. Its
+    /// span is built by `build_joint_jeffreys_subspace`, which reads the
+    /// per-block `ParameterBlockSpec::penalties`; a family whose smoothing rides
+    /// on a JOINT penalty bundle (gam#1587) leaves those lists empty, so that
+    /// builder sees no penalty at all and returns the FULL identifiable span.
+    /// The term then acts on every direction of the basis — including every
+    /// direction the joint penalty already bounds.
+    ///
+    /// That is not a small over-application. `jeffreys_antiderivative` acts
+    /// wherever a reduced eigenvalue is under `CONDITIONING_GATE_ABSOLUTE_CLEAR
+    /// = 16` observation-equivalents, and the full-span choice is justified by
+    /// "the Jeffreys score is `O(1)` against the data's `O(n)` Fisher
+    /// information, so on a data-identified direction its only effect is the
+    /// `O(1/n)` Firth bias correction". On a quasi-separated softmax the data's
+    /// information is not `O(n)` in ANY direction — the Fisher weight
+    /// `W = diag(p) − p pᵀ` collapses to `≈0.005` per row on a confident fit —
+    /// so the premise fails and the term acts at full strength everywhere.
+    /// Measured on the penguins multinomial witness at its certified unbiased
+    /// mode: the reduced likelihood information has `λ_max = 1.44` over a
+    /// 74-dimensional span at `n = 228`, while `H + S_λ` reaches `2298`; the
+    /// armed fit then published mean argmax probability `0.828` against held-out
+    /// accuracy `0.965`.
+    ///
+    /// # The contract
+    ///
+    /// Return the `Σ_t M_t` of the family's own joint penalty specs (any
+    /// POSITIVE combination has the same kernel, so the returned matrix is
+    /// λ-free and therefore constant in both `β` and `ρ` — which is what keeps
+    /// the whole `Φ` derivative tower valid unchanged: every formula
+    /// differentiates through `H` with `Z_J` held fixed). Shape must be the raw
+    /// joint coefficient width. Default `None` keeps the historical full-span
+    /// behaviour exactly, so a family with per-block penalties is byte-unchanged
+    /// (in particular the BMS-probit near-separation on a penalized spline
+    /// direction, which is why the span was widened in the first place, is left
+    /// on the full span).
+    fn jeffreys_span_aggregate_penalty(&self) -> Result<Option<Array2<f64>>, String> {
+        Ok(None)
+    }
+
     /// Optional Tier-B Jeffreys information matrix.
     ///
     /// Defaults to the exact joint Newton Hessian for existing families.

@@ -135,7 +135,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     let jeffreys_hphi_ctx: Option<(Array2<f64>, Array2<f64>)> =
         if family.joint_jeffreys_term_required() && !hyper_layout.is_empty() {
             match (
-                build_joint_jeffreys_subspace(specs, &ranges)?,
+                build_joint_jeffreys_subspace(family, specs, &ranges)?,
                 family.joint_jeffreys_information_with_specs(synced_states, specs)?,
             ) {
                 (Some(z), Some(h))
@@ -551,7 +551,7 @@ pub fn build_jeffreys_hphi_ctx<F: CustomFamily + Clone + Send + Sync + 'static>(
         let ranges = block_param_ranges(specs);
         Ok(
             match (
-                build_joint_jeffreys_subspace(specs, &ranges)?,
+                build_joint_jeffreys_subspace(family, specs, &ranges)?,
                 family.joint_jeffreys_information_with_specs(synced_states, specs)?,
             ) {
                 (Some(z), Some(h))
