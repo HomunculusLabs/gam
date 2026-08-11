@@ -364,10 +364,13 @@ pub(crate) fn marginal_slope_logslope_screen_response(
         Array1::from_iter((0..n).map(|i| (y[i] - y_bar) * (z[i] - z_bar)));
     // A degenerate driver (no variation left after centering) carries no
     // log-slope signal at all; screening on a constant would rank every span
-    // identically and is better declined than reported.
+    // identically and is better declined than reported. The surrogate mean is
+    // hoisted: this runs once per fit on every row, so recomputing it inside the
+    // scan would make a linear check quadratic.
+    let surrogate_mean = surrogate.sum() / n as f64;
     let spread = surrogate
         .iter()
-        .map(|v| (v - surrogate.sum() / n as f64).abs())
+        .map(|v| (v - surrogate_mean).abs())
         .fold(0.0_f64, f64::max);
     (spread > 0.0).then_some(surrogate)
 }
