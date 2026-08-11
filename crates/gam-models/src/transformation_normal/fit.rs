@@ -113,7 +113,40 @@ pub fn fit_transformation_normal(
     // callback derivative kernel consumed by the unified REML/LAML evaluator.
     // Keep analytic curvature enabled here: the evaluator routes CTN Hessians
     // through the matrix-free operator path instead of dense pairwise assembly.
-    let covariate_spec = covariate_spec.clone();
+    let mut covariate_spec = covariate_spec.clone();
+    // #2750/#2754/#2761: resolve every AUTO measure-jet representer range
+    // against the response before the bootstrap design below reads the spec.
+    //
+    // `length_scale == 0.0` is an UNRESOLVED request with two resolvers — the
+    // pure-geometry median-nearest-node rule inside the basis builder, and the
+    // response screen — and which one a model gets must not depend on which
+    // family entry point it took. `fit_standard_model` screens; this family has
+    // its own entry and did not, so the identical declaration on identical rows
+    // realized a different span here than in a standard fit. `ℓ` decides WHICH
+    // span the representers occupy and `λ` cannot move a span, so that is a
+    // different model, not a different tuning (the BMS half of the same hole is
+    // fixed in `fit_bernoulli_marginal_slope_terms`).
+    //
+    // CTN's covariate surface enters the linear predictor of the transformed
+    // response, so `response` is its own screening target — the same
+    // response-scale Gaussian-REML ranking every non-Gaussian standard fit
+    // already uses, and strictly more informed than a heuristic that never
+    // looks at `y` at all. Idempotent (fires only on the `0.0` sentinel), so a
+    // cross-fit fold entering with an already-resolved spec is untouched, and
+    // never an error: every refusal path leaves the term where it was.
+    let seeded = crate::fit_orchestration::drivers::seed_measure_jet_auto_ranges(
+        covariate_data,
+        response.view(),
+        weights.view(),
+        &mut covariate_spec,
+    );
+    if seeded > 0 {
+        log::info!(
+            "[#2750] screened the representer range of {seeded} auto measure-jet term(s) against \
+             the response before the transformation-normal design build"
+        );
+    }
+    let covariate_spec = covariate_spec;
 
     // 1. Build a bootstrap covariate design first so the response basis can
     // adapt to the tensor width instead of always using the global default.

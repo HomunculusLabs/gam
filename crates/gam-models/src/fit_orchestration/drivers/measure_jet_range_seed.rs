@@ -382,6 +382,34 @@ pub(crate) fn marginal_slope_logslope_screen_response(
 ///
 /// Failure to screen is never an error. Every refusal path leaves the term at
 /// the geometry heuristic, which is exactly the pre-#2750 behaviour.
+///
+/// # Where this is reached from, and where it is not (#2754/#2761)
+///
+/// `length_scale == 0.0` has ONE resolver, and the whole point of that sentence
+/// is that it holds no matter which family entry point a model takes. The
+/// builder's geometry heuristic is what makes a miss silent — a path that never
+/// screens still fits, just to a different span — so the reached/unreached
+/// inventory belongs here, in the resolver, where it can be read in one place:
+///
+/// | entry point | screening response | status |
+/// |---|---|---|
+/// | `fit_standard_model` | `y` | screened (#2750) |
+/// | `fit_bernoulli_marginal_slope_terms` | marginal: `y`; log-slope: `(y−ȳ)(z−z̄)` | screened (#2754) |
+/// | `fit_transformation_normal` | `response` | screened (#2754) |
+/// | `fit_survival_marginal_slope_terms` | — | **not derived** |
+/// | `fit_latent_survival_terms`, `fit_latent_binary_terms` | — | **not derived** |
+/// | the `*_location_scale` families | — | **not derived** |
+///
+/// "Not derived" is a statement about the screening TARGET, not an oversight
+/// left unexamined. Each of those families' surfaces enters a likelihood in
+/// which the response is not a direct readout of the surface — a survival
+/// marginal-slope block is modulated by the risk set carried in
+/// `age_entry`/`age_exit`, and a location-scale scale block enters through a
+/// variance rather than a mean — so screening them against the raw response
+/// would rank spans by their fit to a function the surface is not. Inventing
+/// one per family without a fixture that can grade it would be landing an
+/// unmeasured modelling choice in five places at once; the honest state is that
+/// they still take the geometry heuristic, and that this table says so.
 pub(crate) fn seed_measure_jet_auto_ranges(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
