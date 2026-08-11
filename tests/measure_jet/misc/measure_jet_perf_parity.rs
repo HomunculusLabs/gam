@@ -248,11 +248,20 @@ fn measure_jet_single_scale_mode_is_speed_competitive() {
     );
     // Speed parity is gated against MATERN, the comparable kernel-representer
     // method (#1116). Duchon's penalty is closed-form analytic (no
-    // empirical-measure geometry), a different/cheaper class — measure-jet is
-    // ~4x faster than matern but cannot match duchon's analytic-penalty cost,
-    // just as it cannot match duchon's exact-interpolant accuracy. The 2.0x
-    // bound guards the prior 12x regression; duchon's time is printed for
-    // reference only.
+    // empirical-measure geometry), a different and cheaper class, so its time is
+    // printed for reference only. The 2.0x bound guards the prior 12x
+    // regression.
+    //
+    // #2761 header correction: this comment used to claim measure-jet is "~4x
+    // faster than matern", and the file's own printout has contradicted it for
+    // as long as the ℓ dial has been on — mjs=0.423s against matern=0.376s at
+    // the last measurement, i.e. 1.13x SLOWER, not 4x faster. That is the
+    // expected sign: a design-moving outer coordinate rebuilds the representer
+    // design per outer trial (mjs=(58 evals, 32 design realizations) against
+    // matern=(18, 1)), and #2761 is where that cost was accepted in exchange for
+    // the span the frozen range could not reach. The bound is what states the
+    // trade is bounded; a stale "4x faster" in the same paragraph made the
+    // bound look like slack it is not.
     assert!(
         mjs_secs <= 2.0 * matern_secs,
         "measure-jet single-scale mode speed parity failed vs matern: mjs={mjs_secs:.3}s \
