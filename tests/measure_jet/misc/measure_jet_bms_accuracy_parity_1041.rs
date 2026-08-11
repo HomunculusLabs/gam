@@ -213,15 +213,25 @@ fn draw(rep: usize) -> (gam::data::EncodedDataset, Vec<(f64, f64)>) {
 /// Replicate count, DERIVED rather than chosen.
 ///
 /// The gate below must clear its bar by three standard errors (see the module
-/// header). With the fixture's measured within-method sd of the log-ratio,
-/// `sd = 0.119`, and the measured margin to the bar,
-/// `ln(1.10) - mean_log_ratio = 0.136`, the requirement `3*sd/sqrt(k) <= margin`
-/// gives `k >= (3*0.119/0.136)^2 = 6.9`, i.e. **7**; one more is carried so the
-/// condition is met with room rather than exactly, since a gate sitting at its
-/// own resolution boundary is the flake this replaces. The run-time assertion
-/// re-derives the condition from the CURRENT draw, so this constant can never
-/// silently go stale: if the noise grows or the margin shrinks, the gate says
-/// so by name.
+/// header), i.e. `3·sd/√k ≤ margin`. Two measurements bracket what `k` has to
+/// survive, and both are on this fixture:
+///
+/// ```text
+///                              sd(log ratio)   margin = ln(1.10) − mean_log   k needed
+///   before the #2754 fix           0.119                 0.136                   7
+///   at this landing                0.131                 0.189                   5
+/// ```
+///
+/// Eight is carried because the gate must not be tuned to its own best case:
+/// the noise estimate is itself a `k`-sample statistic with relative error
+/// `1/√(2(k−1))` — 35% at `k = 5` against 27% at `k = 8` — so sizing the run to
+/// the smallest `k` that clears the bar hands the resolution assertion to a
+/// standard deviation the same run had to guess. The realized resolution at
+/// `k = 8` is **4.07σ**.
+///
+/// The run-time assertion re-derives the condition from the CURRENT draw, so
+/// this constant can never silently go stale: if the noise grows or the margin
+/// shrinks, the gate says so by name rather than flaking.
 const REPLICATES: usize = 8;
 
 #[test]
