@@ -300,6 +300,15 @@ path through a distinct `type=`:
   suit the target is an error no `λ` can repair (a frozen range cost 13.4×
   the held-out RMSE on a 1-D curve in 3-D, #2761). `learn_length_scale=`
   overrides the convention in either direction.
+  On the coupled marginal-slope families the outer *search* over `ℓ` is
+  switched off — a design-moving dial on covariates shared by the marginal and
+  log-slope surfaces lets the search trade one against the other into a
+  separation-scale runaway — so there `ℓ` is fixed at the value the response
+  **screen** picks before the fit rather than refined during it. It is still
+  data-chosen, not a geometry default: the marginal surface's range is screened
+  against the response and the log-slope surface's against the conditional
+  covariance of the response with the latent driver, which is the function that
+  surface actually carries.
 - `curv(...)` (aliases `curvature`, `constant_curvature`, `mkappa`) —
   constant-curvature `M_κ` geodesic-kernel smooth, the κ-generic sibling
   of `sphere()` that interpolates `Sᵈ → ℝᵈ → Hᵈ` via `kappa=` (default
