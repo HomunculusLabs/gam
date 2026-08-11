@@ -251,8 +251,20 @@ fn screen_measure_jet_range(
     // and the range the shipped screen chose was `3.36930` — the last node
     // BELOW the diameter. Since the walk pushes a node and only then breaks if
     // it failed to improve, an argmin that is the last pushed node improved, so
-    // the loop left through this test with the criterion still descending. The
-    // held-out cost of stopping there was 9.5% on that fixture.
+    // the loop left through this test with the criterion still descending.
+    //
+    // What that was worth, measured after the change rather than assumed from
+    // the shape of the defect: the walk now scores `4.47708`, which does NOT
+    // improve, so the criterion has an interior optimum here and the old
+    // ceiling cut just past it. The gain is the PARABOLIC REFINEMENT below,
+    // which cannot fire on an argmin that is the last element — with a
+    // neighbour on both sides it lands at `3.10543` with a better criterion
+    // value and held-out RMSE `0.04185 → 0.04179`. A stop that cannot be
+    // stepped past also cannot be refined at, and that was the invisible half
+    // of its cost. The much larger held-out number further out on the same
+    // sweep (`0.03788` at `ℓ = 68.5`) is NOT what this recovers — the criterion
+    // does not want to go there — and belongs to whoever takes the criterion
+    // question.
     //
     // Safe by the walk's own rule, which only continues while the criterion
     // improves: on the gam#2750 fixture, where the criterion drops from −256.3

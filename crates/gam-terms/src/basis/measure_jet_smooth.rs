@@ -1124,9 +1124,26 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 /// — walk node 2 to every printed digit, with walk node 3 at `4.47708` past the
 /// diameter. The walk pushes a node and only then breaks if it failed to
 /// improve, so an argmin that IS the last pushed node improved: the walk left
-/// through the ceiling test with the criterion still descending. Held-out
-/// marginal RMSE at that range is `0.04185` against `0.03788` at `ℓ = 68.5`,
-/// where the block still carries `edf = 7.47` and is not degenerate.
+/// through the ceiling test with the criterion still descending.
+///
+/// **What raising the stop was actually worth here, measured after the change,
+/// because it is less than the shape of the defect suggests.** The walk now
+/// scores `4.47708`, which does NOT improve — so the criterion has an interior
+/// optimum on this fixture and the old ceiling happened to cut just past it.
+/// What the extra node buys is the PARABOLIC REFINEMENT, which cannot fire on
+/// an argmin that is the last element: with a neighbour on both sides the
+/// refinement lands at `ℓ = 3.10543` with a better criterion value, and
+/// held-out marginal RMSE goes `0.04185 → 0.04179`. A rule that cannot be
+/// stepped past also cannot be refined at, and that is the part of the cost
+/// that was invisible.
+///
+/// The larger held-out number on the same sweep — `0.03788` at `ℓ = 68.5`,
+/// where the block still carries `edf = 7.47` and is not degenerate — is NOT
+/// what this change recovers, and attributing it to the ceiling would be wrong:
+/// the criterion does not want to go there. That gap is a statement about the
+/// screening CRITERION (a profiled Gaussian REML of the term alone against a
+/// binary response) disagreeing with held-out truth at long ranges, and it
+/// belongs to whoever takes that question next.
 ///
 /// Raising the stop is safe by the walk's own rule, which only continues while
 /// the criterion improves: on the gam#2750 fixture, where the criterion drops
