@@ -99,7 +99,8 @@ pub use measure_jet_smooth::{
     measure_jet_center_masses, measure_jet_design_matrix, measure_jet_energy_form,
     measure_jet_energy_form_with_jets, measure_jet_energy_forms_per_scale,
     measure_jet_input_noise_scale, measure_jet_ln_range_window, measure_jet_multiscale_mode,
-    measure_jet_quadrature_nodes, measure_jet_range_bracket, measure_jet_scale_spectrum,
+    measure_jet_quadrature_nodes, measure_jet_range_bracket,
+    measure_jet_range_feasibility_ceiling, measure_jet_scale_spectrum,
     measure_jet_support_curve,
     realized_measure_jet_length_scale,
 };

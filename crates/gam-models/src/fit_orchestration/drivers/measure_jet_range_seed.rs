@@ -241,9 +241,25 @@ fn screen_measure_jet_range(
     // which the #2454 incumbent-containment rule would then have widened that
     // window to admit, reintroducing exactly the region the floor excludes.
     //
-    // The cap is the bracket's own ceiling, so the walk still introduces no
-    // length of its own.
-    let ceiling_ln = bracket.ceiling.max(bracket.nodes[0]).ln();
+    // The cap is the bracket's own feasibility ceiling, so the walk still
+    // introduces no length of its own.
+    //
+    // It used to be the node bounding-box DIAMETER, and on a frozen-ℓ term that
+    // turned a stopping rule into a model wall (#2761). Measured on the #1041
+    // parity fixture: band `[1.08074, 1.43607, 1.90823]`, `log_step = 0.284265`,
+    // diameter `3.81645`; the walk's nodes are `2.53562`, `3.36930`, `4.47708`,
+    // and the range the shipped screen chose was `3.36930` — the last node
+    // BELOW the diameter. Since the walk pushes a node and only then breaks if
+    // it failed to improve, an argmin that is the last pushed node improved, so
+    // the loop left through this test with the criterion still descending. The
+    // held-out cost of stopping there was 9.5% on that fixture.
+    //
+    // Safe by the walk's own rule, which only continues while the criterion
+    // improves: on the gam#2750 fixture, where the criterion drops from −256.3
+    // to −198.5 just past the diameter, the walk still stops on the first
+    // non-improving node. This cap only ever binds where the criterion is still
+    // descending, which is exactly where stopping is wrong.
+    let ceiling_ln = bracket.feasibility_ceiling.max(bracket.nodes[0]).ln();
     loop {
         let (best_ln, best_value) =
             scored

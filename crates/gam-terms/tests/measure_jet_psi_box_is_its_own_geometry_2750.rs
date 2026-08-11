@@ -20,11 +20,19 @@
 //!    `0.5145` — outside the term's own geometry — and it was rejected twelve
 //!    times, every rejection a full design realization.
 //!
-//! The window is now the term's own two walls, the same pair
-//! `measure_jet_range_bracket` derives: the median nearest-node spacing (below
-//! it neighbouring representers stop overlapping) and the node bounding-box
-//! diagonal (above it every pair overlaps at `≥ exp(−1/2)` and there is one
-//! function). Nothing here is chosen; both are read back from the bracket.
+//! The window is now the term's own two walls, both measured lengths and
+//! neither chosen: the median nearest-node spacing (below it neighbouring
+//! representers stop overlapping and the design is a bump-per-node indicator)
+//! and `spacing/√(2√ε)` (above it the closest pair is not distinguishable from
+//! a coincident one in `f64`, so no distinct model survives).
+//!
+//! The upper wall is deliberately NOT the node bounding-box diameter. That was
+//! the screen's walk stop, and #2761 measured it cutting the walk off with the
+//! criterion still descending — on a term whose `ℓ` dial is frozen there is no
+//! second search to continue past a stopping rule, so the rule became the wall.
+//! Both now read `measure_jet_range_feasibility_ceiling`, and
+//! `the_screen_walk_and_the_search_window_stop_at_the_same_wall_2761` pins that
+//! they agree exactly rather than approximately.
 
 use gam_terms::basis::{
     CenterStrategy, MeasureJetBasisSpec, measure_jet_ln_range_window, measure_jet_range_bracket,
@@ -76,31 +84,45 @@ fn ln_range_window_floor_is_the_bracket_floor_and_its_width_is_pure_precision() 
 }
 
 #[test]
-fn the_search_window_reaches_past_where_the_screen_stops_walking() {
-    // `MeasureJetRangeBracket::ceiling` (the node bounding-box diagonal) is a
-    // stopping rule for the screen's walk over NODES, not a wall in the model.
-    // Measured on three fixtures, the profiled criterion genuinely prefers a
-    // range at or above the node diameter, and a search box that stopped there
-    // railed the outer search and refused the fit. The feasibility wall is the
-    // range at which the closest pair stops being distinguishable, and it is
-    // necessarily further out.
+fn the_screen_walk_and_the_search_window_stop_at_the_same_wall_2761() {
+    // They did not, and that was a defect rather than a design (#2761). The
+    // walk used to stop at `MeasureJetRangeBracket::node_diameter`, on the
+    // argument that at a range that long every pair of representers overlaps at
+    // `>= exp(-1/2)` so no distinct model survives. Two places in the tree
+    // already recorded the opposite -- `measure_jet_ln_range_window`'s own docs
+    // ("the profiled criterion genuinely prefers a range AT or ABOVE the node
+    // diameter", measured on three fixtures) and the earlier version of this
+    // test, which asserted the search window is strictly wider and called the
+    // diameter "a stopping rule for the screen's walk over NODES, not a wall in
+    // the model".
+    //
+    // That reconciliation holds only while something else keeps searching past
+    // the stopping rule. On a term whose ell dial is FROZEN -- the BMS
+    // marginal/log-slope pair, or any `learn_length_scale=false` -- nothing
+    // does, and the stopping rule becomes the wall. So there is one wall now,
+    // read from one definition, and this pins that they agree exactly.
     let data = chart(1.0);
     let spec = spec(40);
     let bracket = measure_jet_range_bracket(data.view(), &spec).expect("bracket realizes");
     let (lo, hi) = measure_jet_ln_range_window(data.view(), &spec).expect("window realizes");
-    assert!(
-        hi > bracket.ceiling.ln(),
-        "the search window must reach past the screen's walk ceiling: window hi={} \
-         (l={}), walk ceiling={} (l={})",
+    assert_eq!(
+        bracket.feasibility_ceiling.ln(),
         hi,
-        hi.exp(),
-        bracket.ceiling.ln(),
-        bracket.ceiling
+        "the screen's walk stop and the outer search's window ceiling must be the SAME \
+         number, not two derivations of the same idea: walk={} window={}",
+        bracket.feasibility_ceiling,
+        hi.exp()
     );
+    // And the diameter, which is still reported as the geometric fact it is,
+    // must sit strictly inside that wall -- otherwise the old stop was not a
+    // tightening and this change is not the one described.
     assert!(
-        lo < bracket.ceiling.ln() && bracket.nodes[0] <= bracket.ceiling,
-        "the walk ceiling still sits inside the window, so every node the screen scores is \
-         reachable by the search that refines it"
+        bracket.node_diameter.ln() < hi && lo < bracket.node_diameter.ln(),
+        "the node diameter must sit strictly inside the window it used to cap: diameter={} \
+         window=[{}, {}]",
+        bracket.node_diameter,
+        lo.exp(),
+        hi.exp()
     );
 }
 
@@ -171,8 +193,8 @@ fn ln_range_window_brackets_the_auto_range_it_seeds() {
         hi.exp()
     );
     assert!(
-        bracket.ceiling > bracket.nodes[bracket.nodes.len() - 1],
-        "the walk ceiling (full node diameter) is above the band's top node (half of it), so \
-         the screen may still walk past every node it scored"
+        bracket.feasibility_ceiling > bracket.nodes[bracket.nodes.len() - 1],
+        "the walk ceiling is above the band's top node, so the screen may still walk past every \
+         node it scored"
     );
 }

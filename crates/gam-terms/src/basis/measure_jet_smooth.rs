@@ -1098,19 +1098,75 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 /// the node bounding-box diagonal, at the band's own auto-clamped resolution.
 /// So the screen introduces no length, no count and no step of its own.
 ///
-/// [`MeasureJetRangeBracket::ceiling`] is the full node bounding-box diagonal:
-/// at `ℓ` that long every pair of representers overlaps at `≥ exp(−1/2)`, so
-/// the block is numerically one function plus the affine head and there is no
-/// distinct model past it. A screen whose argmin lands on the top band node may
-/// walk geometrically toward it at `log_step`; it may not walk past it.
+/// ## Where a walk past the top node stops (#2761)
+///
+/// [`MeasureJetRangeBracket::feasibility_ceiling`] — the range at which the
+/// closest node pair stops being distinguishable in the chart's own arithmetic,
+/// [`measure_jet_range_feasibility_ceiling`]. It is the SAME wall
+/// [`measure_jet_ln_range_window`] gives the outer search, and it is the same
+/// wall for the same reason: a stopping rule may not be tighter than the model.
+///
+/// It used to be [`MeasureJetRangeBracket::node_diameter`], on the argument
+/// that at `ℓ` that long every pair of representers overlaps at `≥ exp(−1/2)`
+/// so "there is no distinct model past it". That argument is measurably wrong,
+/// and the tree said so in two places before this: `measure_jet_ln_range_window`
+/// records that *"the profiled criterion genuinely prefers a range AT or ABOVE
+/// the node diameter"* on three fixtures, and
+/// `the_search_window_reaches_past_where_the_screen_stops_walking` pins the
+/// search window as strictly wider. Those reconcile only while something else
+/// keeps searching past the stopping rule. On a term whose `ℓ` dial is FROZEN —
+/// the BMS marginal/log-slope pair, or any `learn_length_scale=false` — nothing
+/// does, and the stopping rule becomes the wall.
+///
+/// Measured on the #1041 parity fixture (`m = 10`, extent `[2.671, 2.726]`):
+/// band `[1.08074, 1.43607, 1.90823]`, `log_step = 0.284265`, node diameter
+/// `3.81645`. The screen's chosen range for the marginal surface was `3.36930`
+/// — walk node 2 to every printed digit, with walk node 3 at `4.47708` past the
+/// diameter. The walk pushes a node and only then breaks if it failed to
+/// improve, so an argmin that IS the last pushed node improved: the walk left
+/// through the ceiling test with the criterion still descending. Held-out
+/// marginal RMSE at that range is `0.04185` against `0.03788` at `ℓ = 68.5`,
+/// where the block still carries `edf = 7.47` and is not degenerate.
+///
+/// Raising the stop is safe by the walk's own rule, which only continues while
+/// the criterion improves: on the gam#2750 fixture, where the criterion drops
+/// from `−256.3` to `−198.5` just past the diameter, the walk stops on the
+/// first non-improving node exactly as it does today. The ceiling only ever
+/// binds where the criterion is still descending — which is precisely the case
+/// where stopping is wrong.
 #[derive(Clone, Debug)]
 pub struct MeasureJetRangeBracket {
     /// Geometric grid of candidate ranges, ascending. The realized scale band.
     pub nodes: Vec<f64>,
     /// The band's own log step, so an endpoint walk keeps its resolution.
     pub log_step: f64,
-    /// Hard upper end for any walk past the top node (see the type docs).
-    pub ceiling: f64,
+    /// The node bounding-box diagonal. A geometric fact about the cloud,
+    /// reported because the band's own ceiling is half of it; NOT a stopping
+    /// rule (see the type docs).
+    pub node_diameter: f64,
+    /// Hard upper end for any walk past the top node: the feasibility wall
+    /// [`measure_jet_range_feasibility_ceiling`], the same one the outer
+    /// search's [`measure_jet_ln_range_window`] stops at.
+    pub feasibility_ceiling: f64,
+}
+
+/// The range at which a node pair separated by `spacing` stops being
+/// DISTINGUISHABLE from a coincident one in `f64`.
+///
+/// `exp(−spacing²/2ℓ²)` has come within `√ε` of 1 at
+/// `ℓ = spacing/√(2√ε)`; past it `K_cc` is the all-ones matrix to working
+/// precision and the gauge annihilates exactly that (the affine span, constant
+/// included), so no distinct model survives. `√ε` is the chart's own bar — the
+/// same half-mantissa [`condition_representer_section`] spends, and for the same
+/// reason: it is the point past which a direction cannot survive being squared
+/// into a Gram and inverted back out.
+///
+/// ONE definition, used by both the outer search's window
+/// ([`measure_jet_ln_range_window`]) and the response screen's walk stop
+/// ([`MeasureJetRangeBracket::feasibility_ceiling`]), so the two cannot drift
+/// into disagreeing about where the model ends (#2761).
+pub fn measure_jet_range_feasibility_ceiling(spacing: f64) -> f64 {
+    spacing / (2.0 * f64::EPSILON.sqrt()).sqrt()
 }
 
 /// Realize [`MeasureJetRangeBracket`] for a fresh (unfrozen) measure-jet spec.
@@ -1139,10 +1195,14 @@ pub fn measure_jet_range_bracket(
     }
     let (nodes, _masses) = measure_jet_quadrature_nodes(data, seed_centers.view())?;
     let band = measure_jet_band(nodes.view(), spec.num_scales)?;
+    // The band floor IS the median nearest-node spacing, so the feasibility
+    // wall is read off the bracket's own first node rather than remeasured.
+    let feasibility_ceiling = measure_jet_range_feasibility_ceiling(band.eps[0]);
     Ok(MeasureJetRangeBracket {
         nodes: band.eps,
         log_step: band.log_step,
-        ceiling: bounding_box_diagonal(nodes.view()),
+        node_diameter: bounding_box_diagonal(nodes.view()),
+        feasibility_ceiling,
     })
 }
 
@@ -1206,10 +1266,9 @@ pub fn measure_jet_ln_range_window(
              spacing of {spacing}, so it has no range scale to search over"
         );
     }
-    // `s / sqrt(2*sqrt(eps))`, the range at which `1 - exp(-s^2/2l^2)` reaches
-    // the chart's half-mantissa bar. Written as the quotient rather than as a
-    // precomputed multiple so the only constant in it is `f64::EPSILON`.
-    let ceiling = spacing / (2.0 * f64::EPSILON.sqrt()).sqrt();
+    // The range at which `1 - exp(-s^2/2l^2)` reaches the chart's half-mantissa
+    // bar, from the single definition the screen's walk stop also reads.
+    let ceiling = measure_jet_range_feasibility_ceiling(spacing);
     Ok((spacing.ln(), ceiling.ln()))
 }
 
