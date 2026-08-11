@@ -2,19 +2,15 @@
 //! fit, the measure-jet basis must be **accuracy-competitive with the
 //! comparable kernel-representer method (Matérn)** on held-out truth-RMSE,
 //! never the systematically-worst basis it once was (worst in 6-7/8 #1041
-//! datasets when SIMPLE mode froze its kernel/penalty). It now BEATS Matérn
-//! after the #1116 fixes (auto length-scale 1× spacing, density-free α=3/2,
-//! fused nullspace ridge).
+//! datasets when SIMPLE mode froze its kernel/penalty).
 //!
 //! Comparator choice (#1116): the bar is match-or-beat **Matérn**, not the
 //! better-of-{Matérn,Duchon}. Matérn is the same estimator CLASS as
 //! measure-jet — a finite kernel-representer basis (one RBF per center) with a
 //! learned roughness penalty. Duchon is a different class (an EXACT
-//! polyharmonic r³ interpolant); on a smooth surface its per-knot resolution
-//! is unreachable for a 10-16-center RBF basis, and the length-scale sweep
-//! (`zz_mjs_lengthscale_sweep_1041`) + the measured-inert order dials prove the
-//! residual ~1.6×-duchon gap is basis CAPACITY, not a tuning miss. Demanding
-//! ≤1.10×duchon would be an ill-posed bar (cf. the multinomial-vs-VGAM case).
+//! polyharmonic r³ interpolant); on a smooth surface its per-knot resolution is
+//! unreachable for a 10-16-center RBF basis, so demanding ≤1.10×duchon would be
+//! an ill-posed bar (cf. the multinomial-vs-VGAM case).
 //!
 //! Truth is self-constructed (not a reference tool): a single principled
 //! probit Bernoulli draw per row from `eta = alpha(x1,x2) + beta(x1)*z`, and
@@ -23,6 +19,49 @@
 //! a held-out latent grid. All three bases see the SAME data and the SAME
 //! held-out grid. The gate is match-or-beat-Matérn plus an absolute capacity
 //! ceiling that forbids the historical regressions.
+//!
+//! ## #2754: the bar was policed by a statistic that could not resolve it
+//!
+//! This gate used to fit ONE draw and compare one ratio to `1.10`. The ratio's
+//! own sampling spread under redraws of the identical generator was never
+//! measured — the argument on #2754 used the BETWEEN-method spread
+//! (matérn/duchon = 1.42×) as if it were a noise estimate, which it is not:
+//! two different estimators differing by 1.42× says nothing about how much ONE
+//! estimator moves when only the draw changes. Measured, the within-method sd
+//! of `mjs/matérn` over independent draws is **0.12** at a mean of 0.97, so a
+//! single-draw test sat about 1.1 sd below its own bar and failed roughly one
+//! run in eight for no reason but the draw.
+//!
+//! The bar is not the problem and is unchanged. A comparator-relative bound is
+//! the right instrument here — it is the only statement that measure-jet must
+//! stay competitive with its own estimator class as both change. What was wrong
+//! is the INSTRUMENT reading it, so the fix is replication plus a resolution
+//! self-check: the gate reports the mean log-ratio over `REPLICATES` draws and
+//! asserts BOTH that it clears the bar AND that it clears it by at least three
+//! standard errors. The second assertion is #2754's finding made permanent —
+//! if the fixture's noise ever grows relative to the margin it polices, this
+//! says "under-powered" in as many words instead of flipping a coin.
+//!
+//! ## Two stale justifications removed from this file
+//!
+//! * *"the length-scale sweep (`zz_mjs_lengthscale_sweep_1041`) shows the auto
+//!   ℓ (1× median spacing) is already the BEST — every explicit ℓ is worse, so
+//!   ℓ cannot close the gap"*. That test is **not in the tree**; `grep` finds
+//!   only the citation. Rebuilt as
+//!   `examples/probe_2754_bms_length_scale_sweep.rs` on this fixture's own data
+//!   law and this file's own held-out score, the claim inverts — the auto range
+//!   was the WORST of the eleven measured (`0.04441`, against `0.03788` at 68×
+//!   and `0.03985` at 25×). ℓ was never inert here; it was frozen at the one
+//!   value nobody had scored, and the BMS branch was additionally not reaching
+//!   the #2750 response screen at all (#2754/#2761, `4040c3dfc`).
+//! * *"α is pinned to the principled density-free 3/2 and the nullspace ridge
+//!   is fused"*. Neither holds: `MeasureJetBasisSpec::default().alpha` is `1.0`
+//!   (density-WEIGHTED — α = 3/2 was measured over-smoothing low-intrinsic-
+//!   dimension strata, #1116), and the null component is emitted as an
+//!   independent REML candidate on purpose, never fused into the Primary
+//!   (`measure_jet_smooth.rs`: *"statistical selection is a distinct REML
+//!   component below, never a fixed coefficient toll fused into this
+//!   estimand"*).
 
 use gam::families::bms::BernoulliMarginalSlopeFitResult;
 use gam::matrix::LinearOperator;
@@ -139,13 +178,16 @@ fn fit_bms(body: &str, ds: &gam::data::EncodedDataset) -> BernoulliMarginalSlope
     }
 }
 
-#[test]
-fn measure_jet_bms_accuracy_is_competitive_with_matern_and_duchon() {
-    gam::init_parallelism();
-
-    // One shared dataset: principled probit Bernoulli draws from
-    // eta = alpha(x1,x2) + beta(x1)*z.
-    let mut rng = SplitMix64::new(0x1041_2026_0613_0001);
+/// One replicate draw of the fixture's generator, offset so the arms are fixed
+/// before the run rather than chosen after it.
+///
+/// SplitMix64's golden-gamma stride is modular by construction (2*gamma already
+/// exceeds `u64::MAX`), so it has to be spelled as a wrapping multiply. Written
+/// as `*` this panicked at `rep = 2` in any debug build, which is why #2754's
+/// replication estimate had never been computed from more than two draws.
+fn draw(rep: usize) -> (gam::data::EncodedDataset, Vec<(f64, f64)>) {
+    let off = (rep as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut rng = SplitMix64::new(0x1041_2026_0613_0001u64.wrapping_add(off));
     let mut x1 = vec![0.0; N_TRAIN];
     let mut x2 = vec![0.0; N_TRAIN];
     let mut z = vec![0.0; N_TRAIN];
@@ -154,175 +196,124 @@ fn measure_jet_bms_accuracy_is_competitive_with_matern_and_duchon() {
         x2[i] = rng.next_unit();
         z[i] = rng.next_normal();
     }
-    let mut rng_y = SplitMix64::new(0x1041_2026_0613_0002);
+    let mut rng_y = SplitMix64::new(0x1041_2026_0613_0002u64.wrapping_add(off));
     let mut y = vec![0.0; N_TRAIN];
     for i in 0..N_TRAIN {
         let eta = alpha_true(x1[i], x2[i]) + beta_true(x1[i]) * z[i];
         let p = normal_cdf(eta).clamp(1e-9, 1.0 - 1e-9);
         y[i] = if rng_y.next_unit() < p { 1.0 } else { 0.0 };
     }
-    let ds = build_dataset(&x1, &x2, &y, &z);
-
-    // Held-out latent grid shared by all three bases.
-    let mut rng_g = SplitMix64::new(0x1041_2026_0613_0003);
+    let mut rng_g = SplitMix64::new(0x1041_2026_0613_0003u64.wrapping_add(off));
     let grid: Vec<(f64, f64)> = (0..N_TEST)
         .map(|_| (rng_g.next_unit(), rng_g.next_unit()))
         .collect();
+    (build_dataset(&x1, &x2, &y, &z), grid)
+}
+
+/// Replicate count, DERIVED rather than chosen.
+///
+/// The gate below must clear its bar by three standard errors (see the module
+/// header). With the fixture's measured within-method sd of the log-ratio,
+/// `sd = 0.119`, and the measured margin to the bar,
+/// `ln(1.10) - mean_log_ratio = 0.136`, the requirement `3*sd/sqrt(k) <= margin`
+/// gives `k >= (3*0.119/0.136)^2 = 6.9`, i.e. **7**; one more is carried so the
+/// condition is met with room rather than exactly, since a gate sitting at its
+/// own resolution boundary is the flake this replaces. The run-time assertion
+/// re-derives the condition from the CURRENT draw, so this constant can never
+/// silently go stale: if the noise grows or the margin shrinks, the gate says
+/// so by name.
+const REPLICATES: usize = 8;
+
+#[test]
+fn measure_jet_bms_accuracy_is_competitive_with_matern_and_duchon() {
+    gam::init_parallelism();
 
     let mjs_body = format!("mjs(x1, x2, centers={CENTERS})");
     let matern_body = format!("matern(x1, x2, k={CENTERS})");
     let duchon_body = format!("duchon(x1, x2, k={CENTERS})");
 
-    let mjs_fit = fit_bms(&mjs_body, &ds);
-    let matern_fit = fit_bms(&matern_body, &ds);
-    let duchon_fit = fit_bms(&duchon_body, &ds);
-
-    let mjs_rmse = marginal_prob_rmse(&mjs_fit, &grid, "mjs");
-    let matern_rmse = marginal_prob_rmse(&matern_fit, &grid, "matern");
-    let duchon_rmse = marginal_prob_rmse(&duchon_fit, &grid, "duchon");
-    println!(
-        "[#1041 bms-accuracy] mjs={mjs_rmse:.5} matern={matern_rmse:.5} duchon={duchon_rmse:.5}"
-    );
-
-    // Comparator = MATÉRN, not the better-of-both. Matérn is the comparable
-    // estimator class: a finite kernel-representer basis (one RBF per center)
-    // with a learned roughness penalty — the SAME class as the measure-jet
-    // Gaussian-representer + jet-energy penalty. Duchon is a different class: an
-    // EXACT polyharmonic r³ interpolant whose per-knot resolution a 10–16-center
-    // RBF basis cannot match on a smooth surface, so "≤1.10×duchon" is
-    // unachievable BY DESIGN, not a tuning failure. The evidence is decisive:
-    //   * the length-scale sweep (`zz_mjs_lengthscale_sweep_1041`) shows the
-    //     auto ℓ (1× median spacing) is already the BEST — every explicit ℓ is
-    //     worse, so ℓ cannot close the gap;
-    //   * the (s, α, lnτ) order/density dials were measured inert for accuracy
-    //     (gam 770f825eb → reverted 97703771f);
-    //   * α is pinned to the principled density-free 3/2 and the nullspace ridge
-    //     is fused — both tuned;
-    //   * REML learns the single λ, so any penalty *normalization* is absorbed
-    //     by λ and cannot move the fit — only the basis CAPACITY can, and at
-    //     this center count it is RBF-bound below duchon's exact interpolant.
-    // So the principled bar is match-or-beat the comparable kernel method
-    // (Matérn) within a small CI flake guard, plus an absolute RMSE ceiling that
-    // still forbids the historical regressions (frozen dials sat ~1.68×matern
-    // ≈ 0.12; the no-ridge near-nullspace blow-up degraded both speed and RMSE).
-    assert!(
-        mjs_rmse <= 1.10 * matern_rmse,
-        "#1041: measure-jet BMS marginal accuracy must match-or-beat Matérn (the comparable \
-         kernel-representer method): mjs={mjs_rmse:.5} matern={matern_rmse:.5} duchon={duchon_rmse:.5} \
-         (ratio vs matern {:.3} > 1.10)",
-        mjs_rmse / matern_rmse
-    );
-    // Absolute capacity ceiling: catches real regressions (frozen-dial ≈0.12,
-    // nullspace blow-up) without demanding duchon's exact-interpolant accuracy.
-    const MJS_MARGINAL_RMSE_CEILING: f64 = 0.065;
-    assert!(
-        mjs_rmse <= MJS_MARGINAL_RMSE_CEILING,
-        "#1041: measure-jet BMS marginal RMSE {mjs_rmse:.5} exceeds the absolute capacity \
-         ceiling {MJS_MARGINAL_RMSE_CEILING} (matern={matern_rmse:.5} duchon={duchon_rmse:.5}) \
-         — a real regression, not the duchon-class gap"
-    );
-}
-
-/// #2754: the WITHIN-METHOD noise floor this issue's bar was never checked against.
-///
-/// The `1.10x` bar above, and every argument for or against widening it, has
-/// been debated using the BETWEEN-method spread (matern vs duchon, `1.42x`) as
-/// if it were a noise estimate. It is not: two different estimators differing
-/// by `1.42x` says nothing about how much ONE estimator moves when only the
-/// draw changes. A bar is finer than its fixture's resolution when the
-/// statistic it reads has a sd comparable to the margin it polices, and that sd
-/// has never been measured here -- the fixture pins three seeds and fits once.
-///
-/// So this replicates the identical fit over independent draws of the SAME
-/// generator and reports the sd of `mjs_rmse / matern_rmse`. It asserts
-/// nothing about the ratio's LEVEL -- that is the parity test's job, above --
-/// only that the replication actually varied the data and produced finite
-/// ratios, so a silent degenerate run cannot be read as a noise estimate.
-///
-/// Reading the output:
-///   * sd small against `|ratio - 1.10|`  -> the `1.10x` bar is resolvable and
-///     a miss is a real accuracy gap (#2761 territory).
-///   * sd comparable to that margin       -> the bar IS finer than the fixture
-///     can resolve, and #2754's conclusion 1 wins after all.
-///
-/// Printed, not asserted, because the decision it informs belongs on the issue.
-#[test]
-fn measure_jet_bms_within_method_replication_noise_2754() {
-    gam::init_parallelism();
-
-    const REPLICATES: usize = 7;
-    let mut ratios: Vec<f64> = Vec::with_capacity(REPLICATES);
-
+    let mut log_ratios: Vec<f64> = Vec::with_capacity(REPLICATES);
+    let mut mjs_rmses: Vec<f64> = Vec::with_capacity(REPLICATES);
+    let mut duchon_reference = f64::NAN;
     for rep in 0..REPLICATES {
-        // Vary ONLY the draw: same generator, same truth, same bases, same
-        // center count. The offset is the replicate index so the arms are
-        // fixed before the run rather than chosen after it.
-        // SplitMix64's golden-gamma stride: the multiply is modular by
-        // construction (2·γ already exceeds u64::MAX), so it has to be spelled
-        // as a wrapping one. Written as `*` this test panicked on `rep = 2` in
-        // any debug build, which is why #2754's replication estimate has never
-        // been computed from more than two draws.
-        let off = (rep as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mut rng = SplitMix64::new(0x1041_2026_0613_0001u64.wrapping_add(off));
-        let mut x1 = vec![0.0; N_TRAIN];
-        let mut x2 = vec![0.0; N_TRAIN];
-        let mut z = vec![0.0; N_TRAIN];
-        for i in 0..N_TRAIN {
-            x1[i] = rng.next_unit();
-            x2[i] = rng.next_unit();
-            z[i] = rng.next_normal();
+        let (ds, grid) = draw(rep);
+        let mjs_rmse = marginal_prob_rmse(&fit_bms(&mjs_body, &ds), &grid, "mjs");
+        let matern_rmse = marginal_prob_rmse(&fit_bms(&matern_body, &ds), &grid, "matern");
+        if rep == 0 {
+            // Duchon is printed for context on the pinned draw only: it is not
+            // the comparator this gate reads, and fitting it every replicate
+            // would buy nothing the bar is stated in terms of.
+            duchon_reference = marginal_prob_rmse(&fit_bms(&duchon_body, &ds), &grid, "duchon");
         }
-        let mut rng_y = SplitMix64::new(0x1041_2026_0613_0002u64.wrapping_add(off));
-        let mut y = vec![0.0; N_TRAIN];
-        for i in 0..N_TRAIN {
-            let eta = alpha_true(x1[i], x2[i]) + beta_true(x1[i]) * z[i];
-            let p = normal_cdf(eta).clamp(1e-9, 1.0 - 1e-9);
-            y[i] = if rng_y.next_unit() < p { 1.0 } else { 0.0 };
-        }
-        let ds = build_dataset(&x1, &x2, &y, &z);
-
-        let mut rng_g = SplitMix64::new(0x1041_2026_0613_0003u64.wrapping_add(off));
-        let grid: Vec<(f64, f64)> = (0..N_TEST)
-            .map(|_| (rng_g.next_unit(), rng_g.next_unit()))
-            .collect();
-
-        let mjs_body = format!("mjs(x1, x2, centers={CENTERS})");
-        let matern_body = format!("matern(x1, x2, k={CENTERS})");
-        let mjs_fit = fit_bms(&mjs_body, &ds);
-        let matern_fit = fit_bms(&matern_body, &ds);
-        let mjs_rmse = marginal_prob_rmse(&mjs_fit, &grid, "mjs");
-        let matern_rmse = marginal_prob_rmse(&matern_fit, &grid, "matern");
-        let ratio = mjs_rmse / matern_rmse;
-        println!(
-            "[#2754 replication] rep={rep} mjs={mjs_rmse:.6} matern={matern_rmse:.6} ratio={ratio:.6}"
+        assert!(
+            mjs_rmse.is_finite() && mjs_rmse > 0.0 && matern_rmse.is_finite() && matern_rmse > 0.0,
+            "#1041: replicate {rep} produced a non-finite RMSE (mjs={mjs_rmse}, \
+             matern={matern_rmse}) — the arms did not both fit"
         );
-        ratios.push(ratio);
+        println!(
+            "[#1041 bms-accuracy] rep={rep} mjs={mjs_rmse:.5} matern={matern_rmse:.5} \
+             ratio={:.5}",
+            mjs_rmse / matern_rmse
+        );
+        log_ratios.push((mjs_rmse / matern_rmse).ln());
+        mjs_rmses.push(mjs_rmse);
     }
 
-    let n = ratios.len() as f64;
-    let mean = ratios.iter().sum::<f64>() / n;
-    let var = ratios.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>() / (n - 1.0);
-    let sd = var.sqrt();
-    let lo = ratios.iter().cloned().fold(f64::INFINITY, f64::min);
-    let hi = ratios.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let k = log_ratios.len() as f64;
+    let mean_log = log_ratios.iter().sum::<f64>() / k;
+    let var_log =
+        log_ratios.iter().map(|v| (v - mean_log) * (v - mean_log)).sum::<f64>() / (k - 1.0);
+    let se_log = (var_log / k).sqrt();
+    let mean_ratio = mean_log.exp();
+    let mean_mjs = mjs_rmses.iter().sum::<f64>() / k;
+
+    // The bar, and the margin the replication has to be able to see.
+    const RATIO_BAR: f64 = 1.10;
+    let margin = RATIO_BAR.ln() - mean_log;
+    let resolution = margin / se_log;
     println!(
-        "[#2754 replication] n={REPLICATES} mean_ratio={mean:.6} sd={sd:.6} min={lo:.6} max={hi:.6} \
-         margin_to_bar={:.6}",
-        (mean - 1.10).abs()
+        "[#1041 bms-accuracy] k={REPLICATES} mean_ratio={mean_ratio:.5} \
+         (mean_log={mean_log:+.5}, sd_log={:.5}, se={se_log:.5}) mean_mjs={mean_mjs:.5} \
+         duchon(rep 0)={duchon_reference:.5} margin_to_bar={margin:.5} \
+         resolution={resolution:.2} sigma",
+        var_log.sqrt()
     );
 
-    // Non-vacuity: the replication must actually have varied the data, and every
-    // ratio must be a finite positive number. Without this, a degenerate run
-    // that produced seven identical (or NaN) ratios would print sd=0 and be read
-    // as "the bar is perfectly resolvable" -- a noise estimate from a scan that
-    // measured no noise.
+    // The claim: measure-jet must match or beat the comparable kernel-representer
+    // method, as an ESTIMATOR rather than on one draw.
     assert!(
-        ratios.iter().all(|r| r.is_finite() && *r > 0.0),
-        "#2754: every replicate ratio must be finite and positive; got {ratios:?}"
+        mean_ratio <= RATIO_BAR,
+        "#1041: measure-jet BMS marginal accuracy must match-or-beat Matérn (the comparable \
+         kernel-representer method) over {REPLICATES} independent draws: mean ratio \
+         {mean_ratio:.5} > {RATIO_BAR} (mean_log={mean_log:+.5} se={se_log:.5}; per-replicate \
+         ratios exp of {log_ratios:?})"
     );
+
+    // #2754: and the fixture must be able to SEE that margin. A bar policed by a
+    // statistic whose standard error is comparable to the margin cannot
+    // distinguish "measure-jet is worse than Matérn" from "this draw came out
+    // that way", which is exactly the objection this issue raised — stated
+    // against the wrong quantity (the between-method matérn/duchon spread) but
+    // right about the conclusion. Failing here is a statement about the
+    // FIXTURE, not about the estimator, and the remedy is more replicates.
     assert!(
-        hi > lo,
-        "#2754: the replicates produced an identical ratio {lo} every time — the draw did not \
-         vary, so this is not a noise estimate"
+        resolution >= 3.0,
+        "#2754: this gate cannot resolve its own bar. The mean log-ratio clears {RATIO_BAR} by \
+         {margin:.5} against a standard error of {se_log:.5} — only {resolution:.2} sigma, below \
+         the 3 sigma this fixture is required to demonstrate. Either the within-method noise \
+         grew or the margin shrank; raise REPLICATES (the derivation is in its doc comment) or \
+         treat the shrunken margin as the accuracy regression it may be"
+    );
+
+    // Absolute capacity ceiling: catches real regressions (frozen-dial ≈0.12,
+    // nullspace blow-up) without demanding duchon's exact-interpolant accuracy.
+    // Read on the replicate MEAN for the same reason the ratio is.
+    const MJS_MARGINAL_RMSE_CEILING: f64 = 0.065;
+    assert!(
+        mean_mjs <= MJS_MARGINAL_RMSE_CEILING,
+        "#1041: measure-jet BMS marginal RMSE {mean_mjs:.5} (mean over {REPLICATES} draws) \
+         exceeds the absolute capacity ceiling {MJS_MARGINAL_RMSE_CEILING} \
+         (duchon on the pinned draw = {duchon_reference:.5}) — a real regression, not the \
+         duchon-class gap"
     );
 }
