@@ -23,6 +23,38 @@
 //!   cargo run --release --example probe_2754_bms_length_scale_sweep -- [arm]
 //! where `arm` is `sweep` (default, the BMS marginal accuracy vs ℓ) or `span`
 //! (the response-free span floor vs ℓ, Gaussian path, both surfaces' truths).
+//!
+//! # The open question this instrument left behind (#2754/#2761 follow-up)
+//!
+//! After the range resolver reached this branch and the screen's walk stop was
+//! moved to the feasibility wall, the screen picks `ℓ = 3.105` here — a genuine
+//! INTERIOR optimum of its criterion, not an edge: the walk scores `4.47708`,
+//! that node does not improve, and the parabolic refinement then lands at
+//! `3.105`. Held-out RMSE does not turn around there. It keeps falling out to
+//! `ℓ = 68.5` (`0.04179 → 0.03788`), a factor of 22 further, with the block
+//! still carrying `edf = 7.47` and not degenerate.
+//!
+//! `ℓ` decides WHICH span the representers occupy and `λ` cannot move a span,
+//! so a criterion that stops 22× short of the held-out optimum is choosing the
+//! model rather than tuning it. Three candidate causes, each separated by one
+//! run of an arm this file already has the shape for:
+//!
+//! 1. **The Gaussian-REML-on-a-binary-response approximation.** The screen ranks
+//!    spans by a Gaussian REML of `y ∈ {0,1}`; the fit is a probit
+//!    marginal-slope. Re-run the same grid with the continuous response and ask
+//!    whether the criterion's argmin then tracks the held-out argmin.
+//! 2. **Term-alone screening vs the full collection.** The screen scores
+//!    `[1 | X(ℓ)]` with the single jet-energy penalty and `double_penalty =
+//!    false`; the shipped fit carries the null component and a second coupled
+//!    block. Re-score the grid with the double penalty on.
+//! 3. **The held-out functional.** This file scores the marginal PROBABILITY
+//!    surface at `z = 0`; the criterion scores a fit to `y`. Score held-out
+//!    log-likelihood instead.
+//!
+//! Not claimed: that the criterion is wrong. gam#2750 measured it tracking
+//! held-out truth at every node on its own fixture, collapse past the diameter
+//! included. Whatever this is, it is fixture-dependent, and the three arms above
+//! are the way in.
 
 use gam::families::bms::BernoulliMarginalSlopeFitResult;
 use gam::smooth::build_term_collection_design;
