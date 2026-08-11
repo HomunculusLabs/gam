@@ -553,6 +553,7 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         MEASURED_PREDICTED,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert_eq!(
         update.decision.label(),
@@ -577,6 +578,7 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         -1.0,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(
         !ascent.accepted,
@@ -597,6 +599,7 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         MEASURED_PREDICTED,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(
         !no_gain.accepted,
@@ -612,6 +615,7 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
         1.0e-3,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(
         resolvable.accepted,
@@ -5116,20 +5120,20 @@ pub(crate) fn rowwise_kronecker_psi_row_chunks_are_window_consistent() {
 
 #[test]
 pub(crate) fn joint_trust_region_radius_update_accept_reject_logic() {
-    let accepted = update_joint_trust_region_radius(1.0, 1.0, 2.0, 2.0, 1.0, 1.0e-6);
+    let accepted = update_joint_trust_region_radius(1.0, 1.0, 2.0, 2.0, 1.0, 1.0e-6, 0.0);
     assert!(accepted.accepted);
     assert!((accepted.rho - 1.0).abs() < 1.0e-12);
     assert!((accepted.radius - 2.0).abs() < 1.0e-12);
     assert_eq!(accepted.decision.label(), "grow_at_boundary");
 
-    let rejected = update_joint_trust_region_radius(1.0, 0.5, -0.1, 2.0, 1.0, 1.0e-6);
+    let rejected = update_joint_trust_region_radius(1.0, 0.5, -0.1, 2.0, 1.0, 1.0e-6, 0.0);
     assert!(!rejected.accepted);
     assert!(rejected.rho < 0.0);
     assert!((rejected.radius - 0.25).abs() < 1.0e-12);
     assert_eq!(rejected.decision.label(), "shrink_reject");
 
     let rejected_inside_radius =
-        update_joint_trust_region_radius(1.0, 1.0e-3, -0.1, 2.0, 1.0, 1.0e-6);
+        update_joint_trust_region_radius(1.0, 1.0e-3, -0.1, 2.0, 1.0, 1.0e-6, 0.0);
     assert!(!rejected_inside_radius.accepted);
     assert!(
         rejected_inside_radius.radius < 1.0e-3,
@@ -5138,7 +5142,7 @@ pub(crate) fn joint_trust_region_radius_update_accept_reject_logic() {
     assert!((rejected_inside_radius.radius - 5.0e-4).abs() < 1.0e-12);
     assert_eq!(rejected_inside_radius.decision.label(), "shrink_reject");
 
-    let poor = update_joint_trust_region_radius(1.0, 0.5, 0.1, 1.0, 1.0, 1.0e-6);
+    let poor = update_joint_trust_region_radius(1.0, 0.5, 0.1, 1.0, 1.0, 1.0e-6, 0.0);
     assert!(poor.accepted);
     assert!((poor.rho - 0.1).abs() < 1.0e-12);
     assert!((poor.radius - 0.25).abs() < 1.0e-12);
@@ -5162,6 +5166,7 @@ pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_object
         0.5 * OBJECTIVE_TOL,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(below_tolerance.accepted);
     assert_eq!(below_tolerance.decision.label(), "hold_inside");
@@ -5174,6 +5179,7 @@ pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_object
         2.0 * OBJECTIVE_TOL,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(above_tolerance.accepted);
     assert_eq!(above_tolerance.decision.label(), "grow_at_boundary");
@@ -5186,6 +5192,7 @@ pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_object
         0.5 * OBJECTIVE_TOL,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(!rejected_below_tolerance.accepted);
     assert_eq!(rejected_below_tolerance.decision.label(), "shrink_reject");
@@ -5198,6 +5205,7 @@ pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_object
         2.0 * OBJECTIVE_TOL,
         OBJECTIVE_SCALE,
         OBJECTIVE_TOL,
+        0.0,
     );
     assert!(non_boundary.accepted);
     assert_eq!(non_boundary.decision.label(), "hold_inside");
@@ -5231,7 +5239,7 @@ pub(crate) fn joint_newton_collapsed_trust_region_all_reject_exits_before_grindi
     let mut radius = 1.0_f64;
     for _ in 0..200 {
         let rejected =
-            update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6);
+            update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6, 0.0);
         assert!(
             !rejected.accepted,
             "a genuine objective increase must reject"
@@ -5243,7 +5251,7 @@ pub(crate) fn joint_newton_collapsed_trust_region_all_reject_exits_before_grindi
         "sustained rejection must collapse the radius to its absolute 1e-12 floor"
     );
     assert_eq!(
-        update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6)
+        update_joint_trust_region_radius(radius, 0.5 * radius, -1.0, 2.0, 1.0, 1.0e-6, 0.0)
             .decision
             .label(),
         "reject_floor",
@@ -5346,6 +5354,7 @@ pub(crate) fn joint_trust_region_noise_floor_accepts_round_off_negative_actual()
         predicted,
         objective_scale,
         objective_tol,
+        0.0,
     );
     assert!(
         update.accepted,
@@ -5371,6 +5380,7 @@ pub(crate) fn joint_trust_region_noise_floor_rejects_genuine_increase() {
         predicted,
         objective_scale,
         objective_tol,
+        0.0,
     );
     assert!(
         !update.accepted,
@@ -5385,7 +5395,7 @@ pub(crate) fn joint_objective_roundoff_slack_accepts_large_scale_wobble() {
     let trial_objective = old_objective + 2.183e-10;
     assert!(
         trial_objective
-            <= old_objective + joint_objective_roundoff_slack(old_objective, trial_objective),
+            <= old_objective + joint_objective_roundoff_slack(old_objective, trial_objective, 0.0),
         "sub-nanounit objective wobble at large scale should not burn all trust attempts"
     );
 }
@@ -5404,6 +5414,7 @@ pub(crate) fn joint_objective_floor_only_accepts_sub_tolerance_model_steps() {
             actual_reduction,
             predicted_reduction,
             objective_tol,
+            0.0,
         ),
         "the repeated large-scale roundoff wobble should terminate immediately"
     );
@@ -5415,6 +5426,7 @@ pub(crate) fn joint_objective_floor_only_accepts_sub_tolerance_model_steps() {
             -2.0,
             predicted_reduction,
             objective_tol,
+            0.0,
         ),
         "real objective increases must still be rejected"
     );
@@ -5425,6 +5437,7 @@ pub(crate) fn joint_objective_floor_only_accepts_sub_tolerance_model_steps() {
             actual_reduction,
             10.0 * objective_tol,
             objective_tol,
+            0.0,
         ),
         "non-negligible predicted progress must not be hidden by the floor exit"
     );
@@ -5444,6 +5457,7 @@ pub(crate) fn joint_objective_floor_only_accepts_sub_tolerance_model_steps() {
             positive_noise_actual,
             predicted_reduction,
             objective_tol,
+            0.0,
         ),
         "positive-noise reductions must NOT trigger the floor; symmetric exit breaks rank-deficient FD identity"
     );
@@ -5790,6 +5804,7 @@ pub(crate) fn joint_trust_region_rosenbrock_like_quadratic_is_armijo_safe() {
         predicted,
         old_objective,
         objective_tol,
+        0.0,
     );
     assert!(update.accepted);
     assert!(trial_objective < old_objective);

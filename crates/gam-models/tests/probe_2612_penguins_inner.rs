@@ -1,14 +1,16 @@
-//! #2612 focused instrument: the penguins stride-3 witness ONLY, at `Info`, so
-//! the inner joint-Newton trail for ONE fit is readable without paying for the
-//! five other fixtures `probe_2612_whole_picture` runs.
+//! #2612 focused instrument: ONE fixture per test, at `Info`, so the inner
+//! joint-Newton trail of a single solve is readable without paying for the five
+//! other fixtures `probe_2612_whole_picture` runs.
 //!
-//! This exists because the remaining blocker on #2612 is a property of exactly
-//! this fit: with the Jeffreys/Firth span narrowed to `ker(S_λ)` (the directions
-//! no smoothing parameter reaches — which is where the term belongs, and which
-//! measurably fixes the calibration on the banded fixture) the inner joint
-//! Newton no longer certifies the near-separable multinomial mode to the
-//! accuracy the ρ-only LAML derivative lane demands, and the fit disappears.
-//! Reading that requires the per-cycle trust-region trail of this one solve.
+//! The remaining blocker on #2612 is a property of the inner solve, not of the
+//! dataset: with the Jeffreys/Firth span narrowed to `ker(S_λ)` — where it
+//! belongs, and which measurably fixes the calibration — the inner joint Newton
+//! stops five to six orders above the ρ-only LAML derivative lane's `1e-11`
+//! stationarity target, on a convex model, with `resolvable_negative_curvature
+//! = false`. Both the banded fixture (`cls ~ s(x, k=8)`, ten seconds, sixteen
+//! coefficients) and the penguins witness (seven minutes, seventy-four) plateau
+//! at the same `~9e-7`. The banded arm is therefore the oracle and penguins is
+//! the confirmation.
 //!
 //! Asserts nothing. `zz_` prefixed so it can never be mistaken for a bar.
 
@@ -29,7 +31,7 @@ const PENGUINS_CSV: &str = concat!(
     "/../../bench/datasets/penguins.csv"
 );
 
-const FORMULA: &str = "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
+const PENGUINS_FORMULA: &str = "species ~ s(bill_length_mm, k=10) + s(bill_depth_mm, k=10) \
      + s(flipper_length_mm, k=10) + s(body_mass_g, k=10)";
 
 struct StderrLogger;
@@ -54,6 +56,58 @@ fn init() {
     }
     faer::set_global_parallelism(faer::Par::rayon(0));
 }
+
+// ── the banded quasi-separated fixture (the ten-second oracle) ───────────────
+
+const CLASS_NAMES: [&str; 3] = ["a", "b", "c"];
+
+/// Byte-for-byte the fixture `multinomial_separation_arming_2612::banded_records`
+/// builds, so this probe and that acceptance fit the SAME rows: the van der
+/// Corput sequence in base 2 mapped onto `[-1, 1]`, three bands split at
+/// `±1/3`, and a deterministic `±OVERLAP` wobble on every seventh row.
+fn banded_records(indices: &[usize]) -> (Vec<StringRecord>, Vec<usize>) {
+    const OVERLAP: f64 = 0.06;
+    fn covariate(index: usize) -> f64 {
+        let mut numerator = 0.0_f64;
+        let mut denominator = 1.0_f64;
+        let mut n = index + 1;
+        while n > 0 {
+            denominator *= 2.0;
+            numerator += ((n % 2) as f64) / denominator;
+            n /= 2;
+        }
+        2.0 * numerator - 1.0
+    }
+    let mut labels = Vec::with_capacity(indices.len());
+    let records = indices
+        .iter()
+        .map(|&index| {
+            let x = covariate(index);
+            let wobble = if index % 7 == 0 { OVERLAP } else { -OVERLAP };
+            let class = if x < -1.0 / 3.0 + wobble {
+                0
+            } else if x < 1.0 / 3.0 + wobble {
+                1
+            } else {
+                2
+            };
+            labels.push(class);
+            StringRecord::from(vec![x.to_string(), CLASS_NAMES[class].to_string()])
+        })
+        .collect();
+    (records, labels)
+}
+
+fn banded_frame(indices: &[usize]) -> (gam_data::EncodedDataset, Vec<usize>) {
+    let (records, labels) = banded_records(indices);
+    let headers: Vec<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+    (
+        encode_recordswith_inferred_schema(headers, records).expect("encode banded frame"),
+        labels,
+    )
+}
+
+// ── penguins ────────────────────────────────────────────────────────────────
 
 struct Penguin {
     bill_length: f64,
@@ -156,6 +210,8 @@ fn penguins_split(
     )
 }
 
+// ── scoring ─────────────────────────────────────────────────────────────────
+
 fn mean_log_loss(probs: &ndarray::Array2<f64>, labels: &[usize]) -> f64 {
     let mut acc = 0.0;
     for (row, &y) in labels.iter().enumerate() {
@@ -192,14 +248,19 @@ fn mean_argmax_probability(probs: &ndarray::Array2<f64>) -> f64 {
     acc / probs.nrows() as f64
 }
 
-fn report(model: &MultinomialSavedModel, test: &gam_data::EncodedDataset, labels: &[usize]) {
+fn report(
+    label: &str,
+    model: &MultinomialSavedModel,
+    test: &gam_data::EncodedDataset,
+    labels: &[usize],
+) {
     eprintln!(
-        "#2612 [penguins stride-3] separation_evidence = {:?}",
+        "#2612 [{label}] separation_evidence = {:?}",
         model.separation_evidence
     );
     let lambdas: Vec<String> = model.lambdas.iter().map(|v| format!("{v:.4e}")).collect();
     eprintln!(
-        "#2612 [penguins stride-3] classes={:?} P={} lambdas=[{}] edf_per_class={:?}",
+        "#2612 [{label}] classes={:?} P={} lambdas=[{}] edf_per_class={:?}",
         model.class_levels,
         model.p_per_class,
         lambdas.join(", "),
@@ -207,36 +268,36 @@ fn report(model: &MultinomialSavedModel, test: &gam_data::EncodedDataset, labels
     );
     for (estimand, predicted) in [
         ("posterior-mean", predict_multinomial_formula(model, test)),
-        (
-            "plug-in",
-            predict_multinomial_formula_plugin(model, test),
-        ),
+        ("plug-in", predict_multinomial_formula_plugin(model, test)),
     ] {
         match predicted {
             Ok(probs) => {
                 let acc = accuracy(&probs, labels);
                 let argmax = mean_argmax_probability(&probs);
                 eprintln!(
-                    "#2612 [penguins stride-3] {estimand}: acc={acc:.4} logloss={:.5} \
+                    "#2612 [{label}] {estimand}: acc={acc:.4} logloss={:.5} \
                      mean_argmax_p={argmax:.4} calib_gap={:+.5}",
                     mean_log_loss(&probs, labels),
                     argmax - acc,
                 );
             }
-            Err(error) => eprintln!("#2612 [penguins stride-3] {estimand}: UNAVAILABLE: {error}"),
+            Err(error) => eprintln!("#2612 [{label}] {estimand}: UNAVAILABLE: {error}"),
         }
     }
 }
 
-#[test]
-fn zz_probe_2612_penguins_stride3_inner_trail() {
-    init();
-    let (train, test, species) = penguins_split(3);
+fn run(
+    label: &str,
+    train: &gam_data::EncodedDataset,
+    formula: &str,
+    test: &gam_data::EncodedDataset,
+    label_of: impl Fn(&MultinomialSavedModel) -> Vec<usize>,
+) {
     let config = FitConfig::default();
     let started = Instant::now();
     let fitted = fit_penalized_multinomial_formula(&MultinomialFitRequest {
-        data: &train,
-        formula: FORMULA,
+        data: train,
+        formula,
         config: &config,
         init_lambda: 1.0,
         max_iter: 100,
@@ -245,8 +306,50 @@ fn zz_probe_2612_penguins_stride3_inner_trail() {
     let elapsed = started.elapsed().as_secs_f64();
     match fitted {
         Ok(model) => {
-            eprintln!("#2612 [penguins stride-3] FIT OK in {elapsed:.1}s");
-            let labels: Vec<usize> = species
+            eprintln!("#2612 [{label}] FIT OK in {elapsed:.1}s");
+            let labels = label_of(&model);
+            report(label, &model, test, &labels);
+        }
+        Err(error) => eprintln!("#2612 [{label}] FIT FAILED after {elapsed:.1}s: {error}"),
+    }
+}
+
+#[test]
+fn zz_probe_2612_banded_inner_trail() {
+    init();
+    let (train, _) = banded_frame(&(0..180).collect::<Vec<_>>());
+    let (test, test_labels) = banded_frame(&(180..300).collect::<Vec<_>>());
+    run(
+        "B banded quasi-separated",
+        &train,
+        "y ~ s(x, k=8)",
+        &test,
+        |model| {
+            test_labels
+                .iter()
+                .map(|&class| {
+                    model
+                        .class_levels
+                        .iter()
+                        .position(|level| level == CLASS_NAMES[class])
+                        .expect("class level present")
+                })
+                .collect()
+        },
+    );
+}
+
+#[test]
+fn zz_probe_2612_penguins_stride3_inner_trail() {
+    init();
+    let (train, test, species) = penguins_split(3);
+    run(
+        "C penguins stride-3",
+        &train,
+        PENGUINS_FORMULA,
+        &test,
+        |model| {
+            species
                 .iter()
                 .map(|name| {
                     model
@@ -255,11 +358,7 @@ fn zz_probe_2612_penguins_stride3_inner_trail() {
                         .position(|level| level == name)
                         .expect("species level present")
                 })
-                .collect();
-            report(&model, &test, &labels);
-        }
-        Err(error) => {
-            eprintln!("#2612 [penguins stride-3] FIT FAILED after {elapsed:.1}s: {error}");
-        }
-    }
+                .collect()
+        },
+    );
 }

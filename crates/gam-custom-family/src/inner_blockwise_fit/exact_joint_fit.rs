@@ -220,6 +220,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // the sentinel `inf` — converged=true must never be paired with a non-
     // finite residual in the log (#1040 inner-report truthfulness).
     let mut min_certified_residual: f64 = f64::INFINITY;
+    // What ONE evaluation of the inner objective carries in rounding, measured
+    // from the trust region's own backtracking ladders (gam#2612). Lives at
+    // SOLVE scope, not cycle scope: rounding does not get smaller because the
+    // iterate moved, the ladder long enough to measure it appears once, and
+    // every cycle after it is two attempts at the radius floor. See
+    // [`ObjectiveResolutionWitness`].
+    let mut objective_resolution_witness = ObjectiveResolutionWitness::default();
     let mut cycles_since_residual_improved: usize = 0;
     // Number of consecutive non-improving cycles after which the
     // conditioning-based self-vanishing Levenberg–Marquardt damping is
@@ -2357,6 +2364,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // two decades without `rho` moving toward 1 is a first-order
         // disagreement, and no radius repairs it.
         let mut trust_ratio_witness = TrustRatioRefinementWitness::default();
+        // One ladder per cycle: the coarsest and finest ends must come from
+        // ONE shrink sequence to be comparable (different cycles sit at
+        // different β and different radii). What the witness has already
+        // MEASURED survives across cycles; see its doc block.
+        objective_resolution_witness.start_ladder();
+        let resolution_before_this_ladder = objective_resolution_witness.measured();
         // Snapshot every mutable input to the trust-region attempt loop
         // before it can shrink a radius. A later fully-rejected cycle is an
         // exact fixed point only if this state and the realized first trial
@@ -3388,6 +3401,15 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 )));
             }
             let actual_reduction = old_objective - trialobjective;
+            // Read this attempt for what it says about the OBJECTIVE's own
+            // resolution before asking the controller what it says about the
+            // REGION (gam#2612): `actual − predicted` is `O(‖δ‖³)` for any
+            // twice-differentiable objective, so a discrepancy that survives
+            // the ladder's shrink is rounding, not remainder — and the
+            // controller must know that before it can tell a bad region from
+            // an unreadable one.
+            objective_resolution_witness.observe(step_norm, actual_reduction, predicted_reduction);
+            let measured_objective_resolution = objective_resolution_witness.measured();
             let trust_update = update_joint_trust_region_radius(
                 joint_trust_radius,
                 step_norm,
@@ -3395,6 +3417,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 predicted_reduction,
                 old_objective,
                 objective_tol,
+                measured_objective_resolution,
             );
             trust_ratio_witness.observe(step_norm, trust_update.rho, predicted_reduction);
             let old_radius = joint_trust_radius;
@@ -3412,8 +3435,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     actual_reduction,
                     predicted_reduction,
                     objective_tol,
+                    measured_objective_resolution,
                 );
-            let roundoff_slack = joint_objective_roundoff_slack(old_objective, trialobjective);
+            let roundoff_slack = joint_objective_roundoff_slack(
+                old_objective,
+                trialobjective,
+                measured_objective_resolution,
+            );
             let secondary_ok = !floor_reached
                 && trialobjective.is_finite()
                 && trust_update.accepted
@@ -3439,6 +3467,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         predicted_reduction,
                         old_objective,
                         objective_tol,
+                        measured_objective_resolution,
                     );
                     if block_update.radius >= *block_radius
                         || joint_block_step_hit_trust_boundary(*block_step_norm, *block_radius)
@@ -3639,6 +3668,46 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 prev_rejected_attempt_objective = Some(trialobjective);
             } else {
                 prev_rejected_attempt_objective = None;
+            }
+        }
+        // A SHRINK TAKEN ON NON-EVIDENCE IS UNDONE (gam#2612).
+        //
+        // If this ladder is the one that MEASURED the objective's resolution,
+        // then by construction its own rejections were decided against a floor
+        // the solve now knows was too small: the discrepancies it shrank on
+        // were rounding, not model error. The shrinks are therefore not
+        // evidence about the region, and leaving them in place is not
+        // conservative — it is the ratchet. Each shrink makes the next
+        // attempt's true reduction smaller against the SAME rounding, so once
+        // a cycle starts rejecting on noise it can only reject harder; the
+        // #2612 banded witness went from radius `1.166e2` to the `1e-12` floor
+        // inside two cycles and then re-rejected one frozen step for 1,195.
+        //
+        // Restore the radii this cycle started with. The measurement itself is
+        // kept (it is a fact about the arithmetic, not about the region), so
+        // the next cycle re-proposes the same Newton step against a floor that
+        // can now recognise its realized change as rounding and accept it.
+        // Fires at most once per solve: `measured` is monotone, so a later
+        // ladder that re-measures the SAME resolution does not restore again.
+        if objective_resolution_witness.measured() > resolution_before_this_ladder {
+            log::info!(
+                "[joint-newton objective-resolution gam#2612] cycle={} MEASURED resolution={:.6e} \
+                 (was {:.6e}); one evaluation of the inner objective carries this much rounding, \
+                 so the {} shrink(s) this ladder took were decided on it and are undone: \
+                 r={:.3e} -> {:.3e}",
+                cycle,
+                objective_resolution_witness.measured(),
+                resolution_before_this_ladder,
+                line_search_attempts,
+                joint_trust_radius,
+                f64::from_bits(cycle_start_joint_trust_radius_bits),
+            );
+            joint_trust_radius = f64::from_bits(cycle_start_joint_trust_radius_bits);
+            for (radius, bits) in joint_block_trust_radii
+                .iter_mut()
+                .zip(cycle_start_block_trust_radius_bits.iter())
+            {
+                *radius = f64::from_bits(*bits);
             }
         }
         if let Some(sig) = tr_log_sig.take() {

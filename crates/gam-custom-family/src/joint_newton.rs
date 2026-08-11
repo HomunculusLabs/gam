@@ -1915,10 +1915,15 @@ pub(crate) struct JointTrustRegionUpdate {
 }
 
 /// Relative round-off noise floor handed to the shared trust-region
-/// controller: a change in the inner objective below `|objective| ×` this is
-/// indistinguishable from f64 round-off. Named because
+/// controller when the solve has measured NOTHING better: a change in the
+/// inner objective below `|objective| ×` this is indistinguishable from f64
+/// round-off *for an evaluation that does not cancel*. Named because
 /// [`update_joint_trust_region_radius`] has to reason about the SAME floor the
 /// controller applies, and two spellings of the number would be free to drift.
+///
+/// It is a FLOOR, not the floor: an evaluation that cancels carries orders
+/// more, and [`ObjectiveResolutionWitness`] is how the solve finds that out
+/// (gam#2612). `measured_resolution` overrides this whenever it is larger.
 pub(crate) const JOINT_TRUST_NOISE_FLOOR_REL: f64 = 1.0e-14;
 
 pub(crate) fn update_joint_trust_region_radius(
@@ -1928,6 +1933,7 @@ pub(crate) fn update_joint_trust_region_radius(
     predicted_reduction: f64,
     objective_scale: f64,
     objective_tol: f64,
+    measured_resolution: f64,
 ) -> JointTrustRegionUpdate {
     // Round-off-aware trust-region radius control, delegated to the shared
     // `opt::TrustRegionPolicy::noise_aware` controller. The
@@ -1983,15 +1989,26 @@ pub(crate) fn update_joint_trust_region_radius(
     // radius and converges linearly. That is a landscape problem, not a
     // controller one, and neither side of this predicate fixes it.
     let hit_boundary = step_norm >= 0.99 * old_radius && predicted_reduction > objective_tol;
-    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, JOINT_TRUST_NOISE_FLOOR_REL)
-        .update(
-            old_radius,
-            step_norm,
-            hit_boundary,
-            actual_reduction,
-            predicted_reduction,
-            objective_scale,
-        );
+    // THE NOISE FLOOR IS MEASURED WHEN IT CAN BE (gam#2612). The controller
+    // sizes its floor as `|objective_scale| × noise_floor_rel`, so passing the
+    // measured ABSOLUTE resolution as a ratio against the same scale makes its
+    // internal floor exactly that resolution — one number, one spelling, and
+    // the relative constant survives only as the never-measured fallback. See
+    // [`ObjectiveResolutionWitness`] for what the measurement reads and why
+    // `ε|F|` is not it.
+    let objective_scale_floor = objective_scale.abs().max(1.0);
+    let noise_floor = (objective_scale_floor * JOINT_TRUST_NOISE_FLOOR_REL)
+        .max(measured_resolution.max(0.0))
+        .min(f64::MAX);
+    let noise_floor_rel = noise_floor / objective_scale_floor;
+    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, noise_floor_rel).update(
+        old_radius,
+        step_norm,
+        hit_boundary,
+        actual_reduction,
+        predicted_reduction,
+        objective_scale,
+    );
     // MODEL EXHAUSTION IS NOT MODEL DISAGREEMENT (gam#2637).
     //
     // The controller maps two different situations onto one `rho = -inf`
@@ -2020,7 +2037,6 @@ pub(crate) fn update_joint_trust_region_radius(
     // region either. A model that predicts ascent (`predicted_reduction < 0`)
     // or is non-finite still rejects and shrinks exactly as before, and so does
     // any step whose realized change fails to clear the floor.
-    let noise_floor = objective_scale.abs().max(1.0) * JOINT_TRUST_NOISE_FLOOR_REL;
     if !step.accepted
         && step.predicted_nonpositive
         && predicted_reduction.is_finite()
@@ -2141,8 +2157,169 @@ impl TrustRatioRefinementWitness {
     }
 }
 
-pub(crate) fn joint_objective_roundoff_slack(old_objective: f64, trial_objective: f64) -> f64 {
-    (64.0 * f64::EPSILON * (1.0 + old_objective.abs() + trial_objective.abs())).max(1.0e-10)
+/// The smallest change in the inner objective that is a fact about `β` rather
+/// than about the arithmetic.
+///
+/// `measured_resolution` is [`ObjectiveResolutionWitness::measured`] — the
+/// solve's own measurement of what ONE evaluation of `F = −ℓ + ½βᵀS_λβ − Φ`
+/// carries in rounding, or `0.0` before any ladder has been able to make that
+/// measurement. The `64ε(1 + |old| + |trial|)` term below is the resolution a
+/// NON-cancelling evaluation would have, and it is kept as the floor for the
+/// (common) case where nothing has been measured yet.
+///
+/// # Why `ε·|F|` is not the resolution (gam#2612)
+///
+/// It is the resolution only when `F` is accumulated from terms no larger than
+/// `F`. A penalized objective is not: on the #2612 banded witness the armed
+/// refit sits at `|β|∞ = 74.7` with a selected `λ` of `e^8.42 = 4530`, so
+/// `½βᵀS_λβ` is a cancellation at scale `λ‖β‖² ≈ 2.5e7` whose RESULT is `O(10)`
+/// — one evaluation carries `≈1.5e-10` where `ε|F|` claims `3.6e-15`. Measured
+/// on that fixture's own backtracking ladder: `‖δ‖` falls six decades, the
+/// predicted reduction falls with it from `6.7e-11` to `5.9e-16`, and the
+/// realized change does not move off `-1e-10 … -3e-10`. A change that ignores
+/// `‖δ‖` is not the objective moving.
+///
+/// The hard `1e-10` this used to carry instead — introduced in `f0d14c78a`
+/// with no derivation — is exactly that quantity guessed. It was 1.5× too
+/// small on the banded fixture and 20× too small on penguins, and the cost of
+/// missing it is not a slower solve: the trust region shrinks on the noise, a
+/// shorter step has a smaller true reduction against the SAME noise, and the
+/// radius ratchets to its `1e-12` floor with the residual parked five orders
+/// above tolerance.
+pub(crate) fn joint_objective_roundoff_slack(
+    old_objective: f64,
+    trial_objective: f64,
+    measured_resolution: f64,
+) -> f64 {
+    let arithmetic = 64.0 * f64::EPSILON * (1.0 + old_objective.abs() + trial_objective.abs());
+    if measured_resolution.is_finite() && measured_resolution > arithmetic {
+        measured_resolution
+    } else {
+        arithmetic
+    }
+}
+
+/// The inner objective's evaluation resolution, MEASURED from the trust
+/// region's own backtracking ladder rather than assumed from `|F|` (gam#2612).
+///
+/// # The identity it reads
+///
+/// For a twice-differentiable `F` and the quadratic model `m` the step solves,
+/// `actual − predicted = O(‖δ‖³)`: shrink the step by `t` and the discrepancy
+/// must shrink by at least `t²` (it shrinks by `t³` when the model carries the
+/// exact Hessian, and by `t²` when it carries an approximate one). So a
+/// discrepancy that survives a shrink of two decades is NOT the model's
+/// remainder. It is what one evaluation of `F` carries in rounding, and it is
+/// therefore a lower bound on the smallest objective change this solve can
+/// referee.
+///
+/// That is a measurement, not a bound: it needs no operation count, no
+/// per-family statement about its own arithmetic, and no constant. It exists
+/// only after a cycle has actually backtracked across two decades — a solve
+/// whose cycles accept on the first attempt never makes one, and is therefore
+/// byte-unchanged.
+///
+/// # Why the solver needs it
+///
+/// Three sites currently model this quantity and all three model it as a
+/// multiple of `|F|`: the shared trust controller's relative noise floor, the
+/// [`joint_objective_roundoff_slack`] accept band, and the `objective_tol`
+/// convergence scale. When the true resolution is four orders above `ε|F|`
+/// (see that function's doc block) a rejection is a coin flip, and — because
+/// the response to a rejection is to SHRINK, which weakens the next attempt's
+/// evidence while leaving the noise untouched — it is a coin flip that only
+/// ever falls one way. The measurement is what lets the accept test say "these
+/// two points are indistinguishable" instead of "the model was wrong".
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ObjectiveResolutionWitness {
+    /// Largest `‖δ‖` seen this ladder with a finite discrepancy, and the
+    /// discrepancy `|actual − predicted|` there.
+    coarsest_step_norm: f64,
+    coarsest_discrepancy: f64,
+    /// Smallest `‖δ‖` seen this ladder, and its discrepancy.
+    finest_step_norm: f64,
+    finest_discrepancy: f64,
+    /// The resolution measured so far in THIS solve, monotone: a later ladder
+    /// can only widen it. Rounding does not get smaller because the iterate
+    /// moved, and a solve that has once been shown unable to referee changes
+    /// of a given size must not forget it on the next cycle (the #2612 ladder
+    /// makes its measurement in cycle 4 and every cycle after it has only two
+    /// attempts at the radius floor — far too short a ladder to re-measure).
+    measured: f64,
+}
+
+/// The step-norm span a ladder must cover before "the discrepancy did not
+/// shrink" is a statement rather than a coincidence, and the exponent the
+/// shrink is required to beat.
+///
+/// Two decades: the model remainder falls by at least `10⁴` across them
+/// (`t²` with `t = 10⁻²`), so a discrepancy that falls by less than that is
+/// not the remainder. The exponent is `2`, not `3`, so an approximate-Hessian
+/// model — divided-difference `H_Φ`, a Gauss–Newton block — is never mistaken
+/// for a noise floor.
+const OBJECTIVE_RESOLUTION_LADDER_DECADES: f64 = 2.0;
+const OBJECTIVE_RESOLUTION_REMAINDER_EXPONENT: i32 = 2;
+
+impl ObjectiveResolutionWitness {
+    /// Record one trust-region attempt. `actual`/`predicted` are the same
+    /// quantities the accept test compares; `step_norm` is the metric norm of
+    /// the step they were measured across.
+    pub(crate) fn observe(&mut self, step_norm: f64, actual: f64, predicted: f64) {
+        if !(step_norm.is_finite() && step_norm > 0.0)
+            || !actual.is_finite()
+            || !predicted.is_finite()
+        {
+            return;
+        }
+        let discrepancy = (actual - predicted).abs();
+        if self.coarsest_step_norm == 0.0 || step_norm > self.coarsest_step_norm {
+            self.coarsest_step_norm = step_norm;
+            self.coarsest_discrepancy = discrepancy;
+        }
+        if self.finest_step_norm == 0.0 || step_norm < self.finest_step_norm {
+            self.finest_step_norm = step_norm;
+            self.finest_discrepancy = discrepancy;
+        }
+        if let Some(resolution) = self.ladder_verdict() {
+            self.measured = self.measured.max(resolution);
+        }
+    }
+
+    /// Start a new ladder. The per-solve `measured` value survives; the
+    /// coarsest/finest pair does not, because the two ends must come from ONE
+    /// cycle's shrink sequence to be comparable (different cycles are at
+    /// different `β` and different radii).
+    pub(crate) fn start_ladder(&mut self) {
+        self.coarsest_step_norm = 0.0;
+        self.coarsest_discrepancy = 0.0;
+        self.finest_step_norm = 0.0;
+        self.finest_discrepancy = 0.0;
+    }
+
+    /// The resolution this solve has measured, or `0.0` if no ladder has yet
+    /// spanned enough to make the statement.
+    pub(crate) fn measured(&self) -> f64 {
+        self.measured
+    }
+
+    /// `Some(discrepancy at the finest step)` when this ladder spans at least
+    /// [`OBJECTIVE_RESOLUTION_LADDER_DECADES`] and the discrepancy failed to
+    /// fall by the model remainder's own rate over that span.
+    fn ladder_verdict(&self) -> Option<f64> {
+        if !(self.coarsest_step_norm > 0.0 && self.finest_step_norm > 0.0) {
+            return None;
+        }
+        let ratio = self.finest_step_norm / self.coarsest_step_norm;
+        if !(ratio > 0.0 && ratio < 1.0) {
+            return None;
+        }
+        if -ratio.log10() < OBJECTIVE_RESOLUTION_LADDER_DECADES {
+            return None;
+        }
+        let remainder_bound =
+            self.coarsest_discrepancy * ratio.powi(OBJECTIVE_RESOLUTION_REMAINDER_EXPONENT);
+        (self.finest_discrepancy > remainder_bound).then_some(self.finest_discrepancy)
+    }
 }
 
 // True iff the line search detected a noise-level realized reduction (i.e.
@@ -2164,16 +2341,15 @@ pub(crate) fn joint_objective_floor_reached(
     actual_reduction: f64,
     predicted_reduction: f64,
     objective_tol: f64,
+    measured_resolution: f64,
 ) -> bool {
+    let slack =
+        joint_objective_roundoff_slack(old_objective, trial_objective, measured_resolution);
     trial_objective.is_finite()
         && actual_reduction <= 0.0
-        && actual_reduction.abs() <= joint_objective_roundoff_slack(old_objective, trial_objective)
+        && actual_reduction.abs() <= slack
         && predicted_reduction.is_finite()
-        && predicted_reduction
-            <= objective_tol.max(joint_objective_roundoff_slack(
-                old_objective,
-                trial_objective,
-            ))
+        && predicted_reduction <= objective_tol.max(slack)
 }
 
 /// True iff the joint-Newton proposal is already at the step-tolerance floor —

@@ -3479,6 +3479,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 predicted_reduction,
                 obj_before_block,
                 inner_tol * (1.0 + obj_before_block.abs()),
+                // The blockwise path takes ONE step per block per cycle rather
+                // than a backtracking ladder, so it has no shrink sequence to
+                // read a resolution off (gam#2612). `0.0` means "nothing
+                // measured", which leaves this site byte-identical.
+                0.0,
             );
             block_max_step[b] = trust_update.radius;
             if !accepted {
