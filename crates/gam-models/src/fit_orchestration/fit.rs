@@ -4179,7 +4179,7 @@ pub(crate) fn crossfit_score_calibration(
     ))
     .map_err(|e| e.to_string())?;
     let mut frozen_notes = Vec::new();
-    let covariate_spec_raw = build_termspec_with_geometry_and_overrides(
+    let mut covariate_spec_raw = build_termspec_with_geometry_and_overrides(
         &parsed_cov.terms,
         data,
         col_map,
@@ -4190,6 +4190,30 @@ pub(crate) fn crossfit_score_calibration(
         None,
     )
     .map_err(|e| e.to_string())?;
+    // #2750/#2754: resolve auto measure-jet ranges HERE, once, on the full data
+    // — before the freeze below and therefore before any fold sees the spec.
+    //
+    // This is the one place in the cross-fit path where the screen can run at
+    // all. Every fold refit is handed `frozen_cov_spec`, and a frozen term is a
+    // replay with nothing left to seed, so the screen inside
+    // `fit_transformation_normal` is correctly a no-op there. Screening on the
+    // full response before the freeze keeps the property the freeze exists for
+    // — identical centers, identical `p_cov`, column-aligned designs across
+    // folds — because every fold then replays the SAME screened range, rather
+    // than each choosing its own from its own complement.
+    let seeded = crate::fit_orchestration::drivers::seed_measure_jet_auto_ranges(
+        data.values.view(),
+        response_full.view(),
+        weights_full.view(),
+        &mut covariate_spec_raw,
+    );
+    if seeded > 0 {
+        log::info!(
+            "[#2750] screened the representer range of {seeded} auto measure-jet term(s) against \
+             the full response before freezing the cross-fit Stage-1 covariate basis"
+        );
+    }
+    let covariate_spec_raw = covariate_spec_raw;
     let full_cov_design = build_term_collection_design(data.values.view(), &covariate_spec_raw)
         .map_err(|e| e.to_string())?;
     let frozen_cov_spec = crate::fit_orchestration::drivers::freeze_term_collection_from_design(

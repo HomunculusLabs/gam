@@ -427,6 +427,7 @@ pub(crate) fn marginal_slope_logslope_screen_response(
 /// | `fit_standard_model` | `y` | screened (#2750) |
 /// | `fit_bernoulli_marginal_slope_terms` | marginal: `y`; log-slope: `(y−ȳ)(z−z̄)` | screened (#2754) |
 /// | `fit_transformation_normal` | `response` | screened (#2754) |
+/// | the CTN cross-fit Stage-1 builder | full `response`, BEFORE the freeze | screened (#2754) |
 /// | `fit_survival_marginal_slope_terms` | — | **not derived** |
 /// | `fit_latent_survival_terms`, `fit_latent_binary_terms` | — | **not derived** |
 /// | the `*_location_scale` families | — | **not derived** |
