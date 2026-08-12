@@ -3309,9 +3309,16 @@ struct KernelRanges {
     /// `t(1 - 4t + t^2)/(1+t)^4`, the rho-derivative of `k`.
     ///
     /// With `dt/drho = t`, differentiating `k` once more gives
-    /// `t * dk/dt = t(1 - 4t + t^2)/(1+t)^4`. It is the third derivative of a
-    /// mode's fitted fraction, and (with the scale factored out) the fourth of
-    /// its normalized log-determinant.
+    /// `t * dk/dt`, and `dk/dt = (1 - 4t + t^2)/(1+t)^4` because
+    /// `k = (t - t^2)(1+t)^-3`. It is the third rho-derivative of a mode's
+    /// fitted fraction (up to the scale `A/g`), which is what the residual
+    /// block's `(log R)'''` is built from.
+    ///
+    /// Checked against finite differences of `q/(g + e^rho s)` in rho at
+    /// `rho = -2, -0.5, 0.3, 1.7`: agreement to five significant figures at
+    /// `h = 1e-2`, which is that FD's own `O(h^2)` truncation. The determinant's
+    /// third derivative needed no new kernel at all — `u(1-u)(1-2u)` is
+    /// `t(1-t)/(1+t)^3`, exactly `k` — and was checked the same way.
     third: ClosedInterval,
 }
 
