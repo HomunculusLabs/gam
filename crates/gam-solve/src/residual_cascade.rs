@@ -8862,7 +8862,6 @@ mod refinement_decision_tests {
             let enclosure = affine.enclose(a, b).expect("enclosure");
             let score_width = enclosure.score.value.hi - enclosure.score.value.lo;
             let derivative_span = enclosure.derivative.hi.abs().max(enclosure.derivative.lo.abs());
-            let curvature_span = enclosure.curvature.hi.abs().max(enclosure.curvature.lo.abs());
             // What the derivative enclosure itself says the score can move by
             // across this cell. A VALUE enclosure wider than this is pure
             // overestimation: the two are enclosures of the same function.
@@ -8923,7 +8922,6 @@ mod refinement_decision_tests {
                 enclosure.curvature.lo,
                 enclosure.curvature.hi
             );
-            let _ = curvature_span;
         }
     }
 }
