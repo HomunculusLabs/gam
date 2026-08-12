@@ -8728,6 +8728,70 @@ mod refinement_decision_tests {
         );
     }
 
+    /// Automatic REML across the identifiability frontier, both sides of it.
+    ///
+    /// The end-to-end gate above pins ONE rank-deficient design. This sweeps the
+    /// frontier so a regression cannot hide in the shape of a single fixture:
+    /// the same 36-row cloud at three net depths (rank-sufficient, then further
+    /// and further past what 36 rows identify), plus one design at production
+    /// row count. Every cell that is inside the certified spectrum budget must
+    /// certify, whichever side of the frontier it sits on — the score is a
+    /// genuine function of `log lambda` on its POSITIVE modes either way, and
+    /// the number of columns the data cannot pin is not a reason to refuse it.
+    ///
+    /// The reported `deficiency` is `schur_rank − identifiable`: negative is
+    /// rank-sufficient, positive is the regime the certified route used to
+    /// refuse outright.
+    #[test]
+    fn zz_measure_auto_reml_across_the_identifiability_frontier() {
+        for (side, levels) in [(6_usize, 4_usize), (6, 5), (6, 6), (45, 6)] {
+            let (x1, x2, y) = dense_fixture(side);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let core = &design.core;
+            let nullity = core.nullity();
+            let schur_rank = core.m - nullity;
+            let identifiable = core.y.len() - nullity;
+            let deficiency = schur_rank as i64 - identifiable as i64;
+            if core.m > CERTIFIED_SPECTRUM_MAX {
+                println!(
+                    "#FRONTIER side={side} levels={levels} n={} m={} PAST THE SPECTRUM BUDGET",
+                    core.y.len(),
+                    core.m
+                );
+                continue;
+            }
+            let started = std::time::Instant::now();
+            let outcome = design.fit_reml();
+            let elapsed = started.elapsed().as_secs_f64();
+            match &outcome {
+                Ok(fit) => println!(
+                    "#FRONTIER side={side} levels={levels} n={} m={} rank={schur_rank} \
+                     identifiable={identifiable} deficiency={deficiency:+} \
+                     CERTIFIED log_lambda={:.6} in {elapsed:.2}s",
+                    core.y.len(),
+                    core.m,
+                    fit.log_lambda()
+                ),
+                Err(error) => println!(
+                    "#FRONTIER side={side} levels={levels} n={} m={} rank={schur_rank} \
+                     identifiable={identifiable} deficiency={deficiency:+} \
+                     REFUSED in {elapsed:.2}s: {error}",
+                    core.y.len(),
+                    core.m
+                ),
+            }
+            assert!(
+                outcome.is_ok(),
+                "side={side} levels={levels} (deficiency {deficiency:+}) is inside the certified \
+                 spectrum budget and must certify; refusing a design because its net outruns its \
+                 sample is what the first-order-loose value enclosure did"
+            );
+        }
+    }
+
     /// PROBE (#2758 residual): does the certified REML search terminate on a
     /// cascade design the data cannot identify?
     ///
