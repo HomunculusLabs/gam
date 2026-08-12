@@ -107,6 +107,23 @@ pub enum BasisDesignScaleLaw {
     /// degree-one columns in each factor level: intercept columns are invariant
     /// and slope columns gain one power of the abscissa scale.
     RandomInterceptSlopeDegreesZeroAndOne,
+    /// Every design entry gains exactly one power of the chart scale `a`.
+    ///
+    /// The constant-curvature smooth's kernel is `ℓ·(e^{−d_κ/ℓ} − 1)`, which is
+    /// a LENGTH: the `ℓ` factor is what stops the realized design collapsing
+    /// like `1/ℓ` and dragging `ρ̂` with it, and what makes the `ℓ → ∞` face the
+    /// finite geodesic-distance kernel rather than nothing (gam#2747,
+    /// `constant_curvature_kernel_matrix`). Under `x' = a·x`, `κ' = κ/a²`,
+    /// `ℓ' = a·ℓ` the exponent `d_κ/ℓ` is invariant and the prefactor is not, so
+    /// `X' = a·X` exactly.
+    ///
+    /// This is equivariance, not a broken invariance: the design gains a power
+    /// the penalty gains too, and a common positive factor on `(X, S)` is
+    /// absorbed exactly by `λ`, so the fitted function is unchanged. A basis
+    /// whose columns carry units is ordinary — a parametric `x` column does —
+    /// and the alternative (a dimensionless kernel) is what confounded the range
+    /// coordinate with the smoothing parameter.
+    ChartSimilarityDegreeOne,
 }
 
 /// Transformation of active penalty matrices.
@@ -135,6 +152,13 @@ pub enum BasisPenaltyScaleLaw {
     /// PCA uses the empirical function-mass Gram `X_score'X_score/n`; invariant
     /// scores therefore give an exactly invariant penalty and null geometry.
     InvariantFunctionMass,
+    /// The physical RKHS Gram is emitted without arbitrary normalization and
+    /// gains exactly one power of the chart scale, for the same reason its
+    /// design does (see
+    /// [`BasisDesignScaleLaw::ChartSimilarityDegreeOne`]): design and penalty
+    /// are the two blocks of ONE kernel, so they cannot scale differently
+    /// without the penalty ceasing to be the roughness of the design.
+    PhysicalRkhsGramDegreeOne,
 }
 
 /// Transformation of analytic input/hyperparameter derivatives.
@@ -146,7 +170,10 @@ pub enum BasisDerivativeScaleLaw {
     /// remain invariant under `ell -> a*ell`.
     InverseCoordinatePowerAndInvariantLogRange { maximum_order: usize },
     /// Under `kappa'=kappa/a^2`, first and second derivatives with respect to
-    /// the numeric curvature coordinate gain factors `a^2` and `a^4`.
+    /// the numeric curvature coordinate gain factors `a^3` and `a^5` — the
+    /// `a^2` and `a^4` from differentiating in a coordinate that itself scales
+    /// like `a^-2`, times the one power the kernel VALUE carries (see
+    /// [`BasisDesignScaleLaw::ChartSimilarityDegreeOne`]).
     ConstantCurvatureParameterPowers,
     /// Derivatives live in the intrinsic angular chart; changing degrees to
     /// radians applies the ordinary inverse unit-conversion chain rule.
@@ -584,8 +611,8 @@ impl SmoothBasisSpec {
             SmoothBasisSpec::ConstantCurvature { .. } => BasisScaleContract::leaf(
                 BasisScaleFamily::ConstantCurvature,
                 BasisCoordinateScaleAction::ConstantCurvatureChartSimilarity,
-                BasisDesignScaleLaw::Invariant,
-                BasisPenaltyScaleLaw::InvariantPhysicalRkhsGram,
+                BasisDesignScaleLaw::ChartSimilarityDegreeOne,
+                BasisPenaltyScaleLaw::PhysicalRkhsGramDegreeOne,
                 BasisDerivativeScaleLaw::ConstantCurvatureParameterPowers,
                 BasisNullGeometryScaleLaw::ConstantCurvatureCenterConstraint,
                 vec![
@@ -1074,6 +1101,41 @@ mod tests {
         }
     }
 
+    /// [`assert_build_geometry_close`] for a basis that is EQUIVARIANT with
+    /// weight one rather than invariant: one common `scale` must restore both
+    /// the design and every active penalty. Taking the same factor out of both
+    /// is what distinguishes a units change from a model change.
+    fn assert_build_geometry_scaled_close(
+        actual: &BasisBuildResult,
+        expected: &BasisBuildResult,
+        scale: f64,
+        tolerance: f64,
+    ) {
+        assert_matrix_close(
+            &actual.design.to_dense().mapv(|value| value / scale),
+            &expected.design.to_dense(),
+            tolerance,
+        );
+        assert_eq!(
+            actual.active_penalties.len(),
+            expected.active_penalties.len()
+        );
+        for (observed, target) in actual
+            .active_penalties
+            .iter()
+            .zip(expected.active_penalties.iter())
+        {
+            assert_eq!(observed.info.source, target.info.source);
+            assert_eq!(observed.info.effective_rank, target.info.effective_rank);
+            assert_eq!(observed.nullity, target.nullity);
+            assert_matrix_close(
+                &observed.matrix.mapv(|value| value / scale),
+                &target.matrix,
+                tolerance,
+            );
+        }
+    }
+
     fn assert_local_geometry_close(
         actual: &LocalSmoothTermBuild,
         expected: &LocalSmoothTermBuild,
@@ -1507,7 +1569,14 @@ mod tests {
                 },
             )
             .expect("rescaled constant-curvature basis");
-            assert_build_geometry_close(&actual, &reference, 2e-8);
+            // Degree ONE, not invariant (gam#2747): the kernel `ℓ·(e^{−d/ℓ}−1)`
+            // is a length, so the chart similarity multiplies design AND
+            // penalty by `a`. Dividing it back out is the whole content of the
+            // declared `ChartSimilarityDegreeOne` / `PhysicalRkhsGramDegreeOne`
+            // laws — and the fact that ONE factor restores BOTH blocks is the
+            // check that matters, because a common positive factor on `(X, S)`
+            // is exactly what `λ` absorbs.
+            assert_build_geometry_scaled_close(&actual, &reference, factor, 2e-8);
             let (_, dk, dkk) = constant_curvature_kernel_kappa_jets(
                 scaled_data.view(),
                 scaled_centers.view(),
@@ -1516,12 +1585,12 @@ mod tests {
             )
             .expect("rescaled curvature jets");
             assert_matrix_close(
-                &dk.mapv(|value| value / factor.powi(2)),
+                &dk.mapv(|value| value / factor.powi(3)),
                 &dk_reference,
                 2e-8,
             );
             assert_matrix_close(
-                &dkk.mapv(|value| value / factor.powi(4)),
+                &dkk.mapv(|value| value / factor.powi(5)),
                 &dkk_reference,
                 3e-7,
             );

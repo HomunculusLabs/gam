@@ -191,18 +191,34 @@ fn main() {
     let limit = reml(&x_limit, &s_limit, &y, &truth);
 
     println!(
-        "\n{:>12}  {:>12} {:>9} {:>7} {:>7} {:>4}   {:>12} {:>9} {:>7} {:>7}",
+        "\n{:>12}  {:>12} {:>9} {:>7} {:>7} {:>4}   {:>12} {:>9} {:>7} {:>7}  {:>9}",
         "ell", "V_raw", "rho_raw", "R2_raw", "edf_raw", "rail", "V_norm", "rho_norm", "R2_norm",
-        "edf_norm"
+        "edf_norm", "cancel"
     );
-    let mut ell = 1.0e-2_f64;
-    while ell <= 1.0e8 {
-        let built = build_constant_curvature_basis(feats.view(), &spec_at(ell));
-        let raw = built.ok().and_then(|b| {
-            let x = b.design.to_dense();
-            let s = b.active_penalties[0].matrix.as_dense().to_owned();
-            reml(&x, &s, &y, &truth)
-        });
+    let grid: Vec<f64> = {
+        let mut g = Vec::new();
+        let mut e = 1.0e-2_f64;
+        while e <= 1.0e9 {
+            g.push(e);
+            g.push(e * 3.0);
+            e *= 10.0;
+        }
+        g.push(hi);
+        g.sort_by(|a, b| a.partial_cmp(b).expect("finite grid"));
+        g
+    };
+    for ell in grid {
+        let raw_blocks = build_constant_curvature_basis(feats.view(), &spec_at(ell))
+            .ok()
+            .map(|b| {
+                (
+                    b.design.to_dense(),
+                    b.active_penalties[0].matrix.as_dense().to_owned(),
+                )
+            });
+        let raw = raw_blocks
+            .as_ref()
+            .and_then(|(x, s)| reml(x, s, &y, &truth));
 
         // NORM: the same kernel with the `1/ℓ` factor removed, built stably.
         // `−ℓ·expm1(−d/ℓ) → d` as `ℓ → ∞` with no cancellation.
@@ -224,13 +240,29 @@ fn main() {
             ),
             None => format!("{:>12} {:>9} {:>7} {:>7}", "refused", "-", "-", "-"),
         };
+        // How much of `X_raw·ℓ` survives? The raw path forms `exp(−d/ℓ)` whose
+        // entries all approach 1, then annihilates the constant with `z` — so
+        // the signal is what is left after a cancellation of relative size
+        // `d/ℓ`. The normalized path never forms the difference.
+        let scaled = x_norm.mapv(|v| v);
+        let cancellation = match &raw_blocks {
+            Some((x_raw, _)) => {
+                let mut num = 0.0_f64;
+                let mut den = 0.0_f64;
+                for (a, b) in x_raw.iter().zip(scaled.iter()) {
+                    num += (a * ell - b) * (a * ell - b);
+                    den += b * b;
+                }
+                (num / den).sqrt()
+            }
+            None => f64::NAN,
+        };
         println!(
-            "{ell:>12.4e}  {} {:>4}   {}",
+            "{ell:>12.4e}  {} {:>4}   {}  {cancellation:>9.2e}",
             fmt(&raw),
             if rail { "YES" } else { "" },
             fmt(&norm)
         );
-        ell *= 10.0;
     }
 
     println!(

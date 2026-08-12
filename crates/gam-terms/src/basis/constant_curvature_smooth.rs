@@ -13,17 +13,27 @@
 //!
 //! # Kernel
 //!
-//! `K_κ(x, y) = exp(−d_κ(x, y) / ℓ)` — the geodesic-exponential kernel, where
-//! `d_κ` is the exact constant-curvature geodesic distance in the
-//! κ-stereographic chart. The geodesic distance is a kernel of conditionally
-//! negative type on all three constant-curvature space forms (Schoenberg 1942
-//! for `S^d`; classical CND of `‖·‖` on `ℝ^d`; Faraut–Harzallah 1974 for
-//! `H^d`), so `exp(−c·d_κ)` is positive definite for every `c > 0` and every
-//! κ — the Gram on distinct centers is strictly PD, which is exactly what the
-//! RKHS penalty construction needs. At κ = 0 the chart carries the doubled
-//! gauge (`metric 4δ`, `d_0(x, y) = 2‖x − y‖`), so the κ = 0 term is the
-//! Euclidean exponential (Matérn-½) kernel smooth with effective Euclidean
-//! range `ℓ/2`.
+//! `k_{κ,ℓ}(x, y) = ℓ·(exp(−d_κ(x, y)/ℓ) − 1)` — the geodesic-exponential
+//! kernel in its CONTRAST gauge, where `d_κ` is the exact constant-curvature
+//! geodesic distance in the κ-stereographic chart. The geodesic distance is a
+//! kernel of conditionally negative type on all three constant-curvature space
+//! forms (Schoenberg 1942 for `S^d`; classical CND of `‖·‖` on `ℝ^d`;
+//! Faraut–Harzallah 1974 for `H^d`), so `exp(−c·d_κ)` is positive definite for
+//! every `c > 0` and every κ, and the Gram on distinct centers is strictly PD
+//! on the sum-to-zero frame — which is exactly what the RKHS penalty
+//! construction needs. At κ = 0 the chart carries the doubled gauge
+//! (`metric 4δ`, `d_0(x, y) = 2‖x − y‖`), so the κ = 0 term is the Euclidean
+//! exponential (Matérn-½) kernel smooth with effective Euclidean range `ℓ/2`.
+//!
+//! The `ℓ` factor and the subtracted `1` are both invisible to the model —
+//! `z` annihilates constants and `λ` absorbs a positive scale — and both are
+//! load-bearing anyway, because the gauge is what decides whether the range
+//! coordinate is confounded with `ρ` and whether the criterion survives its own
+//! rounding at large `ℓ` (gam#2747). The derivation, with the measurements that
+//! forced it, is on [`constant_curvature_kernel_matrix`]. Its consequence for
+//! the family: `k → −d_κ` as `ℓ → ∞`, so the range's far face is the
+//! geodesic-distance kernel — an ordinary member of the family's own closure,
+//! not a degeneracy.
 //!
 //! # The exponent has TWO coordinates, and BOTH are estimated (gam#2747)
 //!
@@ -257,8 +267,114 @@ pub(crate) fn validate_chart_points(
     Ok(())
 }
 
-/// `K_κ(data, centers)` — the geodesic-exponential kernel matrix
-/// `exp(−d_κ(x_i, c_j)/ℓ)`.
+/// `φ(u) = e^{−u}(1 + u) − 1` — the `∂/∂η` shape factor of the normalized
+/// kernel, evaluated without cancellation.
+///
+/// `φ` vanishes to SECOND order at `u = 0` (`φ = −u²/2 + u³/3 − …`) while both
+/// of its terms are `O(1)`, so the direct form loses `2·log₁₀(1/u)` digits as
+/// `u → 0` — which is exactly the regime the range coordinate walks into. The
+/// series is `−Σ_{m≥2} (−1)^m (m−1) u^m / m!`, used below `u = 1/2` where its
+/// terms are monotone and the truncation at `m = 20` is `< 2⁻²⁰/20! ≈ 5e-25`.
+#[inline]
+fn eta_shape(u: f64) -> f64 {
+    if u >= 0.5 {
+        return (-u).exp() * (1.0 + u) - 1.0;
+    }
+    let mut term = u * u; // u^m / m! at m = 2, times 2!
+    let mut factorial = 2.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sign = 1.0_f64; // (−1)^m at m = 2
+    for m in 2..=20u32 {
+        if m > 2 {
+            term *= u;
+            factorial *= f64::from(m);
+            sign = -sign;
+        }
+        sum -= sign * f64::from(m - 1) * term / factorial;
+    }
+    sum
+}
+
+/// `χ(u) = e^{−u}(1 + u + u²) − 1` — the `∂²/∂η²` shape factor.
+///
+/// Same second-order zero at the origin (`χ = u²/2 − 2u³/3 + …`) and the same
+/// series treatment, with coefficients `(m−1)²/m!`. Away from the origin the
+/// direct form is used; `χ` has a genuine root near `u = 2.15`, where relative
+/// precision is unavailable to any formula and irrelevant — the block is summed
+/// over pairs, so absolute accuracy is what the Hessian consumes.
+#[inline]
+fn eta2_shape(u: f64) -> f64 {
+    if u >= 0.5 {
+        return (-u).exp() * (1.0 + u + u * u) - 1.0;
+    }
+    let mut term = u * u;
+    let mut factorial = 2.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sign = 1.0_f64;
+    for m in 2..=20u32 {
+        if m > 2 {
+            term *= u;
+            factorial *= f64::from(m);
+            sign = -sign;
+        }
+        let weight = f64::from(m - 1) * f64::from(m - 1);
+        sum += sign * weight * term / factorial;
+    }
+    sum
+}
+
+/// The model kernel at one pair: `k = ℓ·(e^{−d/ℓ} − 1)`, evaluated as
+/// `ℓ·expm1(−d/ℓ)`.
+#[inline]
+pub(crate) fn constant_curvature_kernel_scalar(distance: f64, length_scale: f64) -> f64 {
+    length_scale * (-distance / length_scale).exp_m1()
+}
+
+/// `k_κ(data, centers)` — the realized constant-curvature model kernel matrix
+/// `ℓ·(e^{−d_κ(x_i,c_j)/ℓ} − 1)`, evaluated as `ℓ·expm1(−d_κ/ℓ)`.
+///
+/// # Why this is not `exp(−d_κ/ℓ)` (gam#2747)
+///
+/// The kernel is only ever consumed through the coefficient sum-to-zero frame
+/// `z`: the realized design is `K z` and the realized penalty is `zᵀ K z`. `z`
+/// annihilates constants, so the construction is invariant under `K → K + c1ᵀ`
+/// for any per-row `c`, and multiplying `K` by a positive scalar is absorbed
+/// exactly by the smoothing parameter (the prior on the fitted function is
+/// `(1/λ)·X S⁻ Xᵀ`, invariant under `(X, S, λ) → (aX, aS, aλ)`). So `exp(−d/ℓ)`
+/// and `ℓ·(e^{−d/ℓ} − 1)` are the SAME model in two gauges — and the gauge is
+/// not free, because two things are decided by it.
+///
+/// **It decides whether the range coordinate is confounded with the smoothing
+/// parameter.** `exp(−d/ℓ)z = −(1/ℓ)Dz + O(1/ℓ²)`, so the realized design and
+/// penalty both collapse like `1/ℓ` and `λ̂` has to chase them: measured on the
+/// κ = 1 sphere fixture, `ρ̂` falls one-for-one with `ln ℓ` over eleven decades
+/// (`−5.49 → −18.91` from `ℓ = 1` to `10⁶`) while the criterion value is
+/// unchanged to eight significant figures. A range search on an absolute `ρ`
+/// box therefore walks `ρ̂` into `RHO_LOWER` for no statistical reason. In this
+/// gauge `ρ̂` is FLAT (`−5.0978 ± 1e-4` over the same eleven decades).
+///
+/// **And it decides whether the criterion is a function of the data at all.**
+/// All of the model's range information lives in `K − 1`; forming it by
+/// subtracting `exp(−d/ℓ)` from an implicit `1` costs `log₁₀(ℓ/d)` significant
+/// digits, and the Gram then squares what is left. Measured on the same
+/// fixture, the `exp` gauge's REML value departs from the truth by **78.8 nats
+/// at the derived box top** `ℓ_hi = d_min/√ε = 2.53e6` and by 476 nats at
+/// `ℓ = 10⁸`, descending ~100 nats per decade into its own rounding with `edf`
+/// railed at `p` — which is what a range search reads when it "converges to an
+/// asymptote" at the box end. `expm1` forms `K − 1` directly and the departure
+/// is zero to eight figures at `ℓ = 10⁹`.
+///
+/// # Consequences of the gauge, all of them intended
+///
+/// * `k ≤ 0`, with `k = 0` exactly on coincident points. The realized penalty
+///   `zᵀkz = ℓ·zᵀe^{−d/ℓ}z` is still strictly positive definite on the frame —
+///   `−k` is a conditionally negative definite kernel, which is what makes it
+///   so — but the RAW `m × m` matrix is no longer PSD, so the builder forms the
+///   penalty from the RESTRICTED Gram rather than restricting a raw PSD one.
+/// * `k → −d_κ` as `ℓ → ∞`, exactly and with no cancellation. The `ℓ = ∞` face
+///   is the geodesic-distance kernel, an ordinary non-degenerate member of the
+///   family's own closure rather than a degenerate limit — which is what lets
+///   the range coordinate be compactified instead of walled.
 pub fn constant_curvature_kernel_matrix(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -291,33 +407,35 @@ pub fn constant_curvature_kernel_matrix(
                         "constant-curvature distance failed at (row {i}, center {j}): {e}"
                     ))
                 })?;
-                row[j] = (-d / length_scale).exp();
+                row[j] = constant_curvature_kernel_scalar(d, length_scale);
             }
             Ok(())
         })?;
     Ok(out)
 }
 
-/// The `(K, ∂K/∂ψ_a, ∂²K/∂ψ_a∂ψ_b)` tower of the raw (pre-constraint) kernel
-/// matrix in BOTH outer coordinates, `ψ = (κ, η)` with `η = ln ℓ`.
+/// The `(k, ∂k/∂ψ_a, ∂²k/∂ψ_a∂ψ_b)` tower of the raw (pre-constraint) model
+/// kernel matrix in BOTH outer coordinates, `ψ = (κ, η)` with `η = ln ℓ`.
 ///
 /// Exact. `distance_kappa_jet` (Tower4, FD-gated in
 /// `geometry::constant_curvature`) supplies `(d, d′, d″)`; everything else is
-/// the chain rule on `K = e^{−q}` with `q = d_κ(x,y)·e^{−η}`:
+/// the chain rule on `k = ℓ·(e^{−q} − 1)` with `q = d_κ(x,y)·e^{−η}` (see
+/// [`constant_curvature_kernel_matrix`] for why the kernel carries the `ℓ`
+/// factor and the annihilated `−1`):
 ///
 /// ```text
-///   q_κ = d′/ℓ      q_κκ = d″/ℓ
-///   q_η = −q        q_ηη = q        q_κη = −q_κ
-///   K_a  = −q_a·K            K_ab = (q_a q_b − q_ab)·K
+///   k_κ  = −d′·e^{−q}                  k_κκ = e^{−q}·(d′²/ℓ − d″)
+///   k_η  =  ℓ·φ(q),  φ(u) = e^{−u}(1+u) − 1
+///   k_κη = −d′·q·e^{−q}
+///   k_ηη =  ℓ·χ(q),  χ(u) = e^{−u}(1+u+u²) − 1
 /// ```
 ///
-/// so
-///
-/// ```text
-///   K_κ  = −q_κ K            K_κκ = (q_κ² − q_κκ) K
-///   K_η  =  q   K            K_ηη = (q²   − q)    K
-///                            K_κη =  q_κ(1 − q)   K
-/// ```
+/// Every block has a finite `ℓ → ∞` limit, and the two that vanish there do so
+/// through `φ` and `χ`, both of which have a second-order zero at the origin —
+/// so they are evaluated by series below `u = 1/2` rather than by the
+/// two-term difference, which would lose `2·log₁₀(ℓ/d)` digits exactly where
+/// the range coordinate is least identified. `k_κ`, `k_κκ` and `k_κη` are
+/// cancellation-free as written.
 ///
 /// The `η` channel is what makes the range an ESTIMAND rather than a heuristic
 /// (gam#2747): with `ℓ` pinned, κ absorbs the range error and the profiled
@@ -327,17 +445,17 @@ pub fn constant_curvature_kernel_matrix(
 /// (`normalization_scale = 1`), so no normalization quotient rule participates.
 #[derive(Clone, Debug)]
 pub struct ConstantCurvatureKernelPsiJets {
-    /// `K`.
+    /// `k`.
     pub value: Array2<f64>,
-    /// `∂K/∂κ`.
+    /// `∂k/∂κ`.
     pub d_kappa: Array2<f64>,
-    /// `∂K/∂η`, `η = ln ℓ`.
+    /// `∂k/∂η`, `η = ln ℓ`.
     pub d_eta: Array2<f64>,
-    /// `∂²K/∂κ²`.
+    /// `∂²k/∂κ²`.
     pub d_kappa2: Array2<f64>,
-    /// `∂²K/∂κ∂η`.
+    /// `∂²k/∂κ∂η`.
     pub d_kappa_eta: Array2<f64>,
-    /// `∂²K/∂η²`.
+    /// `∂²k/∂η²`.
     pub d_eta2: Array2<f64>,
 }
 
@@ -384,16 +502,14 @@ pub fn constant_curvature_kernel_psi_jets(
                     ))
                 })?;
                 let q = d / length_scale;
-                let q_k = d1 / length_scale;
-                let q_kk = d2 / length_scale;
-                let k = (-q).exp();
+                let decay = (-q).exp();
                 row.push([
-                    k,
-                    -q_k * k,
-                    q * k,
-                    (q_k * q_k - q_kk) * k,
-                    q_k * (1.0 - q) * k,
-                    (q * q - q) * k,
+                    constant_curvature_kernel_scalar(d, length_scale),
+                    -d1 * decay,
+                    length_scale * eta_shape(q),
+                    decay * (d1 * d1 / length_scale - d2),
+                    -d1 * q * decay,
+                    length_scale * eta2_shape(q),
                 ]);
             }
             Ok((i, row))
@@ -412,7 +528,7 @@ pub fn constant_curvature_kernel_psi_jets(
     Ok(jets)
 }
 
-/// `(K, ∂K/∂κ, ∂²K/∂κ²)` — the κ slice of [`constant_curvature_kernel_psi_jets`],
+/// `(k, ∂k/∂κ, ∂²k/∂κ²)` — the κ slice of [`constant_curvature_kernel_psi_jets`],
 /// kept as its own entry point for callers that hold `ℓ` fixed.
 pub fn constant_curvature_kernel_kappa_jets(
     data: ArrayView2<'_, f64>,
@@ -614,10 +730,12 @@ pub fn build_constant_curvature_basis(
     }
     validate_chart_points(centers.view(), spec.kappa, "centers")?;
     // ONE kernel, ONE range (gam#2747). The design and the penalty are the two
-    // blocks of the SAME Gram — `X = K_{κ,ℓ}(data,C)z` and
-    // `S = zᵀK_{κ,ℓ}(C,C)z` — which is what makes `S` the RKHS roughness of the
+    // blocks of the SAME Gram — `X = k_{κ,ℓ}(data,C)z` and
+    // `S = zᵀk_{κ,ℓ}(C,C)z` — which is what makes `S` the RKHS roughness of the
     // function `X` realizes, and the whole model the ordinary
-    // subset-of-regressors GP with kernel `exp(−d_κ/ℓ)`.
+    // subset-of-regressors GP with kernel `exp(−d_κ/ℓ)`, written in the
+    // contrast gauge `k = ℓ·(e^{−d_κ/ℓ} − 1)` that
+    // `constant_curvature_kernel_matrix` derives.
     //
     // Two earlier constructions evaluated them at DIFFERENT lengths: `#944`'s
     // fill-invariant `L(κ)` for the design and `#1464`'s `L_S(κ)` for the
@@ -656,12 +774,20 @@ pub fn build_constant_curvature_basis(
         }
     };
     let gauge = gam_problem::Gauge::from_block_transforms(&[z.clone()]);
-    let raw_penalty = ConstructiveQuadratic::try_from_dense_psd(
-        (&raw_penalty + &raw_penalty.t()) * 0.5,
-        "constant-curvature raw RKHS penalty",
+    // The penalty is assembled AFTER the gauge, not before it (gam#2747). In the
+    // `exp(−d/ℓ)` gauge the raw `m × m` Gram was itself PSD, so it could be
+    // wrapped first and restricted second; the normalized kernel `ℓ·(e^{−d/ℓ}−1)`
+    // is conditionally negative definite instead — `−k` is CND on every constant
+    // -curvature space form — and is PSD only ON the sum-to-zero frame, where
+    // `zᵀkz = ℓ·zᵀe^{−d/ℓ}z ≻ 0` exactly. Restricting first is therefore not a
+    // convenience: it is where the quadratic becomes a penalty. It is also where
+    // the cancellation the gauge exists to avoid would otherwise reappear —
+    // `zᵀ(ℓK)z` formed from entries that all approach `ℓ` loses the same digits
+    // `Kz` does, while `zᵀkz` formed from `expm1` loses none.
+    let penalty = ConstructiveQuadratic::try_from_dense_psd(
+        symmetrize(&gauge.restrict_penalty(&raw_penalty)),
+        "constant-curvature restricted RKHS penalty",
     )?;
-    let penalty =
-        raw_penalty.restricted(&gauge, "constant-curvature identifiability restriction")?;
     let raw_design =
         constant_curvature_kernel_matrix(data, centers.view(), spec.kappa, length_scale)?;
     let design = gam_linalg::matrix::DesignMatrix::Dense(
@@ -1746,5 +1872,185 @@ mod tests {
             "halving h must not inflate the penalty disagreement (missing-term signature): \
              {penalty_rel:.6e} -> {penalty_rel_half:.6e}"
         );
+    }
+
+    /// The contrast gauge is the SAME model as `exp(−d_κ/ℓ)` — and the `exp`
+    /// gauge stops being able to express it (gam#2747).
+    ///
+    /// The realized blocks are only ever `K z` and `zᵀ K z`, and `z` annihilates
+    /// constants, so `K` and `ℓ·(K − 1)` differ by a per-row constant and a
+    /// positive scale: the second block must equal `ℓ ×` the first, EXACTLY, in
+    /// exact arithmetic, at every κ and every ℓ. That equality is the licence
+    /// for the change of gauge, so it is asserted first and at a tolerance that
+    /// leaves no room (1e-12 relative, mid-box).
+    ///
+    /// It is then asserted to FAIL — by a factor of `10⁵` in relative terms — at
+    /// the top of the derived box, because that is the finding: the `exp` gauge
+    /// forms `K − 1` by subtracting two numbers that agree to `log₁₀(ℓ/d)`
+    /// digits, so past `ℓ ≈ 10⁶` the design it emits is not the model's. Only
+    /// one of the two is still right there, and the reference direction says
+    /// which: `expm1` is exact by construction and `exp(x) − 1` is not.
+    #[test]
+    fn the_contrast_gauge_is_the_same_model_and_the_exp_gauge_loses_it_2747() {
+        let (data, centers) = oracle_disk_design_centers();
+        let manifold = ConstantCurvature::new(2, 0.6);
+        let exp_gauge_design = |ell: f64| -> Array2<f64> {
+            let mut raw = Array2::<f64>::zeros((data.nrows(), centers.nrows()));
+            for i in 0..data.nrows() {
+                for j in 0..centers.nrows() {
+                    let d = manifold
+                        .distance(data.row(i), centers.row(j))
+                        .expect("fixture disk is inside the κ = 0.6 chart");
+                    raw[(i, j)] = (-d / ell).exp();
+                }
+            }
+            let weights = Array1::<f64>::ones(centers.nrows());
+            let z = weighted_coefficient_sum_to_zero_transform(weights.view())
+                .expect("uniform sum-to-zero frame");
+            raw.dot(&z).mapv(|value| value * ell)
+        };
+        let realized_design = |ell: f64| -> Array2<f64> {
+            let spec = ConstantCurvatureBasisSpec {
+                center_strategy: CenterStrategy::UserProvided(centers.clone()),
+                kappa: 0.6,
+                length_scale: ell,
+                ..Default::default()
+            };
+            build_constant_curvature_basis(data.view(), &spec)
+                .expect("build")
+                .design
+                .to_dense()
+        };
+        let disagreement = |ell: f64| -> f64 {
+            let a = realized_design(ell);
+            let b = exp_gauge_design(ell);
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for (&x, &y) in a.iter().zip(b.iter()) {
+                num += (x - y) * (x - y);
+                den += x * x;
+            }
+            (num / den).sqrt()
+        };
+        for ell in [0.25_f64, 1.0, 4.0, 16.0] {
+            let error = disagreement(ell);
+            assert!(
+                error < 1.0e-12,
+                "the two gauges are one model: at ℓ={ell} they differ by {error:.3e}"
+            );
+        }
+        // At the top of the derived box the `exp` gauge forms `K − 1` from
+        // entries that agree to `d/ℓ`, so its relative error is `≈ ε·ℓ/d` — a
+        // DERIVED prediction, bracketed by the geometry's own evaluated scale
+        // span, not a threshold. The measurement has to sit inside that bracket:
+        // above it would mean some other error source, below it would mean the
+        // cancellation is not happening and the finding is wrong.
+        let (_, ell_hi) = constant_curvature_length_scale_bounds(data.view(), centers.view())
+            .expect("the fixture geometry has a range box");
+        let (d_min, d_max) = constant_curvature_evaluated_scale_span(data.view(), centers.view())
+            .expect("the fixture geometry has an evaluated scale span");
+        let mildest = f64::EPSILON * ell_hi / d_max;
+        let worst = f64::EPSILON * ell_hi / d_min;
+        let at_wall = disagreement(ell_hi);
+        assert!(
+            at_wall >= mildest && at_wall <= worst,
+            "at the box top ℓ={ell_hi:.4e} the `exp` gauge's error must be the cancellation \
+             `ε·ℓ/d`, bracketed by the evaluated span [{d_min:.4e}, {d_max:.4e}] as \
+             [{mildest:.3e}, {worst:.3e}]; measured {at_wall:.3e}"
+        );
+        assert!(
+            at_wall > 1.0e3 * disagreement(16.0),
+            "and it must GROW with the range: {at_wall:.3e} at the box top against \
+             {:.3e} mid-box",
+            disagreement(16.0)
+        );
+    }
+
+    /// The `ℓ → ∞` face of the range coordinate is the geodesic-DISTANCE kernel,
+    /// reached exactly rather than approached (gam#2747).
+    ///
+    /// `−d_κ` is conditionally positive definite on every constant-curvature
+    /// space form, so `X = −D(data,C)z` and `S = −zᵀD(C,C)z` are an ordinary
+    /// non-degenerate smooth. In the contrast gauge the realized blocks converge
+    /// to it — with the `1/ℓ` collapse gone there is something LEFT to converge
+    /// to — and the penalty stays strictly positive definite all the way, which
+    /// is what makes the limit a point of the parameter space rather than a
+    /// wall. `20bde053f` reverted the free-range enrollment for want of "a
+    /// derived stopping rule for a criterion that converges rather than turning
+    /// over"; a convergent criterion whose limit is a MODEL does not need one.
+    #[test]
+    fn the_range_limit_is_the_geodesic_distance_kernel_2747() {
+        let (data, centers) = oracle_disk_design_centers();
+        let weights = Array1::<f64>::ones(centers.nrows());
+        let z = weighted_coefficient_sum_to_zero_transform(weights.view())
+            .expect("uniform sum-to-zero frame");
+        for kappa in [-1.1_f64, 0.0, 0.9] {
+            let manifold = ConstantCurvature::new(2, kappa);
+            let distances = |a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>| -> Array2<f64> {
+                let mut out = Array2::<f64>::zeros((a.nrows(), b.nrows()));
+                for i in 0..a.nrows() {
+                    for j in 0..b.nrows() {
+                        out[(i, j)] = manifold
+                            .distance(a.row(i), b.row(j))
+                            .expect("fixture disk is inside every probed chart");
+                    }
+                }
+                out
+            };
+            let limit_design = distances(data.view(), centers.view())
+                .mapv(|d| -d)
+                .dot(&z);
+            let limit_penalty = symmetrize(
+                &z.t()
+                    .dot(&distances(centers.view(), centers.view()).mapv(|d| -d))
+                    .dot(&z),
+            );
+            let mut previous = f64::INFINITY;
+            for ell in [1.0e3_f64, 1.0e5, 1.0e7, 1.0e9] {
+                let spec = ConstantCurvatureBasisSpec {
+                    center_strategy: CenterStrategy::UserProvided(centers.clone()),
+                    kappa,
+                    length_scale: ell,
+                    ..Default::default()
+                };
+                let built = build_constant_curvature_basis(data.view(), &spec).expect("build");
+                let design = built.design.to_dense();
+                let penalty = built.active_penalties[0].matrix.clone();
+                let gap = |a: &Array2<f64>, b: &Array2<f64>| -> f64 {
+                    let mut num = 0.0_f64;
+                    let mut den = 0.0_f64;
+                    for (&x, &y) in a.iter().zip(b.iter()) {
+                        num += (x - y) * (x - y);
+                        den += y * y;
+                    }
+                    (num / den).sqrt()
+                };
+                let design_gap = gap(&design, &limit_design);
+                let penalty_gap = gap(&penalty, &limit_penalty);
+                // First order in `1/ℓ`, so each two decades must buy two orders.
+                assert!(
+                    design_gap < previous / 50.0,
+                    "κ={kappa}: the design must converge to the distance kernel; \
+                     at ℓ={ell:.0e} the gap is {design_gap:.3e} against {previous:.3e} before"
+                );
+                previous = design_gap;
+                assert!(
+                    penalty_gap < 1.0e-2,
+                    "κ={kappa}: the penalty must converge too; gap {penalty_gap:.3e} at ℓ={ell:.0e}"
+                );
+                let (evals, _) = FaerEigh::eigh(&penalty, faer::Side::Lower).expect("penalty spectrum");
+                let smallest = evals.iter().cloned().fold(f64::INFINITY, f64::min);
+                let largest = evals.iter().cloned().fold(0.0_f64, f64::max);
+                assert!(
+                    smallest > 1.0e-10 * largest,
+                    "κ={kappa}: the restricted Gram must stay strictly PD at ℓ={ell:.0e}; \
+                     spectrum spans [{smallest:.3e}, {largest:.3e}]"
+                );
+            }
+            assert!(
+                previous < 1.0e-8,
+                "κ={kappa}: at ℓ=1e9 the design must BE the distance kernel; gap {previous:.3e}"
+            );
+        }
     }
 }
