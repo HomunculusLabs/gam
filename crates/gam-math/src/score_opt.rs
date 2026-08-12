@@ -5521,6 +5521,89 @@ mod tests {
         );
     }
 
+    /// The located optimum is the SAME under both enclosure forms, and it is
+    /// accurate to the search's location contract and no better.
+    ///
+    /// Two claims, and the second is the one that catches misuse.
+    ///
+    /// Tightening an enclosure changes which cells the search visits, so it
+    /// could in principle move the point it returns. On the profile
+    /// `gam_sae::identifiability::ridge_reml_select_weight` builds for its
+    /// one-eigendirection closed-form fixture it does not: both oracles return
+    /// the same abscissa to the last bit, from the same stationary bracket. That
+    /// is worth pinning, because a caller comparing the returned `lambda` to a
+    /// closed form cannot tell "the enclosure moved the answer" from "the
+    /// enclosure was always allowed to".
+    ///
+    /// And it was always allowed to. The search certifies a stationary point's
+    /// LOCATION to the requested resolution in `rho`, and returns an evaluated
+    /// SAMPLE from that bracket rather than the bracket's midpoint or a
+    /// polished root. So `|rho_hat - rho*|` is bounded by the resolution and by
+    /// nothing smaller — measured here at `4.17e-9` against a requested
+    /// `1.49e-8`, from a bracket `1.13e-8` wide. A caller wanting more than that
+    /// has to polish the root itself; the fixture's exact `lambda = 1.2` is
+    /// reproduced to `2.5e-9`, which is inside the contract and outside a `1e-9`
+    /// tolerance that no version of this search has ever guaranteed.
+    #[test]
+    fn the_located_optimum_is_enclosure_independent_and_accurate_to_the_contract() {
+        // eigvals=[2.0], signal=[8.0], aux_norm_sq=10.0, n_obs=5, n_responses=3
+        // => pairs = [(1.0, 4.0)] in u = lambda/gamma_max, repeated once per
+        // response, with residual_dof = n_obs*n_responses = 15.
+        let grams = [1.0_f64; 3];
+        let penalties = [1.0_f64; 3];
+        let projected = [4.0 / 3.0; 3];
+        let energies = [10.0_f64];
+        let profile =
+            AffineRemlProfile::new(&grams, &penalties, &projected, &energies, 15.0, 3, 0.0)
+                .expect("valid ridge profile");
+        let lo = certified_ln_positive(f64::MIN_POSITIVE).expect("lo").lo;
+        let hi = certified_ln_positive(f64::MAX / 2.0).expect("hi").hi;
+        let resolution = f64::EPSILON.sqrt();
+        // The closed-form stationary point: lambda_hat = 1.2, and the profile is
+        // built in u = lambda/gamma_max with gamma_max = 2.
+        let truth = 0.6_f64;
+
+        let natural = maximize_score_1d(
+            lo,
+            hi,
+            resolution,
+            |x| profile.evaluate(x),
+            |a, b| profile.enclose_direct(a.x, b.x).map(|(e, _)| e),
+        )
+        .expect("the natural extension decomposes this domain");
+        let centred = maximize_score_1d(lo, hi, resolution, |x| profile.evaluate(x), |a, b| {
+            profile.enclose(a.x, b.x)
+        })
+        .expect("the centred form decomposes this domain");
+
+        assert_eq!(
+            natural.optimum.x, centred.optimum.x,
+            "the two enclosure forms located different optima ({} against {}); tightening may \
+             change which cells are visited but must not move the certified root",
+            natural.optimum.x, centred.optimum.x
+        );
+        for (label, search) in [("natural", &natural), ("centred", &centred)] {
+            assert!(
+                matches!(search.location, ScoreOptimumLocation::Stationary(_)),
+                "{label}: this fixture has an interior stationary optimum, got {:?}",
+                search.location
+            );
+            let offset = (search.optimum.x - truth.ln()).abs();
+            assert!(
+                offset <= resolution,
+                "{label}: the located root is {offset:e} from the closed form in rho, outside \
+                 the requested resolution {resolution:e} — that is a location-contract failure"
+            );
+            // And no better, which is the half a caller must not assume: the
+            // returned point is a sample from the bracket, not a polished root.
+            assert!(
+                offset > 0.0,
+                "{label}: an exactly-attained root would mean this gate has stopped measuring \
+                 what it claims"
+            );
+        }
+    }
+
     /// COST. Centring doubles the per-cell work (one extra degenerate-cell
     /// evaluation), so the net is only a win if it removes more cells than that.
     /// This measures both oracles on the same searches and prints the ratio.
