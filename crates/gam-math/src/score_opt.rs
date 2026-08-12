@@ -2533,10 +2533,14 @@ impl<'a> AffineRemlProfile<'a> {
                 * (outputs * determinant_derivative + self.residual_dof * residual_derivative_sum),
             curvature: -0.5
                 * (outputs * determinant_curvature + self.residual_dof * residual_curvature_sum),
-            // This profile's companion `enclose` is a true interval extension
-            // over the whole cell (it evaluates the mode kernels on interval
-            // lambda), not an endpoint-anchored Taylor pad, so it never reads
-            // the endpoint third derivative and none is computed here.
+            // This profile's companion `enclose` builds its own ranges from the
+            // mode kernels on an interval lambda and centres them on the cell
+            // MIDPOINT, so it never reads an endpoint jet's third derivative --
+            // the third derivative it centres the curvature on is an interval
+            // one it accumulates itself. Nothing reads this field for this
+            // profile, and a scalar third derivative of a score whose two blocks
+            // cancel would be the least trustworthy number here, so it stays
+            // exactly zero rather than being computed and quietly relied on.
             third: 0.0,
         })
     }
