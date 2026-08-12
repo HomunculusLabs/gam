@@ -35,11 +35,28 @@
   same natural extension on the degenerate interval `[m, m]`. Both forms are
   outer enclosures of one exact range, so intersecting is rigorous and can only
   tighten. The derivative is centred first and the value is centred on the
-  RESULT, because the value's remainder is only as tight as the derivative range
-  fed into it. The curvature keeps the natural extension — the centred form for
-  it needs a third-derivative enclosure this profile does not build.
+  RESULT, because a mean value remainder is only as tight as the range fed into
+  it — and the curvature is centred before both, on an exact third-derivative
+  enclosure the profile now builds.
 
-  Overestimation becomes second order. The same 36-row / 1725-column design now
+  Centring the curvature is not an optional third helping. The curvature had the
+  identical defect one derivative up (halfwidth `≈ 49.5·w` against an analytic
+  `f″` of `1.249e-5`, a factor of 8000 at `w = 2e-3`), and the curvature is not
+  merely a width: `maximize_score_1d` reads its SIGN to isolate a stationary
+  point, so a first-order-loose curvature is what stops a root being isolated at
+  all. The mode kernels are analytic, so the third derivative is closed form —
+  `t(1−t)/(1+t)³` for the determinant, which is already the `k` kernel, and
+  `t(1−4t+t²)/(1+t)⁴` for the residual, whose critical points are the roots of
+  `(t−1)(t²−10t+1)`, enclosed exactly like the `k` kernel's `2 ± √3` — with
+  `(log R)‴ = R‴/R − 3(R″/R)(R′/R) + 2(R′/R)³` closing the deviance block.
+  `evaluate` is untouched: only the INTERVAL third derivative is needed, and no
+  proof reads the scalar one.
+
+  Overestimation becomes second order on the value and higher still with the
+  curvature centred: the value range converges as `w⁴` and reaches the
+  point-enclosure floor a full decade of cell width earlier. Against the
+  original natural extension at `w = 2e-3` that is a factor of `7.6e7`. The same
+  36-row / 1725-column design now
   certifies: `fit_reml` returns `DenseExact` at `log λ = −1.679` in 1.2 s, where
   it previously refused in 5.6 s, and the certified search's terminal value
   range is the mean-value bound to the last digit at every width tested.
