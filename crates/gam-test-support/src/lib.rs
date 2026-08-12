@@ -31,7 +31,12 @@ pub use gam_linalg::test_support::no_densify_design;
 // the `log` facade DROPS every record, which is why the BMS intercept counters,
 // the GL-ladder histogram and the certificate-bound discriminator have all been
 // emitting into nothing in every test binary.
-pub use gam_runtime::test_support::install_diagnostic_logger;
+// `diagnostic_write_failures` travels with it: a backend that silently failed to
+// write is exactly the "instrument that never ran produces evidence of absence"
+// shape, and a caller that reads a run for its instrumentation needs to be able
+// to assert the records reached the stream. Re-exporting the installer without
+// the counter leaves that assertion one crate away from every test that needs it.
+pub use gam_runtime::test_support::{diagnostic_write_failures, install_diagnostic_logger};
 
 // Finite-difference derivative checking is `ndarray` in, `ndarray` out: it owns
 // no model-layer type, so it lives in `gam-linalg`.
