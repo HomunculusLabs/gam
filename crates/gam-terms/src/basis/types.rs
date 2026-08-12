@@ -2795,6 +2795,196 @@ pub(crate) fn orthogonality_transform_from_cross_and_gram(
     stabilized_orthogonality_transform_from_gram(gram, &transform_raw)
 }
 
+/// The part of `constraint_matrix` that `design`'s realized column span actually
+/// **CONTAINS**, as vectors in row space (an `n × r` block, `r ≤ q`).
+///
+/// # Overlap is not containment, and only containment licenses a deletion
+///
+/// [`orthogonality_transform_for_design`] removes `rank(BᵀWC)` coefficient
+/// directions from the smooth — one for every parametric direction the design
+/// has any measurable overlap with. That is the wrong predicate. A direction may
+/// be deleted **without loss** only when it is contained in the design's span:
+/// then the deleted function IS the parametric column, the parametric block
+/// keeps it, and the model span is unchanged. When the design merely
+/// *correlates* with the parametric column, the deleted direction is a genuine
+/// function the model can no longer represent at all.
+///
+/// `smooth_requires_parametric_orthogonality` asserts containment for the whole
+/// kernel/radial class — *"their realized column span contains the constant …
+/// a structural rank-1 collision"* — and for the constant-curvature geodesic
+/// kernel that is false. Measured on the `kappa_one_...` fixture (400 rows, 30
+/// centers), the orthogonal projection of the planted truth onto the span — the
+/// best R² any fit could reach at any smoothing parameter — falls from **0.9984
+/// to 0.8957** when the constraint is applied, and the loss grows with the
+/// kernel range (0.9440 → 0.8915 from `ℓ = 0.2` to `ℓ = 3`) because the columns
+/// grow more collinear and the deleted mean-carrying direction carries more.
+/// The shipped pipeline's ceiling matches the hand-applied constraint to six
+/// decimals at every range, and the fitted R² sits AT that ceiling: the fit is
+/// not failing, a model dimension is missing.
+///
+/// # The test
+///
+/// Principal angles between `span(B)` and `span(C)`: with `G = BᵀWB`,
+/// `M = BᵀWC` and `N = CᵀWC`, the generalized problem `MᵀG⁻M v = cos²θ · N v`
+/// gives `cos θ_i` per direction, and `θ = 0` is containment. The decision is
+/// made on `sin²θ = 1 − cos²θ`, and its threshold is DERIVED from that
+/// expression's own resolution rather than chosen: it is a difference of two
+/// `O(1)` quantities accumulated over `k + q` terms, so anything below
+/// `(k + q)·ε` is indistinguishable from zero and anything above it is real.
+/// The two populations are nowhere near that boundary — a contained constant
+/// sits at `κ·ε`, a merely-correlated one at `10⁻¹`–`10⁰` — so the floor has six
+/// orders of margin on both sides and no fixture rides it.
+///
+/// When EVERY direction is contained the original `constraint_matrix` is
+/// returned unchanged rather than a rotation of it, so a basis whose span really
+/// does contain the constant keeps its transform bit-for-bit.
+pub fn contained_constraint_directions(
+    design: &DesignMatrix,
+    constraint_matrix: ArrayView2<'_, f64>,
+    weights: Option<ArrayView1<'_, f64>>,
+) -> Result<Array2<f64>, BasisError> {
+    let n = design.nrows();
+    let k = design.ncols();
+    let q = constraint_matrix.ncols();
+    if q == 0 || k == 0 {
+        return Ok(Array2::zeros((n, 0)));
+    }
+    let normalized = unit_normalize_constraint_columns(constraint_matrix, weights);
+    let (cross, gram) = design_cross_and_gram(design, normalized.view(), weights)?;
+    // `N = CᵀWC` on the unit-normalized block: unit diagonal, off-diagonal
+    // cosines between constraint columns.
+    let mut constraint_gram = Array2::<f64>::zeros((q, q));
+    for i in 0..q {
+        for j in i..q {
+            let mut acc = 0.0_f64;
+            for row in 0..n {
+                let w = weights.map_or(1.0, |ws| ws[row]);
+                acc += w * normalized[[row, i]] * normalized[[row, j]];
+            }
+            constraint_gram[[i, j]] = acc;
+            constraint_gram[[j, i]] = acc;
+        }
+    }
+    // `MᵀG⁻M`, with `G⁻` truncated at the design Gram's own spectral floor.
+    let (design_evals, design_evecs) =
+        FaerEigh::eigh(&gram, Side::Lower).map_err(BasisError::LinalgError)?;
+    let design_top = design_evals.iter().cloned().fold(0.0_f64, f64::max);
+    let mut whitened_cross = design_evecs.t().dot(&cross);
+    for i in 0..k {
+        let scale = if design_evals[i] > design_top * (k as f64) * f64::EPSILON {
+            1.0 / design_evals[i].sqrt()
+        } else {
+            0.0
+        };
+        for j in 0..q {
+            whitened_cross[[i, j]] *= scale;
+        }
+    }
+    let cos2 = whitened_cross.t().dot(&whitened_cross);
+    // Whiten the constraint side so the problem is an ordinary symmetric
+    // eigenproblem; a constraint block with dependent columns simply loses those
+    // directions, which cannot be contained in anything as separate directions.
+    let (constraint_evals, constraint_evecs) =
+        FaerEigh::eigh(&constraint_gram, Side::Lower).map_err(BasisError::LinalgError)?;
+    let constraint_top = constraint_evals.iter().cloned().fold(0.0_f64, f64::max);
+    let keep: Vec<usize> = (0..q)
+        .filter(|&i| constraint_evals[i] > constraint_top * (q as f64) * f64::EPSILON)
+        .collect();
+    if keep.is_empty() {
+        return Ok(Array2::zeros((n, 0)));
+    }
+    let mut inverse_root = Array2::<f64>::zeros((q, keep.len()));
+    for (slot, &i) in keep.iter().enumerate() {
+        let scale = 1.0 / constraint_evals[i].sqrt();
+        for row in 0..q {
+            inverse_root[[row, slot]] = constraint_evecs[[row, i]] * scale;
+        }
+    }
+    let reduced = inverse_root.t().dot(&cos2).dot(&inverse_root);
+    let (_, angle_evecs) =
+        FaerEigh::eigh(&reduced, Side::Lower).map_err(BasisError::LinalgError)?;
+    // The principal directions themselves, in row space. The DECISION is not
+    // taken on the eigenvalues: `sin²θ = 1 − cos²θ` is a difference of two O(1)
+    // quantities and cannot resolve a small angle at all. Forming the residual
+    // `c − B(BᵀWB)⁻BᵀWc` explicitly costs one `n × k` pass per direction and is
+    // accurate to `ε‖c‖` however small the angle is, which is what makes `√ε` a
+    // usable bar rather than a hopeful one.
+    let directions = normalized.dot(&inverse_root.dot(&angle_evecs));
+    let mut direction_cross = Array2::<f64>::zeros((k, directions.ncols()));
+    for start in (0..n).step_by(DESIGN_CROSS_CHUNK_SIZE) {
+        let end = (start + DESIGN_CROSS_CHUNK_SIZE).min(n);
+        let basis_chunk = design
+            .try_row_chunk(start..end)
+            .map_err(|e| BasisError::InvalidInput(e.to_string()))?;
+        let mut direction_chunk = directions.slice(s![start..end, ..]).to_owned();
+        if let Some(ws) = weights {
+            for (mut row, &weight) in direction_chunk
+                .axis_iter_mut(Axis(0))
+                .zip(ws.slice(s![start..end]).iter())
+            {
+                row *= weight;
+            }
+        }
+        direction_cross += &fast_atb(&basis_chunk, &direction_chunk);
+    }
+    let mut design_pinv_cross = design_evecs.t().dot(&direction_cross);
+    for i in 0..k {
+        let scale = if design_evals[i] > design_top * (k as f64) * f64::EPSILON {
+            1.0 / design_evals[i]
+        } else {
+            0.0
+        };
+        for j in 0..directions.ncols() {
+            design_pinv_cross[[i, j]] *= scale;
+        }
+    }
+    let coefficients = design_evecs.dot(&design_pinv_cross);
+    let mut residual_sq = vec![0.0_f64; directions.ncols()];
+    let mut direction_sq = vec![0.0_f64; directions.ncols()];
+    for start in (0..n).step_by(DESIGN_CROSS_CHUNK_SIZE) {
+        let end = (start + DESIGN_CROSS_CHUNK_SIZE).min(n);
+        let basis_chunk = design
+            .try_row_chunk(start..end)
+            .map_err(|e| BasisError::InvalidInput(e.to_string()))?;
+        let approximation = basis_chunk.dot(&coefficients);
+        for j in 0..directions.ncols() {
+            for row in start..end {
+                let w = weights.map_or(1.0, |ws| ws[row]);
+                let target = directions[[row, j]];
+                let gap = target - approximation[[row - start, j]];
+                residual_sq[j] += w * gap * gap;
+                direction_sq[j] += w * target * target;
+            }
+        }
+    }
+    // `√ε`: the direction is reproduced by the design to within the square root
+    // of machine precision, i.e. it IS in the span as far as this arithmetic can
+    // tell. The two populations sit seven orders either side of it — a contained
+    // constant reproduces at `κ·ε`, a merely-correlated one at `10⁻¹`–`10⁰`.
+    let containment_bar = f64::EPSILON.sqrt();
+    let contained: Vec<usize> = (0..directions.ncols())
+        .filter(|&i| {
+            direction_sq[i] > 0.0 && (residual_sq[i] / direction_sq[i]).sqrt() <= containment_bar
+        })
+        .collect();
+    if contained.is_empty() {
+        return Ok(Array2::zeros((n, 0)));
+    }
+    if contained.len() == keep.len() {
+        // Every resolvable parametric direction is inside the span: this is the
+        // case the shipped transform was written for, and it keeps it verbatim
+        // rather than a rotation of it, so those bases do not move at all.
+        return Ok(constraint_matrix.to_owned());
+    }
+    let mut out = Array2::<f64>::zeros((n, contained.len()));
+    for (slot, &i) in contained.iter().enumerate() {
+        for row in 0..n {
+            out[[row, slot]] = directions[[row, i]];
+        }
+    }
+    Ok(out)
+}
+
 pub fn orthogonality_transform_for_design(
     design: &DesignMatrix,
     constraint_matrix: ArrayView2<'_, f64>,
@@ -2932,5 +3122,117 @@ mod saturation_escalation_tests {
             e += 0.25;
         }
         assert!(first_true.is_some(), "edf reaching capacity must saturate");
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+    fn dense(m: Array2<f64>) -> DesignMatrix {
+        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(m))
+    }
+
+    /// A design whose span CONTAINS the constant keeps its constraint block
+    /// verbatim — the shipped transform is right for it and must not move.
+    #[test]
+    fn a_span_that_contains_the_constant_keeps_the_whole_constraint_block() {
+        let n = 40usize;
+        let mut basis = Array2::<f64>::zeros((n, 3));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            basis[[i, 0]] = 1.0;
+            basis[[i, 1]] = x;
+            basis[[i, 2]] = x * x;
+        }
+        let intercept = Array2::<f64>::ones((n, 1));
+        let contained =
+            contained_constraint_directions(&dense(basis), intercept.view(), None).expect("test");
+        assert_eq!(
+            contained.dim(),
+            (n, 1),
+            "the constant IS in this span, so the whole block is contained"
+        );
+        assert!(
+            contained.iter().all(|&v| (v - 1.0).abs() < 1e-14),
+            "an all-contained block must come back verbatim, not rotated"
+        );
+    }
+
+    /// A design that merely CORRELATES with the constant contributes nothing to
+    /// residualize against — deleting a coefficient direction there removes a
+    /// function the parametric block does not carry.
+    #[test]
+    fn a_span_that_only_correlates_with_the_constant_contains_nothing() {
+        let n = 40usize;
+        // Two strictly positive, non-constant columns: heavily correlated with
+        // the constant (cosines ~0.99) and containing it in neither.
+        let mut basis = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            basis[[i, 0]] = (-0.3 * x).exp();
+            basis[[i, 1]] = (-0.9 * x).exp();
+        }
+        let intercept = Array2::<f64>::ones((n, 1));
+        let contained =
+            contained_constraint_directions(&dense(basis.clone()), intercept.view(), None)
+                .expect("test");
+        assert_eq!(
+            contained.ncols(),
+            0,
+            "a merely-correlated constant is not contained and licenses no deletion"
+        );
+        // And the correlation really is high, so this is not passing by the
+        // directions being unrelated: the test would be vacuous if it were.
+        let ones = Array1::<f64>::ones(n);
+        let cross = basis.t().dot(&ones);
+        let gram = basis.t().dot(&basis);
+        let (evals, evecs) = FaerEigh::eigh(&gram, Side::Lower).expect("gram");
+        let projected = evecs.t().dot(&cross);
+        let mut solved = Array1::<f64>::zeros(projected.len());
+        for i in 0..projected.len() {
+            solved[i] = projected[i] / evals[i];
+        }
+        let fitted = basis.dot(&evecs.dot(&solved));
+        let residual = &ones - &fitted;
+        let sine = residual.dot(&residual).sqrt() / ones.dot(&ones).sqrt();
+        assert!(
+            sine > 1.0e-3 && sine < 0.5,
+            "the fixture must be genuinely correlated-but-not-containing; sin θ = {sine}"
+        );
+    }
+
+    /// A block with one contained direction and one merely-correlated one keeps
+    /// exactly the contained one, and it comes back orthogonal to nothing in
+    /// particular — only its span matters downstream.
+    #[test]
+    fn a_mixed_block_keeps_exactly_the_contained_direction() {
+        let n = 40usize;
+        let mut basis = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            basis[[i, 0]] = 1.0;
+            basis[[i, 1]] = (-0.9 * x).exp();
+        }
+        let mut block = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            block[[i, 0]] = 1.0;
+            block[[i, 1]] = x;
+        }
+        let contained =
+            contained_constraint_directions(&dense(basis), block.view(), None).expect("test");
+        assert_eq!(
+            contained.ncols(),
+            1,
+            "one of the two block directions is in the span and the other is not"
+        );
+        // The kept direction must BE the constant, up to scale and sign.
+        let column = contained.column(0).to_owned();
+        let first = column[0];
+        assert!(first.abs() > 1e-8, "the kept direction must be non-degenerate");
+        assert!(
+            column.iter().all(|&v| (v / first - 1.0).abs() < 1e-8),
+            "the kept direction must be the constant, got {column:?}"
+        );
     }
 }

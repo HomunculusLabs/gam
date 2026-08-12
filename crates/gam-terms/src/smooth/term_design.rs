@@ -1174,11 +1174,32 @@ fn apply_global_smooth_identifiability(
             if skip_global_transform || (parametric_block.is_none() && owner_blocks.is_empty()) {
                 None
             } else {
-                Some(build_constraint_block(
+                // Residualize against the part of the constraint block this
+                // smooth's span actually CONTAINS, not the part it merely
+                // overlaps. The transform below deletes one coefficient
+                // direction per constrained direction, and a deletion is free
+                // only under containment — otherwise it removes a function the
+                // parametric block does not carry and the model cannot
+                // represent it at all. See
+                // `contained_constraint_directions` for the measurement that
+                // forced this and for the principal-angle test it makes. When
+                // the whole block is contained (every basis this step was
+                // written for) the block comes back verbatim and nothing moves.
+                let raw = build_constraint_block(
                     data.nrows(),
                     parametric_block.as_ref(),
                     &owner_blocks,
-                )?)
+                )?;
+                let contained = crate::basis::contained_constraint_directions(
+                    &design_local,
+                    raw.view(),
+                    None,
+                )?;
+                if contained.ncols() == 0 {
+                    None
+                } else {
+                    Some(contained)
+                }
             };
         let z_opt = if let Some(z) = replay_z {
             if design_local.ncols() != z.nrows() {

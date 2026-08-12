@@ -150,6 +150,10 @@ fn profile_arm(rows: &[(f64, f64, f64, f64)], ell: f64) -> Option<(f64, f64, f64
     let truth_for_span: Vec<f64> = rows.iter().map(|(_, _, t, _)| *t).collect();
     let (centered_cols, centered_ceiling) = centered_span_ceiling(&smooth, &truth_for_span);
     eprintln!(
+        "    [premise ] ||1 - P_X 1|| / ||1|| = {:.6}   (0 would mean the constant IS in the span)",
+        constant_outside_span(&smooth),
+    );
+    eprintln!(
         "    [profile ] design {}x{}  ceiling = {:.6}   | data-space sum-to-zero: {}x{}  ceiling = {:.6}",
         design.nrows(),
         design.ncols(),
@@ -175,6 +179,35 @@ fn profile_arm(rows: &[(f64, f64, f64, f64)], ell: f64) -> Option<(f64, f64, f64
         fit.rho,
         fit.edf,
     ))
+}
+
+/// The premise the deletion rests on, measured directly: is the constant IN the
+/// realized column span? `‖1 − P_X 1‖ / ‖1‖`, zero iff `1 ∈ span(X)`.
+///
+/// `smooth_requires_parametric_orthogonality` says of this basis class that
+/// "their realized column span CONTAINS the constant ... so without this step
+/// the smooth and the parametric intercept fight over the same direction — a
+/// structural rank-1 collision". If that is true the deleted direction is a
+/// redundancy the intercept keeps and the deletion is free. If it is false the
+/// deleted direction is a function.
+fn constant_outside_span(smooth: &Array2<f64>) -> f64 {
+    use gam_linalg::faer_ndarray::FaerEigh;
+    let n = smooth.nrows();
+    let ones = Array1::<f64>::ones(n);
+    let gram = smooth.t().dot(smooth);
+    let rhs = smooth.t().dot(&ones);
+    let (evals, evecs) = FaerEigh::eigh(&gram, faer::Side::Lower).expect("gram spectrum");
+    let largest = evals.iter().cloned().fold(0.0_f64, f64::max);
+    let projected = evecs.t().dot(&rhs);
+    let mut solved = Array1::<f64>::zeros(projected.len());
+    for i in 0..projected.len() {
+        if evals[i] > 1.0e-12 * largest {
+            solved[i] = projected[i] / evals[i];
+        }
+    }
+    let fitted = smooth.dot(&evecs.dot(&solved));
+    let residual = &ones - &fitted;
+    residual.dot(&residual).sqrt() / ones.dot(&ones).sqrt()
 }
 
 /// `[1 | X·Z]` where `Z` spans `{α : 1ᵀXα = 0}` — the classical data-space
