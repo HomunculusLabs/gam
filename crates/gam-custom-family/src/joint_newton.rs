@@ -2024,7 +2024,14 @@ pub(crate) fn update_joint_trust_region_radius(
         && predicted_reduction > 0.0
         && predicted_reduction <= measured_resolution
         && residual_above_tolerance;
-    let hit_boundary = step_norm >= 0.99 * old_radius
+    // Geometry alone: did the region, rather than the model, decide the step
+    // length? Kept separate from `hit_boundary` because the noise-floor branch
+    // below needs the geometric fact without the model's opinion attached —
+    // there the model has already been established unable to resolve its own
+    // prediction, so asking it whether the step was worth taking is asking a
+    // question it cannot answer (gam#2612).
+    let step_reached_boundary = joint_block_step_hit_trust_boundary(step_norm, old_radius);
+    let hit_boundary = step_reached_boundary
         && (predicted_reduction > objective_tol || objective_unreadable_at_this_step);
     // THE NOISE FLOOR IS MEASURED WHEN IT CAN BE (gam#2612). The controller
     // sizes its floor as `|objective_scale| × noise_floor_rel`, so passing the
@@ -2038,12 +2045,12 @@ pub(crate) fn update_joint_trust_region_radius(
         .max(measured_resolution.max(0.0))
         .min(f64::MAX);
     let noise_floor_rel = noise_floor / objective_scale_floor;
-    let step = opt::TrustRegionPolicy::noise_aware(
+    let policy = opt::TrustRegionPolicy::noise_aware(
         JOINT_TRUST_RADIUS_FLOOR,
         JOINT_TRUST_RADIUS_CEILING,
         noise_floor_rel,
-    )
-    .update(
+    );
+    let step = policy.update(
         old_radius,
         step_norm,
         hit_boundary,
@@ -2074,20 +2081,56 @@ pub(crate) fn update_joint_trust_region_radius(
     //
     // When the model has merely run out of resolution but the realized change
     // is a genuine decrease ABOVE the same floor, the measurement is the better
-    // evidence: take the step and HOLD the radius. Held, not grown — a model
-    // that cannot resolve its own prediction is not evidence for a larger
-    // region either. A model that predicts ascent (`predicted_reduction < 0`)
-    // or is non-finite still rejects and shrinks exactly as before, and so does
-    // any step whose realized change fails to clear the floor.
+    // evidence: take the step. Held, not grown — a model that cannot resolve
+    // its own prediction is not evidence for a larger region either. A model
+    // that predicts ascent (`predicted_reduction < 0`) or is non-finite still
+    // rejects and shrinks exactly as before, and so does any step whose
+    // realized change fails to clear the floor.
+    //
+    // ... EXCEPT WHERE HOLDING IS A FIXED POINT (gam#2612). "Held, not grown"
+    // is right when the step was INTERIOR: the region is not what limited it,
+    // so enlarging it changes nothing. On the BOUNDARY it is a trap of the
+    // same shape as the rejection ratchet this branch was written to break.
+    // The step is short because the radius is small; the predicted reduction
+    // is unreadable BECAUSE the step is short; and "unreadable ⇒ do not grow"
+    // then freezes the radius at whatever value some earlier rejection left,
+    // for every remaining cycle. Measured on this issue's penguins armed
+    // refit: `r = 1.463e-6` held for 167 cycles with the Newton proposal at
+    // `|prop|∞ = 8.961e-5` served in `|δ|∞ = 6.023e-8` slices — a 1500×
+    // truncation — while the residual crawled `0.9922×/cycle` against a
+    // tolerance five orders below it, and the solve exited on the slow-rate
+    // stall guard.
+    //
+    // The evidence for enlarging is not the model. It is the same measurement
+    // this branch already accepted on, plus two facts that are not opinions:
+    //
+    //   * `actual_reduction > noise_floor` — the step DID something the
+    //     objective can resolve (the branch's own precondition);
+    //   * `step_reached_boundary` — the region, not the model, chose the step
+    //     length, so it is the binding constraint;
+    //   * `residual_above_tolerance` — the criterion the inner solve actually
+    //     certifies on is not satisfied, so there is still work to do.
+    //
+    // All three are required, none is a prediction, and the growth is
+    // self-limiting: the moment the region is large enough for the Newton step
+    // to be interior, `step_reached_boundary` is false and this stops. The
+    // factor and the cap are the SHARED controller's own (`policy`), not a
+    // second opinion about how fast a trust region should grow.
     if !step.accepted
         && step.predicted_nonpositive
         && predicted_reduction.is_finite()
         && predicted_reduction >= 0.0
         && actual_reduction > noise_floor
     {
+        let region_is_the_binding_constraint = step_reached_boundary && residual_above_tolerance;
+        let radius = if region_is_the_binding_constraint {
+            (old_radius * policy.expand_factor).min(policy.max_radius)
+        } else {
+            old_radius
+        };
         return JointTrustRegionUpdate {
             rho: 1.0,
-            radius: old_radius,
+            radius,
             accepted: true,
             decision: JointTrustRegionDecision::AcceptBelowModelNoiseFloor,
         };

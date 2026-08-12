@@ -5613,6 +5613,215 @@ pub(crate) fn shrink_active_joint_block_trust_radii_strictly_decreases_max_radiu
     );
 }
 
+/// gam#2612: the accept-below-model-noise-floor branch must not HOLD a radius
+/// that is itself the binding constraint.
+///
+/// "Held, not grown" (gam#2637) is right for an INTERIOR step — the region did
+/// not choose the step length, so enlarging it changes nothing. On the boundary
+/// it is a fixed point: the step is short because the radius is small, the
+/// prediction is unreadable because the step is short, and "unreadable ⇒ do not
+/// grow" then freezes the radius for every remaining cycle. The three inputs
+/// that justify growing are measurements, not predictions — a realized decrease
+/// above the noise floor, geometric boundary contact, and a stationarity
+/// residual still above its own tolerance.
+#[test]
+pub(crate) fn a_boundary_step_below_the_model_noise_floor_grows_the_region_2612() {
+    let objective_scale: f64 = 1.66e5;
+    let noise_floor = objective_scale * 1e-14;
+    // The model's predicted decrease is under the objective's resolution; the
+    // realized decrease is an order above it.
+    let predicted = noise_floor * 0.1;
+    let actual = noise_floor * 10.0;
+    let objective_tol = 1.0e-6 * (1.0 + objective_scale.abs());
+    let radius = 1.0_f64;
+
+    let on_boundary = update_joint_trust_region_radius(
+        radius,
+        radius,
+        actual,
+        predicted,
+        objective_scale,
+        objective_tol,
+        0.0,
+        true,
+    );
+    assert_eq!(
+        on_boundary.decision,
+        JointTrustRegionDecision::AcceptBelowModelNoiseFloor,
+        "the fixture must reach the branch under test"
+    );
+    assert!(on_boundary.accepted);
+    assert!(
+        on_boundary.radius > radius,
+        "a boundary step whose REALIZED decrease cleared the noise floor, with the residual still \
+         above tolerance, must enlarge the region — holding it is the #2612 fixed point; got {:.3e}",
+        on_boundary.radius
+    );
+
+    // Interior: the region was not the binding constraint, so gam#2637's
+    // "held, not grown" stands unchanged.
+    let interior = update_joint_trust_region_radius(
+        radius,
+        0.1 * radius,
+        actual,
+        predicted,
+        objective_scale,
+        objective_tol,
+        0.0,
+        true,
+    );
+    assert_eq!(
+        interior.decision,
+        JointTrustRegionDecision::AcceptBelowModelNoiseFloor
+    );
+    assert!(
+        interior.radius <= radius,
+        "an interior step is not evidence for a larger region (gam#2637); got {:.3e}",
+        interior.radius
+    );
+
+    // Residual already inside its tolerance: the solve has nothing left to
+    // reach, so a larger region is not justified by anything.
+    let converged_residual = update_joint_trust_region_radius(
+        radius,
+        radius,
+        actual,
+        predicted,
+        objective_scale,
+        objective_tol,
+        0.0,
+        false,
+    );
+    assert_eq!(
+        converged_residual.decision,
+        JointTrustRegionDecision::AcceptBelowModelNoiseFloor
+    );
+    assert!(
+        converged_residual.radius <= radius,
+        "with the stationarity residual already at tolerance there is nothing to grow toward; got \
+         {:.3e}",
+        converged_residual.radius
+    );
+}
+
+/// gam#2612: a step sitting EXACTLY on the joint trust sphere must not read as
+/// interior just because its mass is split across blocks.
+///
+/// The joint solve carries two trust constraints — one `D`-metric ball on the
+/// whole step and one box per coefficient block — and
+/// `WhitenedHessianSpectrum::trust_region_step` scales the JOINT norm to the
+/// radius. Because `‖δ‖² = Σ_b ‖δ_b‖²`, `K` blocks of equal mass put every
+/// per-block norm at `1/√K` of that radius: `0.707` for the two coefficient
+/// blocks of a three-class softmax. Asking the boundary question with a
+/// per-block norm and a joint radius therefore answers `false` on a boundary
+/// step for every `K ≥ 2`.
+#[test]
+pub(crate) fn a_joint_boundary_step_is_not_interior_in_its_own_norm_2612() {
+    let metric_diag = Array1::from(vec![1.0_f64; 4]);
+    let ranges = vec![(0usize, 2usize), (2usize, 4usize)];
+    // ‖δ‖ = 1 exactly, split evenly between the two blocks.
+    let delta = Array1::from(vec![0.5_f64, 0.5, 0.5, 0.5]);
+    let radius = 1.0_f64;
+
+    let joint_norm = joint_trust_region_metric_step_norm(&delta, &metric_diag);
+    let block_norms = joint_trust_region_block_metric_norms(&delta, &ranges, &metric_diag);
+    assert!(
+        (joint_norm - radius).abs() <= 1.0e-15,
+        "the fixture must sit on the joint sphere; got {joint_norm:.17e}"
+    );
+    for norm in &block_norms {
+        assert!(
+            (norm - std::f64::consts::FRAC_1_SQRT_2).abs() <= 1.0e-15,
+            "two blocks of equal mass each carry 1/sqrt(2) of the joint norm; got {norm:.17e}"
+        );
+    }
+
+    let per_block_reading = block_norms
+        .iter()
+        .all(|norm| !joint_block_step_hit_trust_boundary(*norm, radius));
+    assert!(
+        per_block_reading,
+        "the mismatched reading is what this test pins: every block reads as interior"
+    );
+    assert!(
+        joint_block_step_hit_trust_boundary(joint_norm, radius),
+        "the step IS on the boundary, and the norm paired with this radius must say so"
+    );
+}
+
+/// gam#2612, the same defect stated as its consequence: with the joint norm the
+/// controller GROWS at a boundary step it modelled well; with the per-block
+/// reading of the identical step it holds, which is the ratchet — the region
+/// shrinks on rejection and can never grow back.
+#[test]
+pub(crate) fn the_joint_norm_is_what_lets_a_well_modelled_boundary_step_grow_2612() {
+    let radius = 1.0_f64;
+    let joint_norm = 1.0_f64;
+    let two_equal_blocks_read = std::f64::consts::FRAC_1_SQRT_2;
+    // A model that predicted the realized decrease exactly: rho = 1, and the
+    // predicted reduction is far above the convergence tolerance, so nothing
+    // but the boundary test decides whether the region may grow.
+    let actual = 1.0_f64;
+    let predicted = 1.0_f64;
+    let objective_scale = 1.0_f64;
+    let objective_tol = 1.0e-6_f64;
+
+    let joint = update_joint_trust_region_radius(
+        radius,
+        joint_norm,
+        actual,
+        predicted,
+        objective_scale,
+        objective_tol,
+        0.0,
+        false,
+    );
+    assert!(joint.accepted, "rho = 1 must accept");
+    assert!(
+        joint.radius > radius,
+        "a boundary step with a perfect gain ratio must enlarge the region; got {:.3e}",
+        joint.radius
+    );
+
+    let per_block = update_joint_trust_region_radius(
+        radius,
+        two_equal_blocks_read,
+        actual,
+        predicted,
+        objective_scale,
+        objective_tol,
+        0.0,
+        false,
+    );
+    assert!(per_block.accepted, "the same step is still accepted");
+    assert!(
+        per_block.radius <= radius,
+        "the per-block reading of the SAME step must not grow — this is the ratchet, and it is \
+         why a multi-block joint solve could only ever shrink (gam#2612); got {:.3e}",
+        per_block.radius
+    );
+}
+
+/// gam#2612 scope: with ONE block the joint norm IS the block norm, so every
+/// single-block family is byte-identical under the repair. This is the claim
+/// the fix's blast radius rests on, so it is asserted rather than argued.
+#[test]
+pub(crate) fn a_single_block_joint_step_reads_identically_in_both_norms_2612() {
+    let metric_diag = Array1::from(vec![2.0_f64, 0.5, 3.0]);
+    let ranges = vec![(0usize, 3usize)];
+    let delta = Array1::from(vec![0.25_f64, -1.5, 0.75]);
+
+    let joint_norm = joint_trust_region_metric_step_norm(&delta, &metric_diag);
+    let block_norms = joint_trust_region_block_metric_norms(&delta, &ranges, &metric_diag);
+    assert_eq!(block_norms.len(), 1);
+    assert_eq!(
+        joint_norm.to_bits(),
+        block_norms[0].to_bits(),
+        "one block: the two norms are the same accumulation in the same order, so they must agree \
+         bit for bit, not merely closely"
+    );
+}
+
 #[test]
 pub(crate) fn shrink_active_joint_block_trust_radii_decreases_max_when_max_held_by_interior_block()
 {
