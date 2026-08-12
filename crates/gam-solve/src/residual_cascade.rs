@@ -8617,4 +8617,103 @@ mod refinement_decision_tests {
             }
         }
     }
+
+    /// PROBE (#2758 residual): does the certified REML search terminate on a
+    /// cascade design the data cannot identify?
+    ///
+    /// `dense_cascade_spectrum` records that "a 36-row / 1725-column design
+    /// still spins in `AffineRemlProfile::enclose` under `maximize_score_1d`
+    /// past 900 s ... that is a separate defect", and
+    /// `auto_reml_certifies_past_the_dense_gram_cache` keeps such a design out
+    /// of its fixture for the same reason. Neither says WHERE the time goes.
+    /// This prints one line per value-ordered retry pass — the loop
+    /// `maximize_score_1d_value_ordered` runs — so the axis that does not
+    /// terminate is read off the run rather than inferred.
+    #[test]
+    fn zz_probe_rank_deficient_value_ordered_retry_terminates() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+            .expect("cascade design");
+        let core = &design.core;
+        let nullity = core.nullity();
+        println!(
+            "[PROBE] n={} m={} nullity={nullity} schur_rank={} identifiable={}",
+            core.y.len(),
+            core.m,
+            core.m - nullity,
+            core.y.len() - nullity
+        );
+        let profile = core.reml_profile().expect("spectral profile");
+        let (lo, hi) = profile.log_lambda_domain().expect("domain");
+        let affine = profile
+            .affine_view()
+            .expect("affine view")
+            .expect("spectral residual form");
+        let CascadeResidualForm::Spectral(spectrum) = &profile.residual else {
+            panic!("expected the spectral residual form");
+        };
+        println!(
+            "[PROBE] domain=[{lo:.6}, {hi:.6}] width={:.6} kept_modes={} det_modes={}",
+            hi - lo,
+            spectrum.eigenvalue.len(),
+            profile.modes.len()
+        );
+
+        // The retry loop of `maximize_score_1d_value_ordered`, unrolled so each
+        // pass can be timed and printed. Same contraction rule, same oracles.
+        let mut resolution = f64::EPSILON.sqrt();
+        for pass in 0..64 {
+            let started = std::time::Instant::now();
+            let search = match gam_math::score_opt::maximize_score_1d(
+                lo,
+                hi,
+                resolution,
+                |x| affine.evaluate(x),
+                |a, b| affine.enclose(a.x, b.x),
+            ) {
+                Ok(search) => search,
+                Err(error) => {
+                    println!(
+                        "[PROBE] pass={pass} resolution={resolution:.6e} \
+                         elapsed={:.3}s TERMINAL ERROR {error}",
+                        started.elapsed().as_secs_f64()
+                    );
+                    return;
+                }
+            };
+            let certificate = search.value_certificate;
+            println!(
+                "[PROBE] pass={pass} resolution={resolution:.6e} elapsed={:.3}s \
+                 excess={:.6e} comparison_resolution={:.6e} ratio={:.3e} \
+                 location={:?} stationary={} flat={} dominated={}",
+                started.elapsed().as_secs_f64(),
+                certificate.maximum_excess,
+                certificate.comparison_resolution,
+                certificate.maximum_excess / certificate.comparison_resolution.max(f64::MIN_POSITIVE),
+                search.location,
+                search.stationary_points.len(),
+                search.resolution_flat_regions.len(),
+                search.dominated_regions.len(),
+            );
+            if certificate.maximum_excess <= certificate.comparison_resolution {
+                println!("[PROBE] ORDERED at pass={pass}");
+                return;
+            }
+            let binary = 0.5 * resolution;
+            let directed = if certificate.comparison_resolution > 0.0 {
+                resolution * (certificate.comparison_resolution / certificate.maximum_excess)
+            } else {
+                binary
+            };
+            let next = binary.min(directed);
+            if !(next.is_finite() && next > 0.0 && next < resolution) {
+                println!("[PROBE] contraction exhausted at pass={pass}");
+                return;
+            }
+            resolution = next;
+        }
+        println!("[PROBE] 64 passes without ordering — the retry axis does not terminate");
+    }
 }
