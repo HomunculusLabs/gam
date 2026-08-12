@@ -7,6 +7,35 @@
 
 use super::*;
 
+/// Clear every cross-cycle statistic whose inference assumes a FIXED step model
+/// (gam#2612).
+///
+/// The joint-Newton loop's stall verdicts — "the residual has not improved for
+/// `N` cycles", "the trailing window projects more cycles than the budget has"
+/// — are inferences about a sequence of steps taken from ONE model. When the
+/// model changes underneath them that evidence describes a solver that no
+/// longer exists, exactly as it does when an accepted step changes the critical
+/// cone. Nothing here accepts an iterate or loosens a tolerance: the next cycle
+/// recomputes the residual and must build fresh evidence against the unchanged
+/// KKT certificate.
+fn clear_stall_evidence_collected_under_the_previous_model(
+    best_residual_seen: &mut f64,
+    cycles_since_residual_improved: &mut usize,
+    tr_clamped_during_stall: &mut bool,
+    residual_descent_history: &mut std::collections::VecDeque<f64>,
+    residual_rate_history: &mut std::collections::VecDeque<f64>,
+    merit_window: &mut std::collections::VecDeque<f64>,
+    geometric_tail_history: &mut std::collections::VecDeque<f64>,
+) {
+    *best_residual_seen = f64::INFINITY;
+    *cycles_since_residual_improved = 0;
+    *tr_clamped_during_stall = false;
+    residual_descent_history.clear();
+    residual_rate_history.clear();
+    merit_window.clear();
+    geometric_tail_history.clear();
+}
+
 pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     context: ExactJointFitContext<'_, F>,
 ) -> Result<BlockwiseInnerResult, CustomFamilyError> {
@@ -468,6 +497,39 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // only a handful of true-Hessian cycles.
     let mut jeffreys_completion_calls = 0usize;
     let mut jeffreys_true_hessian_probe_logged = false;
+    // ONE INVARIANT FOR EVERY CONCEDING EXIT (gam#2612): this solve may not
+    // give up while its step model is still the DIVIDED-DIFFERENCE Jeffreys
+    // surrogate.
+    //
+    // `H_Φ` is the Daleckii–Krein divided-difference part of `−∇²Φ`; the exact
+    // second-order completion `−½ tr(K D_ab)` is the rest of it, and until it
+    // is formed the Newton step is built on a matrix that is NOT the Hessian
+    // of the objective the certificate is taken against.
+    // [`JEFFREYS_COMPLETION_RESIDUAL_BAND`] arms it on a PROXIMITY proxy — the
+    // residual reaching `300 × residual_tol` — and that proxy is circular
+    // wherever the distance from tolerance is CAUSED by the inexact model.
+    // Measured on the #2612 penguins armed refit, once the trust region was
+    // repaired enough to stop being the binding constraint: cycle 155 takes
+    // the FULL Newton step (`|δ|∞ = |prop|∞ = 1.069e-4`, interior at
+    // `r = 9.290e-3`) and the residual still does not contract — it drifts at
+    // `1.0031×/cycle` at `2.398e-6`, five hundred times outside a band of
+    // `4.3e-9`, with `jeffreys_completion_calls = 0`. The step is exactly as
+    // long as the model wants; the model is the wrong matrix. And the in-tree
+    // `[979-TRUE-HESSIAN]` probe prices the difference on an armed iterate of
+    // this same fit: the divided-difference step's linearized residual
+    // contraction is `5.791e-1` where the true Hessian's is `4.285e-11`.
+    //
+    // So a stall verdict taken on the surrogate is a statement about the
+    // model, not about the problem. Every conceding path asks this question
+    // first, and if the completion has never been formed it arms it and takes
+    // another cycle. Latched, so it fires at most once per solve and every
+    // later concession is honest.
+    //
+    // The cross-cycle stall evidence is cleared with it (
+    // [`clear_stall_evidence_collected_under_the_previous_model`]) for the same
+    // reason the accepted-active-face transition clears it: every statistic in
+    // that set is an inference about a FIXED step model, and the model just
+    // changed.
     // Total descent budget across the joint-Newton loop, used by
     // the end-of-loop summary to report `descent_total`.
     let initial_joint_objective: f64 = lastobjective;
@@ -5440,6 +5502,65 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             }
             residual_rate_history.push_back(residual);
         }
+        // THE SURROGATE MODEL HAS A BUDGET, AND IT IS THIS SOLVE'S (gam#2612).
+        //
+        // The stall guards below defer their projection cap to
+        // `max(inner_max_cycles − cycle, LINEAR_RATE_PROJECTION_CAP)`, i.e. they
+        // are allowed to say "reachable" against the historic floor of 100 even
+        // when this evaluation only has 24 cycles left. That is right for a
+        // STALL verdict — the floor exists so a solve is never killed earlier
+        // than it historically was — and wrong for the question asked here,
+        // which is not "should I give up" but "can the model I am using finish
+        // inside the budget I actually have". Measured on the penguins screening
+        // evaluations, whose budget is 64: 36 of them ground to `64/64` with
+        // `jeffreys_completion_calls = 0` and the residual still improving on
+        // the last cycle — never stalled, never certified, simply out of cycles
+        // under a model that was not the objective's Hessian.
+        //
+        // So the same trailing-window projection is asked against the REAL
+        // remaining budget, and when the answer is "no" the model is upgraded
+        // rather than the solve abandoned. This costs nothing on a solve that
+        // is converging: a quadratic endgame projects a handful of cycles and
+        // never fills the window in the first place.
+        if head_jeffreys_term.is_some()
+            && !jeffreys_completion_endgame
+            && residual.is_finite()
+            && residual > residual_tol
+            && residual_rate_history.len() > LINEAR_RATE_WINDOW
+            && let Some(&oldest) = residual_rate_history.front()
+            && gam_solve::loop_guard::slow_geometric_rate_exceeds_projection_cap(
+                residual,
+                oldest,
+                LINEAR_RATE_WINDOW,
+                residual_tol,
+                inner_max_cycles.saturating_sub(cycle),
+            )
+        {
+            jeffreys_completion_endgame = true;
+            clear_stall_evidence_collected_under_the_previous_model(
+                &mut best_residual_seen,
+                &mut cycles_since_residual_improved,
+                &mut tr_clamped_during_stall,
+                &mut residual_descent_history,
+                &mut residual_rate_history,
+                &mut merit_window,
+                &mut geometric_tail_history,
+            );
+            log::info!(
+                "[PIRLS/joint-Newton model] cycle {:>3} | the divided-difference Jeffreys \
+                 surrogate cannot reach tol inside this solve's own remaining budget \
+                 ({} cycle(s) of {inner_max_cycles}): residual={:.3e} (tol={:.3e}) at \
+                 ~{:.4}×/cycle over the last {} cycles. Arming the exact second-order \
+                 completion and clearing the cross-cycle evidence collected under the surrogate",
+                cycle,
+                inner_max_cycles.saturating_sub(cycle),
+                residual,
+                residual_tol,
+                (residual / oldest).powf(1.0 / (LINEAR_RATE_WINDOW as f64)),
+                LINEAR_RATE_WINDOW,
+            );
+            continue 'joint_newton_cycles;
+        }
         // Trailing window of the Φ-augmented merit, kept in lockstep with
         // `residual_rate_history` so its front is the merit exactly
         // LINEAR_RATE_WINDOW cycles back. Powers the merit-descent veto on
@@ -5521,6 +5642,33 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             && tr_clamped_during_stall
             && !residual_tol_reachable_within_cap
         {
+            // gam#2612: a stall verdict taken on the divided-difference
+            // Jeffreys surrogate is a statement about the MODEL, not about the
+            // problem. See the invariant at `jeffreys_completion_endgame`.
+            if head_jeffreys_term.is_some() && !jeffreys_completion_endgame {
+                jeffreys_completion_endgame = true;
+                clear_stall_evidence_collected_under_the_previous_model(
+                    &mut best_residual_seen,
+                    &mut cycles_since_residual_improved,
+                    &mut tr_clamped_during_stall,
+                    &mut residual_descent_history,
+                    &mut residual_rate_history,
+                    &mut merit_window,
+                    &mut geometric_tail_history,
+                );
+                log::info!(
+                    "[PIRLS/joint-Newton model] cycle {:>3} | the residual-stall guard would \
+                     concede on a step model that is not the objective's Hessian \
+                     (jeffreys_completion_calls={}, residual={:.3e} against a completion band of \
+                     {:.3e}); arming the exact Jeffreys second-order completion and clearing the \
+                     cross-cycle evidence collected under the surrogate",
+                    cycle,
+                    jeffreys_completion_calls,
+                    residual,
+                    JEFFREYS_COMPLETION_RESIDUAL_BAND * residual_tol,
+                );
+                continue 'joint_newton_cycles;
+            }
             let last_math_summary = last_joint_math
                 .as_ref()
                 .map(|math| {
@@ -5729,6 +5877,34 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 effective_projection_cap,
             );
             if too_slow {
+                // gam#2612: same invariant as the residual-stall guard — a
+                // rate measured under the surrogate model is a fact about the
+                // surrogate.
+                if head_jeffreys_term.is_some() && !jeffreys_completion_endgame {
+                    jeffreys_completion_endgame = true;
+                    clear_stall_evidence_collected_under_the_previous_model(
+                        &mut best_residual_seen,
+                        &mut cycles_since_residual_improved,
+                        &mut tr_clamped_during_stall,
+                        &mut residual_descent_history,
+                        &mut residual_rate_history,
+                        &mut merit_window,
+                        &mut geometric_tail_history,
+                    );
+                    log::info!(
+                        "[PIRLS/joint-Newton model] cycle {:>3} | the slow-geometric-rate \
+                         projection would concede on a step model that is not the objective's \
+                         Hessian (jeffreys_completion_calls={}, residual={:.3e} against a \
+                         completion band of {:.3e}); arming the exact Jeffreys second-order \
+                         completion and clearing the cross-cycle evidence collected under the \
+                         surrogate",
+                        cycle,
+                        jeffreys_completion_calls,
+                        residual,
+                        JEFFREYS_COMPLETION_RESIDUAL_BAND * residual_tol,
+                    );
+                    continue 'joint_newton_cycles;
+                }
                 log::warn!(
                     "[PIRLS/joint-Newton convergence] cycle {:>3} | slow-geometric-rate stall early-exit (gam#979): residual={:.3e} (tol={:.3e}) descending at ~{:.4}×/cycle over the last {} cycles — projected >{} more cycles to reach tol; the residual is converging but far too slowly to finish in a practical budget (the survival marginal-slope oversmoothed-ρ endgame), so returning unconverged with finite β instead of grinding to inner_max_cycles={}.",
                     cycle,
