@@ -104,7 +104,7 @@ fn kappa_one_kernel_is_exact_great_circle_1404() {
             let cross_norm =
                 (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
             let angle = cross_norm.atan2(dot);
-            let expected = (-angle / LENGTH_SCALE).exp();
+            let expected = LENGTH_SCALE * (-angle / LENGTH_SCALE).exp_m1();
             assert!(
                 (k[(i, j)] - expected).abs() < 1e-10,
                 "kappa=1 kernel ({i},{j}): got {} want {expected} (angle {angle})",

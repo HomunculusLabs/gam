@@ -679,13 +679,33 @@ pub fn constant_curvature_evaluated_scale_span(
 /// * **`ℓ_lo = d_max / (½·ln(1/ε))`** — with `q = d/ℓ`, the design's entries
 ///   span `e^{−q_max}` and `XᵀX` spans its square, so a Cholesky resolves the
 ///   Gram only while `e^{−2·q_max} ≥ ε`, i.e. `q_max ≤ ½·ln(1/ε) ≈ 18`.
-/// * **`ℓ_hi = d_min⁺ / √ε`** — the closest evaluated pair must stay
-///   distinguishable from a coincident one AFTER the same squaring:
-///   `(1 − e^{−q_min})² ≥ ε`, i.e. `q_min ≥ √ε`.
+/// * **`ℓ_hi = d_max / (2√ε)`** — the far end is not a numerical wall at all,
+///   and the third derivation is what made that visible. `ℓ_hi` used to be
+///   `d_min⁺/√ε`, the point at which `1 − e^{−q_min}` rounds away and the Gram
+///   squares what is left. That loss was REAL, but it was a property of the
+///   `exp(−d/ℓ)` gauge rather than of the model: the design is `Kz` and `z`
+///   annihilates constants, so all the range information lived in `K − 1`, and
+///   forming it by subtraction cost `log₁₀(ℓ/d)` digits. The criterion built on
+///   it was measurably FALSE well before that wall — 78.8 nats of fabricated
+///   descent AT `ℓ_hi`, ~100 nats per decade past it, `edf` railed at `p`
+///   (gam#2747). The contrast gauge
+///   ([`constant_curvature_kernel_matrix`]) forms `K − 1` directly and the loss
+///   is gone, so nothing numerical bounds the range from above any more.
+///
+///   What bounds it is the MODEL: `k → −d_κ` as `ℓ → ∞`, so the far face of the
+///   range is the geodesic-distance kernel, and the departure from it is
+///   `d/(2ℓ)` relative, first order. Truncating the chart where the LARGEST
+///   evaluated pair is within `√ε` of its limit puts every entry of the design
+///   within the square root of machine precision of the limit design — past
+///   that point the range is not identified because there is nothing left to
+///   identify, and an estimate reported there is a statement about the model
+///   (`the kernel IS the geodesic distance`) rather than about the box. That is
+///   what [`RangeSolveOutcome`](../../../gam_models/index.html) declares rather
+///   than leaves to be inferred.
 ///
 /// Both ends are read in the κ = 0 doubled gauge, the same gauge the auto
 /// `ℓ_ref` rule uses, so the box is κ-FIXED and does not move while the
-/// optimizer walks κ. It is still wide — some seven orders — and deliberately
+/// optimizer walks κ. It is still wide — some eight orders — and deliberately
 /// so: the criterion supplies the shape, this supplies only the wall.
 /// Bracketing the inner search is a separate concern and uses
 /// [`constant_curvature_evaluated_scale_span`] directly.
@@ -696,7 +716,10 @@ pub fn constant_curvature_length_scale_bounds(
     let (d_min, d_max) = constant_curvature_evaluated_scale_span(data, centers)?;
     let gram_resolvable_efolds = 0.5 * -f64::EPSILON.ln();
     let lo = d_max / gram_resolvable_efolds;
-    let hi = d_min / f64::EPSILON.sqrt();
+    // `d_min` is deliberately unused at the top end now; it still guards the
+    // span's own validity, which is why the span is read as a pair.
+    let _ = d_min;
+    let hi = d_max / (2.0 * f64::EPSILON.sqrt());
     if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi > lo) {
         crate::bail_invalid_basis!(
             "constant-curvature range box collapsed: [{lo}, {hi}] from an evaluated span of \
@@ -1428,11 +1451,11 @@ mod tests {
         );
         // TWO distinct points are enough. With one distance both ends are the
         // SAME `d`, so the box's width is a property of the FORMAT alone:
-        // `(d/√ε) / (d/(½ln(1/ε))) = ½ln(1/ε)/√ε ≈ 1.2e9`.
+        // `(d/(2√ε)) / (d/(½ln(1/ε))) = ½ln(1/ε)/(2√ε) ≈ 6.0e8`.
         let pair = ndarray::array![[0.0_f64, 0.0], [0.2, 0.0]];
         let (lo, hi) = constant_curvature_length_scale_bounds(pair.view(), pair.view())
             .expect("one positive pairwise distance is enough");
-        let format_width = (0.5 * -f64::EPSILON.ln()) / f64::EPSILON.sqrt();
+        let format_width = (0.5 * -f64::EPSILON.ln()) / (2.0 * f64::EPSILON.sqrt());
         assert!(
             lo > 0.0 && (hi / lo - format_width).abs() <= 1.0e-9 * format_width,
             "a one-distance geometry's box width is the format's, {format_width}; got \
@@ -1608,20 +1631,36 @@ mod tests {
             1.0 + gram_range(lo / 2.0) == 1.0,
             "half an ℓ_lo below, the Gram's far entries must round into the diagonal"
         );
-        // AT `hi` the closest pair's contrast survives the same squaring; a
-        // factor of two above, it does not.
-        let gram_contrast = |ell: f64| {
-            let c = 1.0 - (-span_lo / ell).exp();
-            c * c
+        // AT `hi` the far end is a MODEL statement, not a numerical one
+        // (gam#2747): the widest evaluated pair's kernel must have come within
+        // `√ε` of its `ℓ → ∞` limit `−d`, and must NOT yet be that close an
+        // order of magnitude below. Truncating the chart there is what makes an
+        // estimate at the top mean "the kernel is the geodesic distance"
+        // instead of "the box ended here".
+        let limit_departure = |ell: f64| {
+            let k = constant_curvature_kernel_scalar(span_hi, ell);
+            ((k + span_hi) / span_hi).abs()
         };
+        let root_eps = f64::EPSILON.sqrt();
         assert!(
-            1.0 + gram_contrast(hi) != 1.0,
-            "at ℓ_hi the closest pair's SQUARED contrast must still perturb 1; got {}",
-            gram_contrast(hi)
+            limit_departure(hi) <= root_eps * 1.01,
+            "at ℓ_hi the widest evaluated pair must BE its own limit to √ε; departure {:.3e} \
+             against {root_eps:.3e}",
+            limit_departure(hi)
         );
         assert!(
-            1.0 + gram_contrast(hi * 2.0) == 1.0,
-            "twice ℓ_hi above, the closest pair's squared contrast must round away"
+            limit_departure(hi / 10.0) > root_eps,
+            "an order of magnitude below ℓ_hi the limit must still be resolvable, or the \
+             chart is being truncated earlier than the model justifies; departure {:.3e}",
+            limit_departure(hi / 10.0)
+        );
+        // And the old top must be gone: `d_min/√ε` is where the RETIRED `exp`
+        // gauge lost the design to cancellation, which is a property of a gauge
+        // this basis no longer uses.
+        let retired_top = span_lo / root_eps;
+        assert!(
+            (hi - retired_top).abs() > 0.1 * retired_top,
+            "ℓ_hi must no longer be the retired cancellation wall {retired_top:.4e}; got {hi:.4e}"
         );
     }
 

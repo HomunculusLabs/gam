@@ -62,7 +62,7 @@ fn kappa_zero_kernel_is_euclidean_exponential() {
             let dx = pts[(i, 0)] - pts[(j, 0)];
             let dy = pts[(i, 1)] - pts[(j, 1)];
             let d_flat = 2.0 * (dx * dx + dy * dy).sqrt();
-            let expected = (-d_flat / LENGTH_SCALE).exp();
+            let expected = LENGTH_SCALE * (-d_flat / LENGTH_SCALE).exp_m1();
             assert!(
                 (k[(i, j)] - expected).abs() < 1e-12,
                 "kappa=0 kernel ({i},{j}): got {} want {expected}",
@@ -107,7 +107,7 @@ fn kappa_one_kernel_uses_great_circle_distance() {
             let cross_norm =
                 (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
             let angle = cross_norm.atan2(dot);
-            let expected = (-angle / LENGTH_SCALE).exp();
+            let expected = LENGTH_SCALE * (-angle / LENGTH_SCALE).exp_m1();
             assert!(
                 (k[(i, j)] - expected).abs() < 1e-10,
                 "kappa=1 kernel ({i},{j}): got {} want {expected} (angle {angle})",
@@ -128,7 +128,7 @@ fn kappa_minus_one_kernel_matches_poincare_radial_distance() {
     for j in 0..pts.nrows() {
         let r = (pts[(j, 0)].powi(2) + pts[(j, 1)].powi(2)).sqrt();
         let d = 2.0 * r.atanh();
-        let expected = (-d / LENGTH_SCALE).exp();
+        let expected = LENGTH_SCALE * (-d / LENGTH_SCALE).exp_m1();
         assert!(
             (k[(0, j)] - expected).abs() < 1e-12,
             "kappa=-1 kernel (0,{j}): got {} want {expected}",

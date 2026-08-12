@@ -214,6 +214,29 @@ enum RangeSolveOutcome {
     /// is still the best one found, but `η̂` is locally CONSTANT in κ there, so
     /// the profile's derivatives are the plain κ slice.
     LocallyFixed,
+    /// `η̂` reached the TOP of the range chart, where the kernel has become the
+    /// geodesic-distance kernel to within `√ε` in every design entry
+    /// (`constant_curvature_length_scale_bounds`). The reduction is unavailable
+    /// for the same reason it is at any wall — but the two are not the same
+    /// statement, and conflating them is the whole of gam#2747 on this
+    /// coordinate.
+    ///
+    /// A wall says the estimator was stopped. This says it ARRIVED: `k → −d_κ`
+    /// as `ℓ → ∞`, and `−d_κ` is conditionally positive definite on all three
+    /// space forms, so the far face of the range is an ordinary non-degenerate
+    /// model rather than a degeneracy. `V(ℓ)` converging monotonically to it is
+    /// therefore an answer — "the range is at or beyond the point where the
+    /// kernel IS the geodesic distance" — and not the "readout of the box"
+    /// `20bde053f` reverted the free-range enrollment over. Nothing past the top
+    /// is a different model, so nothing past it is worth searching, and the
+    /// stopping rule that comment asked for is a consequence of the chart rather
+    /// than a rule.
+    ///
+    /// Declared rather than inferable, exactly as `146f9232d` made
+    /// `KappaEstimateSupport` for the curvature coordinate: a consumer that
+    /// reads `ℓ̂` alone cannot tell an arrival from a truncation, and the two
+    /// support very different claims about the magnitude.
+    DistanceKernelLimit,
 }
 
 impl<'a> ConstantCurvatureProfile<'a> {
@@ -319,14 +342,23 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// is not comparable to an unconstrained one — picking the smaller of the
     /// two is picking whichever happened to be truncated harder.
     ///
-    /// This matters here and essentially nowhere else because the range
-    /// coordinate DRIVES `ρ̂`: the realized design scales like `1/ℓ`, so λ has
-    /// to follow it and `ρ̂ ≈ const − ln ℓ` (measured: each ×100 in `ℓ` costs
-    /// 4.6 in `ρ̂`, which is `ln 100`). A range box drawn at the floating-point
-    /// wall is therefore always wide enough to walk `ρ̂` into `RHO_LOWER`, and
-    /// the values past it move spuriously by tens of nats while the true
-    /// criterion is flat — which is exactly how a κ̂ ends up 84 nats worse than
-    /// a box endpoint the CI walk then refuses to accept.
+    /// **The reason this was written is gone, and the check is kept anyway.**
+    /// It was added because the range coordinate DROVE `ρ̂`: the realized design
+    /// scaled like `1/ℓ`, so λ had to follow it and `ρ̂ ≈ const − ln ℓ`
+    /// (measured: each ×100 in `ℓ` cost 4.6 in `ρ̂`, which is `ln 100`), and a
+    /// range box eight orders wide was therefore always wide enough to walk `ρ̂`
+    /// into `RHO_LOWER` for no statistical reason whatever. That was the
+    /// `exp(−d/ℓ)` gauge's `1/ℓ` collapse, and gam#2747 removed it at the
+    /// source: in the contrast gauge `ℓ·(e^{−d/ℓ} − 1)` the design does not
+    /// collapse and `ρ̂` is flat in the range (measured: `−5.0978 ± 1e-4` across
+    /// eleven decades on the κ=1 sphere fixture). So this refusal should now
+    /// almost never fire from the range coordinate.
+    ///
+    /// It stays because the ARGUMENT was never about the range. A constrained
+    /// minimum is not comparable to an unconstrained one whatever drove it
+    /// there, and a dataset whose λ̂ genuinely wants to leave the ρ box still
+    /// exists. What changed is its status: it was a systematic artefact of a
+    /// gauge and is now a rare, real event.
     ///
     /// Refusing rather than clamping is deliberate: the point is not infeasible
     /// for the MODEL, only unusable as a comparison, and the search treats a
@@ -473,7 +505,10 @@ impl<'a> ConstantCurvatureProfile<'a> {
             let h = jet.hessian[1][1];
             let at_lo = eta <= lo + 1.0e-12 * (1.0 + lo.abs());
             let at_hi = eta >= hi - 1.0e-12 * (1.0 + hi.abs());
-            if (at_lo && g >= 0.0) || (at_hi && g <= 0.0) {
+            if at_hi && g <= 0.0 {
+                return Ok((eta, jet, RangeSolveOutcome::DistanceKernelLimit));
+            }
+            if at_lo && g >= 0.0 {
                 return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
             }
             if g.abs() <= 1.0e-9 * (1.0 + jet.value.abs()) {
@@ -523,20 +558,23 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 None => break,
             }
         }
+        let at_top = eta >= hi - 1.0e-9 * (1.0 + hi.abs());
         let interior = converged
             && jet.hessian[1][1].is_finite()
             && jet.hessian[1][1] > 0.0
             && eta > lo + 1.0e-9 * (1.0 + lo.abs())
-            && eta < hi - 1.0e-9 * (1.0 + hi.abs());
-        Ok((
-            eta,
-            jet,
-            if interior {
-                RangeSolveOutcome::InteriorMinimum
-            } else {
-                RangeSolveOutcome::LocallyFixed
-            },
-        ))
+            && !at_top;
+        // The chart's TOP is the geodesic-distance face and its bottom is an
+        // evaluability wall, so an iterate that stopped at one is not the same
+        // finding as an iterate that stopped at the other — see
+        // `RangeSolveOutcome::DistanceKernelLimit`. Both give the plain κ slice;
+        // only one of them is an answer about the model.
+        let outcome = match (interior, at_top) {
+            (true, _) => RangeSolveOutcome::InteriorMinimum,
+            (false, true) => RangeSolveOutcome::DistanceKernelLimit,
+            (false, false) => RangeSolveOutcome::LocallyFixed,
+        };
+        Ok((eta, jet, outcome))
     }
 
     /// `(V_p(κ), V_p′(κ), V_p″(κ))` with the range PROFILED out — the
@@ -553,7 +591,9 @@ impl<'a> ConstantCurvatureProfile<'a> {
         let (_, jet, outcome) = self.minimize_over_eta(kappa)?;
         match outcome {
             RangeSolveOutcome::InteriorMinimum => jet.eta_profiled_kappa_jet(),
-            RangeSolveOutcome::LocallyFixed => Ok(jet.kappa_slice()),
+            RangeSolveOutcome::LocallyFixed | RangeSolveOutcome::DistanceKernelLimit => {
+                Ok(jet.kappa_slice())
+            }
         }
     }
 }
@@ -726,11 +766,21 @@ fn constant_curvature_kappa_profile_optimum(
     // Read ℓ̂ off the SAME profile object the solve just used, so the reported
     // range is the one the accepted κ̂ was profiled against (and replays from its
     // cache rather than re-solving).
-    let (eta_hat, _, _) = objective.state.minimize_over_eta(kappa_hat)?;
+    let (eta_hat, _, range_outcome) = objective.state.minimize_over_eta(kappa_hat)?;
     let length_scale_hat = eta_hat.exp();
+    // The range's support, said rather than left to be read off the magnitude
+    // (gam#2747). `DistanceKernelLimit` is not a rail: the kernel has become
+    // `−d_κ`, which is the model, so `ℓ̂` there is a lower bound with a meaning
+    // and not a readout of a box.
+    let range_support = match range_outcome {
+        RangeSolveOutcome::InteriorMinimum => "interior",
+        RangeSolveOutcome::DistanceKernelLimit => "at the geodesic-distance limit",
+        RangeSolveOutcome::LocallyFixed => "locally fixed",
+    };
     log::info!(
         "[spatial-kappa] continuous likelihood-profile optimum kappa_hat={:.6} \
-         length_scale_hat={:.6} (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
+         length_scale_hat={:.6} ({range_support}) \
+         (negative_log_evidence={:.6e}, projected_gradient={}) for term {term_idx}",
         kappa_hat,
         length_scale_hat,
         result.final_value,
