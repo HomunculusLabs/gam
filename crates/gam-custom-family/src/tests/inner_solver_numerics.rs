@@ -5363,6 +5363,7 @@ pub(crate) fn joint_trust_region_noise_floor_accepts_round_off_negative_actual()
         objective_scale,
         objective_tol,
         0.0,
+        false,
     );
     assert!(
         update.accepted,
@@ -5389,6 +5390,7 @@ pub(crate) fn joint_trust_region_noise_floor_rejects_genuine_increase() {
         objective_scale,
         objective_tol,
         0.0,
+        false,
     );
     assert!(
         !update.accepted,
@@ -5813,6 +5815,7 @@ pub(crate) fn joint_trust_region_rosenbrock_like_quadratic_is_armijo_safe() {
         old_objective,
         objective_tol,
         0.0,
+        false,
     );
     assert!(update.accepted);
     assert!(trial_objective < old_objective);
