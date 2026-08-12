@@ -2636,27 +2636,9 @@ impl<'a> AffineRemlProfile<'a> {
         // value alone — and it is this cascade that makes
         // `width(F) <= width(F({m})) + max|F'| * w` hold BY CONSTRUCTION against
         // the ranges this function actually returns.
-        let centred_curvature = centre.curvature.add(direct_third.mul(offset));
-        // Two rigorous outer enclosures of the same nonempty exact range cannot
-        // be disjoint, so the fallbacks below are unreachable; they are written
-        // in the sound direction (keep the natural extension) rather than as a
-        // panic, because a refusal here would convert a tightening into a
-        // failure.
-        let curvature = direct
-            .curvature
-            .intersection(centred_curvature)
-            .unwrap_or(direct.curvature);
-        let centred_derivative = centre.derivative.add(curvature.mul(offset));
-        let derivative = direct
-            .derivative
-            .intersection(centred_derivative)
-            .unwrap_or(direct.derivative);
-        let centred_value = centre.score.value.add(derivative.mul(offset));
-        let value = direct
-            .score
-            .value
-            .intersection(centred_value)
-            .unwrap_or(direct.score.value);
+        let curvature = centred_or(direct.curvature, centre.curvature, direct_third, offset);
+        let derivative = centred_or(direct.derivative, centre.derivative, curvature, offset);
+        let value = centred_or(direct.score.value, centre.score.value, derivative, offset);
         Ok(DerivativeEnclosure {
             score: ScoreValueEnclosure {
                 value,
@@ -3196,6 +3178,55 @@ fn finite_nonnegative_quotient(
         });
     }
     Ok(quotient.nonnegative())
+}
+
+/// One channel of the centred (mean value) enclosure, intersected with the
+/// natural extension — and never trusted over it when the remainder is not a
+/// finite interval.
+///
+/// `f(x) in point + slope * offset` for every `x` in the cell, by the mean value
+/// theorem, when `point` encloses `f` (or `f'`, or `f''`) at the expansion
+/// centre and `slope` encloses the NEXT derivative over the whole cell. Both
+/// forms are outer enclosures of one exact range, so the intersection is an
+/// outer enclosure too: this can only tighten.
+///
+/// # Why the finiteness guard is not defensive clutter
+///
+/// `ClosedInterval::mul` takes the min/max over four endpoint products, and
+/// `inf * 0` is NaN. `f64::min` and `f64::max` IGNORE a NaN operand, so a NaN
+/// product silently drops out of the reduction and the surviving endpoints
+/// describe a range STRICTLY INSIDE the true one — an unsound certificate, in
+/// the one direction that matters, produced with no signal at all. That is
+/// reachable here: `offset` has an endpoint of exactly zero whenever the
+/// expansion centre lands on a cell boundary (adjacent-float cells, and cells so
+/// wide that `lo + hi` overflows), and a `slope` endpoint can be infinite when a
+/// near-interpolating residual sends a derivative ratio past binary64's range.
+///
+/// So the remainder is required to be a finite valid interval before it is used,
+/// and the natural extension — which is rigorous unconditionally — is kept
+/// otherwise. The same check covers a NaN arriving from anywhere else.
+fn centred_or(
+    direct: ClosedInterval,
+    point: ClosedInterval,
+    slope: ClosedInterval,
+    offset: ClosedInterval,
+) -> ClosedInterval {
+    if !(slope.is_valid() && slope.lo.is_finite() && slope.hi.is_finite()) {
+        return direct;
+    }
+    let remainder = slope.mul(offset);
+    if !(remainder.is_valid() && remainder.lo.is_finite() && remainder.hi.is_finite()) {
+        return direct;
+    }
+    let centred = point.add(remainder);
+    if !centred.is_valid() {
+        return direct;
+    }
+    // Two rigorous outer enclosures of the same nonempty exact range cannot be
+    // disjoint, so this fallback is unreachable; it is written in the sound
+    // direction rather than as a panic, because a refusal here would convert a
+    // tightening into a failure.
+    direct.intersection(centred).unwrap_or(direct)
 }
 
 fn mode_ranges(
