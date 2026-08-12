@@ -68,6 +68,70 @@
   residual went from `3.8e-7` to `4.0e-5`. The under-measurement is therefore
   real and is NOT the binding constraint; the envelope is not the way to fix it.
 
+- **The inner solve conceded on a step model that is not the objective's
+  Hessian, and with that repaired the multinomial outer search converges for the
+  first time (#2612).** `H_Φ` is the Daleckii–Krein divided-difference part of
+  `−∇²Φ`; the exact second-order completion `−½ tr(K D_ab)` is the rest of it,
+  and until it is formed the Newton step is built on a matrix that is not the
+  Hessian of the objective the certificate is taken against.
+  `JEFFREYS_COMPLETION_RESIDUAL_BAND` arms it on a proximity proxy — the residual
+  reaching `300 × residual_tol` — which is circular wherever the distance from
+  tolerance is *caused* by the inexact model.
+
+  Measured on the penguins witness once the trust region had been repaired
+  enough to stop being the binding constraint: cycle 155 takes the **full**
+  Newton step (`|δ|∞ = |prop|∞ = 1.069e-4`, interior at `r = 9.290e-3`) and the
+  residual still does not contract — it drifts at `1.0031×/cycle` at `2.398e-6`,
+  five hundred times outside a band of `4.3e-9`, with
+  `jeffreys_completion_calls = 0`. The step is exactly as long as the model
+  wants; the model is the wrong matrix. Arming the completion where the solve
+  would otherwise concede:
+
+  ```text
+  cycle 39  about to concede at residual 4.593e-6  → arm the completion
+  cycle 40  ρ=+0.9922   residual 4.593e-6 → 7.410e-8
+  cycle 41  ρ=+1.000    residual 7.410e-8 → 4.298e-12   (tol 1.441e-11)
+  ```
+
+  The repair is an invariant rather than a threshold — *the inner solve may not
+  concede while its step model is still the surrogate* — asked at the
+  residual-stall guard, the slow-geometric-rate projection, and per cycle
+  against the budget **this solve actually has** (the stall guards are allowed
+  to defer to a historic floor of 100 cycles; a screening evaluation with a
+  64-cycle budget is not). End to end on `zz_probe_2612_penguins_stride3_inner_trail`:
+
+  | build | wall | inner solves non-converged | outer verdict |
+  |---|---|---|---|
+  | before | 333.4 s | 50 | `line_search_failed` at `\|g\| = 1.556e-1` |
+  | trust-region norms | 116.6 s | 3 | inner infeasible |
+  | + boundary growth | 119.0 s | 2 | inner infeasible |
+  | + completion invariant | 493.3 s | 4 | **Converged**, `\|g\| = 1.357e-3 < 2.290e-3` |
+
+  The cost is stated rather than hidden: an armed solve pays an extra
+  `O(n·M²·P²)` contraction per cycle, and a solve that never needed it never
+  arms. Regression surface: `gam-custom-family --lib` 275/275,
+  `gam-models --lib -- location_scale` 224/224, `-- marginal_slope` 229/229,
+  `multinomial_separation_arming_2612` 3/3 (accuracy 0.9750, calibration gap
+  −0.0151) — the other multi-block joint families exercise the same two repairs
+  and none of them moved.
+
+  **Where #2612 now stands.** The fit still does not mint, and the blocker is a
+  different subsystem: the outer search converges to an *interior strict saddle*
+  (`λ_min = −1.074e1` on the un-railed sub-block, 19 of 24 `θ` railed), the
+  `#2357` negative-curvature escape reseed fires and lowers the objective
+  (`7.545783 → 7.545502`), and the re-run climbs back to the identical ρ and the
+  identical saddle, at which point the one-shot escape is spent and the
+  certificate refuses. That is the `#2357`/`#2665` family — a gradient-only BFGS
+  search (`search_hessian_source=BfgsApprox`) cannot see the negative curvature
+  it is sitting on.
+
+- **A Jeffreys drift GEMM panicked on a column-major product (#2612).**
+  `as_slice` is C-order-only and neither `dot` nor `+` promises that order, so
+  `dw_rows.dot(&a_rows.t()) + …` could return column-major and the `expect`
+  fired — in production code. `binomial_location_scale_expected_hphi_drift_matches_finite_difference`
+  died on it. `as_standard_layout` borrows in the C-order case, so the GEMM path
+  is unchanged.
+
 - **One sentinel, one resolver — the marginal-slope branch never reached the
   measure-jet range screen (#2754, #2761).** `length_scale == 0.0` is an
   UNRESOLVED representer range, and the tree carries two resolvers for it: the
