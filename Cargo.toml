@@ -455,3 +455,7 @@ path = "examples/probe_2761_ell_profile.rs"
 name = "probe_2750_lambda_path"
 path = "examples/probe_2750_lambda_path.rs"
 
+[[example]]
+name = "probe_2714_frailty_trust_ladder"
+path = "examples/probe_2714_frailty_trust_ladder.rs"
+

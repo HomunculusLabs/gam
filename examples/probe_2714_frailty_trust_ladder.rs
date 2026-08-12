@@ -1,22 +1,20 @@
-//! #2714 probe: the same fit as `repro_2714_latent_frailty_inner_solve`, run
-//! with the solver's own diagnostic backend installed.
+//! #2714 probe: the witness's own fit, with the solver's diagnostics turned on.
 //!
-//! The witness's binary installs no `log` backend, so every `log::info!` the
-//! joint-Newton inner emits — the per-attempt trust ladder, the
-//! `TrustRatioRefinementWitness` model-consistency fault, the objective's
-//! measured resolution — is discarded. Reading those lines is what separates
-//! "the region is wrong" from "the two ends of ρ measure different functions",
-//! and it costs one line to turn on.
+//! The issue records that the quality binary installs no `log` backend, so
+//! everything the joint-Newton inner emits about WHY it refuses — the
+//! per-attempt trust ladder, the `TrustRatioRefinementWitness` model-consistency
+//! fault, the objective's measured resolution — is dropped. Every lane that has
+//! read this fixture has read it blind on that half, and turning it on costs one
+//! line.
 //!
-//! `#[ignore]` because it is an instrument: it prints, it does not grade. Run it
-//! with
+//! This is the same fit as `tests/repro_2714_latent_frailty_inner_solve.rs`
+//! (veteran lung, every 4th row held out, latent likelihood, Weibull baseline,
+//! I-spline time basis, `HazardMultiplier` frailty with a learned scale) —
+//! that file carries the GRADE, this one carries the READING.
 //!
 //! ```text
-//! cargo test --test probe_2714_frailty_trust_ladder -- --ignored --nocapture
+//! cargo run --release --example probe_2714_frailty_trust_ladder
 //! ```
-//!
-//! The graded half is `repro_2714_latent_frailty_inner_solve`, which asserts the
-//! fit converges and is not `#[ignore]`d.
 
 use csv::StringRecord;
 use gam::families::survival::lognormal_kernel::{FrailtyScale, FrailtySpec, HazardLoading};
@@ -31,9 +29,7 @@ const VETERAN_CSV: &str = concat!(
     "/bench/datasets/veteran_lung.csv"
 );
 
-#[test]
-#[ignore = "instrument: prints the inner solve's trust ladder, asserts nothing about it"]
-fn probe_2714_latent_frailty_trust_ladder() {
+fn main() {
     gam::test_support::install_diagnostic_logger();
     init_parallelism();
 
@@ -94,9 +90,12 @@ fn probe_2714_latent_frailty_trust_ladder() {
         Ok(_) => eprintln!("[2714-probe] the fit returned Ok"),
         Err(error) => eprintln!("[2714-probe] the fit returned Err:\n{error}"),
     }
+    // A run of zeros is the easiest wrong answer to produce by accident: a
+    // backend that silently failed to write is indistinguishable from a solver
+    // that emitted nothing.
+    let dropped = gam::test_support::diagnostic_write_failures();
     assert_eq!(
-        gam::test_support::diagnostic_write_failures(),
-        0,
-        "#2714 probe: diagnostics were dropped, so this run measured nothing"
+        dropped, 0,
+        "#2714 probe: {dropped} diagnostic records were dropped, so this run measured nothing"
     );
 }
