@@ -8892,6 +8892,15 @@ mod refinement_decision_tests {
             }
         }
 
+        println!("[PROBE] --- the profile as literals, for the gam-math capability gate ---");
+        println!("[PROBE] dof={} rank={} null_logdet={:?} anchor={:?}",
+            core.y.len() - nullity,
+            spectrum.penalty.len(),
+            profile.null_logdet,
+            spectrum.anchor_energy[0]);
+        println!("[PROBE] eigenvalue={:?}", spectrum.eigenvalue);
+        println!("[PROBE] projected_square={:?}", spectrum.projected_square);
+
         println!("[PROBE] --- end to end: does fit_reml certify this design now? ---");
         {
             let started = std::time::Instant::now();
