@@ -2038,7 +2038,12 @@ pub(crate) fn update_joint_trust_region_radius(
         .max(measured_resolution.max(0.0))
         .min(f64::MAX);
     let noise_floor_rel = noise_floor / objective_scale_floor;
-    let step = opt::TrustRegionPolicy::noise_aware(1.0e-12, 1.0e6, noise_floor_rel).update(
+    let step = opt::TrustRegionPolicy::noise_aware(
+        JOINT_TRUST_RADIUS_FLOOR,
+        JOINT_TRUST_RADIUS_CEILING,
+        noise_floor_rel,
+    )
+    .update(
         old_radius,
         step_norm,
         hit_boundary,
@@ -2407,9 +2412,11 @@ pub(crate) fn joint_proposal_at_step_floor(proposal_step_inf: f64, step_tol: f64
 }
 
 /// The absolute trust-radius floor `update_joint_trust_region_radius` clamps to
-/// (`radius.clamp(1.0e-12, 1.0e6)`), with a small multiplicative slack to absorb
+/// (`radius.clamp(JOINT_TRUST_RADIUS_FLOOR, JOINT_TRUST_RADIUS_CEILING)`), with a
+/// small multiplicative slack to absorb
 /// the promote-to-`RejectFloor` boundary test there.
-pub(crate) const JOINT_COLLAPSED_FLOOR_RADIUS_CEIL: f64 = 1.0e-12 * (1.0 + 1e-9);
+pub(crate) const JOINT_COLLAPSED_FLOOR_RADIUS_CEIL: f64 =
+    JOINT_TRUST_RADIUS_FLOOR * (1.0 + 1e-9);
 
 /// Number of consecutive all-reject-at-floor cycles after which the coupled
 /// joint-Newton loop is declared stuck-but-stationary and exited cleanly (gam#979).
@@ -2507,9 +2514,34 @@ pub(crate) fn truncate_joint_step_to_block_metric_radii(
     norms
 }
 
+/// Did a step of length `step_norm` reach the boundary of a trust region of
+/// radius `radius`?
+///
+/// **The two arguments must be measured in the same norm.** That is not a
+/// style note: the joint solve carries TWO trust constraints — one D-metric
+/// ball on the whole step (`WhitenedHessianSpectrum::trust_region_step`, which
+/// scales `‖δ‖_D` to `max_b R_b`) and one box per coefficient block — and the
+/// per-block norms of a jointly-scaled step are `‖δ_b‖ = ‖δ‖/√K` when `K`
+/// blocks carry comparable step mass. Asking this question with a per-block
+/// norm and a joint radius therefore answers `false` on a step that is EXACTLY
+/// on the joint sphere, for every `K ≥ 2`, and the trust region becomes a
+/// one-way ratchet: it shrinks on rejection and can never grow back
+/// (gam#2612 — measured on the penguins witness, 4427 accepted attempts at a
+/// held radius, of which ZERO ever reached `0.99` and 1295 sat in the
+/// `[0.70, 0.99)` band that `1/√2` puts a two-block boundary step into).
 pub(crate) fn joint_block_step_hit_trust_boundary(step_norm: f64, radius: f64) -> bool {
     step_norm.is_finite() && radius > 0.0 && step_norm >= 0.99 * radius
 }
+
+/// The absolute floor and ceiling every joint trust radius is clamped to.
+///
+/// [`update_joint_trust_region_radius`] constructs its controller with exactly
+/// this pair, so any site that moves a radius WITHOUT going through that call
+/// must clamp to the same one or the two disagree about what a collapsed
+/// region is (`JOINT_COLLAPSED_FLOOR_RADIUS_CEIL` is the floor's read-back
+/// band, and it is derived from the floor for that reason).
+pub(crate) const JOINT_TRUST_RADIUS_FLOOR: f64 = 1.0e-12;
+pub(crate) const JOINT_TRUST_RADIUS_CEILING: f64 = 1.0e6;
 
 /// Per-block dogleg step (Powell, blending the Cauchy and Newton points within
 /// the block's M-metric trust radius). This is the principled globalization for
@@ -2698,7 +2730,7 @@ pub(crate) fn shrink_active_joint_block_trust_radii(
     //     to `inner_loop_hard_ceiling` (1200) cycles wasting ~120 s per
     //     outer ρ-evaluation — the Rust CI Test hang and the
     //     `rust_margslope_aniso_duchon16d_*` large-scale 2400 s timeout.
-    const RADIUS_FLOOR: f64 = 1.0e-12;
+    const RADIUS_FLOOR: f64 = JOINT_TRUST_RADIUS_FLOOR;
     let any_boundary_block = block_radii
         .iter()
         .zip(block_step_norms)
@@ -2752,7 +2784,7 @@ pub(crate) fn shrink_active_joint_block_trust_radii(
             if step_norm.is_finite() && *step_norm > 0.0 {
                 new_radius = new_radius.min(0.5 * *step_norm);
             }
-            *radius = new_radius.clamp(RADIUS_FLOOR, 1.0e6);
+            *radius = new_radius.clamp(RADIUS_FLOOR, JOINT_TRUST_RADIUS_CEILING);
         }
     }
     block_radii.iter().copied().fold(0.0_f64, f64::max)

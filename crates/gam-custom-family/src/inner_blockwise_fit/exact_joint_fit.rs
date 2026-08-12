@@ -2987,18 +2987,49 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &ranges,
                 &joint_trust_metric_diag,
             );
-            let step_norm = block_step_norms.iter().copied().fold(0.0_f64, f64::max);
+            // THE JOINT RADIUS IS JUDGED IN THE JOINT NORM (gam#2612).
+            //
+            // Two trust constraints act on this step: the D-metric ball on the
+            // WHOLE step, which is what `spectrum.trust_region_step(
+            // joint_trust_radius)` solves against, and one box per coefficient
+            // block. Their norms are related by `‖δ‖² = Σ_b ‖δ_b‖²`, so a step
+            // sitting EXACTLY on the joint sphere has `max_b ‖δ_b‖ = ‖δ‖/√K`
+            // whenever `K` blocks carry comparable mass — `0.707` of the
+            // radius for the two coefficient blocks of a three-class softmax.
+            //
+            // Handing that per-block maximum to the controller alongside the
+            // JOINT radius therefore reports every boundary step as interior,
+            // `hit_boundary` is false for the whole solve, and the region can
+            // only ever shrink. Measured on this issue's penguins witness
+            // before the repair: of 4427 accepted attempts at a held radius,
+            // ZERO reached `0.99 · r` and 1295 sat in `[0.70, 0.99)` — the
+            // `1/√2` band — with 1149 of those carrying a Newton proposal at
+            // least `1.5×` the step actually taken (424 of them `≥ 10×`). The
+            // fit then dies with `|prop|∞ = 7.686e-5` against an accepted
+            // `|δ|∞ = 5.270e-7` and the residual crawling at `0.9932×/cycle`.
+            //
+            // So the controller gets the length measured in ITS radius's own
+            // norm. The per-block boxes keep their own pairing below.
+            let joint_step_norm =
+                joint_trust_region_metric_step_norm(&trial_delta, &joint_trust_metric_diag);
+            let step_norm = joint_step_norm;
             let trial_step_inf = trial_delta
                 .iter()
                 .copied()
                 .map(f64::abs)
                 .fold(0.0_f64, f64::max);
-            let step_hit_trust_boundary = block_step_norms
-                .iter()
-                .zip(&joint_block_trust_radii)
-                .any(|(step_norm, radius)| {
-                    joint_block_step_hit_trust_boundary(*step_norm, *radius)
-                });
+            // Which constraint actually bound this step: the joint ball, or
+            // some block's box. Either one makes the step a boundary step, and
+            // each is asked in its own norm.
+            let joint_ball_bound_the_step =
+                joint_block_step_hit_trust_boundary(joint_step_norm, joint_trust_radius);
+            let step_hit_trust_boundary = joint_ball_bound_the_step
+                || block_step_norms
+                    .iter()
+                    .zip(&joint_block_trust_radii)
+                    .any(|(step_norm, radius)| {
+                        joint_block_step_hit_trust_boundary(*step_norm, *radius)
+                    });
             // Predicted reduction must use the TRUE penalized Hessian
             // (the one that appears in `f(β) = -ℓ + ½βᵀSβ + ½·joint_mode_diagonal_ridge·‖β‖²`),
             // NOT the SPD-stabilized version. The stabilizing shift
@@ -3457,24 +3488,52 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 "reject"
             };
             if floor_reached || secondary_ok {
-                for (block_radius, block_step_norm) in joint_block_trust_radii
-                    .iter_mut()
-                    .zip(block_step_norms.iter())
-                {
-                    let block_update = update_joint_trust_region_radius(
-                        *block_radius,
-                        *block_step_norm,
-                        actual_reduction,
-                        predicted_reduction,
-                        old_objective,
-                        objective_tol,
-                        measured_objective_resolution,
-                        current_stationarity_residual > residual_tol,
-                    );
-                    if block_update.radius >= *block_radius
-                        || joint_block_step_hit_trust_boundary(*block_step_norm, *block_radius)
+                if joint_ball_bound_the_step {
+                    // The JOINT ball is what limited this step, so the joint
+                    // decision — taken above on `(joint_trust_radius,
+                    // joint_step_norm)`, one norm, one radius — is the one
+                    // that owns the outcome. Carry it to every block by the
+                    // factor it chose: the Moré–Sorensen solve is handed
+                    // `max_b R_b`, so scaling all of them moves that maximum
+                    // exactly as the controller decided while preserving
+                    // whatever relative sizes the per-block path left behind.
+                    //
+                    // Running the per-block loop here instead is what made the
+                    // region a ratchet (gam#2612): under a joint constraint no
+                    // block reaches its OWN radius, so every per-block verdict
+                    // is "hold" and a step that was genuinely truncated —
+                    // `|prop|∞` an order or more above `|δ|∞` — buys no room.
+                    let factor = if old_radius.is_finite() && old_radius > 0.0 {
+                        trust_update.radius / old_radius
+                    } else {
+                        1.0
+                    };
+                    if factor.is_finite() && factor > 0.0 && factor != 1.0 {
+                        for block_radius in joint_block_trust_radii.iter_mut() {
+                            *block_radius = (*block_radius * factor)
+                                .clamp(JOINT_TRUST_RADIUS_FLOOR, JOINT_TRUST_RADIUS_CEILING);
+                        }
+                    }
+                } else {
+                    for (block_radius, block_step_norm) in joint_block_trust_radii
+                        .iter_mut()
+                        .zip(block_step_norms.iter())
                     {
-                        *block_radius = block_update.radius;
+                        let block_update = update_joint_trust_region_radius(
+                            *block_radius,
+                            *block_step_norm,
+                            actual_reduction,
+                            predicted_reduction,
+                            old_objective,
+                            objective_tol,
+                            measured_objective_resolution,
+                            current_stationarity_residual > residual_tol,
+                        );
+                        if block_update.radius >= *block_radius
+                            || joint_block_step_hit_trust_boundary(*block_step_norm, *block_radius)
+                        {
+                            *block_radius = block_update.radius;
+                        }
                     }
                 }
                 joint_trust_radius = joint_block_trust_radii
