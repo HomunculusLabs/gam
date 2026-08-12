@@ -1,5 +1,66 @@
 ## Unreleased
 
+- **The constant-curvature range coordinate was confounded with `ρ` and
+  fabricated past `ℓ ≈ 10⁶`, and both were the KERNEL'S GAUGE (#2747).** The
+  kernel is only ever consumed through the coefficient sum-to-zero frame `z` —
+  the realized design is `K z`, the penalty `zᵀK z` — and `z` annihilates
+  constants while `λ` absorbs a positive scale, so `exp(−d_κ/ℓ)` and
+  `ℓ·(e^{−d_κ/ℓ} − 1)` are the SAME model in two gauges. The gauge is not free.
+
+  `exp(−d/ℓ)z = −(1/ℓ)Dz + O(1/ℓ²)`, so design and penalty both COLLAPSE like
+  `1/ℓ` and `λ̂` has to chase the range one-for-one: measured on the κ=1 sphere
+  fixture, `ρ̂` falls `−5.49 → −18.91` as `ℓ` goes `1 → 10⁶` while the criterion
+  value is unchanged to eight significant figures. `constant_curvature_profile.rs`
+  already had this from the other side ("each ×100 in ℓ costs 4.6 in ρ̂") and
+  worked around it by refusing every point whose `ρ̂` railed against the absolute
+  `ρ` box.
+
+  Worse, all of the model's range information lives in `K − 1`, formed by
+  subtracting from an implicit 1 numbers that agree to `log₁₀(ℓ/d)` digits — and
+  the Gram then squares what is left. The shipped criterion was **78.8 nats below
+  the truth AT the derived box top** `ℓ_hi = d_min/√ε = 2.53e6`, 476 nats at
+  `10⁸`, descending ~100 nats per decade into its own rounding with `edf` railed
+  at `p`. That is what `20bde053f` read as "the criterion is monotone in ell all
+  the way to its asymptote … ell-hat ran to 1.5e6, a readout of the box rather
+  than of the data": not a flat likelihood, a false one.
+
+  The kernel is now `k = ℓ·(e^{−d_κ/ℓ} − 1)`, evaluated as `ℓ·expm1(−d_κ/ℓ)`.
+  No subtraction of near-equal numbers; `X` and `S` no longer collapse; `ρ̂` is
+  flat in the range (`−5.0978 ± 1e-4` over eleven decades); and `k → −d_κ`
+  exactly as `ℓ → ∞`, so the far face of the range is the geodesic-DISTANCE
+  kernel — `−d` is conditionally negative definite on all three space forms, so
+  it is an ordinary non-degenerate smooth rather than nothing. Three
+  consequences, each handled rather than worked around: the raw `m × m` matrix is
+  no longer PSD (it is conditionally negative definite), so the penalty is built
+  from the RESTRICTED Gram `zᵀkz = ℓ·zᵀe^{−d/ℓ}z ≻ 0`, which is also where the
+  cancellation would otherwise reappear; the ψ jets change shape, with the two
+  `η` blocks becoming `ℓ·φ(q)` / `ℓ·χ(q)` for `φ = e^{−u}(1+u) − 1`,
+  `χ = e^{−u}(1+u+u²) − 1`, both evaluated by series below `u = ½` because both
+  have a second-order zero at the origin; and the declared scale contract goes
+  from invariance to equivariance of weight one, because the kernel is a LENGTH.
+
+  With the cancellation gone nothing numerical bounds the range from above, so
+  the chart is truncated where the MODEL stops moving: `ℓ_hi = d_max/(2√ε)`, past
+  which every design entry is within `√ε` of the geodesic-distance design.
+  Arriving there is `RangeSolveOutcome::DistanceKernelLimit`, published as
+  `RangeEstimateSupport` on the curvature report and the Python row — an arrival,
+  not a rail, and the range's version of the `KappaEstimateSupport` `146f9232d`
+  added for the same reason. A criterion that converges to a member of its own
+  family does not need a stopping rule; it needs its limit to be a point of the
+  chart. On that basis the pinned-κ/free-range enrollment `20bde053f` reverted is
+  restored: a pinned `kappa=` fixes the geometry, not the resolution.
+
+  Verified by `the_contrast_gauge_is_the_same_model_and_the_exp_gauge_loses_it_2747`
+  (the two gauges agree to <1e-12 across the mid box; at the box top the `exp`
+  gauge's error must land inside the DERIVED bracket `ε·ℓ/d` taken over the
+  geometry's own evaluated span — measured 1.78e-10 against a predicted
+  [1.1e-10, 8.8e-10]) and `the_range_limit_is_the_geodesic_distance_kernel_2747`
+  (on both branches and flat, the design converges to `−D z` at first order in
+  `1/ℓ`, reaching <1e-8 at `ℓ=10⁹`, with the restricted Gram strictly PD
+  throughout). `gam-terms --lib constant_curvature`: 18 passed.
+  `gam-models --lib constant_curvature`: 7 passed, including the 3×3
+  curvature×range identification gate and the reverse-mode adjoint FD check.
+
 - **A family had two log-likelihoods, and the joint-Newton trust ratio divided
   one by the derivative of the other (#2714).** The accept test compares
   `old_objective − trial_objective`, and the two ends came from different family
