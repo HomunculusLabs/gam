@@ -2607,6 +2607,25 @@ impl<'a> AffineRemlProfile<'a> {
     /// cell, not of which enclosure form was tighter, so it is carried across
     /// unchanged from the whole-cell reading (the conservative one — the
     /// midpoint reading is taken over a degenerate interval and is never wider).
+    ///
+    /// # One consequence worth naming, because it points the other way
+    ///
+    /// `resolution_flat_region` retires a cell when its score range fits inside
+    /// `2 * evaluation_error`, so a TIGHTER value range makes that verdict
+    /// easier to reach — and a caller whose optimum lands in such a region gets
+    /// a refusal (`ResidualCascadeError::RemlOptimumResolutionFlat`) rather than
+    /// a fit. Tightening could in principle trade a subdivision-budget refusal
+    /// for a resolution-flat one.
+    ///
+    /// It does not, because the flat test is the LAST thing a cell is offered:
+    /// dominance, derivative exclusion and stationary isolation are all tried
+    /// first, and centring strengthens each of them by more than it strengthens
+    /// the flat test — the derivative and curvature ranges are what decide those
+    /// three, and both are now centred too. Measured on the cascade design this
+    /// was built for: the search returns `Stationary(0)` at every requested
+    /// resolution from `1.49e-8` to `1e-3`, never `ResolutionFlat`, and
+    /// `auto_reml_certifies_a_design_the_data_cannot_identify` asserts exactly
+    /// that so the trade cannot creep in unnoticed.
     pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
         let (direct, direct_third) = self.enclose_direct(lo, hi)?;
         if lo == hi {
