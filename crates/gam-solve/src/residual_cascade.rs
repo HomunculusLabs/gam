@@ -8661,59 +8661,121 @@ mod refinement_decision_tests {
             profile.modes.len()
         );
 
-        // The retry loop of `maximize_score_1d_value_ordered`, unrolled so each
-        // pass can be timed and printed. Same contraction rule, same oracles.
-        let mut resolution = f64::EPSILON.sqrt();
-        for pass in 0..64 {
+        // FALSIFIED, and the falsification points somewhere better. The ladder
+        // below refuses at EVERY request from 1.49e-8 to 1e-3, and the failing
+        // cell simply walks down the domain as the request coarsens. So the
+        // request is not what binds and `subdivision_budget`'s recommendation is
+        // not the repair here.
+        //
+        // What the failure record shows instead: on the terminal cell
+        // `[-16.78595040183548, -16.784710795129012]` (width 1.2396e-3) the
+        // enclosure reports
+        //     score      = [36.611966585064685, 36.65287355922212]   (width 4.0907e-2)
+        //     derivative = [-2.0454623868609193e-2, 2.045226959739566e-2]
+        // and 4.0907e-2 / 1.2396e-3 = 33.0 EXACTLY — the number of kept modes —
+        // while the derivative enclosure bounds the score's variation over that
+        // same cell by 2.045e-2 * 1.2396e-3 = 2.535e-5, sixteen hundred times
+        // smaller. Two enclosures of the same function disagree by 1600x, and
+        // `resolution_flat_region` reads the loose one, so a cell that IS flat
+        // at the evaluator's resolution is subdivided instead of retired.
+        //
+        // Only one of the two can be right, and which one it is decides whether
+        // this is a tightness defect or a SOUNDNESS defect in a proof object.
+        // That is what this measures, by finite differences of the same
+        // evaluator, before anything is changed.
+        println!("[PROBE] --- ladder: is the REQUEST what binds? ---");
+        for request in [f64::EPSILON.sqrt(), 1.0e-6, 1.0e-4, 1.0e-3] {
             let started = std::time::Instant::now();
-            let search = match gam_math::score_opt::maximize_score_1d(
+            let outcome = gam_math::score_opt::maximize_score_1d(
                 lo,
                 hi,
-                resolution,
+                request,
                 |x| affine.evaluate(x),
                 |a, b| affine.enclose(a.x, b.x),
-            ) {
-                Ok(search) => search,
-                Err(error) => {
-                    println!(
-                        "[PROBE] pass={pass} resolution={resolution:.6e} \
-                         elapsed={:.3}s TERMINAL ERROR {error}",
-                        started.elapsed().as_secs_f64()
-                    );
-                    return;
-                }
-            };
-            let certificate = search.value_certificate;
-            println!(
-                "[PROBE] pass={pass} resolution={resolution:.6e} elapsed={:.3}s \
-                 excess={:.6e} comparison_resolution={:.6e} ratio={:.3e} \
-                 location={:?} stationary={} flat={} dominated={}",
-                started.elapsed().as_secs_f64(),
-                certificate.maximum_excess,
-                certificate.comparison_resolution,
-                certificate.maximum_excess / certificate.comparison_resolution.max(f64::MIN_POSITIVE),
-                search.location,
-                search.stationary_points.len(),
-                search.resolution_flat_regions.len(),
-                search.dominated_regions.len(),
             );
-            if certificate.maximum_excess <= certificate.comparison_resolution {
-                println!("[PROBE] ORDERED at pass={pass}");
-                return;
+            match outcome {
+                Ok(search) => println!(
+                    "[PROBE] request={request:.3e} OK in {:.2}s location={:?}",
+                    started.elapsed().as_secs_f64(),
+                    search.location
+                ),
+                Err(error) => println!(
+                    "[PROBE] request={request:.3e} ERR in {:.2}s {}",
+                    started.elapsed().as_secs_f64(),
+                    match &error {
+                        gam_math::score_opt::ScoreSearchError::SubdivisionBudget {
+                            cell_lo,
+                            cell_hi,
+                            subdivisions,
+                            budget,
+                            ..
+                        } => format!(
+                            "SubdivisionBudget {subdivisions}/{budget} at [{cell_lo:.9}, {cell_hi:.9}]"
+                        ),
+                        other => format!("{other:?}"),
+                    }
+                ),
             }
-            let binary = 0.5 * resolution;
-            let directed = if certificate.comparison_resolution > 0.0 {
-                resolution * (certificate.comparison_resolution / certificate.maximum_excess)
-            } else {
-                binary
-            };
-            let next = binary.min(directed);
-            if !(next.is_finite() && next > 0.0 && next < resolution) {
-                println!("[PROBE] contraction exhausted at pass={pass}");
-                return;
-            }
-            resolution = next;
         }
-        println!("[PROBE] 64 passes without ordering — the retry axis does not terminate");
+
+        println!("[PROBE] --- looseness: the enclosure against the function ---");
+        // The terminal cell of the tightest rung, read at shrinking widths.
+        // `evaluate` returns an ANALYTIC jet, so its derivative at an interior
+        // point is the soundness check with signal in it; a finite difference
+        // of two rounded values is not, because at these widths the numerator
+        // is `2*eval_err` of noise over a `1e-5` base. The FD is printed with
+        // its own noise bar next to it and asserted on nothing.
+        let center = -16.785_330_598_482_25_f64;
+        for exponent in [-1.0_f64, -2.0, -3.0, -4.0, -5.0, -6.0] {
+            let half = 10.0_f64.powf(exponent);
+            let (a, b) = (center - half, center + half);
+            let width = b - a;
+            let jet = affine.evaluate(center).expect("jet at the midpoint");
+            let enclosure = affine.enclose(a, b).expect("enclosure");
+            let score_width = enclosure.score.value.hi - enclosure.score.value.lo;
+            let derivative_span = enclosure.derivative.hi.abs().max(enclosure.derivative.lo.abs());
+            let curvature_span = enclosure.curvature.hi.abs().max(enclosure.curvature.lo.abs());
+            // What the derivative enclosure itself says the score can move by
+            // across this cell. A VALUE enclosure wider than this is pure
+            // overestimation: the two are enclosures of the same function.
+            let mean_value_bound = derivative_span * width;
+            let fd_noise = 2.0 * enclosure.score.evaluation_error / width;
+            println!(
+                "[PROBE] width={width:.3e} jet_d={:.9e} jet_dd={:.9e} \
+                 encl_d=[{:.6e}, {:.6e}] encl_dd=[{:.6e}, {:.6e}] \
+                 score_width={score_width:.6e} mvt_bound={mean_value_bound:.6e} \
+                 value_looseness={:.4e} derivative_looseness={:.4e} \
+                 flat_test={score_width:.3e}<=2eta={:.3e}? {} fd_noise={fd_noise:.3e}",
+                jet.derivative,
+                jet.curvature,
+                enclosure.derivative.lo,
+                enclosure.derivative.hi,
+                enclosure.curvature.lo,
+                enclosure.curvature.hi,
+                score_width / mean_value_bound.max(f64::MIN_POSITIVE),
+                derivative_span / jet.derivative.abs().max(f64::MIN_POSITIVE),
+                2.0 * enclosure.score.evaluation_error,
+                score_width <= 2.0 * enclosure.score.evaluation_error,
+            );
+            // Soundness, with signal: the analytic derivative and curvature at
+            // an interior point must lie inside the cell's certified ranges.
+            assert!(
+                enclosure.derivative.contains(jet.derivative),
+                "UNSOUND derivative enclosure on [{a}, {b}]: the analytic derivative {} at the \
+                 midpoint is outside [{}, {}]",
+                jet.derivative,
+                enclosure.derivative.lo,
+                enclosure.derivative.hi
+            );
+            assert!(
+                enclosure.curvature.contains(jet.curvature),
+                "UNSOUND curvature enclosure on [{a}, {b}]: the analytic curvature {} at the \
+                 midpoint is outside [{}, {}]",
+                jet.curvature,
+                enclosure.curvature.lo,
+                enclosure.curvature.hi
+            );
+            let _ = curvature_span;
+        }
     }
 }
