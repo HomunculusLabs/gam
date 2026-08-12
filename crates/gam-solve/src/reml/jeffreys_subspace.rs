@@ -2807,10 +2807,22 @@ impl JeffreysHphiDriftBase {
         // mirror the upper triangle so the stored result is exactly symmetric (the
         // GEMM need not return a bit-symmetric product).
         let gram = dw_rows.dot(&a_rows.t()) + aw_rows.dot(&da_rows.t()); // p × p
+        // `as_slice` is C-ORDER-ONLY, and neither `dot` nor `+` promises that
+        // order: `a_rows.t()` is an F-order view, so the product — and the sum
+        // that inherits its layout — can come back column-major, at which point
+        // `as_slice` returns `None` and this `expect` PANICS in production
+        // code. Measured: `binomial_location_scale_expected_hphi_drift_matches_
+        // finite_difference` dies here with "Jeffreys drift Gram is contiguous"
+        // on an ordinary two-block fixture. `as_standard_layout` borrows when
+        // the order is already C (the common case, so the GEMM path this
+        // function exists for is unchanged) and copies only when it is not,
+        // which is strictly cheaper than the `O(p²·m²)` scalar loop the GEMM
+        // replaced.
+        let gram = gram.as_standard_layout();
         let mut out = Array2::<f64>::zeros((p, p));
         let gram_values = gram
             .as_slice()
-            .expect("Jeffreys drift Gram is contiguous");
+            .expect("a standard-layout array is C-contiguous by construction");
         let out_values = out
             .as_slice_mut()
             .expect("Jeffreys drift output is contiguous");
