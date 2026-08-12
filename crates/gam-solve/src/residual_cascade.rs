@@ -8718,6 +8718,24 @@ mod refinement_decision_tests {
             }
         }
 
+        println!("[PROBE] --- end to end: does fit_reml certify this design now? ---");
+        {
+            let started = std::time::Instant::now();
+            match design.fit_reml() {
+                Ok(fit) => println!(
+                    "[PROBE] fit_reml OK in {:.2}s log_lambda={} logdet={:?} rss_pen={}",
+                    started.elapsed().as_secs_f64(),
+                    fit.log_lambda(),
+                    fit.certificate.logdet_method,
+                    fit.rss_pen
+                ),
+                Err(error) => println!(
+                    "[PROBE] fit_reml ERR in {:.2}s {error}",
+                    started.elapsed().as_secs_f64()
+                ),
+            }
+        }
+
         println!("[PROBE] --- looseness: the enclosure against the function ---");
         // The terminal cell of the tightest rung, read at shrinking widths.
         // `evaluate` returns an ANALYTIC jet, so its derivative at an interior

@@ -2593,22 +2593,33 @@ impl<'a> AffineRemlProfile<'a> {
             next_down(lo - centre_point).min(0.0),
             next_up(hi - centre_point).max(0.0),
         );
-        let centred_value = centre.score.value.add(direct.derivative.mul(offset));
+        // The DERIVATIVE is centred first and the value is then centred on the
+        // result, not on the natural extension's derivative. The two are
+        // sequential for a reason: the remainder term of the value's mean value
+        // form is `F'(cell) * [a-m, b-m]`, so it is only as tight as the
+        // derivative range fed into it, and the centred derivative is the
+        // tighter of the two available. On the cancelling fixture at `w = 0.2`
+        // that is a further factor of 3.3 on the value range, and it is what
+        // makes `width(F) <= width(F({m})) + max|F'| * w` hold BY CONSTRUCTION
+        // against the range this function actually returns — the invariant
+        // `the_value_enclosure_never_exceeds_the_bound_its_own_derivative_certifies`
+        // gates, and the one the natural extension broke by `7.4e5`.
         let centred_derivative = centre.derivative.add(direct.curvature.mul(offset));
         // Two rigorous outer enclosures of the same nonempty exact range cannot
         // be disjoint, so the fallbacks below are unreachable; they are written
         // in the sound direction (keep the natural extension) rather than as a
         // panic, because a refusal here would convert a tightening into a
         // failure.
+        let derivative = direct
+            .derivative
+            .intersection(centred_derivative)
+            .unwrap_or(direct.derivative);
+        let centred_value = centre.score.value.add(derivative.mul(offset));
         let value = direct
             .score
             .value
             .intersection(centred_value)
             .unwrap_or(direct.score.value);
-        let derivative = direct
-            .derivative
-            .intersection(centred_derivative)
-            .unwrap_or(direct.derivative);
         Ok(DerivativeEnclosure {
             score: ScoreValueEnclosure {
                 value,
@@ -4882,6 +4893,117 @@ mod tests {
             "the residual complement must remove the independent near-one dependency: {:?}",
             enclosure.derivative
         );
+    }
+
+    /// The score VALUE enclosure may never be looser than the bound its own
+    /// DERIVATIVE enclosure certifies for the same cell.
+    ///
+    /// Both are enclosures of one function, so the mean value theorem ties
+    /// them: across a cell of width `w` the score cannot move by more than
+    /// `max|f'| * w`, hence
+    ///
+    /// ```text
+    ///     width(F([a,b]))  <=  width(F({m}))  +  max|F'([a,b])| * w
+    /// ```
+    ///
+    /// This is the invariant the natural interval extension broke, and it broke
+    /// it in the regime the search lives in. The score is
+    /// `-0.5 * (D*logdet_block + dof*deviance_block)` and near a REML optimum
+    /// those two blocks cancel — each moves by `O(rank)` per unit of `rho`
+    /// while their sum does not. Interval addition cannot see that the two
+    /// movements are the same quantity with opposite signs, so the natural
+    /// extension returned a range of width `rank * w` where the exact function
+    /// has `|f'| * w`. Measured on a 33-mode cascade profile, that was a factor
+    /// of `7.4e5` at `w = 2e-6`, and the factor DIVERGED as the cell shrank
+    /// (`O(w)` against `O(w^2)`).
+    ///
+    /// `resolution_flat_region` reads the value range, so the consequence was
+    /// not a loose number but a search that could retire no cell and refused
+    /// designs it could certify. The centred form in [`AffineRemlProfile::enclose`]
+    /// restores the invariant by construction; this gate is what stops the
+    /// natural extension coming back.
+    ///
+    /// The fixture is built to CANCEL: `g_i = s_i = q_i = 1` with
+    /// `E = modes = dof = rank`, whose analytic score is exactly constant in
+    /// `rho`, so `|f'|` is zero to roundoff and any first-order slack in the
+    /// value range shows up immediately.
+    #[test]
+    fn the_value_enclosure_never_exceeds_the_bound_its_own_derivative_certifies() {
+        const MODES: usize = 33;
+        let grams = [1.0; MODES];
+        let penalties = [1.0; MODES];
+        let projected = [1.0; MODES];
+        let energies = [MODES as f64];
+        let profile = AffineRemlProfile::new(
+            &grams,
+            &penalties,
+            &projected,
+            &energies,
+            MODES as f64,
+            MODES,
+            0.0,
+        )
+        .expect("valid cancellation fixture");
+
+        let centre = -12.0_f64;
+        let mut previous_width = f64::INFINITY;
+        for exponent in [-1_i32, -2, -3, -4, -5, -6] {
+            let half = 10.0_f64.powi(exponent);
+            let (a, b) = (centre - half, centre + half);
+            let width = b - a;
+            let cell = profile.enclose(a, b).expect("cell enclosure");
+            let point = profile.enclose(centre, centre).expect("point enclosure");
+
+            // Soundness first: the cell's ranges must CONTAIN the degenerate
+            // cell's, which is what `certify_endpoint_derivative` relies on and
+            // what an intersection of two enclosures could otherwise break.
+            assert!(
+                cell.score.value.lo <= point.score.value.lo
+                    && point.score.value.hi <= cell.score.value.hi,
+                "w={width:e}: the midpoint value range {:?} escaped the cell range {:?}",
+                point.score.value,
+                cell.score.value
+            );
+            assert!(
+                cell.derivative.lo <= point.derivative.lo
+                    && point.derivative.hi <= cell.derivative.hi,
+                "w={width:e}: the midpoint derivative range {:?} escaped the cell range {:?}",
+                point.derivative,
+                cell.derivative
+            );
+
+            let value_width = cell.score.value.hi - cell.score.value.lo;
+            let point_width = point.score.value.hi - point.score.value.lo;
+            let derivative_bound = cell.derivative.hi.abs().max(cell.derivative.lo.abs());
+            let mean_value_bound = point_width + derivative_bound * width;
+            assert!(
+                value_width <= mean_value_bound * (1.0 + 1.0e-9),
+                "w={width:e}: the value range is {value_width:e} wide but this cell's own \
+                 derivative enclosure {:?} bounds the score's movement across it by \
+                 {mean_value_bound:e} — the natural extension is back",
+                cell.derivative
+            );
+
+            println!(
+                "[GATE] w={width:e} value_width={value_width:e} point_width={point_width:e} \
+                 mvt={mean_value_bound:e} D={derivative_bound:e}"
+            );
+            // And it must actually CONVERGE. A first-order range falls by 10
+            // per decade of cell width; this one falls by ~1000, because the
+            // remainder is `max|F'| * w` and `max|F'|` is itself centred. The
+            // gate asks for better than 50 per decade — enough to separate
+            // `O(w)` from anything above it without pinning a rate — until the
+            // range reaches the floor every enclosure has, the width of the
+            // DEGENERATE-cell reading, below which there is nothing left to
+            // win. Measured floor here: 8.98e-12 on a score of magnitude ~30.
+            assert!(
+                value_width <= previous_width / 50.0 || value_width <= 2.0 * point_width,
+                "w={width:e}: the value range fell only {previous_width:e} -> \
+                 {value_width:e}, and it is not at the point-enclosure floor \
+                 {point_width:e} — that is first-order behaviour"
+            );
+            previous_width = value_width;
+        }
     }
 
     #[test]
