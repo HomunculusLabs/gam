@@ -564,6 +564,32 @@ pub enum ScoreSearchError<E> {
 /// A fixed `sqrt(EPSILON)` request cannot be right for both. The resolution
 /// should be derived from the evaluator's certified error at the working point
 /// rather than pinned to a machine constant.
+///
+/// # That recommendation is NOT the repair for a budget refusal, measured
+///
+/// It was taken as one, and the discriminator says otherwise. On a rank-deficient
+/// cascade design (36 rows, 1725 columns, 33 modes on a 40.6-wide domain) that
+/// refused here at 8193/8192 subdivisions, the same search was run at four
+/// requested resolutions spanning five orders — `1.49e-8`, `1e-6`, `1e-4`,
+/// `1e-3` — and **every one refused**, the terminal cell merely walking down the
+/// domain (`-16.79`, `-18.51`, `-20.08`, `-20.59`) as the request coarsened.
+/// Matching the request to the evaluator's error bought nothing there.
+///
+/// What bound that search was the ENCLOSURE, one level down: the score's value
+/// range was a natural interval extension, first order in the cell width with
+/// constant `rank` (`33.0·w`, over six decades) against an exact `|f'|` of
+/// `1.15e-5`. `resolution_flat_region` reads that range, so no cell could be
+/// retired at any request. With the centred form in
+/// [`AffineRemlProfile::enclose`] the same design certifies in 0.4 s at every
+/// one of those four requests.
+///
+/// The two `spline_scan` refusals named above also both PASS now
+/// (`cargo test -p gam-solve --lib`, 1898 of 1901, and neither is among the
+/// three reds). So the table above stands as a measurement of a real
+/// mismatch — a machine constant is still the wrong source for a
+/// problem-dependent tolerance — but the failures it was written to explain are
+/// gone, and it should not be cited as the cause of a fresh one without a
+/// discriminator like the ladder above.
 pub fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
     let width = hi - lo;
     if !(width.is_finite() && width > 0.0 && resolution.is_finite() && resolution > 0.0) {
