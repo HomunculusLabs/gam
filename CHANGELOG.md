@@ -1,5 +1,88 @@
 ## Unreleased
 
+- **A family had two log-likelihoods, and the joint-Newton trust ratio divided
+  one by the derivative of the other (#2714).** The accept test compares
+  `old_objective − trial_objective`, and the two ends came from different family
+  hooks: `old_objective` is built from `current_log_likelihood`, which
+  `load_joint_gradient_evaluation` reads off
+  `exact_newton_joint_gradient_evaluation`, while `trial_objective` is built from
+  `log_likelihood_only`, which the line search calls at `β + δ`. For the latent
+  survival family those were two independent implementations — the gradient hook
+  sums the row program's `∂_a^j K₀`-basis value channel, the line search summed
+  `LatentSurvivalRowJet`'s rung-basis assembly.
+
+  Writing `b(β)` for the gap, and noting that the base point does not move across
+  a backtracking ladder,
+
+  ```text
+  actual_reduction = −[ℓ(β+δ) − ℓ(β)] − b(β) + (penalty terms),
+  ```
+
+  so `b` is a **constant of the ladder**: shrinking the radius shrinks the
+  bracket and leaves `b` alone, and `actual_reduction → −b` instead of `→ 0`.
+  Below the radius where the true reduction falls under `|b|`, the sign of `b`
+  decides every attempt outright — which is the
+  `rejects[model,likelihood,objective,feasibility] = [0,0,2,0]` partition at trust
+  radius `1e-12` this issue was filed on. The two bases are an exact integer
+  change of basis in real arithmetic (`m^k K_k = (−1)^k (∂_a)_k K₀`) and two
+  different quadratures in f64, so `b ≠ 0` by construction on any row whose term
+  list reaches `k ≥ 1` — every exact-event row. `k = 0` lists agreed anyway, which
+  is why right-censored rows were silent about it.
+
+  `log_likelihood_only` now evaluates the same row expression through a value-only
+  lift of the same row program and sums it through the same deterministic
+  reduction, so the two scalars are **bit-identical** and `b ≡ 0`. Measured over a
+  35-state sweep: `worst |accept − gradient| = 0.0` exactly, and the value lift
+  matches the order-two lift bit-for-bit at 100 states. It is cheaper than what it
+  replaces, not dearer — the value backend skips the `K + K(K+1)/2` normalised
+  moments while building the same kernel bundle.
+
+  Two sub-faults of the same shape were fixed under it, because the value lift is
+  only bit-identical if neither of them holds:
+
+  * **The log-survival panel was placed from the requested derivative order.**
+    `log_survival_panel` chose its window and node count from `order`, so two
+    consumers at one `(μ, σ)` read the same integral off two Clenshaw–Curtis
+    rules. On one latent-survival row the value, gradient/Hessian, contracted
+    third and fourth ask for `max_k = 4, 5, 6, 7` — so the Hessian was assembled
+    from a different `∂_a K₀` than the gradient it was paired with. The placement
+    is now one of exactly two surfaces, each a pure function of `(branch, μ, σ)`,
+    and the hot value route (every `ln S` in the tree, `max_k + 1` per bundle) is
+    byte-identical and pays nothing; only the single tower request per bundle
+    moves, by ~1.15× in nodes.
+  * **Tower certification was all-or-nothing, so the BASIS depended on the
+    request too.** Refusing the whole tower when its last rung cancelled denied a
+    consumer needing rungs `0..=1` a basis well conditioned at every rung it
+    reads, and let two consumers of one term list be routed differently because
+    one also wanted a Hessian. It is now the longest certified prefix; a term list
+    needing a rung past the truncation still falls back whole, so nothing is ever
+    a partial mix.
+
+- **The constraint-face retention ladder skipped faces, and could exit in one
+  pass while reporting that it had exhausted double precision (#2714).**
+  `constrained_posterior_correction` retains constraint rows by a per-row floor
+  and then checks the assembled face against the identity that defines its lift
+  (`max|A G − I| ≤ 1e-3`), lowering the floor on a miss by `departure/tolerance`.
+  That factor is read off the per-row model `departure ≈ ε·diagonal/pivot`, which
+  the filter's own documentation says bounds the face's conditioning only when the
+  elimination is ordered by pivot magnitude — and this walk is ordered by slack,
+  which is exactly the case the ladder runs in. So it skipped larger admissible
+  faces, and on a badly conditioned face one pass carried the floor from `1e-3`
+  past `f64::EPSILON`, out of the loop and into a terminal message describing a
+  ladder that had taken one rung.
+
+  Retention is a step function of the floor `d`: a row is kept iff
+  `d > d_r = (k+1)·ε·diagonal_r/pivot_r`, so the retained set changes only at the
+  accepted rows' own breakpoints and the face is bit-identical between them. The
+  ladder now steps to `max_r d_r`, which drops exactly the worst-conditioned
+  accepted row. It is exhaustive (no admissible face can be skipped), minimal (it
+  stops at the largest face that delivers the accuracy), and terminates in at most
+  `q` passes rather than ~40 — ending at a single retained row, where `W` is `1×1`
+  and the departure gate cannot fail. No constant changed; the step size is read
+  off the retention rule instead of off an error model. Gated by a brute-force
+  oracle that sweeps the floor on a 64-per-octave grid and asserts the ladder
+  returns the largest face satisfying its own identity.
+
 - **The joint trust region measured the step in one norm and the radius in
   another, so on any multi-block fit it could only ever shrink (#2612).** The
   coupled joint-Newton solve carries two trust constraints: one `D`-metric ball
