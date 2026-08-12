@@ -2266,13 +2266,19 @@ impl Core {
         // which is what box-filling nets produce on a small sample — `Z` is almost
         // all of `rank`, so every score enclosure is inflated by that ratio.
         //
-        // What this does NOT do is make such a design certifiable, and the
-        // measurement says so: a 36-row / 1725-column design still spins in
-        // `AffineRemlProfile::enclose` under `maximize_score_1d` past 900 s with
-        // all 1692 nulls dropped and only 33 modes left. So the inflation was not
-        // that design's blocker; the unidentified end of its spectrum is, and that
-        // is a separate defect. Dropping the nulls is kept because it is exact and
-        // strictly tightens every enclosure, not because it fixed that case.
+        // What this does NOT do, on its own, is make such a design certifiable:
+        // a 36-row / 1725-column design with all 1692 nulls dropped and only 33
+        // modes left was still refused, so the inflation was not that design's
+        // blocker. The blocker turned out to be a different and larger
+        // overestimation one level down — `AffineRemlProfile::enclose` was a
+        // natural interval extension whose VALUE range was first order in the
+        // cell width with constant `rank` (`33.0·w`, measured over six decades)
+        // against an exact `|f'|` of `1.15e-5`, so no cell could be retired as
+        // resolution-flat and the search died on its subdivision budget. With
+        // that enclosure centred, the same design certifies in about a second
+        // (`auto_reml_certifies_a_design_the_data_cannot_identify`). Dropping the
+        // nulls is kept because it is exact and strictly tightens every
+        // enclosure, which is its own reason.
         let mut kept_eigenvalue = Vec::with_capacity(rank);
         let mut kept_projected_square = Vec::with_capacity(rank);
         for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
@@ -6573,24 +6579,27 @@ mod refinement_decision_tests {
     /// a returned fit from `fit_reml` carries the KKT and ordering proofs, and
     /// its log-determinant route is exact.
     ///
-    /// The fixture has MORE ROWS THAN COLUMNS on purpose. A cascade whose
-    /// box-filling net outruns its sample — 36 rows against 1725 columns, say —
-    /// does not certify at any width, including widths under `DENSE_GRAM_MAX`
-    /// where the route was always open: `maximize_score_1d` subdivides for the
-    /// unidentified end of the spectrum and does not terminate. That is a
-    /// separate defect from this issue's, it predates the change here, and
-    /// putting it in this gate's fixture would measure it instead of the
-    /// capability.
+    /// The fixture has MORE ROWS THAN COLUMNS on purpose, and that premise is
+    /// now about keeping this gate on ITS subject rather than about a design
+    /// nobody could fit. A cascade whose box-filling net outruns its sample —
+    /// 36 rows against 1725 columns, say — used to be refused at every width,
+    /// including widths under `DENSE_GRAM_MAX` where the route was always open;
+    /// that was a first-order-loose score-value enclosure and not a property of
+    /// the data, and such designs certify now
+    /// (`auto_reml_certifies_a_design_the_data_cannot_identify`). Keeping this
+    /// fixture rank-sufficient still matters: this gate is about the WIDTH
+    /// regime between the Gram cache and the spectrum budget, and a fixture that
+    /// also crossed the identifiability frontier would fold two claims into one
+    /// green.
     #[test]
     fn auto_reml_certifies_past_the_dense_gram_cache() {
         // The grid side is SEARCHED for rather than pinned, because the two
         // premises pull against each other and neither is a property of the code
         // under test. The width has to land strictly between the Gram cache and
         // the spectrum budget, and the sample has to be at least as large as the
-        // width: a design with FEWER rows than columns is a separate,
-        // pre-existing problem for the certified search (see
-        // `the_spectral_residual_carries_no_null_modes`) and would be measured
-        // here instead of the capability. Six levels of box-filling net set a
+        // width: a design with FEWER rows than columns is a separate claim (see
+        // `auto_reml_certifies_a_design_the_data_cannot_identify`, which is the
+        // gate for it) and would be measured here instead of the capability. Six levels of box-filling net set a
         // floor on the width, and a finer data grid adds centres of its own, so
         // the admissible sides are a band.
         //
@@ -8616,6 +8625,107 @@ mod refinement_decision_tests {
                 Err(other) => panic!("{name}: unexpected cascade outcome: {other}"),
             }
         }
+    }
+
+    /// A cascade design the data cannot identify is CERTIFIABLE, and the
+    /// certified route is what certifies it.
+    ///
+    /// This is the end-to-end angle on the centred-form repair in
+    /// `AffineRemlProfile::enclose`, and it is deliberately the design three
+    /// places in this file used to describe as impossible: `dense_fixture(6)`
+    /// at `levels = 6` is 36 rows against 1725 columns, a Schur rank of 1722
+    /// against 33 identifiable directions. Nothing about it is pathological —
+    /// it is what a geometric box-filling net produces on a small sample, which
+    /// is to say the ordinary small-`n` case.
+    ///
+    /// What used to happen: the score's VALUE enclosure was a natural interval
+    /// extension whose overestimation was first order in the cell width with
+    /// constant `rank` (`33.0·w`, measured over six decades), while the exact
+    /// score moved by `|f'|·w` with `|f'| = 1.15e-5`. `resolution_flat_region`
+    /// reads that range, so no cell could be retired, no cell could be
+    /// derivative-excluded, and `maximize_score_1d` refused at 8193/8192
+    /// subdivisions. The failure was reported — correctly — as
+    /// `RemlScoreSearchUndecomposable`, which named the design's rank and the
+    /// sample's identifiability and looked for all the world like a statement
+    /// about the data.
+    ///
+    /// It was a statement about the enclosure. Centring the value and derivative
+    /// forms on the cell midpoint makes the overestimation second order, and the
+    /// same design certifies in about a second.
+    ///
+    /// The premise is asserted rather than assumed, because a fixture that
+    /// drifted out of the rank-deficient regime would pass this gate while
+    /// proving nothing.
+    #[test]
+    fn auto_reml_certifies_a_design_the_data_cannot_identify() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+            .expect("cascade design");
+        let core = &design.core;
+        let nullity = core.nullity();
+        let schur_rank = core.m - nullity;
+        let identifiable = core.y.len() - nullity;
+        assert!(
+            schur_rank > identifiable,
+            "premise: this fixture must be rank-deficient (Schur rank {schur_rank} against \
+             {identifiable} identifiable directions)"
+        );
+        assert!(
+            core.m <= CERTIFIED_SPECTRUM_MAX,
+            "premise: the refusal under test must be the SEARCH's, not the spectrum budget's \
+             ({} columns against {CERTIFIED_SPECTRUM_MAX})",
+            core.m
+        );
+
+        let fit = design.fit_reml().expect(
+            "a rank-deficient cascade design must certify: the score is a genuine function of \
+             log lambda on its POSITIVE modes, and refusing it was an artifact of a \
+             first-order-loose value enclosure",
+        );
+        assert_eq!(fit.certificate.logdet_method, LogdetMethod::DenseExact);
+        assert!(
+            fit.log_lambda().is_finite(),
+            "certified selection must return a finite log lambda, got {}",
+            fit.log_lambda()
+        );
+        assert!(
+            fit.rss_pen.is_finite() && fit.rss_pen > 0.0,
+            "the minted fit must carry a positive penalized residual, got {}",
+            fit.rss_pen
+        );
+
+        // The certificate, not just the fit: the search must have reached a
+        // decided location rather than been handed one, and the value ordering
+        // must have closed. `fit_reml` already refuses
+        // `RemlValueOrderingUnresolved` and a failed KKT, so reaching here is
+        // that proof; this re-reads the search directly so a future change that
+        // routes around `fit_reml` cannot make the gate vacuous.
+        let profile = core.reml_profile().expect("spectral profile");
+        let (lo, hi) = profile.log_lambda_domain().expect("domain");
+        let affine = profile
+            .affine_view()
+            .expect("affine view")
+            .expect("spectral residual form");
+        let search = affine
+            .maximize_value_ordered(lo, hi, f64::EPSILON.sqrt())
+            .expect("the certified search must decompose this domain");
+        assert!(
+            !matches!(
+                search.location,
+                gam_math::score_opt::ScoreOptimumLocation::ResolutionFlat(_)
+            ),
+            "the optimum must be a decided location, not a resolution-flat region: {:?}",
+            search.location
+        );
+        assert!(
+            search.value_certificate.maximum_excess
+                <= search.value_certificate.comparison_resolution,
+            "the global value ordering must close: excess {} against comparison resolution {}",
+            search.value_certificate.maximum_excess,
+            search.value_certificate.comparison_resolution
+        );
     }
 
     /// PROBE (#2758 residual): does the certified REML search terminate on a
