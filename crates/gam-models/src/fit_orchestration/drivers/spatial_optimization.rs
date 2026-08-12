@@ -8768,6 +8768,14 @@ pub struct CurvatureInference {
     pub length_scale_hat: f64,
     /// Was `ℓ̂` estimated, or pinned by an explicit `length_scale=`?
     pub length_scale_estimated: bool,
+    /// WHERE `ℓ̂` sits in the range chart (gam#2747). `length_scale_hat` alone
+    /// cannot distinguish an interior minimum from an arrival at the
+    /// geodesic-distance face from a stop at the evaluability wall, and the
+    /// three support different claims about the magnitude — see
+    /// [`gam_geometry::curvature_estimand::RangeEstimateSupport`]. This is the
+    /// range's version of `ci.kappa_hat_support`, and it exists for the same
+    /// reason: a provenance a reader has to infer is one they will get wrong.
+    pub length_scale_support: gam_geometry::curvature_estimand::RangeEstimateSupport,
 }
 
 /// Compute the #944 curvature inference for the constant-curvature smooth at
@@ -9059,7 +9067,7 @@ pub fn curvature_inference_forspec(
     )
     .map_err(EstimationError::RemlOptimizationFailed)?;
 
-    let (eta_hat, _, _) = profile.minimize_over_eta(kappa_hat)?;
+    let (eta_hat, _, range_outcome) = profile.minimize_over_eta(kappa_hat)?;
     Ok(CurvatureInference {
         term_idx,
         kappa_hat,
@@ -9067,6 +9075,7 @@ pub fn curvature_inference_forspec(
         flatness,
         length_scale_hat: eta_hat.exp(),
         length_scale_estimated: profile.eta_bounds.is_some(),
+        length_scale_support: range_outcome.support(),
     })
 }
 

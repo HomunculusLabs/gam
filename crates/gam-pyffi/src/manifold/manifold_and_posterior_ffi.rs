@@ -1673,6 +1673,12 @@ struct CurvatureInferenceRow {
     /// `false` when the user pinned the range with an explicit `length_scale=`,
     /// in which case `κ̂` is conditional on that choice rather than profiled.
     length_scale_estimated: bool,
+    /// Where `ℓ̂` sits in the range chart: `"interior"`,
+    /// `"distance_kernel_limit"` (the criterion reached the `ℓ → ∞` face, where
+    /// the kernel IS the geodesic distance — an arrival, and `ℓ̂` is a lower
+    /// bound), or `"locally_fixed"` (pinned, or stopped at the evaluability
+    /// wall). gam#2747.
+    length_scale_support: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1856,6 +1862,7 @@ fn curvature_inference_dataset_json_impl(
             flatness_p_value: report.flatness.p_value,
             length_scale_hat: report.length_scale_hat,
             length_scale_estimated: report.length_scale_estimated,
+            length_scale_support: report.length_scale_support.label(),
         });
     }
 

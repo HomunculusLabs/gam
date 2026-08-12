@@ -463,3 +463,7 @@ path = "examples/probe_2714_frailty_trust_ladder.rs"
 [[example]]
 name = "probe_2747_range_normalization"
 path = "examples/probe_2747_range_normalization.rs"
+
+[[example]]
+name = "probe_2747_pipeline_vs_profile"
+path = "examples/probe_2747_pipeline_vs_profile.rs"

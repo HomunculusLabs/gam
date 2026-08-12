@@ -164,6 +164,61 @@ impl KappaEstimateSupport {
     }
 }
 
+/// Where the profiled range `ℓ̂` sits relative to the range chart it was solved
+/// in — the range coordinate's analogue of [`KappaEstimateSupport`], and for the
+/// same reason (gam#2747).
+///
+/// `ℓ̂` is the argmin of `V(κ̂, ·)` over the chart, and the magnitude alone
+/// cannot say whether the criterion turned over inside it. Unlike the κ box,
+/// though, the range chart's two ends are not the same kind of place, and the
+/// whole of gam#2747 on this coordinate is that conflating them hid a defect:
+/// the bottom is an evaluability wall (below it the Gram's dynamic range exceeds
+/// what a double-precision Cholesky resolves), while the TOP is the model's own
+/// limit — `k → −d_κ`, the geodesic-distance kernel, which is conditionally
+/// positive definite on all three space forms and therefore an ordinary smooth.
+///
+/// So a reader must be able to tell three things apart, not two:
+///
+/// * an interior minimum — `ℓ̂` is an estimate;
+/// * an ARRIVAL at the distance-kernel face — `ℓ̂` is a lower bound with a
+///   meaning, "the kernel is the geodesic distance", and nothing past it is a
+///   different model;
+/// * anything else — pinned by the user, stopped at the evaluability wall, or a
+///   solve whose η-curvature does not identify the reduction.
+///
+/// The middle case is what `20bde053f` reported as "a readout of the box rather
+/// than of the data" and reverted an enrollment over. It is not one, and saying
+/// which of the three happened is how a consumer stops having to guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeEstimateSupport {
+    /// `V_η = 0` with `V_ηη > 0` strictly inside the chart: an estimate, and the
+    /// only case in which the profile's envelope/Schur reduction applies.
+    Interior,
+    /// `ℓ̂` is at the top of the chart, where the kernel has become `−d_κ` to
+    /// within `√ε` in every design entry. An arrival, not a rail.
+    DistanceKernelLimit,
+    /// Pinned by an explicit `length_scale=`, parked at the evaluability wall,
+    /// or otherwise not certified as an interior minimizer. `η̂` is locally
+    /// constant in κ, so the profile takes the plain κ slice.
+    LocallyFixed,
+}
+
+impl RangeEstimateSupport {
+    /// `true` when `ℓ̂` is an interior stationary point of the range criterion.
+    pub fn is_interior(self) -> bool {
+        matches!(self, Self::Interior)
+    }
+
+    /// Serialized provenance label, for the report surfaces.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interior => "interior",
+            Self::DistanceKernelLimit => "distance_kernel_limit",
+            Self::LocallyFixed => "locally_fixed",
+        }
+    }
+}
+
 /// Profile-likelihood confidence interval for the fitted curvature `κ̂`.
 ///
 /// The set is the Wilks region `{κ : 2[V_p(κ) − V_p(κ̂)] ≤ χ²_{1,1−α}}` where

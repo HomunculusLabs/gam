@@ -239,6 +239,18 @@ enum RangeSolveOutcome {
     DistanceKernelLimit,
 }
 
+impl RangeSolveOutcome {
+    /// The published provenance of `ℓ̂`, for the report surfaces.
+    fn support(self) -> gam_geometry::curvature_estimand::RangeEstimateSupport {
+        use gam_geometry::curvature_estimand::RangeEstimateSupport;
+        match self {
+            Self::InteriorMinimum => RangeEstimateSupport::Interior,
+            Self::DistanceKernelLimit => RangeEstimateSupport::DistanceKernelLimit,
+            Self::LocallyFixed => RangeEstimateSupport::LocallyFixed,
+        }
+    }
+}
+
 impl<'a> ConstantCurvatureProfile<'a> {
     /// Construct the curvature-estimation profile in its fit-time constraint
     /// frame.
