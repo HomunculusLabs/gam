@@ -5501,6 +5501,99 @@ mod tests {
         );
     }
 
+    /// COST. Centring doubles the per-cell work (one extra degenerate-cell
+    /// evaluation), so the net is only a win if it removes more cells than that.
+    /// This measures both oracles on the same searches and prints the ratio.
+    ///
+    /// Two shapes, because they pull in opposite directions: the cascade profile
+    /// on its own 40.6-wide domain, where the natural extension cannot finish at
+    /// all, and a well-conditioned profile on the FULL representable log-lambda
+    /// domain (`ln(MIN_POSITIVE)` to `ln(MAX/2)`, 1417 wide) — which is what
+    /// `gam_sae::identifiability::ridge_reml_select_weight` searches, and the
+    /// case where a search that already succeeded cheaply could only get slower.
+    #[test]
+    fn zz_measure_centred_enclosure_search_cost() {
+        let (grams, penalties, projected, energies) = cascade_profile_parts();
+        let cascade = AffineRemlProfile::new(
+            &grams,
+            &penalties,
+            &projected,
+            &energies,
+            33.0,
+            33,
+            9.226276711274537,
+        )
+        .expect("valid cascade profile");
+
+        let full_lo = certified_ln_positive(f64::MIN_POSITIVE).expect("domain lo").lo;
+        let full_hi = certified_ln_positive(f64::MAX / 2.0).expect("domain hi").hi;
+        let cases: [(&str, f64, f64); 3] = [
+            // The domain the design declares, where the natural extension
+            // cannot finish at all.
+            ("cascade/40.6-wide", -21.860900258111, 18.75853229939662),
+            // A narrow window around the optimum (-1.679), where the natural
+            // extension already succeeds in a handful of cells. This is the
+            // case centring could only make SLOWER, since there are no cells
+            // left for it to remove.
+            ("cascade/narrow-around-the-optimum", -3.0, 0.0),
+            // The full representable log-lambda domain, 1417 wide, which is what
+            // `gam_sae::identifiability::ridge_reml_select_weight` searches.
+            ("cascade/full-representable-domain", full_lo, full_hi),
+        ];
+
+        for (label, lo, hi) in cases {
+            let profile = &cascade;
+            let resolution = f64::EPSILON.sqrt();
+            let started = std::time::Instant::now();
+            let natural = maximize_score_1d(
+                lo,
+                hi,
+                resolution,
+                |x| profile.evaluate(x),
+                |a, b| profile.enclose_direct(a.x, b.x).map(|(e, _)| e),
+            );
+            let natural_seconds = started.elapsed().as_secs_f64();
+            let started = std::time::Instant::now();
+            let centred = maximize_score_1d(
+                lo,
+                hi,
+                resolution,
+                |x| profile.evaluate(x),
+                |a, b| profile.enclose(a.x, b.x),
+            );
+            let centred_seconds = started.elapsed().as_secs_f64();
+            println!(
+                "#COST {label}: natural {:.4}s ({}) centred {:.4}s ({}) speedup {:.2}x",
+                natural_seconds,
+                natural.as_ref().map_or("REFUSED", |_| "ok"),
+                centred_seconds,
+                centred.as_ref().map_or("REFUSED", |_| "ok"),
+                natural_seconds / centred_seconds.max(f64::MIN_POSITIVE),
+            );
+            // A refusal is a legitimate outcome for some domains (the full
+            // representable one reaches lambda values where the profiled
+            // residual is not evaluable at all); what must never happen is the
+            // centred oracle refusing where the natural one succeeds.
+            assert!(
+                centred.is_ok() || natural.is_err(),
+                "{label}: the centred oracle refused ({centred:?}) where the natural extension \
+                 succeeded — an intersection can only tighten, so this is impossible unless the \
+                 centred form is unsound"
+            );
+            // The per-cell cost is at most 2x, so a search that certifies under
+            // BOTH oracles must not lose more than that. A wider loss means the
+            // centred form is provoking work rather than removing it.
+            if natural.is_ok() {
+                assert!(
+                    centred_seconds <= natural_seconds * 2.5 + 1.0e-3,
+                    "{label}: centring cost {centred_seconds:.4}s against the natural \
+                     extension's {natural_seconds:.4}s — more than the doubled per-cell work \
+                     can explain"
+                );
+            }
+        }
+    }
+
     /// The capability the centred form buys, pinned by running the SAME search
     /// twice on the same profile with the two enclosure forms.
     ///
