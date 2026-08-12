@@ -716,9 +716,10 @@ pub fn constant_curvature_length_scale_bounds(
     let (d_min, d_max) = constant_curvature_evaluated_scale_span(data, centers)?;
     let gram_resolvable_efolds = 0.5 * -f64::EPSILON.ln();
     let lo = d_max / gram_resolvable_efolds;
-    // `d_min` is deliberately unused at the top end now; it still guards the
-    // span's own validity, which is why the span is read as a pair.
-    let _ = d_min;
+    // The top end no longer reads `d_min` — the closest pair's contrast was the
+    // RETIRED gauge's failure mode, not this one's — but the span is still read
+    // as a pair because `d_min` guards the span's own validity and names the
+    // geometry in the refusal below.
     let hi = d_max / (2.0 * f64::EPSILON.sqrt());
     if !(lo.is_finite() && lo > 0.0 && hi.is_finite() && hi > lo) {
         crate::bail_invalid_basis!(
