@@ -34,6 +34,26 @@
 //! Demmler--Reinsch eigensystem (`g_i = 1`) and a reference-Hessian pencil
 //! (`g_i = 1 - lambda_0 mu_i`, `s_i = mu_i`) without any matrix dependency in
 //! this crate.
+//!
+//! # The enclosure has to COLLAPSE, not merely be correct
+//!
+//! Everything above is a statement about what the search does with an
+//! enclosure; none of it says how tight one has to be, and the difference
+//! decides whether a domain can be decomposed at all. Every terminal verdict —
+//! derivative exclusion, stationary isolation, score-value flatness, exact
+//! dominance — is a comparison between an enclosure and a fixed quantity, so an
+//! enclosure whose overestimation is FIRST ORDER in the cell width buys a
+//! constant factor of resolution per subdivision, and the search enumerates
+//! cells until its budget is gone.
+//!
+//! That is not hypothetical: [`AffineRemlProfile::enclose`] was a natural
+//! interval extension, and on a REML score — whose log-determinant and deviance
+//! blocks each move by `O(rank)` per unit of `log lambda` while their sum does
+//! not — it returned a value range of exactly `rank * width`, up to `7.4e5`
+//! times wider than the cell's own derivative enclosure permitted, and refused
+//! designs it could certify. It is now a centred (mean value) form intersected
+//! with the natural one, in all three channels; see that method for the
+//! identity, the measurements, and what the centring is anchored on.
 
 use std::fmt;
 use std::sync::OnceLock;
