@@ -1,5 +1,68 @@
 ## Unreleased
 
+- **The certified REML score's VALUE enclosure was a natural interval extension,
+  so its overestimation was FIRST ORDER in the cell width with constant `rank`,
+  and the certified search refused designs it could certify (residual of
+  #2758).** `AffineRemlProfile::enclose` evaluated each mode kernel on the
+  interval `λ` and accumulated. The score is
+  `−0.5·(D·normalized_logdet + residual_dof·Σ_d log(R_d/dof))`, and near a REML
+  optimum those two brackets CANCEL — each block's `d/dρ` is `O(rank)` while
+  their sum is not. Interval addition cannot see that the two movements are the
+  same quantity with opposite signs, so the extension carried `rank·w` of slack
+  the exact function does not have.
+
+  Measured on a 33-mode cascade profile, the value range came out at `33.0·w`
+  **exactly, over six decades of cell width**, while the same cell's derivative
+  enclosure bounded the score's movement across it by up to `7.4e5` times less —
+  and the ratio DIVERGED as the cell shrank, one side being `O(w)` and the other
+  `O(w²)`. Both enclosures were sound; this was overestimation.
+
+  It was not a loose number. `maximize_score_1d` retires a cell as
+  resolution-flat when its score range fits inside `2·evaluation_error`; against
+  an `O(w)` range that needs a cell `rank/|f′|` times narrower than the function
+  does. On a 36-row / 1725-column cascade — what a geometric box-filling net
+  produces on a small sample — the flat test needed `w ≤ 6.7e-8`, 29 levels down
+  a 40.6-wide domain, so no cell could be retired, none could be
+  derivative-excluded, and the search refused at 8193/8192 subdivisions with
+  `RemlScoreSearchUndecomposable`. That refusal names the design's rank and the
+  sample's identifiability and reads as a statement about the data; it was a
+  statement about the enclosure.
+
+  The enclosure is now the **centred (mean-value) form**, intersected with the
+  natural one: for `m` the cell midpoint,
+  `f(x) ∈ F({m}) + F′([a,b])·[a−m, b−m]` and
+  `f′(x) ∈ F′({m}) + F″([a,b])·[a−m, b−m]`, with `F({m})` obtained by calling the
+  same natural extension on the degenerate interval `[m, m]`. Both forms are
+  outer enclosures of one exact range, so intersecting is rigorous and can only
+  tighten. The derivative is centred first and the value is centred on the
+  RESULT, because the value's remainder is only as tight as the derivative range
+  fed into it. The curvature keeps the natural extension — the centred form for
+  it needs a third-derivative enclosure this profile does not build.
+
+  Overestimation becomes second order. The same 36-row / 1725-column design now
+  certifies: `fit_reml` returns `DenseExact` at `log λ = −1.679` in 1.2 s, where
+  it previously refused in 5.6 s, and the certified search's terminal value
+  range is the mean-value bound to the last digit at every width tested.
+
+  Two claims in the tree were falsified on the way and are corrected in place.
+  `dense_cascade_spectrum` said this design "still spins in
+  `AffineRemlProfile::enclose` under `maximize_score_1d` past 900 s" — it never
+  spun; it returned the typed budget refusal in 5.6 s, #2546 having closed that
+  axis. And `subdivision_budget`'s own recommendation, "the request, not the
+  budget, is what actually binds", is not the repair here: the search refused at
+  every requested resolution from `1.49e-8` to `1e-3`, the terminal cell merely
+  walking down the domain as the request coarsened.
+
+  Gated from three angles:
+  `the_value_enclosure_never_exceeds_the_bound_its_own_derivative_certifies`
+  (the invariant the natural extension broke, on a fixture built to cancel, plus
+  convergence better than 50× per decade to the point-enclosure floor),
+  `the_centred_enclosure_holds_on_degenerate_adjacent_and_extreme_cells` (point
+  cells return the natural extension untouched; adjacent-float cells centre
+  inside themselves; the centred range is always inside the natural one), and
+  `auto_reml_certifies_a_design_the_data_cannot_identify` (end to end, with its
+  rank-deficiency and inside-the-budget premises asserted).
+
 - **The constant-curvature range coordinate was confounded with `ρ` and
   fabricated past `ℓ ≈ 10⁶`, and both were the KERNEL'S GAUGE (#2747).** The
   kernel is only ever consumed through the coefficient sum-to-zero frame `z` —
