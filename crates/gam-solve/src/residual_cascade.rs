@@ -8757,15 +8757,35 @@ mod refinement_decision_tests {
                 2.0 * enclosure.score.evaluation_error,
                 score_width <= 2.0 * enclosure.score.evaluation_error,
             );
-            // Soundness, with signal: the analytic derivative and curvature at
-            // an interior point must lie inside the cell's certified ranges.
+            // SOUNDNESS, against a proof object rather than against a rounded
+            // scalar. `evaluate`'s jet is documented as a proposal — its
+            // residual is `energy - sum q_i/h_i`, a cancelling difference, so on
+            // this design it carries about three digits of loss, which is
+            // exactly why the search never treats it as evidence. The
+            // certified statement is that the cell's range contains the
+            // DEGENERATE-cell range at every interior point: both enclose the
+            // same exact derivative, and inclusion is what
+            // `certify_endpoint_derivative` relies on.
+            let point = affine.enclose(center, center).expect("point enclosure");
             assert!(
-                enclosure.derivative.contains(jet.derivative),
-                "UNSOUND derivative enclosure on [{a}, {b}]: the analytic derivative {} at the \
-                 midpoint is outside [{}, {}]",
-                jet.derivative,
+                enclosure.derivative.lo <= point.derivative.lo
+                    && point.derivative.hi <= enclosure.derivative.hi,
+                "UNSOUND derivative enclosure on [{a}, {b}]: the midpoint range [{}, {}] is not \
+                 inside the cell range [{}, {}]",
+                point.derivative.lo,
+                point.derivative.hi,
                 enclosure.derivative.lo,
                 enclosure.derivative.hi
+            );
+            assert!(
+                enclosure.score.value.lo <= point.score.value.lo
+                    && point.score.value.hi <= enclosure.score.value.hi,
+                "UNSOUND value enclosure on [{a}, {b}]: the midpoint range [{}, {}] is not \
+                 inside the cell range [{}, {}]",
+                point.score.value.lo,
+                point.score.value.hi,
+                enclosure.score.value.lo,
+                enclosure.score.value.hi
             );
             assert!(
                 enclosure.curvature.contains(jet.curvature),

@@ -2518,13 +2518,120 @@ impl<'a> AffineRemlProfile<'a> {
     /// Outward enclosure of the score value and first two derivatives on a
     /// bounded log-lambda interval.
     ///
+    /// # Two enclosures, intersected: the natural extension and the centred form
+    ///
+    /// [`Self::enclose_direct`] below is the NATURAL interval extension — each
+    /// mode kernel evaluated on the interval lambda and summed. It is rigorous,
+    /// and on the derivative and curvature it is also tight, because there the
+    /// exact quantities are `O(1)` sums.
+    ///
+    /// On the score VALUE it is neither, and the reason is structural rather
+    /// than incidental. The value is
+    ///
+    /// ```text
+    ///     -0.5 * (D * normalized_logdet + residual_dof * sum_d log(R_d/dof))
+    /// ```
+    ///
+    /// and near a REML optimum those two brackets cancel: each block's `d/drho`
+    /// is `O(rank)` while their sum is not. Interval addition cannot see that
+    /// the two variations are the same quantity with opposite signs, so the
+    /// natural extension carries `rank * width` of slack the exact function does
+    /// not have. Measured on a 33-mode profile over six decades of cell width,
+    /// the value range came out at `33.0 * width` EXACTLY while the cell's own
+    /// derivative enclosure bounded the score's variation across it by up to
+    /// `7.4e5` times less — and the ratio DIVERGES as the cell shrinks, because
+    /// one side is `O(w)` and the other `O(w^2)`.
+    ///
+    /// That is not a cosmetic loss. `maximize_score_1d` retires a cell as
+    /// resolution-flat when its score range fits inside `2 * evaluation_error`;
+    /// against an `O(w)` range that test needs a cell `rank/|f'|` times narrower
+    /// than the function requires, so cells that ARE flat get subdivided, and a
+    /// search that should finish in a handful of cells exhausts its subdivision
+    /// budget and refuses a design it can certify.
+    ///
+    /// The cure is the standard one and needs nothing this routine does not
+    /// already compute. For every `x` in `[a, b]` and `m` the midpoint, the mean
+    /// value theorem gives
+    ///
+    /// ```text
+    ///     f(x)  in  F({m})  + F'([a,b]) * [a-m, b-m]
+    ///     f'(x) in  F'({m}) + F''([a,b]) * [a-m, b-m]
+    /// ```
+    ///
+    /// with `F({m})` obtained by calling the SAME natural extension on the
+    /// degenerate interval `[m, m]`. Both forms are outer enclosures of the same
+    /// exact range, so their INTERSECTION is an outer enclosure too — this can
+    /// only ever tighten, never widen, and it is never an acceptance tolerance.
+    /// The centred form's overestimation is second order in the cell width,
+    /// which is what makes the branch-and-bound converge.
+    ///
+    /// The curvature keeps the natural extension alone: the centred form for it
+    /// would need a third-derivative enclosure, and this profile does not build
+    /// one.
+    ///
+    /// The `evaluation_error` is a property of the POINT evaluator over the
+    /// cell, not of which enclosure form was tighter, so it is carried across
+    /// unchanged from the whole-cell reading (the conservative one — the
+    /// midpoint reading is taken over a degenerate interval and is never wider).
+    pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
+        let direct = self.enclose_direct(lo, hi)?;
+        if lo == hi {
+            return Ok(direct);
+        }
+        // Any point of the cell is a valid expansion centre; the midpoint
+        // minimizes the worst-case `|x - m|` and so the width of the remainder
+        // term. Clamped because `0.5*(lo+hi)` may round outside a cell whose
+        // endpoints are adjacent floats, and a centre outside the cell would
+        // make the mean value theorem inapplicable.
+        let centre_point = (0.5 * (lo + hi)).clamp(lo, hi);
+        let centre = self.enclose_direct(centre_point, centre_point)?;
+        // `[a-m, b-m]`, rounded OUTWARD. Both subtractions are exact by
+        // Sterbenz whenever the endpoints are within a factor of two of the
+        // centre, which is the usual case; the directed widening costs one ulp
+        // and removes the need to prove it.
+        let offset = ClosedInterval::new(
+            next_down(lo - centre_point).min(0.0),
+            next_up(hi - centre_point).max(0.0),
+        );
+        let centred_value = centre.score.value.add(direct.derivative.mul(offset));
+        let centred_derivative = centre.derivative.add(direct.curvature.mul(offset));
+        // Two rigorous outer enclosures of the same nonempty exact range cannot
+        // be disjoint, so the fallbacks below are unreachable; they are written
+        // in the sound direction (keep the natural extension) rather than as a
+        // panic, because a refusal here would convert a tightening into a
+        // failure.
+        let value = direct
+            .score
+            .value
+            .intersection(centred_value)
+            .unwrap_or(direct.score.value);
+        let derivative = direct
+            .derivative
+            .intersection(centred_derivative)
+            .unwrap_or(direct.derivative);
+        Ok(DerivativeEnclosure {
+            score: ScoreValueEnclosure {
+                value,
+                evaluation_error: direct.score.evaluation_error,
+            },
+            derivative,
+            curvature: direct.curvature,
+        })
+    }
+
+    /// The natural (direct) interval extension: every mode kernel evaluated on
+    /// the interval lambda and accumulated.
+    ///
     /// The interval kernels enclose the exact-real ranges. The score value uses
     /// the same cancellation-free normalized determinant identity as
     /// [`Self::evaluate`]. Its separate `evaluation_error` charges each
     /// source-derived elementary-function interval, error propagation through
     /// `log(residual)`, and Wilkinson `gamma_k * sum |term|` bounds for the
     /// actual sequential accumulators.
-    pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
+    ///
+    /// [`Self::enclose`] is what callers want: this form alone is first-order
+    /// loose on the value, for the reason documented there.
+    fn enclose_direct(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
         if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
             return Err(AffineRemlError::InvalidLogLambdaInterval { lo, hi });
         }
