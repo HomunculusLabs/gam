@@ -1,5 +1,57 @@
 ## Unreleased
 
+- **The joint trust region measured the step in one norm and the radius in
+  another, so on any multi-block fit it could only ever shrink (#2612).** The
+  coupled joint-Newton solve carries two trust constraints: one `D`-metric ball
+  on the whole step, which `WhitenedHessianSpectrum::trust_region_step` scales
+  `‖δ‖_D` to, and one box per coefficient block. The controller was handed
+  `max_b ‖δ_b‖` — the largest *per-block* norm — alongside the *joint* radius.
+  Because `‖δ‖² = Σ_b ‖δ_b‖²`, a step sitting exactly on the joint sphere has
+  `max_b ‖δ_b‖ = ‖δ‖/√K` when `K` blocks carry comparable mass, so
+  `hit_boundary = step_norm ≥ 0.99·r` was **false on a boundary step for every
+  `K ≥ 2`** and the region became a one-way ratchet.
+
+  Measured on the #2612 penguins witness, over all 6784 accepted trust attempts
+  of one fit:
+
+  | `‖δ‖/r` | attempts |
+  |---|---|
+  | ≥ 0.99 (what the controller looks for) | 1 |
+  | 0.70 – 0.99 (the `1/√2` band, median 0.781) | 2018 |
+  | < 0.70 | 4765 |
+
+  1454 of those 2018 carried a Newton proposal at least `1.5×` the step actually
+  taken, 563 of them `≥ 10×`. The fit died with two inner solves at the ratchet's
+  floor — `|prop|∞ = 7.686e-5` against an accepted `|δ|∞ = 5.270e-7`, the residual
+  crawling `0.9932×/cycle` — and 50 of the run's inner solves ended
+  non-converged. With the norms paired correctly that is **3**, and the fit takes
+  116.6 s instead of 333.4 s.
+
+  For `K = 1` the joint norm *is* the block norm and the joint radius *is* the
+  block radius, so every single-block family is byte-identical; the change
+  reaches exactly the multi-block joint solves (multinomial, location-scale,
+  marginal-slope) where the test was in the wrong units. It also explains why
+  the #2612 `objective_unreadable_at_this_step` growth clause never fired on
+  multinomial: it is gated on the same structurally-false boundary test.
+
+  Two consequences of the same reading are fixed with it. **"Held, not grown" is
+  a fixed point when the region is what limited the step** — the accept-below-
+  model-noise-floor branch (#2637) is right to hold an *interior* step, but on
+  the boundary the step is short because the radius is small, the prediction is
+  unreadable *because* the step is short, and the radius then freezes forever
+  (measured: `r = 1.463e-6` held for 167 cycles against a `|prop|∞ = 8.961e-5`).
+  It now grows on the three facts that are measurements rather than predictions:
+  a realized decrease above the noise floor, geometric boundary contact, and a
+  stationarity residual still above tolerance. And **the objective's measured
+  resolution now keeps measuring after the ladder that certified it**: a ladder
+  verdict is one realization of a random band, so the ladder publishes the
+  envelope it proved (`remainder ≤ c·‖δ‖²` below a step length it showed to be
+  noise-dominated) and every later attempt inside that envelope whose
+  discrepancy exceeds the bound is another sample of the same rounding. On the
+  penguins refit the cycle-149 ladder measures `4.396e-11` and the solve then
+  rejects a `1.168e-10` realized change thirteen cycles later — 2.7× its own
+  measurement, at a step length the ladder had already certified.
+
 - **One sentinel, one resolver — the marginal-slope branch never reached the
   measure-jet range screen (#2754, #2761).** `length_scale == 0.0` is an
   UNRESOLVED representer range, and the tree carries two resolvers for it: the
