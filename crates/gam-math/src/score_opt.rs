@@ -5207,6 +5207,152 @@ mod tests {
         }
     }
 
+    /// The 33 kept Schur modes and response energies of the cascade design in
+    /// `gam_solve::residual_cascade`'s
+    /// `auto_reml_certifies_a_design_the_data_cannot_identify` — 36 rows against
+    /// 1725 columns — printed by that crate's `zz_probe_rank_deficient_` probe and
+    /// carried here as literals so these gates need no design build and no
+    /// dependency on gam-solve.
+    ///
+    /// A synthetic stand-in was tried first, twice, and neither reproduced the
+    /// defect: it needs BOTH the multiscale spectrum and the near-interpolating
+    /// response that makes the two score blocks cancel, and hand-built profiles
+    /// kept landing on a monotone score the natural extension excludes by sign in
+    /// a handful of cells. That is why these gates carry data rather than a
+    /// formula.
+    ///
+    /// Returns `(gram_modes, penalty_modes, projected_rhs_squared, response_energy)`;
+    /// the profile also takes `residual_dof = 33`, `determinant_rank = 33` and
+    /// `logdet_constant = 9.226276711274537`, and its certified log-lambda domain
+    /// is `[-21.860900258111, 18.75853229939662]`.
+    fn cascade_profile_parts() -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let grams = vec![
+            0.021513523027428847, 0.023421509558465926, 0.024477791743994424,
+            0.03028760364561828, 0.03510108223379587, 0.040671848915996144,
+            0.042394860646972565, 0.044208976267946384, 0.046980397477518414,
+            0.051041787441650194, 0.053417305918114666, 0.05575657456312382,
+            0.056982691606415704, 0.059623191536431024, 0.06072593823762461,
+            0.061603808142128846, 0.0626306391548814, 0.06415989316153273, 0.06612727525342801,
+            0.07201682707299777, 0.10499606046436369, 0.12037535776467499, 0.1486138626340859,
+            0.1762399329554861, 0.19315924476245142, 0.26688703253550705, 0.2848266927054469,
+            0.33232244706214037, 0.6015439556821448, 1.1406886269841172, 1.3973782387809837,
+            1.8043547873076875, 2.0890420358314765,
+        ];
+        let penalties = vec![1.0_f64; 33];
+        let projected = vec![
+            0.0008447602450715568, 0.004744115853417025, 0.0013711877079256205,
+            0.000556576229807026, 0.00032950514304538826, 0.00015869074743770514,
+            0.004035749350652998, 0.002408288703125203, 0.0002161132863778849,
+            0.0024599052556113317, 0.00028155268264135145, 9.068039769807838e-7,
+            0.0004390033211936947, 0.004642257342083, 5.722227645019854e-6,
+            0.003702111930202603, 0.003943553329808974, 0.0011808139994261783,
+            1.490921408482301e-5, 0.001728436851442388, 0.00040290378245105683,
+            0.0006710268119971442, 0.0032383572156905664, 0.00013742753101732549,
+            6.681227329297447e-5, 0.054339495839186305, 0.018972176651153957,
+            0.04535732957447296, 0.1129209190002305, 0.05428138627351111, 1.5501891913959478,
+            0.14151749008562448, 0.11704548115908926,
+        ];
+        let energies = vec![2.7067510572921663_f64];
+        (grams, penalties, projected, energies)
+    }
+
+    /// The centred ranges contain the function at EVERY interior point, not just
+    /// at the centre they were expanded about.
+    ///
+    /// This is the gate on the riskiest thing centring introduces. Each channel
+    /// is now a mean value form anchored on the one above it — the curvature on
+    /// an interval THIRD derivative, the derivative on the curvature, the value
+    /// on the derivative — so an error in the third-derivative kernel does not
+    /// make a range wide, it makes it NARROW, and a narrow certified range is an
+    /// unsound proof rather than a slow one.
+    ///
+    /// The check needs no finite differences and no reference implementation.
+    /// `enclose(x, x)` is the natural extension on a degenerate cell, which
+    /// encloses the exact value, derivative and curvature AT `x`; so for every
+    /// `x` in `[a, b]` the cell's ranges must contain the point's. Sampling `x`
+    /// away from the midpoint is what exercises the remainder terms: at the
+    /// centre they vanish identically and prove nothing.
+    ///
+    /// Sampled across four decades of cell width so the remainder is the
+    /// dominant term at the wide end and roundoff dominates at the narrow one.
+    #[test]
+    fn the_centred_ranges_contain_the_function_at_every_interior_point() {
+        let (grams, penalties, projected, energies) = cascade_profile_parts();
+        let profile = AffineRemlProfile::new(
+            &grams,
+            &penalties,
+            &projected,
+            &energies,
+            33.0,
+            33,
+            9.226276711274537,
+        )
+        .expect("valid cascade profile");
+
+        // A containment check is only evidence if the range it checks was
+        // actually NARROWED by the thing under test: if the intersection with
+        // the natural extension were a no-op, every assertion below would hold
+        // for any third-derivative kernel at all, including a wrong one.
+        let mut curvature_tightened = false;
+        // Spread over the design's own domain, including both saturated tails.
+        for centre in [-20.0_f64, -12.5, -6.0, -1.679, 3.0, 11.0, 17.5] {
+            for exponent in [0_i32, -1, -2, -3, -4] {
+                let half = 10.0_f64.powi(exponent);
+                let (a, b) = (centre - half, centre + half);
+                let cell = profile.enclose(a, b).expect("cell enclosure");
+                let (natural, _) = profile.enclose_direct(a, b).expect("natural extension");
+                assert!(
+                    cell.curvature.lo >= natural.curvature.lo
+                        && cell.curvature.hi <= natural.curvature.hi,
+                    "cell [{a}, {b}]: the centred curvature {:?} is not inside the natural \
+                     extension {:?}",
+                    cell.curvature,
+                    natural.curvature
+                );
+                if cell.curvature.hi - cell.curvature.lo
+                    < 0.5 * (natural.curvature.hi - natural.curvature.lo)
+                {
+                    curvature_tightened = true;
+                }
+                for step in 0..=8 {
+                    let x = a + (b - a) * (step as f64 / 8.0);
+                    let point = profile.enclose(x, x).expect("point enclosure");
+                    assert!(
+                        cell.score.value.lo <= point.score.value.lo
+                            && point.score.value.hi <= cell.score.value.hi,
+                        "cell [{a}, {b}] value range {:?} does not contain the exact value at \
+                         x={x}, {:?}",
+                        cell.score.value,
+                        point.score.value
+                    );
+                    assert!(
+                        cell.derivative.lo <= point.derivative.lo
+                            && point.derivative.hi <= cell.derivative.hi,
+                        "cell [{a}, {b}] derivative range {:?} does not contain the exact \
+                         derivative at x={x}, {:?}",
+                        cell.derivative,
+                        point.derivative
+                    );
+                    assert!(
+                        cell.curvature.lo <= point.curvature.lo
+                            && point.curvature.hi <= cell.curvature.hi,
+                        "cell [{a}, {b}] curvature range {:?} does not contain the exact \
+                         curvature at x={x}, {:?} — the third-derivative kernel the curvature \
+                         is centred on is wrong",
+                        cell.curvature,
+                        point.curvature
+                    );
+                }
+            }
+        }
+        assert!(
+            curvature_tightened,
+            "the centred curvature never halved the natural extension's range anywhere in this \
+             sweep, so the containment checks above would pass for a WRONG third-derivative \
+             kernel too — this gate has gone vacuous"
+        );
+    }
+
     /// The capability the centred form buys, pinned by running the SAME search
     /// twice on the same profile with the two enclosure forms.
     ///
@@ -5225,43 +5371,7 @@ mod tests {
     /// extension cannot see.
     #[test]
     fn the_natural_extension_cannot_decompose_a_domain_the_centred_form_certifies() {
-        // The 33 kept Schur modes and response energies of the cascade design in
-        // `gam_solve::residual_cascade`'s
-        // `auto_reml_certifies_a_design_the_data_cannot_identify` — 36 rows against
-        // 1725 columns — printed by that crate's `zz_probe_rank_deficient_*` and
-        // carried here as literals so this gate needs no design build and no
-        // dependency on gam-solve. A synthetic stand-in was tried first and did not
-        // reproduce: the defect needs BOTH the multiscale spectrum and the
-        // near-interpolating response that makes the two score blocks cancel, and
-        // hand-built fixtures kept landing on a monotone score the natural
-        // extension excludes by sign in a handful of cells.
-        let grams = [
-            0.021513523027428847, 0.023421509558465926, 0.024477791743994424,
-            0.03028760364561828, 0.03510108223379587, 0.040671848915996144,
-            0.042394860646972565, 0.044208976267946384, 0.046980397477518414,
-            0.051041787441650194, 0.053417305918114666, 0.05575657456312382,
-            0.056982691606415704, 0.059623191536431024, 0.06072593823762461,
-            0.061603808142128846, 0.0626306391548814, 0.06415989316153273, 0.06612727525342801,
-            0.07201682707299777, 0.10499606046436369, 0.12037535776467499, 0.1486138626340859,
-            0.1762399329554861, 0.19315924476245142, 0.26688703253550705, 0.2848266927054469,
-            0.33232244706214037, 0.6015439556821448, 1.1406886269841172, 1.3973782387809837,
-            1.8043547873076875, 2.0890420358314765,
-        ];
-        let penalties = [1.0_f64; 33];
-        let projected = [
-            0.0008447602450715568, 0.004744115853417025, 0.0013711877079256205,
-            0.000556576229807026, 0.00032950514304538826, 0.00015869074743770514,
-            0.004035749350652998, 0.002408288703125203, 0.0002161132863778849,
-            0.0024599052556113317, 0.00028155268264135145, 9.068039769807838e-7,
-            0.0004390033211936947, 0.004642257342083, 5.722227645019854e-6,
-            0.003702111930202603, 0.003943553329808974, 0.0011808139994261783,
-            1.490921408482301e-5, 0.001728436851442388, 0.00040290378245105683,
-            0.0006710268119971442, 0.0032383572156905664, 0.00013742753101732549,
-            6.681227329297447e-5, 0.054339495839186305, 0.018972176651153957,
-            0.04535732957447296, 0.1129209190002305, 0.05428138627351111, 1.5501891913959478,
-            0.14151749008562448, 0.11704548115908926,
-        ];
-        let energies = [2.7067510572921663_f64];
+        let (grams, penalties, projected, energies) = cascade_profile_parts();
         let profile = AffineRemlProfile::new(
             &grams,
             &penalties,
