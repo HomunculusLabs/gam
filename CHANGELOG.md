@@ -42,15 +42,31 @@
   (measured: `r = 1.463e-6` held for 167 cycles against a `|prop|∞ = 8.961e-5`).
   It now grows on the three facts that are measurements rather than predictions:
   a realized decrease above the noise floor, geometric boundary contact, and a
-  stationarity residual still above tolerance. And **the objective's measured
-  resolution now keeps measuring after the ladder that certified it**: a ladder
-  verdict is one realization of a random band, so the ladder publishes the
-  envelope it proved (`remainder ≤ c·‖δ‖²` below a step length it showed to be
-  noise-dominated) and every later attempt inside that envelope whose
-  discrepancy exceeds the bound is another sample of the same rounding. On the
-  penguins refit the cycle-149 ladder measures `4.396e-11` and the solve then
-  rejects a `1.168e-10` realized change thirteen cycles later — 2.7× its own
-  measurement, at a step length the ladder had already certified.
+  stationarity residual still above tolerance.
+
+  **Measured and reverted (recorded because the negative result is the useful
+  part).** A third repair looked equally well-founded and is wrong: a ladder
+  verdict is one realization of a random band, so the ladder was made to publish
+  the envelope it proved (`remainder ≤ c·‖δ‖²` below a step length it had shown
+  to be noise-dominated) and every later attempt inside that envelope widened the
+  measurement. The motivating observation is real — the penguins refit measures
+  `4.396e-11` at cycle 149 and then rejects a `1.168e-10` realized change at
+  cycle 162, at a step length the ladder had already certified — but the repair
+  makes the fit *worse*, not better:
+
+  | build | wall | inner solves ending non-converged |
+  |---|---|---|
+  | before the norm repair | 333.4 s | 50 |
+  | norm repair | 116.6 s | 3 |
+  | + boundary growth | 119.0 s | **2** |
+  | + certified noise envelope | 291.9 s | **47** |
+
+  Over-measuring the objective's resolution is worse than under-measuring it,
+  because the accept test then reads genuine objective changes as rounding and
+  the solve stops being able to tell a good step from a neutral one — the
+  measured resolutions rose from `~4e-11` to `~3e-10` and the worst terminal
+  residual went from `3.8e-7` to `4.0e-5`. The under-measurement is therefore
+  real and is NOT the binding constraint; the envelope is not the way to fix it.
 
 - **One sentinel, one resolver — the marginal-slope branch never reached the
   measure-jet range screen (#2754, #2761).** `length_scale == 0.0` is an

@@ -2331,36 +2331,6 @@ pub(crate) struct ObjectiveResolutionWitness {
     /// makes its measurement in cycle 4 and every cycle after it has only two
     /// attempts at the radius floor — far too short a ladder to re-measure).
     measured: f64,
-    /// The largest `‖δ‖` at which a ladder has SHOWN the discrepancy to be
-    /// rounding rather than model remainder — the *certified noise envelope*.
-    ///
-    /// A ladder verdict is one realization of a random quantity, and one
-    /// realization systematically understates a band. On the #2612 penguins
-    /// armed refit the cycle-149 ladder measures `4.396e-11` from its finest
-    /// rung; thirteen cycles later the SAME solve rejects a step on a realized
-    /// change of `1.168e-10` — 2.7× the measured value, at a step length
-    /// `2.925e-6` well inside the `9.361e-5` the ladder had already certified
-    /// as noise-dominated. The information to recognise that rejection as
-    /// rounding was on record; only the estimator threw it away.
-    ///
-    /// So the ladder publishes what it PROVED — "below this step length the
-    /// model remainder cannot account for the discrepancy" — and every later
-    /// attempt inside that envelope is a free additional sample of the same
-    /// rounding. `0.0` until a ladder has proved anything, which leaves every
-    /// solve that never backtracks byte-unchanged.
-    noise_envelope_step_norm: f64,
-    /// The remainder bound the envelope was certified against, as the
-    /// coefficient `c` of `c·‖δ‖²` — the coarsest rung's own discrepancy
-    /// divided by its own step norm squared. A later attempt inside the
-    /// envelope counts as a sample of the rounding only if it also EXCEEDS
-    /// this bound, so the envelope carries the test it was proved with rather
-    /// than degenerating into "any small step".
-    noise_envelope_remainder_coefficient: f64,
-    /// Largest step norm this ladder has itself shown to be noise-dominated,
-    /// pending the ladder's verdict. Published into the envelope only when the
-    /// ladder actually spans [`OBJECTIVE_RESOLUTION_LADDER_DECADES`], so one
-    /// coarse pair can never certify one.
-    ladder_noise_ceiling: f64,
 }
 
 /// The step-norm span a ladder must cover before "the discrepancy did not
@@ -2387,22 +2357,6 @@ impl ObjectiveResolutionWitness {
             return;
         }
         let discrepancy = (actual - predicted).abs();
-        // INSIDE A CERTIFIED ENVELOPE, EVERY ATTEMPT IS A SAMPLE (gam#2612).
-        // A ladder proves `remainder ≤ c·‖δ‖²` below some step length; an
-        // attempt there whose discrepancy exceeds that bound cannot be the
-        // remainder, so it is rounding and the resolution is at least its
-        // size. This is what lets a solve whose later cycles have only one or
-        // two attempts each — far too short to re-ladder — keep learning the
-        // band it must see through, instead of being stuck with one
-        // realization from the one cycle that happened to backtrack.
-        if self.noise_envelope_step_norm > 0.0
-            && step_norm <= self.noise_envelope_step_norm
-            && discrepancy
-                > self.noise_envelope_remainder_coefficient
-                    * step_norm.powi(OBJECTIVE_RESOLUTION_REMAINDER_EXPONENT)
-        {
-            self.measured = self.measured.max(discrepancy);
-        }
         if self.coarsest_step_norm == 0.0 || step_norm > self.coarsest_step_norm {
             self.coarsest_step_norm = step_norm;
             self.coarsest_discrepancy = discrepancy;
@@ -2411,51 +2365,20 @@ impl ObjectiveResolutionWitness {
             self.finest_step_norm = step_norm;
             self.finest_discrepancy = discrepancy;
         }
-        // Where THIS ladder has shown the remainder cannot account for what it
-        // sees. Measured against the coarsest rung, which is the only rung
-        // whose discrepancy is allowed to be remainder.
-        if self.coarsest_step_norm > 0.0
-            && step_norm < self.coarsest_step_norm
-            && discrepancy
-                > self.coarsest_discrepancy
-                    * (step_norm / self.coarsest_step_norm)
-                        .powi(OBJECTIVE_RESOLUTION_REMAINDER_EXPONENT)
-            && step_norm > self.ladder_noise_ceiling
-        {
-            self.ladder_noise_ceiling = step_norm;
-        }
         if let Some(resolution) = self.ladder_verdict() {
             self.measured = self.measured.max(resolution);
-            // An envelope is only publishable with the bound it was proved
-            // against. A coarsest rung whose discrepancy is exactly zero
-            // proves a bound of zero, under which EVERY later nonzero
-            // discrepancy would read as rounding — that is not a measurement,
-            // it is the absence of one, so no envelope is published.
-            let coefficient = self.coarsest_discrepancy
-                / self
-                    .coarsest_step_norm
-                    .powi(OBJECTIVE_RESOLUTION_REMAINDER_EXPONENT);
-            if self.ladder_noise_ceiling > self.noise_envelope_step_norm
-                && self.coarsest_step_norm > 0.0
-                && coefficient.is_finite()
-                && coefficient > 0.0
-            {
-                self.noise_envelope_step_norm = self.ladder_noise_ceiling;
-                self.noise_envelope_remainder_coefficient = coefficient;
-            }
         }
     }
 
-    /// Start a new ladder. The per-solve `measured` value and the certified
-    /// noise envelope survive; the coarsest/finest pair does not, because the
-    /// two ends must come from ONE cycle's shrink sequence to be comparable
-    /// (different cycles are at different `β` and different radii).
+    /// Start a new ladder. The per-solve `measured` value survives; the
+    /// coarsest/finest pair does not, because the two ends must come from ONE
+    /// cycle's shrink sequence to be comparable (different cycles are at
+    /// different `β` and different radii).
     pub(crate) fn start_ladder(&mut self) {
         self.coarsest_step_norm = 0.0;
         self.coarsest_discrepancy = 0.0;
         self.finest_step_norm = 0.0;
         self.finest_discrepancy = 0.0;
-        self.ladder_noise_ceiling = 0.0;
     }
 
     /// The resolution this solve has measured, or `0.0` if no ladder has yet
