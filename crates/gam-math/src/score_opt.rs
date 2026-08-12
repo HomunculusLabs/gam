@@ -2591,16 +2591,20 @@ impl<'a> AffineRemlProfile<'a> {
     /// The centred form's overestimation is second order in the cell width,
     /// which is what makes the branch-and-bound converge.
     ///
-    /// The curvature keeps the natural extension alone: the centred form for it
-    /// would need a third-derivative enclosure, and this profile does not build
-    /// one.
+    /// All three channels are centred, including the curvature: the profile's
+    /// mode kernels are analytic, so `enclose_direct` also accumulates the exact
+    /// third-derivative range (`t(1-4t+t^2)/(1+t)^4` per mode for the residual,
+    /// `t(1-t)/(1+t)^3` for the determinant), and the curvature is centred on
+    /// that. It matters: stationary isolation reads the curvature DIRECTLY and
+    /// needs its sign, so a first-order-loose curvature is what stops a root
+    /// being isolated rather than merely making a range wide.
     ///
     /// The `evaluation_error` is a property of the POINT evaluator over the
     /// cell, not of which enclosure form was tighter, so it is carried across
     /// unchanged from the whole-cell reading (the conservative one — the
     /// midpoint reading is taken over a degenerate interval and is never wider).
     pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
-        let direct = self.enclose_direct(lo, hi)?;
+        let (direct, direct_third) = self.enclose_direct(lo, hi)?;
         if lo == hi {
             return Ok(direct);
         }
@@ -2610,7 +2614,7 @@ impl<'a> AffineRemlProfile<'a> {
         // endpoints are adjacent floats, and a centre outside the cell would
         // make the mean value theorem inapplicable.
         let centre_point = (0.5 * (lo + hi)).clamp(lo, hi);
-        let centre = self.enclose_direct(centre_point, centre_point)?;
+        let (centre, _) = self.enclose_direct(centre_point, centre_point)?;
         // `[a-m, b-m]`, rounded OUTWARD. Both subtractions are exact by
         // Sterbenz whenever the endpoints are within a factor of two of the
         // centre, which is the usual case; the directed widening costs one ulp
@@ -2619,23 +2623,26 @@ impl<'a> AffineRemlProfile<'a> {
             next_down(lo - centre_point).min(0.0),
             next_up(hi - centre_point).max(0.0),
         );
-        // The DERIVATIVE is centred first and the value is then centred on the
-        // result, not on the natural extension's derivative. The two are
-        // sequential for a reason: the remainder term of the value's mean value
-        // form is `F'(cell) * [a-m, b-m]`, so it is only as tight as the
-        // derivative range fed into it, and the centred derivative is the
-        // tighter of the two available. On the cancelling fixture at `w = 0.2`
-        // that is a further factor of 3.3 on the value range, and it is what
-        // makes `width(F) <= width(F({m})) + max|F'| * w` hold BY CONSTRUCTION
-        // against the range this function actually returns — the invariant
-        // `the_value_enclosure_never_exceeds_the_bound_its_own_derivative_certifies`
-        // gates, and the one the natural extension broke by `7.4e5`.
-        let centred_derivative = centre.derivative.add(direct.curvature.mul(offset));
+        // The three channels are centred in DERIVATIVE ORDER, each on the result
+        // of the one above, because a mean value remainder is only as tight as
+        // the range fed into it: the curvature's remainder is `F'''*offset`, the
+        // derivative's is `F''*offset`, and the value's is `F'*offset`. Feeding
+        // each the natural extension's range instead of the centred one leaves a
+        // constant factor on the floor at every level — measured at 3.3x on the
+        // value alone — and it is this cascade that makes
+        // `width(F) <= width(F({m})) + max|F'| * w` hold BY CONSTRUCTION against
+        // the ranges this function actually returns.
+        let centred_curvature = centre.curvature.add(direct_third.mul(offset));
         // Two rigorous outer enclosures of the same nonempty exact range cannot
         // be disjoint, so the fallbacks below are unreachable; they are written
         // in the sound direction (keep the natural extension) rather than as a
         // panic, because a refusal here would convert a tightening into a
         // failure.
+        let curvature = direct
+            .curvature
+            .intersection(centred_curvature)
+            .unwrap_or(direct.curvature);
+        let centred_derivative = centre.derivative.add(curvature.mul(offset));
         let derivative = direct
             .derivative
             .intersection(centred_derivative)
@@ -2652,7 +2659,7 @@ impl<'a> AffineRemlProfile<'a> {
                 evaluation_error: direct.score.evaluation_error,
             },
             derivative,
-            curvature: direct.curvature,
+            curvature,
         })
     }
 
@@ -2668,7 +2675,11 @@ impl<'a> AffineRemlProfile<'a> {
     ///
     /// [`Self::enclose`] is what callers want: this form alone is first-order
     /// loose on the value, for the reason documented there.
-    fn enclose_direct(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
+    fn enclose_direct(
+        &self,
+        lo: f64,
+        hi: f64,
+    ) -> Result<(DerivativeEnclosure, ClosedInterval), AffineRemlError> {
         if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
             return Err(AffineRemlError::InvalidLogLambdaInterval { lo, hi });
         }
@@ -2696,6 +2707,7 @@ impl<'a> AffineRemlProfile<'a> {
         let mut normalized_logdet_error = 0.0;
         let mut determinant_first = ClosedInterval::point(0.0);
         let mut determinant_second = ClosedInterval::point(0.0);
+        let mut determinant_third = ClosedInterval::point(0.0);
         for i in 0..self.num_modes() {
             let (normalized_mode, normalized_mode_error) =
                 normalized_log_mode_enclosure(self.gram_modes[i], self.penalty_modes[i], lo, hi)?;
@@ -2710,10 +2722,12 @@ impl<'a> AffineRemlProfile<'a> {
             let ranges = mode_ranges(self.gram_modes[i], self.penalty_modes[i], 0.0, lambda)?;
             determinant_first = determinant_first.sub(ranges.c);
             determinant_second = determinant_second.add(ranges.w);
+            determinant_third = determinant_third.add(ranges.determinant_third);
         }
 
         let mut residual_first_sum = ClosedInterval::point(0.0);
         let mut residual_second_sum = ClosedInterval::point(0.0);
+        let mut residual_third_sum = ClosedInterval::point(0.0);
         let mut residual_log_sum = ClosedInterval::point(0.0);
         let mut residual_log_magnitude = 0.0;
         let mut residual_log_error = 0.0;
@@ -2724,6 +2738,7 @@ impl<'a> AffineRemlProfile<'a> {
             let mut singular_fitted = ClosedInterval::point(0.0);
             let mut first = ClosedInterval::point(0.0);
             let mut second = ClosedInterval::point(0.0);
+            let mut third = ClosedInterval::point(0.0);
             let mut fitted_magnitude = energy;
             for i in 0..modes {
                 let ranges = mode_ranges(
@@ -2737,6 +2752,7 @@ impl<'a> AffineRemlProfile<'a> {
                 singular_fitted = singular_fitted.add(ranges.singular_fitted);
                 first = first.add(ranges.p);
                 second = second.add(ranges.q);
+                third = third.add(ranges.residual_third);
                 fitted_magnitude = add_nonnegative_upward(fitted_magnitude, ranges.v.max_abs());
             }
             // Two exact identities describe the same residual:
@@ -2779,8 +2795,16 @@ impl<'a> AffineRemlProfile<'a> {
             }
             let first_ratio = first.div_positive(residual).nonnegative();
             let second_ratio = second.div_positive(residual);
+            let third_ratio = third.div_positive(residual);
             residual_first_sum = residual_first_sum.add(first_ratio);
             residual_second_sum = residual_second_sum.add(second_ratio.sub(first_ratio.square()));
+            // The third derivative of `log R`, from the same three ratios:
+            //   (log R)''' = R'''/R - 3 (R''/R)(R'/R) + 2 (R'/R)^3.
+            residual_third_sum = residual_third_sum.add(
+                third_ratio
+                    .sub(second_ratio.mul(first_ratio).scale(3.0))
+                    .add(first_ratio.square().mul(first_ratio).scale(2.0)),
+            );
 
             let fitted_arithmetic_error = wilkinson_roundoff(
                 fitted_magnitude,
@@ -2850,8 +2874,12 @@ impl<'a> AffineRemlProfile<'a> {
         let second_bracket = determinant_second
             .scale(outputs)
             .add(residual_second_sum.scale(self.residual_dof));
+        let third_bracket = determinant_third
+            .scale(outputs)
+            .add(residual_third_sum.scale(self.residual_dof));
         let derivative = first_bracket.scale(-0.5);
         let curvature = second_bracket.scale(-0.5);
+        let third = third_bracket.scale(-0.5);
         let score_value = normalized_logdet
             .scale(outputs)
             .add(residual_log_sum.scale(self.residual_dof))
@@ -2886,11 +2914,14 @@ impl<'a> AffineRemlProfile<'a> {
             value: score_value,
             evaluation_error: value_evaluation_error,
         };
-        Ok(DerivativeEnclosure {
-            score,
-            derivative,
-            curvature,
-        })
+        Ok((
+            DerivativeEnclosure {
+                score,
+                derivative,
+                curvature,
+            },
+            third,
+        ))
     }
 
     pub fn maximize(
@@ -2965,6 +2996,15 @@ struct ModeRanges {
     /// Second derivative of the residual contribution:
     /// `projected_square * lambda s (g-lambda s) / h^3`.
     q: ClosedInterval,
+    /// Third `rho`-derivative of this mode's normalized log determinant,
+    /// `u(1-u)(1-2u) = t(1-t)/(1+t)^3`. Exactly the `k` kernel: the
+    /// determinant's second derivative is `w` and its third is `k`, which is
+    /// also the fitted fraction's second. Zero for an unpenalized mode (no
+    /// `-rho` term) and for a Gram-zero mode (whose normalized determinant is
+    /// exactly constant).
+    determinant_third: ClosedInterval,
+    /// Third derivative of the residual contribution.
+    residual_third: ClosedInterval,
 }
 
 /// Exact-real range and a uniform forward-error bound for the normalized
@@ -3172,6 +3212,8 @@ fn mode_ranges(
             singular_fitted: ClosedInterval::point(0.0),
             p: ClosedInterval::point(0.0),
             q: ClosedInterval::point(0.0),
+            determinant_third: ClosedInterval::point(0.0),
+            residual_third: ClosedInterval::point(0.0),
         });
     }
     if gram == 0.0 {
@@ -3185,6 +3227,8 @@ fn mode_ranges(
                 singular_fitted: zero,
                 p: zero,
                 q: zero,
+                determinant_third: zero,
+                residual_third: zero,
             });
         }
 
@@ -3215,6 +3259,11 @@ fn mode_ranges(
             singular_fitted: v,
             p: v,
             q: v.neg(),
+            // A Gram-zero mode's fitted fraction is `A/(lambda s)`, whose
+            // rho-derivative is its own negative, so the residual's successive
+            // derivatives alternate in sign at constant magnitude.
+            determinant_third: zero,
+            residual_third: v,
         });
     }
 
@@ -3238,6 +3287,8 @@ fn mode_ranges(
         singular_fitted: ClosedInterval::point(0.0),
         p: scale.mul(kernels.w).nonnegative(),
         q: scale.mul(kernels.k),
+        determinant_third: kernels.k,
+        residual_third: scale.mul(kernels.third),
     })
 }
 
@@ -3251,6 +3302,13 @@ struct KernelRanges {
     w: ClosedInterval,
     /// `t(1-t)/(1+t)^3`.
     k: ClosedInterval,
+    /// `t(1 - 4t + t^2)/(1+t)^4`, the rho-derivative of `k`.
+    ///
+    /// With `dt/drho = t`, differentiating `k` once more gives
+    /// `t * dk/dt = t(1 - 4t + t^2)/(1+t)^4`. It is the third derivative of a
+    /// mode's fitted fraction, and (with the scale factored out) the fourth of
+    /// its normalized log-determinant.
+    third: ClosedInterval,
 }
 
 fn kernel_at(t: ClosedInterval) -> KernelRanges {
@@ -3260,7 +3318,13 @@ fn kernel_at(t: ClosedInterval) -> KernelRanges {
     let u = t.mul(v).nonnegative();
     let w = u.mul(v).nonnegative();
     let k = w.mul(one.sub(t)).div_positive(denom);
-    KernelRanges { v, u, w, k }
+    // `t(1 - 4t + t^2)/(1+t)^4 = w * (1 - 4t + t^2)/(1+t)^2`. The numerator is
+    // signed, which `mul` handles; the denominator is a square of a strictly
+    // positive interval.
+    let third = w
+        .mul(one.sub(t.scale(4.0)).add(t.square()))
+        .div_positive(denom.square());
+    KernelRanges { v, u, w, k, third }
 }
 
 fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
@@ -3270,10 +3334,15 @@ fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
     let u = ClosedInterval::new(left.u.lo, right.u.hi).nonnegative();
     let mut w = left.w.hull(right.w).nonnegative();
     let mut k = left.k.hull(right.k);
+    let mut third = left.third.hull(right.third);
 
     if t.contains(1.0) {
         let critical = kernel_at(ClosedInterval::point(1.0));
         w = w.hull(critical.w).nonnegative();
+        // `d/dt [t(1-4t+t^2)/(1+t)^4] = (1 - 11t + 11t^2 - t^3)/(1+t)^5`, and
+        // `t^3 - 11t^2 + 11t - 1 = (t-1)(t^2 - 10t + 1)`, so `t = 1` is one of
+        // this kernel's three critical points as well.
+        third = third.hull(critical.third);
     }
 
     // k'(t) has its only positive roots at 2 +/- sqrt(3).  Enclose sqrt(3)
@@ -3291,11 +3360,31 @@ fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
         }
     }
 
+    // The remaining two roots of `t^2 - 10t + 1` are `5 +/- 2 sqrt(6)`,
+    // enclosed before the addition so the exact irrationals survive.
+    let sqrt_six =
+        certified_sqrt_positive(6.0).expect("six is a finite positive square-root argument");
+    let two_sqrt_six = sqrt_six.scale(2.0);
+    for critical in [
+        ClosedInterval::point(5.0).sub(two_sqrt_six),
+        ClosedInterval::point(5.0).add(two_sqrt_six),
+    ] {
+        if critical.hi >= t.lo && critical.lo <= t.hi {
+            third = third.hull(kernel_at(critical).third);
+        }
+    }
+
     // Monotonicity gives tighter endpoint ranges than a dependency-heavy
     // interval evaluation, but retain outward endpoint arithmetic.
     v.lo = v.lo.max(0.0);
     v.hi = v.hi.min(next_up(1.0));
-    KernelRanges { v, u, w, k }
+    KernelRanges {
+        v,
+        u,
+        w,
+        k,
+        third,
+    }
 }
 
 const LOG_SERIES_TERMS: usize = 18;
@@ -5061,7 +5150,7 @@ mod tests {
                 .expect("valid fixture");
 
         for &x in &[-600.0_f64, -37.5, -1.0, 0.0, 2.75, 600.0] {
-            let Ok(direct) = profile.enclose_direct(x, x) else {
+            let Ok((direct, _)) = profile.enclose_direct(x, x) else {
                 continue;
             };
             let centred = profile.enclose(x, x).expect("a point cell must enclose");
@@ -5096,7 +5185,7 @@ mod tests {
             );
 
             // Intersecting can only tighten: never wider than the natural form.
-            let wide = profile.enclose_direct(x, up).expect("direct adjacent cell");
+            let (wide, _) = profile.enclose_direct(x, up).expect("direct adjacent cell");
             assert!(
                 cell.score.value.lo >= wide.score.value.lo
                     && cell.score.value.hi <= wide.score.value.hi,
@@ -5189,7 +5278,7 @@ mod tests {
             hi,
             resolution,
             |x| profile.evaluate(x),
-            |a, b| profile.enclose_direct(a.x, b.x),
+            |a, b| profile.enclose_direct(a.x, b.x).map(|(enclosure, _)| enclosure),
         );
         let centred = maximize_score_1d(
             lo,
