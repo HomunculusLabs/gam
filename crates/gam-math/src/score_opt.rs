@@ -5006,6 +5006,88 @@ mod tests {
         }
     }
 
+    /// The centred form's degenerate and extreme cells.
+    ///
+    /// Centring introduces a second evaluation and an arithmetic that can
+    /// produce an empty intersection or a non-finite remainder where the
+    /// natural extension could not, so the cases where those are reachable are
+    /// pinned rather than argued:
+    ///
+    /// * a POINT cell must return the natural extension untouched — the centred
+    ///   form's remainder is exactly zero there and re-deriving it would only
+    ///   add rounding;
+    /// * a cell whose endpoints are ADJACENT binary64 values must still centre
+    ///   at a point inside itself (`0.5*(lo+hi)` can round to either endpoint,
+    ///   and a centre outside the cell would make the mean value theorem
+    ///   inapplicable);
+    /// * cells at the far ends of the representable `log lambda` domain, where
+    ///   `lambda` is denormal at one end and near overflow at the other, must
+    ///   stay sound: the centred range must contain the point range, and it may
+    ///   never be wider than the natural extension it intersects.
+    #[test]
+    fn the_centred_enclosure_holds_on_degenerate_adjacent_and_extreme_cells() {
+        let grams = [1.0, 4.0, 1.0e-9, 2.5e7];
+        let penalties = [1.0, 1.0, 1.0, 1.0];
+        let projected = [0.5, 0.25, 1.0e-3, 3.0];
+        let energies = [8.0];
+        let profile =
+            AffineRemlProfile::new(&grams, &penalties, &projected, &energies, 6.0, 4, 0.25)
+                .expect("valid fixture");
+
+        for &x in &[-600.0_f64, -37.5, -1.0, 0.0, 2.75, 600.0] {
+            let Ok(direct) = profile.enclose_direct(x, x) else {
+                continue;
+            };
+            let centred = profile.enclose(x, x).expect("a point cell must enclose");
+            assert_eq!(
+                centred, direct,
+                "a point cell must return the natural extension untouched at x={x}"
+            );
+
+            // Adjacent binary64 endpoints: the tightest non-degenerate cell.
+            let up = next_up(x);
+            let Ok(cell) = profile.enclose(x, up) else {
+                continue;
+            };
+            let point = profile.enclose(x, x).expect("point cell");
+            assert!(
+                cell.score.value.lo <= point.score.value.lo
+                    && point.score.value.hi <= cell.score.value.hi,
+                "adjacent-float cell at {x}: point value range {:?} escaped {:?}",
+                point.score.value,
+                cell.score.value
+            );
+            assert!(
+                cell.derivative.lo <= point.derivative.lo
+                    && point.derivative.hi <= cell.derivative.hi,
+                "adjacent-float cell at {x}: point derivative range {:?} escaped {:?}",
+                point.derivative,
+                cell.derivative
+            );
+            assert!(
+                cell.score.value.is_valid() && cell.derivative.is_valid(),
+                "adjacent-float cell at {x} produced an invalid enclosure: {cell:?}"
+            );
+
+            // Intersecting can only tighten: never wider than the natural form.
+            let wide = profile.enclose_direct(x, up).expect("direct adjacent cell");
+            assert!(
+                cell.score.value.lo >= wide.score.value.lo
+                    && cell.score.value.hi <= wide.score.value.hi,
+                "the centred value range {:?} is not inside the natural extension {:?} at {x}",
+                cell.score.value,
+                wide.score.value
+            );
+            assert!(
+                cell.derivative.lo >= wide.derivative.lo
+                    && cell.derivative.hi <= wide.derivative.hi,
+                "the centred derivative range {:?} is not inside the natural extension {:?} at {x}",
+                cell.derivative,
+                wide.derivative
+            );
+        }
+    }
+
     #[test]
     fn affine_reml_zero_smoothing_schur_residual_keeps_division_low_parts() {
         // Three exact-real quotients 1/3 sum to one, although no individual
