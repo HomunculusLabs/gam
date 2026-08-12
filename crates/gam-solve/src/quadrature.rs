@@ -1434,13 +1434,60 @@ fn log_survival_panel_arclength(mu: f64, sigma: f64, z_lo: f64, z_hi: f64) -> f6
     (z_hi - z_lo) + 2.0 / sigma * ((r_hi - r_lo) - ((1.0 + r_hi) / (1.0 + r_lo)).ln())
 }
 
-/// Place the panel for `(branch, μ, σ)` at μ-derivative order `order`.
+/// The order the DERIVATIVE-TOWER panel is placed at, for every request that
+/// asks for one (#2714).
+///
+/// The placement below widens the window (`drop`) and adds nodes with the order
+/// it is placed for. Reading that order off whatever the caller happened to ask
+/// for makes `σ^j ∂_μ^j S` a function of THE REQUEST as well as of `(μ, σ)` —
+/// and the consumers ask for different orders at the same `(μ, σ)` inside one
+/// fit. `log_kernel_bundle` passes `max_k`, which the latent row program derives
+/// from `base_max_k + 2·max_primary_increment + max_suffix_increment`, i.e. from
+/// whether the caller wanted a value, a gradient, a Hessian or a contracted
+/// third: `4`, `5`, `6` and `7` on the same row. So the gradient and the Hessian
+/// paired with it were reading the same integral off four different rules, and
+/// the Hessian was not exactly the derivative of the gradient — the fault class
+/// this issue is about, one level below where it was found.
+///
+/// Pinning the placement makes entry `j` a property of `(μ, σ)` alone.
+///
+/// The VALUE route pays nothing for it. `order = 0` requests keep their own
+/// order-0 placement, which is already a function of `(μ, σ)` alone, and that is
+/// the placement every `ln S` in the tree comes off — a bundle evaluates
+/// `max_k + 1` of them against one tower, so the tower's `~1.2×` node count is
+/// a few percent of the bundle and the hot path is byte-identical.
+const LOG_SURVIVAL_TOWER_PANEL_ORDER: usize = LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER;
+
+/// The order a panel is PLACED at, given the order a caller asked to be
+/// filled in.
+///
+/// Two placements, each a pure function of `(branch, μ, σ)`: the value surface
+/// (`order = 0`) and the tower surface. See [`LOG_SURVIVAL_TOWER_PANEL_ORDER`].
+/// They agree about `S` itself wherever it matters, because the one consumer of
+/// the tower — `log_scaled_a_derivative_tower` — takes entry 0 from the value
+/// route verbatim rather than from the tower panel.
+#[inline]
+fn log_survival_panel_placement_order(requested_order: usize) -> usize {
+    if requested_order == 0 {
+        0
+    } else {
+        LOG_SURVIVAL_TOWER_PANEL_ORDER
+    }
+}
+
+/// Place the panel for `(branch, μ, σ)`, given the μ-derivative order the caller
+/// asked to have filled in.
+///
+/// The `order` argument reaches the geometry only through
+/// [`log_survival_panel_placement_order`], so the panel is one of exactly two
+/// surfaces and never a per-request one.
 fn log_survival_panel(
     branch: LogSurvivalBranch,
     mu: f64,
     sigma: f64,
-    order: usize,
+    requested_order: usize,
 ) -> LogSurvivalPanel {
+    let order = log_survival_panel_placement_order(requested_order);
     let z_peak = match branch {
         LogSurvivalBranch::Survival => log_survival_peak_z(mu, sigma),
         LogSurvivalBranch::Complement => log_complement_peak_z(mu, sigma),
@@ -1521,21 +1568,45 @@ impl LogSurvivalJet {
         &self,
         order: usize,
     ) -> Option<&[LogSurvivalSignedValue]> {
-        if order > self.order {
-            return None;
+        let prefix = self.certified_prefix_order(order)?;
+        (prefix == order).then(|| &self.scaled_mu_derivatives[..=order])
+    }
+
+    /// The largest `r ≤ order` for which entries `0..=r` are ALL certified, or
+    /// `None` when even entry 0 is not (#2714).
+    ///
+    /// Certification is a prefix property — every entry is judged on its own
+    /// finiteness, sign and measured cancellation — so "the whole tower up to
+    /// `order`" and "the longest usable tower" are the same test read to two
+    /// different lengths, and asking for the longest is what makes the answer
+    /// independent of how much the caller asked for.
+    ///
+    /// That independence is the point. [`Self::certified_scaled_mu_derivatives`]
+    /// refuses the whole tower when the LAST rung fails, so a consumer that
+    /// needed rungs `0..=1` and asked for `0..=5` was denied a basis that is
+    /// perfectly well conditioned at the rungs it actually reads — and, worse,
+    /// two consumers reading the SAME term list at the same `(μ, σ)` could be
+    /// routed to different bases purely because one of them also wanted a
+    /// Hessian. Handing back the certified prefix moves that decision onto the
+    /// term list, where it belongs.
+    ///
+    /// It does not weaken the "never a partial mix" rule: a tower truncated at
+    /// `r` makes every term list needing a rung above `r` fall back WHOLE to the
+    /// rung basis (see `latent_kernel_evaluate_terms_in_a_basis`, which refuses
+    /// the list rather than the term). What is admitted is still one surface.
+    pub fn certified_prefix_order(&self, order: usize) -> Option<usize> {
+        let order = order.min(self.order);
+        let mut certified = None;
+        for (index, entry) in self.scaled_mu_derivatives[..=order].iter().enumerate() {
+            let usable = entry.log_abs.is_finite()
+                && (index == 0 || entry.sign != 0.0)
+                && entry.log_cancellation <= LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION;
+            if !usable {
+                break;
+            }
+            certified = Some(index);
         }
-        let certified = self.scaled_mu_derivatives[..=order].iter().enumerate().all(
-            |(index, entry)| {
-                entry.log_abs.is_finite()
-                    && (index == 0 || entry.sign != 0.0)
-                    && entry.log_cancellation <= LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION
-            },
-        );
-        if certified {
-            Some(&self.scaled_mu_derivatives[..=order])
-        } else {
-            None
-        }
+        certified
     }
 }
 
@@ -7436,9 +7507,9 @@ mod tests {
 #[cfg(test)]
 mod log_survival_panel_2714_tests {
     use super::{
-        LOG_SURVIVAL_PANEL_MAX_NODES, LOG_SURVIVAL_PANEL_MIN_NODES,
-        LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION, LogSurvivalBranch, QuadratureContext,
-        log_survival_jet, log_survival_panel,
+        LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER, LOG_SURVIVAL_PANEL_MAX_NODES,
+        LOG_SURVIVAL_PANEL_MIN_NODES, LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION, LogSurvivalBranch,
+        QuadratureContext, log_survival_jet, log_survival_panel,
     };
 
     /// `(mu, sigma, ln S)` — 60-digit mpmath reference for
@@ -7577,6 +7648,122 @@ mod log_survival_panel_2714_tests {
             );
         }
         println!("[2714] worst |analytic - FD| / |analytic| = {worst:.3e}");
+    }
+
+    /// #2714: `σ^j ∂_μ^j S` is a property of `(μ, σ)`, not of how many orders
+    /// the caller asked for.
+    ///
+    /// The panel's window and node count are chosen from the order it is placed
+    /// for, so reading that order off the REQUEST made the same integral come
+    /// off a different rule per consumer. That is not hypothetical here: on one
+    /// latent-survival row, `log_kernel_bundle` is asked for `max_k = 4`, `5`,
+    /// `6` and `7` by the value, gradient, Hessian and contracted-third paths
+    /// respectively, and every one of them reads entry `1` of the same tower.
+    /// A Hessian assembled from a different `∂_a K₀` than the gradient it is
+    /// paired with is not the derivative of that gradient.
+    ///
+    /// Bit-equality, not a tolerance: two placements of one rule differ by
+    /// round-off, and round-off is exactly what a trust ratio divides by near
+    /// its fixed point. There is nothing to be tolerant of — the numbers are
+    /// either the same object or they are not.
+    #[test]
+    fn log_survival_tower_is_independent_of_the_requested_order_2714() {
+        let ctx = QuadratureContext::new();
+        let mut compared = 0usize;
+        for &(mu, sigma) in &[
+            (-20.0, 0.002),
+            (-8.0, 0.15),
+            (-3.0, 0.5),
+            (0.0, 1.0),
+            (1.8, 0.15),
+            (3.2, 0.15),
+            (3.2, 2.0),
+            (5.0, 1.0),
+            (8.0, 4.0),
+            (0.0, 8.0),
+            (12.0, 0.02),
+            (-3.0, 20.0),
+        ] {
+            let reference = log_survival_jet(&ctx, mu, sigma, LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER);
+            for requested in 1..=LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER {
+                let jet = log_survival_jet(&ctx, mu, sigma, requested);
+                for order in 1..=requested {
+                    let got = jet.scaled_mu_derivatives[order];
+                    let want = reference.scaled_mu_derivatives[order];
+                    assert_eq!(
+                        (got.log_abs.to_bits(), got.sign.to_bits()),
+                        (want.log_abs.to_bits(), want.sign.to_bits()),
+                        "#2714: sigma^{order} d^{order} S/d mu^{order} at (mu={mu}, \
+                         sigma={sigma}) is {:.17e} (sign {}) when {requested} orders \
+                         are requested and {:.17e} (sign {}) when \
+                         {LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER} are. The tower must \
+                         not depend on how much of it the caller wants.",
+                        got.log_abs, got.sign, want.log_abs, want.sign
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        // Non-vacuity: an assertion loop that never ran is a green that means
+        // nothing, and this one is nested three deep.
+        assert!(
+            compared >= 12 * (LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER
+                * (LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER + 1)
+                / 2),
+            "#2714: only {compared} tower entries were compared"
+        );
+        println!("[2714] tower order-independence: {compared} entries bit-identical");
+    }
+
+    /// #2714: certification is a PREFIX, so the basis a consumer is routed to
+    /// does not depend on how many rungs it asked for.
+    ///
+    /// The all-or-nothing form refused the whole tower when its last rung
+    /// cancelled, so a consumer needing rungs `0..=1` and asking for `0..=5` was
+    /// denied a basis that is well conditioned at every rung it reads. The
+    /// prefix form gives it exactly the rungs the quadrature vouches for.
+    #[test]
+    fn log_survival_tower_certification_is_a_prefix_2714() {
+        let ctx = QuadratureContext::new();
+        let mut saw_truncation = false;
+        for &(mu, sigma, ..) in LOG_SURVIVAL_TOWER_REFERENCE {
+            let jet = log_survival_jet(&ctx, mu, sigma, LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER);
+            let Some(prefix) = jet.certified_prefix_order(LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER)
+            else {
+                continue;
+            };
+            // Monotone in the request: asking for less can never certify less.
+            for requested in 0..=LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER {
+                assert_eq!(
+                    jet.certified_prefix_order(requested),
+                    Some(prefix.min(requested)),
+                    "#2714: the certified prefix at (mu={mu}, sigma={sigma}) is \
+                     {prefix} but reading it against a request of {requested} \
+                     disagrees — the prefix must be a property of the tower, \
+                     truncated by the request and not decided by it"
+                );
+                // And it agrees with the all-or-nothing reading exactly where
+                // that reading succeeds, so nothing that used to be admitted
+                // has been silently widened.
+                assert_eq!(
+                    jet.certified_scaled_mu_derivatives(requested).is_some(),
+                    requested <= prefix,
+                    "#2714: the whole-tower and prefix readings disagree at \
+                     (mu={mu}, sigma={sigma}, requested={requested})"
+                );
+            }
+            if prefix < LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER {
+                saw_truncation = true;
+            }
+        }
+        // The whole point is the rows where the prefix is SHORTER than the
+        // request; a table on which every tower certifies to the top says
+        // nothing about the change.
+        assert!(
+            saw_truncation,
+            "#2714: no reference row produced a truncated certified prefix, so \
+             this test did not exercise the behaviour it exists for"
+        );
     }
 
     /// `(mu, sigma, ln|σ^j ∂_μ^j S| for j = 0..=4, sign of each)` — 50-digit

@@ -526,7 +526,8 @@ pub fn log_kernel_bundle(
     })
 }
 
-/// The `σ^j ∂_a^j K_0` tower for one bundle, or `None` when it must not be used.
+/// The `σ^j ∂_a^j K_0` tower for one bundle, truncated at the highest rung the
+/// quadrature certifies, or `None` when it certifies none.
 ///
 /// The tower and the value `ln S(a,σ)` come off the same log-space survival
 /// panel by construction (#2714), so there is no longer any question of a
@@ -534,11 +535,23 @@ pub fn log_kernel_bundle(
 /// be gated by "is the value routed through the Gumbel-mixing quadrature",
 /// i.e. by `σ ≥ 8`. What is left to decide is only whether the direct tower is
 /// better conditioned than the rung basis here, and the quadrature answers that
-/// itself: [`LogSurvivalJet::certified_scaled_mu_derivatives`] admits the tower
-/// exactly when its measured signed-sum cancellation says it is accurate.
+/// itself: [`LogSurvivalJet::certified_prefix_order`] admits each entry exactly
+/// when its measured signed-sum cancellation says it is accurate.
 ///
-/// `None` also covers a non-finite `log_k0`, so a caller either gets the whole
-/// tower or falls back to the rung basis — never a partial mix.
+/// **The length is the certified PREFIX, not `max_k`.** Refusing the whole
+/// tower because its last rung cancelled made the basis a function of how many
+/// rungs the CALLER asked for, and the callers differ: a value request, a
+/// gradient, a Hessian and a contracted third derive `max_k` as
+/// `base + 2·max_primary_increment + max_suffix_increment`, so they can reach
+/// `4`, `5`, `6` and `7` on one row. Two of them evaluating the same term list
+/// at the same point would then disagree about which basis to use, and their
+/// answers would differ — which is the same fault as the one #2714 is filed on,
+/// one level down.
+///
+/// This is not a partial mix: a term list that needs a rung past the truncation
+/// falls back to the rung basis WHOLE (see
+/// `latent_kernel_evaluate_terms_in_a_basis`, which refuses the list, not the
+/// term). `None` also covers a non-finite `log_k0`.
 fn log_scaled_a_derivative_tower(
     quadctx: &QuadratureContext,
     a: f64,
@@ -550,8 +563,9 @@ fn log_scaled_a_derivative_tower(
         return None;
     }
     let jet = log_survival_jet(quadctx, a, sigma, max_k);
-    let certified = jet.certified_scaled_mu_derivatives(max_k)?;
-    let mut tower = Vec::with_capacity(max_k + 1);
+    let certified_order = jet.certified_prefix_order(max_k)?;
+    let certified = jet.certified_scaled_mu_derivatives(certified_order)?;
+    let mut tower = Vec::with_capacity(certified_order + 1);
     // Entry 0 is the kernel itself, taken verbatim from the value path so a
     // `k = 0` term list evaluates identically on either basis.
     tower.push(KernelSignedLog {
