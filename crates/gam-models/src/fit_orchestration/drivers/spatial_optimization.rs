@@ -8518,26 +8518,65 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
     // ordinary fixed-geometry fit below already profiles rho at the certified
     // pair.
     //
-    // A PINNED `kappa=` still takes the whole term out of this profile, range
-    // included, and that is a deliberate stopping point rather than a
-    // conclusion. Enrolling a pinned-κ term for range estimation alone was
-    // implemented and MEASURED (gam#2747), and on a capacity-starved fixture the
-    // criterion turned out to be monotone in `ℓ` all the way to its asymptote —
-    // the realized design converges to its linear-in-distance limit, `V` goes
-    // flat, and `ℓ̂` ran to 1.5e6, a readout of the box rather than of the data.
-    // That is the same failure mode this issue is about, moved to the other
-    // coordinate, and it needs a derived stopping rule for a criterion that
-    // converges rather than turning over. The range is confounded with κ, which
-    // is why it must be estimated when κ is FREE; a pinned κ removes the
-    // confounding, so the case that motivates the estimation does not arise and
-    // shipping an unbounded search for it here would be trading a known
-    // heuristic for an unmeasured rail.
+    // A PINNED `kappa=` takes the term out of the CURVATURE search — fixed
+    // geometry is the whole contract of `kappa=` (gam#2152) — but not out of the
+    // range one. It used to: `20bde053f` reverted the pinned-κ/free-range
+    // enrollment because the range criterion was "monotone in `ℓ` all the way to
+    // its asymptote … `ℓ̂` ran to 1.5e6, a readout of the box rather than of the
+    // data", and asked for "a derived stopping rule for a criterion that
+    // converges rather than turning over".
+    //
+    // Both halves of that are now answered rather than deferred (gam#2747).
+    // The monotone descent past `ℓ ≈ 10⁶` was not the criterion converging, it
+    // was the criterion FABRICATED — the `exp(−d/ℓ)` gauge put every bit of the
+    // range's information into `K − 1` and formed it by subtraction, so the
+    // value fell ~100 nats per decade into its own cancellation and `edf` railed
+    // at `p`. The contrast gauge removes that, the chart's top is now derived
+    // from where the model stops moving (the kernel IS the geodesic distance to
+    // within `√ε`), and arriving there is a DECLARED outcome rather than a rail.
+    // A criterion that converges to a member of its own family does not need a
+    // stopping rule; it needs its limit to be a point of the chart.
+    //
+    // So: κ free ⇒ both coordinates from the profile. κ pinned, range free ⇒ the
+    // range alone, at that κ, from the SAME inner solve. Range pinned ⇒ neither.
+    // The pinned-κ arm is skipped rather than refused when the profile's
+    // Gaussian-identity/unit-weight precondition does not hold: the range is a
+    // nuisance coordinate there and the auto `ℓ_ref` is a valid fallback, while
+    // for a free κ the profile IS the estimand and there is nothing to fall back
+    // to.
     let free_curvature_terms: Vec<usize> = constant_curvature_term_indices(&resolvedspec)
         .into_iter()
         .filter(|&term_idx| !constant_curvature_kappa_is_fixed(&resolvedspec, term_idx))
         .collect();
+    let pinned_kappa_free_range_terms: Vec<usize> =
+        constant_curvature_term_indices(&resolvedspec)
+            .into_iter()
+            .filter(|&term_idx| {
+                constant_curvature_kappa_is_fixed(&resolvedspec, term_idx)
+                    && !constant_curvature_length_scale_is_fixed(&resolvedspec, term_idx)
+            })
+            .collect();
     if !free_curvature_terms.is_empty() {
         validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)?;
+    }
+    if !pinned_kappa_free_range_terms.is_empty()
+        && validate_constant_curvature_profile_inputs(weights.view(), offset.view(), &family)
+            .is_ok()
+    {
+        for term_idx in pinned_kappa_free_range_terms {
+            let length_scale_hat =
+                constant_curvature_range_only_optimum(data, y.view(), &resolvedspec, term_idx)?;
+            if let Some(SmoothBasisSpec::ConstantCurvature { spec: cc, .. }) = resolvedspec
+                .smooth_terms
+                .get_mut(term_idx)
+                .map(|term| &mut term.basis)
+            {
+                // `length_scale_fixed` stays as the user left it, for the same
+                // reason the free-κ arm leaves it alone: a realized value frozen
+                // into the spec must not be mistaken for a pin on a later fit.
+                cc.length_scale = length_scale_hat;
+            }
+        }
     }
     for term_idx in free_curvature_terms {
         let psi_hat = constant_curvature_kappa_profile_optimum(

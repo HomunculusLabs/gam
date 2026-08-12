@@ -598,6 +598,57 @@ impl<'a> ConstantCurvatureProfile<'a> {
     }
 }
 
+/// `ℓ̂` at a PINNED κ — the range half of the profile, run on its own.
+///
+/// A pinned `kappa=` fixes the geometry (gam#2152) and takes the term out of the
+/// curvature search. It does not fix the RANGE, and the two were coupled here
+/// only because one function owned both: `20bde053f` reverted the pinned-κ /
+/// free-range enrollment because the range criterion "is monotone in ell all
+/// the way to its asymptote … a readout of the box rather than of the data".
+/// That reading was correct about the symptom and wrong about the cause — past
+/// `ℓ ≈ 10⁶` the old kernel gauge's criterion was fabricated, descending ~100
+/// nats per decade into its own cancellation — and both halves are fixed:
+/// the criterion is now a function of the data across the whole chart, and the
+/// chart's top is the geodesic-distance face, an arrival the solve DECLARES
+/// (see [`RangeSolveOutcome::DistanceKernelLimit`]).
+///
+/// So the range is estimated whenever the user did not pin it, at whatever κ the
+/// term carries. This runs the same inner solve
+/// [`ConstantCurvatureProfile::minimize_over_eta`] the full profile runs at each
+/// trial κ — one owner, one objective — rather than a second range search with
+/// its own bracket.
+fn constant_curvature_range_only_optimum(
+    data: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    resolvedspec: &TermCollectionSpec,
+    term_idx: usize,
+) -> Result<f64, EstimationError> {
+    let (feature_cols, base_spec) = match resolvedspec
+        .smooth_terms
+        .get(term_idx)
+        .map(|term| &term.basis)
+    {
+        Some(SmoothBasisSpec::ConstantCurvature {
+            feature_cols, spec, ..
+        }) => (feature_cols, spec.clone()),
+        _ => {
+            crate::bail_invalid_estim!(
+                "constant-curvature range optimum requested for non-curvature term {term_idx}"
+            )
+        }
+    };
+    let pinned_kappa = base_spec.kappa;
+    let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
+    let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
+    let (eta_hat, _, outcome) = profile.minimize_over_eta(pinned_kappa)?;
+    let length_scale_hat = eta_hat.exp();
+    log::info!(
+        "[spatial-kappa] pinned kappa={pinned_kappa:.6}: range profiled to \
+         length_scale_hat={length_scale_hat:.6} ({outcome:?}) for term {term_idx}",
+    );
+    Ok(length_scale_hat)
+}
+
 fn validate_constant_curvature_profile_inputs(
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
