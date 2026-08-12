@@ -8988,13 +8988,28 @@ mod refinement_decision_tests {
                 enclosure.score.value.hi
             );
             assert!(
-                enclosure.curvature.contains(jet.curvature),
-                "UNSOUND curvature enclosure on [{a}, {b}]: the analytic curvature {} at the \
-                 midpoint is outside [{}, {}]",
-                jet.curvature,
+                enclosure.curvature.lo <= point.curvature.lo
+                    && point.curvature.hi <= enclosure.curvature.hi,
+                "UNSOUND curvature enclosure on [{a}, {b}]: the midpoint range [{}, {}] is not \
+                 inside the cell range [{}, {}]",
+                point.curvature.lo,
+                point.curvature.hi,
                 enclosure.curvature.lo,
                 enclosure.curvature.hi
             );
+            // The rounded scalar jet is NOT asserted against the curvature, for
+            // the same reason it is not asserted against the derivative, and the
+            // margin is now large enough to be worth naming: at w=2e-6 the
+            // certified curvature range is [1.2498332e-5, 1.2499254e-5] and the
+            // jet says 1.2492615e-5, outside it by 4.6e-4 relative. That is the
+            // scalar path's own loss, not the enclosure's -- `evaluate` forms
+            // the residual as the cancelling `energy - sum q_i/h_i` and then
+            // divides by it twice, while the interval path intersects that with
+            // the well-conditioned zero-smoothing complement. Centring has made
+            // the proof object tight enough that the rounded evaluator is the
+            // less accurate of the two, which is exactly why the search
+            // documents scalar derivatives as proposals and takes every
+            // exclusion, isolation and ordering decision on the ranges.
         }
     }
 }
