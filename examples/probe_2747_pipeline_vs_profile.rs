@@ -148,11 +148,15 @@ fn profile_arm(rows: &[(f64, f64, f64, f64)], ell: f64) -> Option<(f64, f64, f64
         .slice_mut(s![1.., 1..])
         .assign(&basis.active_penalties[0].matrix.as_dense());
     let truth_for_span: Vec<f64> = rows.iter().map(|(_, _, t, _)| *t).collect();
+    let (centered_cols, centered_ceiling) = centered_span_ceiling(&smooth, &truth_for_span);
     eprintln!(
-        "    [profile ] design {}x{}  span_ceiling(truth) = {:.6}",
+        "    [profile ] design {}x{}  ceiling = {:.6}   | data-space sum-to-zero: {}x{}  ceiling = {:.6}",
         design.nrows(),
         design.ncols(),
         span_ceiling(&design, &truth_for_span),
+        design.nrows(),
+        centered_cols,
+        centered_ceiling,
     );
     let response = y.clone().insert_axis(ndarray::Axis(1));
     let fit = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
@@ -171,6 +175,47 @@ fn profile_arm(rows: &[(f64, f64, f64, f64)], ell: f64) -> Option<(f64, f64, f64
         fit.rho,
         fit.edf,
     ))
+}
+
+/// `[1 | X·Z]` where `Z` spans `{α : 1ᵀXα = 0}` — the classical data-space
+/// sum-to-zero identifiability constraint, applied by hand so its cost can be
+/// read off directly. `Z` comes from the SVD-free route: the null space of a
+/// single row is everything orthogonal to that row.
+fn centered_span_ceiling(smooth: &Array2<f64>, truth: &[f64]) -> (usize, f64) {
+    let n = smooth.nrows();
+    let p = smooth.ncols();
+    let sums: Array1<f64> = smooth.sum_axis(ndarray::Axis(0));
+    let norm = sums.dot(&sums).sqrt();
+    // Householder-style complement of the single constraint row.
+    let unit = sums.mapv(|v| v / norm);
+    let mut z = Array2::<f64>::zeros((p, p - 1));
+    // Gram-Schmidt the standard basis against `unit`, dropping the direction
+    // that collapses.
+    let mut written = 0usize;
+    for j in 0..p {
+        if written == p - 1 {
+            break;
+        }
+        let mut column = Array1::<f64>::zeros(p);
+        column[j] = 1.0;
+        let mut residual = &column - &unit.mapv(|v| v * unit[j]);
+        for k in 0..written {
+            let prior = z.column(k).to_owned();
+            let overlap = residual.dot(&prior);
+            residual = &residual - &prior.mapv(|v| v * overlap);
+        }
+        let length = residual.dot(&residual).sqrt();
+        if length > 1.0e-8 {
+            for i in 0..p {
+                z[(i, written)] = residual[i] / length;
+            }
+            written += 1;
+        }
+    }
+    let constrained = smooth.dot(&z);
+    let mut design = Array2::<f64>::ones((n, constrained.ncols() + 1));
+    design.slice_mut(s![.., 1..]).assign(&constrained);
+    (design.ncols(), span_ceiling(&design, truth))
 }
 
 /// The best any fit could do on a given design: the orthogonal projection of the
