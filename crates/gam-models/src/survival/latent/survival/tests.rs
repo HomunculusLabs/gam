@@ -3491,3 +3491,258 @@
             "refusal must name the first unrepresentable derivative: {overflow_error}"
         );
     }
+
+    /// The #2714 witness's own family shape: a frailty multiplying the WHOLE
+    /// hazard (`HazardLoading::Full`, so every unloaded component is zero), a
+    /// LEARNED scale, and both event types present.
+    ///
+    /// This is deliberately not `learnable_sigma_test_family`, which is
+    /// `LoadedVsUnloaded` with non-zero unloaded masses. The two shapes reach
+    /// different kernel term lists — `Full` leaves the exact-event numerator as
+    /// the single `q·q̇·K₁` rung with no `K₀` companion — and the gates below are
+    /// about which basis that rung is evaluated in.
+    fn full_loading_learned_sigma_family() -> LatentSurvivalFamily {
+        let n = 4;
+        LatentSurvivalFamily {
+            event_target: array![1u8, 0u8, 1u8, 1u8],
+            weights: array![1.0, 0.8, 1.0, 1.3],
+            latent_sd_fixed: None,
+            hazard_loading: HazardLoading::Full,
+            unloaded_mass_entry: Array1::zeros(n),
+            unloaded_mass_exit: Array1::zeros(n),
+            unloaded_hazard_exit: Array1::zeros(n),
+            x_time_entry: Array2::zeros((n, 2)),
+            x_time_exit: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            x_time_derivative_exit: array![
+                [0.0, 1.00],
+                [0.0, 1.00],
+                [0.0, 1.00],
+                [0.0, 1.00]
+            ],
+            x_time_right: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            time_offset_right: Array1::zeros(n),
+            unloaded_mass_right: Array1::zeros(n),
+            x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![
+                [1.0, -0.40],
+                [1.0, 0.15],
+                [1.0, 0.60],
+                [1.0, -0.90]
+            ])),
+            time_linear_constraints: None,
+            quadctx: Arc::new(QuadratureContext::new()),
+        }
+    }
+
+    /// The three log-likelihoods a latent-survival family exposes, at one β.
+    ///
+    /// `accept_test` is [`CustomFamily::log_likelihood_only`] — what the
+    /// joint-Newton trust region evaluates at the TRIAL point. `gradient_source`
+    /// is `exact_newton_joint_gradient_evaluation`'s scalar — what becomes
+    /// `current_log_likelihood`, hence `old_objective`, hence the OTHER end of
+    /// `actual_reduction = old_objective − trial_objective`. `working_sets` is
+    /// `evaluate`'s, which the same solver reads on the non-joint path.
+    fn latent_survival_three_log_likelihoods(
+        family: &LatentSurvivalFamily,
+        specs: &[ParameterBlockSpec],
+        states: &[ParameterBlockState],
+    ) -> (f64, f64, f64) {
+        let accept_test = family
+            .log_likelihood_only(states)
+            .expect("log_likelihood_only");
+        let gradient_source = family
+            .exact_newton_joint_gradient_evaluation(states, specs)
+            .expect("joint gradient evaluation")
+            .expect("latent survival exposes a joint gradient evaluation")
+            .log_likelihood;
+        let working_sets = family.evaluate(states).expect("evaluate").log_likelihood;
+        (accept_test, gradient_source, working_sets)
+    }
+
+    /// #2714: a family must have ONE log-likelihood, not one per consumer.
+    ///
+    /// The joint-Newton trust ratio is
+    ///
+    /// ```text
+    /// ρ = (old_objective − trial_objective) / (rhs·δ − ½δᵀHδ)
+    /// ```
+    ///
+    /// and the two halves of that numerator are produced by DIFFERENT family
+    /// hooks. `old_objective` is built from `current_log_likelihood`, which
+    /// `load_joint_gradient_evaluation` reads off
+    /// `exact_newton_joint_gradient_evaluation`; `trial_objective` is built from
+    /// `log_likelihood_only`, which the line search calls at `β + δ`. Writing
+    /// `b(β) = ℓ_accept(β) − ℓ_gradient(β)` for the gap between them,
+    ///
+    /// ```text
+    /// actual_reduction = −[ℓ_gradient(β+δ) − ℓ_gradient(β)] − b(β+δ) + (penalty terms),
+    /// ```
+    ///
+    /// so ANY non-zero `b` enters the numerator as a term that does not vanish
+    /// with `‖δ‖`. The trust region then shrinks the step without shrinking the
+    /// disagreement, `ρ` stops approaching 1, and every attempt is refused on the
+    /// objective while the model and the likelihood accept it — the
+    /// `rejects[model,likelihood,objective,feasibility] = [0,0,2,0]` signature at
+    /// radius `1e-12` this issue is filed on.
+    ///
+    /// The two hooks reach the kernel by different routes, which is why this is
+    /// not automatic: `log_likelihood_only` sums
+    /// `LatentSurvivalRowJet::evaluate(..).log_lik`, assembled by
+    /// [`LogKernelSumJet`] over the RUNG basis (`kernel_ratio_jet` on
+    /// `log_values`), while the gradient hook sums
+    /// `latent_survival_row_primary_gradient_hessian`'s value channel, which
+    /// prefers the `∂_a^j K₀` basis (#2610). Those are an exact change of basis
+    /// in real arithmetic and two different quadratures in f64.
+    ///
+    /// The bar is `1e-13` relative, which is a statement about ONE function
+    /// evaluated twice, not about two approximations of one integral: `b` is
+    /// what the trust region must not see, and the objective's own resolution
+    /// witness works at `|F|·ε`.
+    #[test]
+    fn latent_survival_family_has_one_log_likelihood_2714() {
+        let family = full_loading_learned_sigma_family();
+        let specs = latent_test_specs(
+            family.event_target.len(),
+            &[("time", 2), ("mean", 2), ("log_sigma", 1)],
+        );
+        let slices = family.joint_slices();
+        let sigma_idx = slices
+            .log_sigma
+            .as_ref()
+            .expect("learned scale exposes a log_sigma block")
+            .start;
+
+        // A β sweep rather than one point: the disagreement this gate exists for
+        // is state-dependent by construction (the `∂_a` tower is admitted per
+        // bundle by its own measured cancellation), so a single β can sit on
+        // either side of that admission and say nothing about the other.
+        let base = array![-0.60, 0.85, -0.25, 0.40, 0.0_f64];
+        let mut worst_accept_vs_gradient = 0.0_f64;
+        let mut worst_accept_vs_working_sets = 0.0_f64;
+        let mut worst_at = (0.0_f64, 0.0_f64);
+        let mut evaluated = 0usize;
+        for log_sigma in [-2.5_f64, -1.5, -0.7, 0.0, 0.7, 1.5, 2.5] {
+            for time_shift in [-0.8_f64, -0.3, 0.0, 0.35, 0.9] {
+                let mut beta = base.clone();
+                beta[0] += time_shift;
+                beta[sigma_idx] = log_sigma;
+                let states = latent_survival_states_from_joint_beta(&family, &beta);
+                let (accept_test, gradient_source, working_sets) =
+                    latent_survival_three_log_likelihoods(&family, &specs, &states);
+                let scale = accept_test
+                    .abs()
+                    .max(gradient_source.abs())
+                    .max(working_sets.abs())
+                    .max(1.0);
+                let gap_gradient = (accept_test - gradient_source).abs() / scale;
+                let gap_working = (accept_test - working_sets).abs() / scale;
+                if gap_gradient > worst_accept_vs_gradient {
+                    worst_accept_vs_gradient = gap_gradient;
+                    worst_at = (log_sigma, time_shift);
+                }
+                worst_accept_vs_working_sets = worst_accept_vs_working_sets.max(gap_working);
+                evaluated += 1;
+            }
+        }
+        eprintln!(
+            "[2714] one-log-likelihood: {evaluated} states; worst |accept − gradient|/scale = \
+             {worst_accept_vs_gradient:.6e} at (log_sigma, time_shift) = {worst_at:?}; \
+             worst |accept − evaluate|/scale = {worst_accept_vs_working_sets:.6e}"
+        );
+        assert!(
+            worst_accept_vs_gradient <= 1e-13,
+            "#2714: the log-likelihood the accept test evaluates at the trial β and the one the \
+             base-point objective is built from disagree by {worst_accept_vs_gradient:.6e} \
+             relative at (log_sigma, time_shift) = {worst_at:?}. That gap enters \
+             `actual_reduction` as a term independent of ‖δ‖, so no trust radius can make ρ \
+             approach 1 and every step is refused on the objective."
+        );
+        assert!(
+            worst_accept_vs_working_sets <= 1e-13,
+            "#2714: `log_likelihood_only` and `evaluate` disagree by \
+             {worst_accept_vs_working_sets:.6e} relative"
+        );
+    }
+
+    /// #2714: the joint gradient must differentiate the objective the accept
+    /// test evaluates — in EVERY coordinate, not the one this family already
+    /// pins.
+    ///
+    /// `latent_survival_learnable_sigma_block_matches_family_fd` central-
+    /// differences `log_likelihood_only` against the joint gradient at ONE
+    /// coordinate (log-σ), at ONE β, with a `2e-3` relative bar. That is a gate
+    /// on the log-σ channel's chain rule, and it is silent about the time and
+    /// mean channels, which carry the exact-event `K₁` rung the two evaluators
+    /// disagree on.
+    ///
+    /// The step is `ε^{1/3}(1+|β_j|)` — the central-difference optimum for a
+    /// value known to `ε` — and the bar `64·ε^{2/3}(1+|analytic|)` is that
+    /// optimum's own error with slack for the `f'''` factor. A gradient that
+    /// belongs to a DIFFERENT function than the one differenced fails this by
+    /// orders, not by the slack.
+    #[test]
+    fn latent_survival_joint_gradient_differentiates_the_accept_objective_2714() {
+        let family = full_loading_learned_sigma_family();
+        let specs = latent_test_specs(
+            family.event_target.len(),
+            &[("time", 2), ("mean", 2), ("log_sigma", 1)],
+        );
+        let slices = family.joint_slices();
+        let sigma_idx = slices
+            .log_sigma
+            .as_ref()
+            .expect("learned scale exposes a log_sigma block")
+            .start;
+        let base = array![-0.60, 0.85, -0.25, 0.40, 0.0_f64];
+
+        let mut worst_ratio = 0.0_f64;
+        let mut worst_report = String::new();
+        for log_sigma in [-2.0_f64, -0.7, 0.0, 0.9, 2.0] {
+            let mut beta = base.clone();
+            beta[sigma_idx] = log_sigma;
+            let states = latent_survival_states_from_joint_beta(&family, &beta);
+            let analytic = family
+                .exact_newton_joint_gradient_evaluation(&states, &specs)
+                .expect("joint gradient evaluation")
+                .expect("latent survival exposes a joint gradient evaluation")
+                .gradient;
+            for j in 0..beta.len() {
+                let h = f64::EPSILON.cbrt() * (1.0 + beta[j].abs());
+                let mut beta_plus = beta.clone();
+                beta_plus[j] += h;
+                let mut beta_minus = beta.clone();
+                beta_minus[j] -= h;
+                let ll_plus = family
+                    .log_likelihood_only(&latent_survival_states_from_joint_beta(
+                        &family, &beta_plus,
+                    ))
+                    .expect("accept-test log-likelihood at +h");
+                let ll_minus = family
+                    .log_likelihood_only(&latent_survival_states_from_joint_beta(
+                        &family,
+                        &beta_minus,
+                    ))
+                    .expect("accept-test log-likelihood at −h");
+                let fd = (ll_plus - ll_minus) / (2.0 * h);
+                let bound =
+                    64.0 * f64::EPSILON.powf(2.0 / 3.0) * (1.0 + analytic[j].abs()).max(1.0);
+                let ratio = (analytic[j] - fd).abs() / bound;
+                if ratio > worst_ratio {
+                    worst_ratio = ratio;
+                    worst_report = format!(
+                        "coordinate {j} at log_sigma={log_sigma}: analytic={:.12e}, \
+                         central difference of log_likelihood_only={fd:.12e}, \
+                         |gap|={:.6e}, bound={bound:.6e}",
+                        analytic[j],
+                        (analytic[j] - fd).abs()
+                    );
+                }
+            }
+        }
+        eprintln!("[2714] gradient-vs-accept-objective: worst gap/bound = {worst_ratio:.6e}");
+        assert!(
+            worst_ratio <= 1.0,
+            "#2714: the joint gradient is not the derivative of the objective the accept test \
+             evaluates — {worst_report} (gap/bound = {worst_ratio:.6e}). rhs·δ and \
+             actual_reduction then measure two different functions and ρ cannot approach 1."
+        );
+    }
