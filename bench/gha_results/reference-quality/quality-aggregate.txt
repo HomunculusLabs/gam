@@ -2,15 +2,15 @@ execution record: /tmp/quality-report/quality_results.tsv
 === #1561 whole-suite quality meta-gate ===
 category        n scored GAMwin REFwin   medlogR  p(1-sided)      p_BH
 factors         3      3      1      2    0.0170      0.9093    0.9782
-families       66     65     35     30   -0.0032      0.1978    0.3956
+families       66     65     34     31   -0.0032      0.2203    0.4123
 manifolds      15     14     11      2   -0.1652      0.0087    0.0525
 misc           38     38     10     26    0.0015      0.9782    0.9782
 smooths        40     40     20     20    0.0000      0.2749    0.4123
 survival       14     14     10      4   -0.0176      0.0450    0.1351
 ------------------------------------------------------------------------
-OVERALL       176    174     87     84    0.0000      0.1053 
+OVERALL       176    174     86     85    0.0000      0.1114 
 
-CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.1053, median log(gam/ref)=0.0000, wins 87 / losses 84)
+CLOSURE (one-sided p<0.05 AND GAM better on median): FAIL (p=0.1114, median log(gam/ref)=0.0000, wins 86 / losses 85)
 NOTE: 2 pair(s) dropped (nonfinite/nonpositive).
 
 --- execution vs emission (silent-attrition guard) ---
@@ -101,7 +101,7 @@ Top tests GAM loses (largest log(gam/ref) > 0):
   +0.4865  misc/quality_vs_gamlss_negbin_dispersion_location_scale_1060::mu [rmse_log_mu] gam=0.066945 vs gamlss=0.041154
   +0.4857  families/quality_vs_gamlss_gaussian_location_scale_cyclic::fundamental::mu [mu_rmse_to_truth] gam=0.034166 vs gamlss=0.021022
   +0.4839  misc/quality_validation_baseline_1471::poisson_ci_coverage [ci_calibration_error] gam=0.038667 vs mgcv=0.023833
-  +0.4548  families/quality_vs_scipy_conjugate_gaussian_posterior::sd [sd_max_abs_diff_to_truth] gam=0.00048358 vs scipy=0.00030686
+  +0.4642  families/quality_vs_scipy_conjugate_gaussian_posterior::sd [sd_max_abs_diff_to_truth] gam=0.00048358 vs scipy=0.00030401
   +0.4503  families/quality_vs_inla_binomial_smooth_probability [prob_rmse_to_truth] gam=0.030429 vs inla=0.019396
   +0.4276  families/quality_vs_mgcv_poisson_tensor [rmse_to_truth] gam=0.24002 vs mgcv=0.15652
   +0.4014  smooths/quality_vs_mgcv_duchon_default_rank::2d_n1500 [truth_rmse] gam=0.021396 vs mgcv=0.014322
