@@ -70,7 +70,24 @@
   every requested resolution from `1.49e-8` to `1e-3`, the terminal cell merely
   walking down the domain as the request coarsened.
 
-  Gated from three angles:
+  **Cost.** Centring doubles the per-cell work (one extra degenerate-cell
+  evaluation), so the net was measured rather than assumed, on three domains of
+  the same profile: the 40.6-wide declared domain goes from a 9.94 s refusal to a
+  0.58 s certification (**17×**), and a three-wide window around the optimum —
+  where the natural extension already finished in a handful of cells and there
+  was nothing left to remove — is still **1.26× faster**, because the tighter
+  derivative range excludes cells by sign a level or two earlier. The 2× per-cell
+  cost does not show up anywhere. The `residual_cascade` integration suite went
+  643 s → 541 s alongside.
+
+  One consequence points the other way and is named in the code: a tighter value
+  range makes `resolution_flat_region` easier to satisfy, and an optimum landing
+  in a flat region is a refusal rather than a fit. It does not happen, because
+  the flat test is the last thing a cell is offered and centring strengthens
+  dominance, derivative exclusion and stationary isolation by more — the gate
+  asserts the located optimum is a decided one.
+
+  Gated from four angles:
   `the_value_enclosure_never_exceeds_the_bound_its_own_derivative_certifies`
   (the invariant the natural extension broke, on a fixture built to cancel, plus
   convergence better than 50× per decade to the point-enclosure floor),
@@ -78,7 +95,18 @@
   cells return the natural extension untouched; adjacent-float cells centre
   inside themselves; the centred range is always inside the natural one), and
   `auto_reml_certifies_a_design_the_data_cannot_identify` (end to end, with its
-  rank-deficiency and inside-the-budget premises asserted).
+  rank-deficiency and inside-the-budget premises asserted), and
+  `the_natural_extension_cannot_decompose_a_domain_the_centred_form_certifies`,
+  which runs ONE search twice with the two enclosure forms — the natural
+  extension is kept callable by the fix, so the before/after is a controlled
+  comparison inside one test rather than a claim about a previous commit, and it
+  asserts its own premise so a fixture that stops exercising the defect says so.
+
+  Verified at `0b3b0fbd8`, release profile, 4-core runner:
+  `gam-math` 284/284; `gam-terms` 936/936; `gam-solve` 1899 of 1902, the three
+  reds being the pre-existing `jeffreys_subspace` and two `run_plan` failures
+  already attributed to the #2612 lane at `250a04729`; `gam --test misc
+  residual_cascade` 26/26.
 
 - **The constant-curvature range coordinate was confounded with `ρ` and
   fabricated past `ℓ ≈ 10⁶`, and both were the KERNEL'S GAUGE (#2747).** The
