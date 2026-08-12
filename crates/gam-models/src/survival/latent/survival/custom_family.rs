@@ -125,34 +125,95 @@ impl CustomFamily for LatentSurvivalFamily {
         })
     }
 
+    /// The scalar the joint-Newton accept test evaluates at the TRIAL β.
+    ///
+    /// # This must be the same function as the gradient hook's, not a second
+    /// implementation of it (#2714)
+    ///
+    /// The trust ratio's numerator is `old_objective − trial_objective`, and the
+    /// two ends are produced by different hooks: `old_objective` is built from
+    /// `current_log_likelihood`, which `load_joint_gradient_evaluation` reads off
+    /// [`Self::exact_newton_joint_gradient_evaluation`], while `trial_objective`
+    /// is built from here. Writing `b(β)` for the gap between them, and noting
+    /// that the base point does not move across a backtracking ladder,
+    ///
+    /// ```text
+    /// actual_reduction = −[ℓ(β+δ) − ℓ(β)] − b(β) + (penalty terms),
+    /// ```
+    ///
+    /// so `b` is a CONSTANT of the ladder: shrinking the radius shrinks the
+    /// bracket and leaves `b` alone, and `actual_reduction → −b` instead of
+    /// `→ 0`. Below the radius where the true reduction falls under `|b|` the
+    /// sign of `b` decides every attempt outright — `b > 0` refuses all of them,
+    /// which is the `rejects[model,likelihood,objective,feasibility] = [0,0,2,0]`
+    /// partition at trust radius `1e-12` this family was filed on.
+    ///
+    /// This used to sum `LatentSurvivalRowJet::evaluate(..).log_lik`, assembled
+    /// by `LogKernelSumJet` over the RUNG basis, against a gradient hook summing
+    /// the row program's `∂_a^j K₀`-basis value channel. Those are an exact
+    /// integer change of basis in real arithmetic (`m^k K_k = (−1)^k (∂_a)_k K₀`)
+    /// and two different quadratures in f64, so `b ≠ 0` by construction on any
+    /// row whose term list reaches `k ≥ 1` — i.e. every exact-event row, which is
+    /// most of a survival dataset. `k = 0` lists agreed anyway, because the
+    /// tower's entry 0 is `log_values[0]` verbatim, which is why right-censored
+    /// rows were silent about it.
+    ///
+    /// It now evaluates the SAME row expression through
+    /// [`latent_survival_row_primary_value`] and sums it through the SAME
+    /// deterministic reduction, so the two scalars are bit-identical rather than
+    /// merely close, and `b ≡ 0`. It is not slower for it: the value backend
+    /// builds the one kernel bundle the gradient hook builds and then evaluates a
+    /// single term list instead of the `K + K(K+1)/2` normalised moments the
+    /// order-two lift needs.
     fn log_likelihood_only(&self, block_states: &[ParameterBlockState]) -> Result<f64, String> {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
             .map_err(String::from)?;
         let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
         let q_right = self.time_q_right(block_states)?;
-        let latent_sd = self.latent_sd(block_states)?;
-        let n = self.event_target.len();
-        // Per-row latent-survival jet + log-lik contribution. Independent
-        // across rows; sum via parallel reduce. `?` propagation happens
-        // through a Result-collecting fold.
-        let contributions: Result<Vec<f64>, String> = (0..n)
-            .into_par_iter()
-            .map(|i| -> Result<f64, String> {
-                let wi = weights.at(i);
+        let sigma = self.latent_sd(block_states)?;
+        let include_log_sigma = self.joint_slices().log_sigma.is_some();
+        // The SAME chunked reduction `evaluate_exact_newton_joint_gradient_dense`
+        // uses. A different summation order over the same per-row values would
+        // reintroduce `b` at `n·ε`, which is small but is still a systematic
+        // constant of the ladder rather than noise.
+        let total = deterministic_latent_survival_row_reduction(
+            self.event_target.len(),
+            CompensatedRowSum::default,
+            |row_idx, acc| {
+                let wi = weights.at(row_idx);
                 if wi == 0.0 {
-                    return Ok(0.0);
+                    return Ok(());
                 }
-                let row = self.build_row_at(i, q_entry[i], q_exit[i], qdot_exit[i], q_right[i])?;
-                let jet = LatentSurvivalRowJet::evaluate(&self.quadctx, &row, mu[i], latent_sd)
-                    .map_err(|e| format!("LatentSurvivalFamily row {i}: {e}"))?;
-                checked_weighted_row_value(wi, jet.log_lik, i, "log likelihood")
-            })
-            .collect();
-        let mut total = CompensatedRowSum::default();
-        for contribution in contributions? {
-            total.add(contribution);
-        }
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let row_ll = latent_survival_row_primary_value(
+                    &self.quadctx,
+                    &row,
+                    LatentSurvivalPrimaryPoint {
+                        q_entry: q_entry[row_idx],
+                        q_exit: q_exit[row_idx],
+                        qdot_exit: qdot_exit[row_idx],
+                        q_right: q_right[row_idx],
+                        mu: mu[row_idx],
+                        sigma,
+                    },
+                    include_log_sigma,
+                )?;
+                acc.add(checked_weighted_row_value(
+                    wi,
+                    row_ll,
+                    row_idx,
+                    "log likelihood",
+                )?);
+                Ok(())
+            },
+            |total_acc, chunk_acc| total_acc.add(chunk_acc.value()),
+        )?;
         require_finite_likelihood_scalar(total.value(), "log likelihood")
     }
 
@@ -433,6 +494,18 @@ impl CustomFamily for LatentBinaryFamily {
         })
     }
 
+    /// Same contract as [`LatentSurvivalFamily::log_likelihood_only`], and the
+    /// same repair (#2714): this is the trial end of the trust ratio's numerator
+    /// and `evaluate_exact_newton_joint_dense` is the base end, so the row
+    /// log-survival both of them start from has to be ONE function.
+    ///
+    /// Latent-binary rows are right-censored, whose term lists reach only
+    /// `k = 0`, where the two bases agree bit-for-bit — so the gap here was not
+    /// the basis but the composition: `unloaded_offset + num − den` associates
+    /// differently from `(num − den) + unloaded_offset`, and `ln(m·q̇)` differently
+    /// from `ln m + ln q̇`. One ulp per row is still a systematic constant of the
+    /// backtracking ladder rather than noise, and there is no reason to carry two
+    /// spellings of one row expression.
     fn log_likelihood_only(&self, block_states: &[ParameterBlockState]) -> Result<f64, String> {
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
             .map_err(String::from)?;
@@ -444,13 +517,21 @@ impl CustomFamily for LatentBinaryFamily {
                 continue;
             }
             let row = self.build_right_censored_row_at(i, q_entry[i], q_exit[i])?;
-            let survival_jet =
-                LatentSurvivalRowJet::evaluate(&self.quadctx, &row, mu[i], self.latent_sd)
-                    .map_err(|e| format!("LatentBinaryFamily row {i}: {e}"))?;
-            let binary_log_lik = binary_log_likelihood_from_log_survival(
-                survival_jet.log_lik,
-                self.event_target[i],
+            let row_log_survival = latent_survival_row_primary_value(
+                &self.quadctx,
+                &row,
+                LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[i],
+                    q_exit: q_exit[i],
+                    qdot_exit: 1.0,
+                    q_right: q_exit[i],
+                    mu: mu[i],
+                    sigma: self.latent_sd,
+                },
+                false,
             )?;
+            let binary_log_lik =
+                binary_log_likelihood_from_log_survival(row_log_survival, self.event_target[i])?;
             ll.add(checked_weighted_row_value(
                 wi,
                 binary_log_lik,

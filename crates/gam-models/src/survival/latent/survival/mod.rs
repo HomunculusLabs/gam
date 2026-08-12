@@ -2694,6 +2694,80 @@ fn latent_certified_cumulants(
 /// same recurrence, accumulation order, and signed-log reduction as its oracle.
 /// The expensive quadrature bundle is then evaluated ONCE at the maximum `k`
 /// required by the complete output instead of once per Hessian cell.
+/// The kernel rung ceiling one lift needs.
+///
+/// Every emitted part carries a full order-two base, so the largest requested
+/// recurrence is the base list's own highest rung plus two primary
+/// differentiations plus the largest nilpotent suffix. This exact support bound
+/// is what lets the one shared bundle be built before any individual derivative
+/// term list is constructed.
+///
+/// Extracted so the value-only lift and the order-two lift cannot drift: the
+/// bundle's `max_k` decides which rungs exist AND (through
+/// `log_scaled_a_derivative_tower`) how long the `∂_a` tower is, so two lifts
+/// that computed it differently would evaluate the same base term list on
+/// different data (#2714).
+fn latent_kernel_sum_max_k<const K: usize>(
+    base_terms: &[LatentKernelPrimaryTerm],
+    primary_directions: &[LatentKernelPrimaryDirection; K],
+    suffixes: &[&[LatentKernelPrimaryDirection]],
+) -> usize {
+    let base_max_k = base_terms.iter().map(|term| term.k).max().unwrap_or(0);
+    let k_increment = |direction: &LatentKernelPrimaryDirection| {
+        if direction.dtau != 0.0 {
+            2
+        } else if direction.dq != 0.0 || direction.dmu != 0.0 {
+            1
+        } else {
+            0
+        }
+    };
+    let max_primary_increment = primary_directions
+        .iter()
+        .map(&k_increment)
+        .max()
+        .unwrap_or(0);
+    let max_suffix_increment = suffixes
+        .iter()
+        .map(|suffix| suffix.iter().map(&k_increment).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    base_max_k + 2 * max_primary_increment + max_suffix_increment
+}
+
+/// The shared prologue of every lift: the ONE kernel bundle, and the base term
+/// list's signed-log sum on it.
+///
+/// This is the row's log-likelihood contribution before any normalisation —
+/// `latent_kernel_sum_order2_parts` publishes it verbatim as the value channel
+/// (`out[0].0.v = base_log_sum`). Sharing it with the value-only lift is what
+/// makes `log_likelihood_only` and the joint gradient evaluate ONE function of
+/// `β` rather than two implementations of one formula (#2714).
+fn latent_kernel_sum_base<const K: usize>(
+    quadctx: &QuadratureContext,
+    base_terms: &[LatentKernelPrimaryTerm],
+    state: LatentKernelPrimaryState,
+    primary_directions: &[LatentKernelPrimaryDirection; K],
+    suffixes: &[&[LatentKernelPrimaryDirection]],
+    context: &str,
+) -> Result<(LogLognormalKernelBundle, f64), LatentSurvivalError> {
+    let max_k = latent_kernel_sum_max_k(base_terms, primary_directions, suffixes);
+    let bundle =
+        log_kernel_bundle(quadctx, state.q.exp(), state.mu, state.sigma, max_k).map_err(|e| {
+            LatentSurvivalError::NumericalFailure {
+                reason: format!("{context} kernel evaluation failed: {e}"),
+            }
+        })?;
+    let (base_log_sum, base_sign) =
+        latent_kernel_evaluate_terms(&bundle, state, base_terms, context)?;
+    if !(base_log_sum.is_finite() && base_sign > 0.0) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!("{context} produced a non-positive signed kernel sum"),
+        });
+    }
+    Ok((bundle, base_log_sum))
+}
+
 fn latent_kernel_sum_order2_parts<const K: usize>(
     quadctx: &QuadratureContext,
     base_terms: &[LatentKernelPrimaryTerm],
@@ -2706,48 +2780,19 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
         !suffixes.is_empty() && suffixes.len() <= 4,
         "latent kernel lift supports one to four order-two parts"
     );
-    let base_max_k = base_terms.iter().map(|term| term.k).max().unwrap_or(0);
-    let k_increment = |direction: &LatentKernelPrimaryDirection| {
-        if direction.dtau != 0.0 {
-            2
-        } else if direction.dq != 0.0 || direction.dmu != 0.0 {
-            1
-        } else {
-            0
-        }
-    };
-    // Every emitted part carries a full order-two base.  The largest requested
-    // recurrence is therefore two primary differentiations plus the largest
-    // nilpotent suffix.  This exact support bound lets us build the one shared
-    // bundle before constructing any individual derivative term list.
-    let max_primary_increment = primary_directions
-        .iter()
-        .map(&k_increment)
-        .max()
-        .unwrap_or(0);
-    let max_suffix_increment = suffixes
-        .iter()
-        .map(|suffix| suffix.iter().map(&k_increment).sum::<usize>())
-        .max()
-        .unwrap_or(0);
-    let max_k = base_max_k + 2 * max_primary_increment + max_suffix_increment;
-    let bundle =
-        log_kernel_bundle(quadctx, state.q.exp(), state.mu, state.sigma, max_k).map_err(|e| {
-            LatentSurvivalError::NumericalFailure {
-                reason: format!("{context} kernel evaluation failed: {e}"),
-            }
-        })?;
+    let (bundle, base_log_sum) = latent_kernel_sum_base(
+        quadctx,
+        base_terms,
+        state,
+        primary_directions,
+        suffixes,
+        context,
+    )?;
 
     let evaluate_terms = |terms: &[LatentKernelPrimaryTerm]| {
         latent_kernel_evaluate_terms(&bundle, state, terms, context)
     };
 
-    let (base_log_sum, base_sign) = evaluate_terms(base_terms)?;
-    if !(base_log_sum.is_finite() && base_sign > 0.0) {
-        return Err(LatentSurvivalError::NumericalFailure {
-            reason: format!("{context} produced a non-positive signed kernel sum"),
-        });
-    }
     let normalized = |axes: &[LatentKernelPrimaryDirection],
                       suffix: &[LatentKernelPrimaryDirection]|
      -> Result<LatentSignedLog, LatentSurvivalError> {
@@ -2979,6 +3024,67 @@ impl<const K: usize> LatentPrimaryJetBackend<K> for LatentOrder2Backend {
             context,
         )?;
         Ok(parts[0])
+    }
+}
+
+/// Value-only backend: the SAME row expression, evaluated for its value channel
+/// and nothing else (#2714).
+///
+/// This is what `log_likelihood_only` — the scalar the joint-Newton trust region
+/// evaluates at the TRIAL β — goes through, so that the accept test measures the
+/// value of the function whose gradient the step was built from, rather than a
+/// second implementation of the same formula. The trust ratio's numerator
+/// differences `old_objective` (built from the gradient hook's log-likelihood)
+/// against `trial_objective` (built from this one); a gap between them is a
+/// constant of the backtracking ladder that shrinking the radius cannot remove.
+///
+/// **`K` is deliberately the same `K` the derivative backends use** even though
+/// no derivative is produced. [`latent_kernel_sum_max_k`] sizes the kernel
+/// bundle from the primary directions, and the bundle's `max_k` decides both
+/// which rungs exist and how long the `∂_a` tower is — so a backend that dropped
+/// the directions would build a SHORTER bundle and could be routed to a
+/// different basis for the same term list. Same `K` ⇒ same bundle ⇒ same basis ⇒
+/// the value is bit-identical, which is the entire point.
+///
+/// `derivative_order = 0` because no derivative channel is filled: it reaches
+/// only `latent_survival_positive_log_difference_jet`, where it means the
+/// interval branch validates the unary composition to order 0. A value-only
+/// evaluation must not refuse because some derivative of the log-gap is
+/// unrepresentable.
+#[derive(Clone, Copy)]
+struct LatentValueBackend;
+
+impl<const K: usize> LatentPrimaryJetBackend<K> for LatentValueBackend {
+    type Jet = Order2<K>;
+
+    fn derivative_order(&self) -> usize {
+        0
+    }
+
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool {
+        latent_order2_all_finite(jet)
+    }
+
+    fn kernel_sum_log(
+        &self,
+        quadctx: &QuadratureContext,
+        base_terms: &[LatentKernelPrimaryTerm],
+        state: LatentKernelPrimaryState,
+        primary_directions: &[LatentKernelPrimaryDirection; K],
+        context: &str,
+    ) -> Result<Self::Jet, LatentSurvivalError> {
+        // The same `suffixes` the order-two backend passes, so
+        // `latent_kernel_sum_max_k` returns the same ceiling.
+        let suffixes: [&[LatentKernelPrimaryDirection]; 1] = [&[]];
+        let (_, base_log_sum) = latent_kernel_sum_base(
+            quadctx,
+            base_terms,
+            state,
+            primary_directions,
+            &suffixes,
+            context,
+        )?;
+        Ok(Order2::<K>::constant(base_log_sum))
     }
 }
 
@@ -3745,6 +3851,38 @@ fn latent_survival_row_primary_gradient_hessian(
                 },
             ),
         ))
+    }
+}
+
+/// The row log-likelihood, on the SAME surface as
+/// [`latent_survival_row_primary_gradient_hessian`]'s value channel — and, on a
+/// bundle whose basis does not depend on the derivative request, bit-identical
+/// to it (#2714).
+///
+/// The `include_log_sigma` switch selects the same `K` the gradient/Hessian
+/// entry point selects, because `K` is what sizes the kernel bundle.
+fn latent_survival_row_primary_value(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    include_log_sigma: bool,
+) -> Result<f64, LatentSurvivalError> {
+    if include_log_sigma {
+        latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
+            &LatentValueBackend,
+            quadctx,
+            row,
+            point,
+        )
+        .map(|jet| jet.value())
+    } else {
+        latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
+            &LatentValueBackend,
+            quadctx,
+            row,
+            point,
+        )
+        .map(|jet| jet.value())
     }
 }
 

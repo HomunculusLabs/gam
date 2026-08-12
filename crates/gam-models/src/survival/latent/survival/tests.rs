@@ -3511,8 +3511,16 @@
             unloaded_mass_entry: Array1::zeros(n),
             unloaded_mass_exit: Array1::zeros(n),
             unloaded_hazard_exit: Array1::zeros(n),
-            x_time_entry: Array2::zeros((n, 2)),
+            // `q_entry = β₀` and `q_exit = β₀ + dᵢ·β₁` with `dᵢ > 0`, so
+            // `q_exit ≥ q_entry` holds at EVERY β the sweeps below visit as long
+            // as `β₁ > 0` — which they hold fixed. `build_latent_survival_row`
+            // refuses a non-monotone cumulative mass, so a fixture that only
+            // happened to be monotone at the one β I picked would be measuring
+            // that refusal instead of the likelihood.
+            x_time_entry: array![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
             x_time_exit: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            // `q̇_exit = β₁ > 0`, which the exact-event rows also require — the
+            // same choice buys both.
             x_time_derivative_exit: array![
                 [0.0, 1.00],
                 [0.0, 1.00],
@@ -3660,6 +3668,86 @@
             worst_accept_vs_working_sets <= 1e-13,
             "#2714: `log_likelihood_only` and `evaluate` disagree by \
              {worst_accept_vs_working_sets:.6e} relative"
+        );
+    }
+
+    /// #2714, the structural half: the value-only lift and the order-two lift
+    /// return the SAME BITS, not merely the same number to a tolerance.
+    ///
+    /// `log_likelihood_only` is cheap because it evaluates the row expression
+    /// through `LatentValueBackend`, which skips the `K + K(K+1)/2` normalised
+    /// moments the gradient/Hessian lift needs. That is only sound if the value
+    /// channel it publishes is the one the gradient lift would have published —
+    /// which requires the kernel bundle, the `∂_a` tower and the basis choice to
+    /// be identical, and every one of those is derived from `K` and `max_k`.
+    ///
+    /// Asserting bit equality rather than a tolerance is the point. A tolerance
+    /// would pass on two lifts that build DIFFERENT bundles and happen to agree
+    /// to `1e-15`, which is exactly the state this issue is about: the trust
+    /// ratio divides by quantities of that size near its fixed point, so
+    /// "agrees to round-off" is not a substitute for "is the same object".
+    #[test]
+    fn latent_survival_value_lift_is_bit_identical_to_the_gradient_lift_2714() {
+        let quadctx = QuadratureContext::new();
+        let mut compared = 0usize;
+        for (event_code, qdot_exit) in [(1u8, 0.85_f64), (0u8, 1.0)] {
+            let row = build_latent_survival_row(
+                0,
+                HazardLoading::Full,
+                latent_survival_event_type_for(event_code),
+                -0.60,
+                0.10,
+                qdot_exit,
+                0.10,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            )
+            .expect("witness-shaped latent survival row");
+            for log_sigma in [-2.5_f64, -1.0, 0.0, 1.0, 2.5] {
+                for mu in [-1.3_f64, -0.2, 0.0, 0.4, 1.1] {
+                    for include_log_sigma in [true, false] {
+                        let point = LatentSurvivalPrimaryPoint {
+                            q_entry: -0.60,
+                            q_exit: 0.10,
+                            qdot_exit,
+                            q_right: 0.10,
+                            mu,
+                            sigma: log_sigma.exp(),
+                        };
+                        let value = latent_survival_row_primary_value(
+                            &quadctx,
+                            &row,
+                            point,
+                            include_log_sigma,
+                        )
+                        .expect("value-only lift");
+                        let (gradient_value, _, _) = latent_survival_row_primary_gradient_hessian(
+                            &quadctx,
+                            &row,
+                            point,
+                            include_log_sigma,
+                        )
+                        .expect("order-two lift");
+                        assert_eq!(
+                            value.to_bits(),
+                            gradient_value.to_bits(),
+                            "#2714: the value-only lift returns {value:.17e} and the \
+                             order-two lift {gradient_value:.17e} at (event={event_code}, \
+                             log_sigma={log_sigma}, mu={mu}, \
+                             include_log_sigma={include_log_sigma}). The accept test uses \
+                             the first and the trust ratio's other end uses the second, so \
+                             any gap is a constant of the backtracking ladder."
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            compared, 100,
+            "#2714: the bit-identity sweep must actually run its 100 states"
         );
     }
 
