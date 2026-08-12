@@ -3190,21 +3190,27 @@ fn finite_nonnegative_quotient(
 /// forms are outer enclosures of one exact range, so the intersection is an
 /// outer enclosure too: this can only tighten.
 ///
-/// # Why the finiteness guard is not defensive clutter
+/// # What the finiteness guard is for, measured
 ///
-/// `ClosedInterval::mul` takes the min/max over four endpoint products, and
-/// `inf * 0` is NaN. `f64::min` and `f64::max` IGNORE a NaN operand, so a NaN
-/// product silently drops out of the reduction and the surviving endpoints
-/// describe a range STRICTLY INSIDE the true one — an unsound certificate, in
-/// the one direction that matters, produced with no signal at all. That is
-/// reachable here: `offset` has an endpoint of exactly zero whenever the
-/// expansion centre lands on a cell boundary (adjacent-float cells, and cells so
-/// wide that `lo + hi` overflows), and a `slope` endpoint can be infinite when a
-/// near-interpolating residual sends a derivative ratio past binary64's range.
+/// `ClosedInterval::mul` reduces four endpoint products with `f64::min` and
+/// `f64::max`, which IGNORE a NaN operand, so a NaN product drops out of the
+/// reduction and the surviving endpoints describe a range strictly INSIDE the
+/// true one — an unsound certificate, in the one direction that matters, with no
+/// signal at all.
 ///
-/// So the remainder is required to be a finite valid interval before it is used,
-/// and the natural extension — which is rigorous unconditionally — is kept
-/// otherwise. The same check covers a NaN arriving from anywhere else.
+/// The obvious way in is `inf * 0`, and that way is already shut:
+/// `product_down`/`product_up` treat a zero operand as exact and map the NaN to
+/// `0.0`, and a sweep over every endpoint shape finds no narrowing from a
+/// singly-infinite slope. The way that is NOT shut is a NaN arriving from
+/// anywhere else — `[NaN, 1.0] * [-0.5, 0.5]` reduces to `[-0.5, 0.5]`, two
+/// corners silently gone — because `enclose_direct` does not prove every
+/// accumulator finite and `checked_enclosure` validates only the enclosure the
+/// search receives, after this narrowing would already have happened.
+///
+/// So the guard excludes a non-finite slope and a non-finite remainder, and
+/// keeps the natural extension, which is rigorous unconditionally. See
+/// `the_centred_form_keeps_the_natural_extension_when_the_remainder_is_not_finite`
+/// for both halves as assertions.
 fn centred_or(
     direct: ClosedInterval,
     point: ClosedInterval,
@@ -5292,6 +5298,91 @@ mod tests {
         ];
         let energies = vec![2.7067510572921663_f64];
         (grams, penalties, projected, energies)
+    }
+
+    /// The centred form's guard, and an honest account of what it is for.
+    ///
+    /// I wrote this guard for a hazard that turned out not to exist on the live
+    /// path, so here is what is actually true, measured rather than argued.
+    ///
+    /// **The `inf * 0` story is closed already.** `ClosedInterval::mul` reduces
+    /// four endpoint products with `f64::min`/`f64::max`, which IGNORE a NaN
+    /// operand — so an `inf * 0` product would drop out of the reduction
+    /// silently and leave a range strictly INSIDE the true one. But
+    /// `product_down`/`product_up` treat a zero operand as exact and map the
+    /// resulting NaN to `0.0`, so no NaN is ever produced that way, and
+    /// `[-inf, -inf] * [-1, 0]` reduces to `[0, inf]` — correct. Enumerating
+    /// every endpoint shape over `{-inf, -3, -1, 0, 1, 3, inf}` against a
+    /// sampled product set finds no narrowing from any singly-infinite slope.
+    ///
+    /// **What is still open is a NaN arriving from elsewhere.** `product_is_exact`
+    /// is false for a NaN against a non-unit, non-zero operand, so
+    /// `[NaN, 1.0] * [-0.5, 0.5]` reduces to `[-0.5, 0.5]`: two of the four
+    /// corners are dropped and a finite-looking, too-narrow range comes back with
+    /// no signal at all. `enclose_direct` does not prove every accumulator finite,
+    /// and `checked_enclosure` only validates the enclosure the search RECEIVES —
+    /// by which point a NaN slope has already been used to narrow the value.
+    ///
+    /// So the guard excludes a non-finite slope and a non-finite remainder and
+    /// keeps the natural extension, which is rigorous unconditionally. It is
+    /// cheap, and it means a certified range does not rest on a case analysis of
+    /// a rounding primitive three modules away that the next person to touch
+    /// `mode_ranges` will not re-derive.
+    #[test]
+    fn the_centred_form_keeps_the_natural_extension_when_the_remainder_is_not_finite() {
+        let direct = ClosedInterval::new(-10.0, 10.0);
+        let point = ClosedInterval::new(-1.0, 1.0);
+        let touching_zero = ClosedInterval::new(-0.5, 0.0);
+        let straddling_zero = ClosedInterval::new(-0.5, 0.5);
+
+        // The hazard, on the record as a fact rather than as a worry: a NaN
+        // endpoint reduces to a finite-looking range narrower than the truth.
+        let narrowed = ClosedInterval::new(f64::NAN, 1.0).mul(straddling_zero);
+        assert!(
+            narrowed.lo.is_finite() && narrowed.hi.is_finite(),
+            "premise: a NaN endpoint must reduce to a finite-LOOKING range ({narrowed:?}); if \
+             `mul` stops dropping it this gate is about nothing"
+        );
+        // And the `inf * 0` path, which is NOT a hazard, asserted so a change to
+        // `product_down`'s zero handling shows up here rather than silently.
+        let infinite = ClosedInterval::new(f64::NEG_INFINITY, f64::NEG_INFINITY)
+            .mul(ClosedInterval::new(-1.0, 0.0));
+        assert!(
+            infinite.lo <= 0.0 && infinite.hi.is_infinite(),
+            "`inf * 0` must stay sound through `product_down`'s exact-zero mapping, got \
+             {infinite:?}"
+        );
+
+        for slope in [
+            ClosedInterval::new(f64::NEG_INFINITY, 3.0),
+            ClosedInterval::new(-3.0, f64::INFINITY),
+            ClosedInterval::new(f64::NEG_INFINITY, f64::INFINITY),
+            ClosedInterval::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ClosedInterval::new(f64::NAN, 1.0),
+            ClosedInterval::new(1.0, f64::NAN),
+        ] {
+            for offset in [touching_zero, straddling_zero, ClosedInterval::new(0.0, 0.5)] {
+                assert_eq!(
+                    centred_or(direct, point, slope, offset),
+                    direct,
+                    "a non-finite slope {slope:?} over offset {offset:?} must leave the natural \
+                     extension in place"
+                );
+            }
+        }
+
+        // And it still tightens when the remainder IS finite, so the guard has
+        // not simply disabled the centred form.
+        let tightened = centred_or(
+            direct,
+            point,
+            ClosedInterval::new(-2.0, 2.0),
+            straddling_zero,
+        );
+        assert!(
+            tightened.lo > direct.lo && tightened.hi < direct.hi,
+            "a finite remainder must still tighten: {tightened:?} against {direct:?}"
+        );
     }
 
     /// The centred ranges contain the function at EVERY interior point, not just
