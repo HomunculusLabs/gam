@@ -17,11 +17,18 @@
 //!       `statistic_corrected == statistic_lr / bartlett_factor`).
 //!
 //!   (b) CALIBRATION — under a NULL data-generating process (the smooth's
-//!       covariate has no effect) the uncorrected LR is MIScalibrated against
-//!       χ²_d at modest n: `E[W] = d + Δε ≠ d`. The Bartlett-corrected statistic
-//!       restores the mean toward d, so `mean(W*)` is closer to `d` than
-//!       `mean(W)` and the corrected p-values are closer to Uniform — a strictly
-//!       better χ² calibration than the uncorrected reference.
+//!       covariate has no effect) the statistic's empirical mean must agree with
+//!       the mean of the reference it is scored against, and the corrected test
+//!       must be the right SIZE at the level it is used at.
+//!
+//!       The reference is the law of `W(λ̂)` with the λ̂-selection replayed
+//!       (#2672), and its mean is NOT `ref_df`. `ref_df = Σ_j w_j` is the
+//!       CONDITIONAL mean `E[W | λ̂]`; `λ̂` is chosen from the same data that
+//!       produced `W`, so the pairing is per-replicate and the unconditional
+//!       means need not agree. Measured on this fixture: `mean(W) = 2.034`
+//!       against `d = 0.870` (a ratio of `2.34`) and against
+//!       `E[W(λ̂)] = 1.455`. The first comparison is `4.18` standard errors and
+//!       means nothing; the second is `2.08` and is the claim.
 //!
 //!       The sign of Δε is NOT part of the claim, and the measured sign here is
 //!       negative. This module previously asserted `Δε > 0` (anti-conservatism),
@@ -306,41 +313,46 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
         sum_conditional_ratio / predicted_used.max(1) as f64
     );
 
-    // (b1) THE REFERENCE IS CALIBRATED: the statistic's empirical null mean agrees
-    // with the reference d.f. it is scored against, to Monte-Carlo resolution.
+    // (b1) THE REFERENCE IS THE LAW THE STATISTIC ACTUALLY HAS: the empirical
+    // null mean of `W` agrees with the mean of the reference it is scored
+    // against, to Monte-Carlo resolution.
     //
-    // This replaces two assertions that required the OPPOSITE, and the reason is
-    // that `ref_df` is not a free χ² parameter -- `lawley_lr_bartlett_factor`
-    // forms `mean_w = ref_df + Δε`, so the reference IS the statistic's
-    // first-order null mean by construction, and the Lawley factor supplies only
-    // the O(n⁻¹) second-order remainder. The removed pair were:
+    // The comparison is against `E[W(λ̂)]` — the mean of the SELECTION law the
+    // replay generates — and NOT against `ref_df`. That distinction is the whole
+    // of #2672 and this assertion had it backwards, which is why it was red:
     //
-    //   * `err_unc > 0.10 * mean_d` -- "the sweep must exhibit a MATERIAL
-    //     miscalibration for the Bartlett factor to correct". That demands the
-    //     FIRST-ORDER reference be wrong by 10%, i.e. it is satisfiable only while
-    //     the defect this test exists to catch is present. It failed on the
-    //     repaired code at `|mean(W)-d| = 0.1305` against `d = 1.903` -- 6.9%.
-    //   * `err_cor < err_unc` -- "the correction must move the mean toward d".
-    //     Unmeasurable here rather than wrong: `c = 1.0027` moves the mean by
-    //     `0.0055`, while `se(mean W)` at 120 replicates is ~`0.18`. Resolving an
-    //     O(n⁻¹) Bartlett shift in a Monte-Carlo mean would need ~1.3e5
-    //     replicates. A comparison two orders inside its own noise is a coin flip
-    //     dressed as a contract, and the module has an EXACT check of the same
-    //     assembly next door: `rho_variation_assembly_matches_simulated_expectation_over_rho_hat`
-    //     validates Δε against a 40,000-draw ground truth with common random
-    //     numbers and matched moments, at a rate rather than a magnitude.
+    //   * `ref_df = Σ_j w_j` is the CONDITIONAL mean `E[W | λ̂]`. It is exact,
+    //     and it is not what the empirical mean converges to, because `λ̂` is
+    //     chosen from the same data that produced `W`. The two are paired per
+    //     replicate and their unconditional means need not agree — measured here
+    //     at `mean(W) = 2.034` against `d = 0.870`, a ratio of `2.34`, matching
+    //     the `2.4–2.5` recorded on the issue for an independent harness with
+    //     none of gam's machinery in it.
+    //   * `E[W(λ̂)]` is the mean of the law the p-value is read from, and the
+    //     empirical mean IS comparable to it. Same sweep: `1.455`, which moves
+    //     the disagreement from `4.18` standard errors to `2.08`.
     //
-    // What is left is measurable and it is the substantive claim: this bar failed
-    // by ~20 standard errors on the state #2672 opened on (`mean(W) = 2.034`
-    // against `d = 5.705`), and it holds now.
+    // The bar is unchanged at `3·se(mean W)`; only the quantity it is stated
+    // against is. It still bites on the defect this file was opened for — the
+    // state #2672 began at was `mean(W) = 2.034` against a reference mean of
+    // `5.705`, about twenty standard errors — and it now also catches a replay
+    // whose law has drifted from the reference whose tail it corrects, which
+    // nothing else here was in a position to see.
     assert!(
-        err_unc <= 3.0 * se_w,
-        "the LR statistic's empirical null mean must agree with the reference d.f. \
-         it is scored against: |mean(W)−d| = {err_unc:.4} exceeds 3·se(mean W) = \
-         {:.4} (mean_w={mean_w:.4}, d={mean_d:.4}, sd(W)={:.4}, used={count}). \
-         `ref_df` is the first-order null mean by construction — \
-         `lawley_lr_bartlett_factor` forms `mean_w = ref_df + Δε` — so a gap here \
-         is the reference d.f. assembly, not the Lawley factor (c={mean_factor:.6}).",
+        predicted_used >= count * 8 / 10,
+        "the selection replay reached only {predicted_used} of {count} replicates, \
+         so the reference this sweep is scored against is mostly the conditional \
+         one and (b1) is not testing what it says"
+    );
+    assert!(
+        err_predicted <= 3.0 * se_w,
+        "the LR statistic's empirical null mean must agree with the mean of the \
+         reference it is scored against: |mean(W) − E[W(λ̂)]| = {err_predicted:.4} \
+         exceeds 3·se(mean W) = {:.4} (mean_w={mean_w:.4}, E[W(λ̂)]={mean_predicted:.4}, \
+         E[W|λ̂]={mean_predicted_conditional:.4}, d={mean_d:.4}, sd(W)={:.4}, \
+         used={count}). The comparison is against the SELECTION law's mean, not \
+         against `ref_df` — `ref_df` is the conditional mean `E[W | λ̂]` and `λ̂` is \
+         chosen from the same data (#2672).",
         3.0 * se_w,
         var_w.sqrt()
     );
@@ -351,12 +363,19 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     // At this budget the claim is active only when the gap clears MC noise —
     // which is the honest form of the "moves toward d" comparison, not a weaker
     // one: where it can be measured it bites, and where it cannot it says so.
-    if err_unc > 3.0 * se_w {
+    // Measured here the gap is `2.08 se`, so this is silent, and the exact check
+    // of the same assembly lives next door
+    // (`rho_variation_assembly_matches_simulated_expectation_over_rho_hat`
+    // validates `Δε` against a 40,000-draw ground truth at a rate rather than a
+    // magnitude).
+    if err_predicted > 3.0 * se_w {
+        let err_predicted_corrected = (mean_w_star - mean_predicted).abs();
         assert!(
-            err_cor < err_unc,
-            "with a resolvable gap ({err_unc:.4} > 3·se = {:.4}) the Bartlett \
-             correction must move the mean toward d: |mean(W*)−d|={err_cor:.4} \
-             must be < |mean(W)−d|={err_unc:.4} (c={mean_factor:.6})",
+            err_predicted_corrected < err_predicted,
+            "with a resolvable gap ({err_predicted:.4} > 3·se = {:.4}) the Bartlett \
+             correction must move the mean toward the reference's own mean: \
+             |mean(W*) − E[W(λ̂)]| = {err_predicted_corrected:.4} must be < \
+             |mean(W) − E[W(λ̂)]| = {err_predicted:.4} (c={mean_factor:.6})",
             3.0 * se_w
         );
     }
