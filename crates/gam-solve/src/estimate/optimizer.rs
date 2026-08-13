@@ -199,47 +199,59 @@ fn reserve_dense_covariance_bundle(p: usize) -> Option<gam_runtime::resource::Me
 /// covariance either, so there is nothing here to keep consistent with and the
 /// marginal is published untruncated, exactly as the conditional one is.
 ///
-/// A failure is propagated rather than degraded. The identical call already
-/// succeeded on this constraint system at `Vb`, and `W_p = W + (A J)V_ρ(A J)ᵀ`
-/// is `W` plus a PSD term — better conditioned, not worse — so a refusal here is
-/// a genuine anomaly and not the routine cost of an upgrade.
+/// A MOMENT failure declines rather than propagating. The corrected covariance
+/// is a refinement of an already-published conditional one, and #2601 is on
+/// record for what happens when a failure to refine the uncertainty is allowed
+/// to destroy a converged point estimate; the honest degradation is the typed
+/// absence every consumer of `beta_covariance_corrected` already handles. A
+/// STRUCTURAL failure — a geometry whose constraint width disagrees with the
+/// covariance it is supposed to constrain — is still fatal, because that is a
+/// wiring defect and no absence describes it.
 pub(crate) fn apply_marginal_constraint_truncation(
     geometry: &crate::constrained_posterior::ConstrainedPosteriorGeometry,
     covariance: &mut Array2<f64>,
-) -> Result<(), EstimationError> {
+) -> Result<Result<(), String>, EstimationError> {
     if geometry.decline().is_some() {
-        return Ok(());
+        return Ok(Ok(()));
     }
-    let center = geometry.unconstrained_center().map_err(|reason| {
-        EstimationError::RemlOptimizationFailed(format!(
-            "smoothing-corrected covariance cannot be truncated to the feasible set: {reason}"
-        ))
-    })?;
     let p = covariance.nrows();
-    if geometry.constraints.a.ncols() != p || center.len() != p {
+    if geometry.constraints.a.ncols() != p {
         return Err(EstimationError::RemlOptimizationFailed(format!(
-            "constrained posterior geometry has {} constraint columns and a length-{} centre \
-             against a {p}x{p} corrected covariance",
+            "constrained posterior geometry has {} constraint columns against a {p}x{p} \
+             corrected covariance",
             geometry.constraints.a.ncols(),
-            center.len(),
         )));
     }
+    let center = match geometry.unconstrained_center() {
+        Ok(center) if center.len() == p => center,
+        Ok(center) => {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "constrained posterior geometry carries a length-{} centre against a {p}x{p} \
+                 corrected covariance",
+                center.len(),
+            )));
+        }
+        Err(reason) => return Ok(Err(reason)),
+    };
     let marginal_correction =
-        crate::constrained_posterior::constrained_posterior_correction_from_covariance(
+        match crate::constrained_posterior::constrained_posterior_correction_from_covariance(
             covariance,
             center,
             &geometry.constraints,
-        )
-        .map_err(|reason| {
-            EstimationError::RemlOptimizationFailed(format!(
-                "smoothing-corrected covariance could not be truncated to the feasible set: \
-                 {reason}"
-            ))
-        })?;
+        ) {
+            Ok(correction) => correction,
+            Err(reason) => return Ok(Err(reason)),
+        };
     if let Some(correction) = marginal_correction {
-        correction.apply_to_covariance_in_place(covariance);
+        // Same positive-semidefinite assembly the conditional covariance uses:
+        // the marginal is read for standard errors too, and a pinned coordinate
+        // cancels there for exactly the same reason.
+        match correction.truncated_covariance_psd(covariance, &geometry.constraints) {
+            Ok(truncated) => *covariance = truncated,
+            Err(reason) => return Ok(Err(reason)),
+        }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Reserve the square matrices that remain live even when inference stays
@@ -2868,8 +2880,33 @@ where
             if let Some(correction) = constrained_correction {
                 constrained_removed_variance = Some(correction.removed_variance_diagonal());
                 constrained_diagonal_uncertainty = Some(correction.diagonal_uncertainty());
-                untruncated_conditional_covariance = Some(posterior_covariance.clone());
-                correction.apply_to_covariance_in_place(&mut posterior_covariance);
+                // `Σ_π` is read for its DIAGONAL immediately below, and on a
+                // pinned coordinate the subtractive form `Σ − GΔGᵀ` is a
+                // cancellation whose residue carries a sign — measured at
+                // `−3.09e-15` on `y ~ s(x, shape=convex)`, which the strict
+                // `variance > 0` gate then refuses. Assemble the identical
+                // quantity as `(P L)(P L)ᵀ + (G L_C)(G L_C)ᵀ`, where the
+                // diagonal is a sum of squares (#2705 group A).
+                let constraints = constrained_posterior
+                    .as_ref()
+                    .map(|geometry| &geometry.constraints)
+                    .ok_or_else(|| {
+                        EstimationError::RemlOptimizationFailed(
+                            "a constrained posterior correction exists without the geometry that \
+                             owns its constraint system"
+                                .to_string(),
+                        )
+                    })?;
+                let truncated = correction
+                    .truncated_covariance_psd(&posterior_covariance, constraints)
+                    .map_err(|reason| {
+                        EstimationError::RemlOptimizationFailed(format!(
+                            "constrained posterior covariance could not be assembled in its \
+                             positive-semidefinite form: {reason}"
+                        ))
+                    })?;
+                untruncated_conditional_covariance = Some(posterior_covariance);
+                posterior_covariance = truncated;
             }
             beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
                 posterior_covariance,
@@ -3162,15 +3199,42 @@ where
                 )
             })?;
             let mut raw_se = Array1::<f64>::zeros(p_cov);
+            // Why an inequality-truncated covariance may show an exactly-zero
+            // diagonal, and why that is a measurement rather than a defect
+            // (#2705 group A).
+            //
+            // For an UNCONSTRAINED fit `Σ = φ·H⁻¹` with `H` SPD, so every
+            // diagonal entry is strictly positive and a zero would mean the
+            // Hessian is singular — which this gate exists to catch, and still
+            // does. A TRUNCATED one is a different object: the constraint
+            // removes the coordinate's variance along its own normal, and the
+            // λ → ∞ limit of that removal is exactly zero. The Gram assembly
+            // above computes that limit as a sum of squares, so it reports the
+            // clean `0.0` instead of the `±ε·Σ_ii` rounding residue the
+            // subtraction used to leave — and a strict `> 0` test would then
+            // refuse the fit for producing the right answer.
+            let truncation_applied = constrained_removed_variance.is_some();
             for (index, &variance) in covariance.as_array().diag().iter().enumerate() {
                 let valid = if zero_covariance_boundary {
                     variance == 0.0
+                } else if truncation_applied {
+                    variance.is_finite() && variance >= 0.0
                 } else {
                     variance.is_finite() && variance > 0.0
                 };
                 if !valid {
+                    let removed = constrained_removed_variance
+                        .as_ref()
+                        .and_then(|d| d.get(index).copied())
+                        .map_or("n/a".to_string(), |v| format!("{v:.6e}"));
+                    let allowance = constrained_diagonal_uncertainty
+                        .as_ref()
+                        .and_then(|d| d.get(index).copied())
+                        .map_or("n/a".to_string(), |v| format!("{v:.6e}"));
                     return Err(EstimationError::RemlOptimizationFailed(format!(
-                        "posterior covariance diagonal {index} is not positive and representable: {variance:?}"
+                        "posterior covariance diagonal {index} is not positive and representable: \
+                         {variance:?} [#2705 attribution: removed_variance_diag={removed} \
+                         cubature_allowance={allowance} truncation_applied={truncation_applied}]"
                     )));
                 }
                 raw_se[index] = variance.sqrt();
@@ -3260,15 +3324,43 @@ where
                         "exact factorized SPD inverse has invalid diagonal {index}: {variance_unscaled:?}"
                     )));
                 }
-                let variance = cov_scale * variance_unscaled - removed_variance[index];
+                let base = cov_scale * variance_unscaled;
+                let removed = removed_variance[index];
+                let variance = base - removed;
+                // #2705 group A. The dense branch assembles this quantity as a
+                // sum of squares and cannot produce a negative variance; here
+                // there is no dense `Σ` to factor, so the subtraction stands —
+                // and on a coordinate the constraint pins, `removed` cancels
+                // `base` to the last digit and the residue carries a sign.
+                //
+                // The resolution of that residue is a MEASURED quantity, not a
+                // chosen one: `base` and `removed` are each accurate to a
+                // relative rounding error, so their difference is accurate to
+                // `~ε·max(base, removed)` in ABSOLUTE terms — which is the whole
+                // of the answer once the removal is complete. A residue inside
+                // that band is the zero it is approximating (the λ → ∞ limit of
+                // the truncation, the only value it can be). A residue outside
+                // it is a real negative variance and is refused, with the
+                // decomposition attached so the next reader does not have to
+                // re-derive which producer overran.
+                let subtraction_resolution =
+                    16.0 * f64::EPSILON * base.abs().max(removed.abs());
+                let variance = if variance < 0.0 && -variance <= subtraction_resolution {
+                    0.0
+                } else {
+                    variance
+                };
                 let valid = if zero_covariance_boundary {
                     variance == 0.0
                 } else {
-                    variance.is_finite() && variance > 0.0
+                    variance.is_finite() && variance >= 0.0
                 };
                 if !valid {
                     return Err(EstimationError::RemlOptimizationFailed(format!(
-                        "factorized posterior variance {index} is not positive and representable: {variance:?}"
+                        "factorized posterior variance {index} is not positive and \
+                         representable: {variance:?} [#2705 attribution: base={base:.6e} \
+                         removed_variance_diag={removed:.6e} \
+                         subtraction_resolution={subtraction_resolution:.6e}]"
                     )));
                 }
                 se[index] = variance.sqrt();
@@ -3340,21 +3432,44 @@ where
                     .unwrap_or_else(|| base_cov.as_array())
                     .clone();
                 corrected += corr;
-                if let Some(geometry) = constrained_posterior.as_ref() {
-                    apply_marginal_constraint_truncation(geometry, &mut corrected)?;
-                }
-                if let Some(a_bc) = bias_correction_jacobian.as_ref() {
-                    if a_bc.dim() != corrected.dim() {
-                        return Err(EstimationError::RemlOptimizationFailed(format!(
-                            "bias-correction Jacobian shape {:?} does not match corrected covariance {:?}",
-                            a_bc.dim(),
-                            corrected.dim()
-                        )));
+                let truncation = match constrained_posterior.as_ref() {
+                    Some(geometry) => {
+                        apply_marginal_constraint_truncation(geometry, &mut corrected)?
                     }
-                    corrected = a_bc.dot(&corrected).dot(&a_bc.t());
+                    None => Ok(()),
+                };
+                match truncation {
+                    Ok(()) => {
+                        if let Some(a_bc) = bias_correction_jacobian.as_ref() {
+                            if a_bc.dim() != corrected.dim() {
+                                return Err(EstimationError::RemlOptimizationFailed(format!(
+                                    "bias-correction Jacobian shape {:?} does not match corrected covariance {:?}",
+                                    a_bc.dim(),
+                                    corrected.dim()
+                                )));
+                            }
+                            // The truncation is a statement about the law of β;
+                            // `A_bc` then maps that law to the bias-corrected
+                            // estimator `β_BC = A_bc·β` (#1870). Truncating
+                            // first and mapping second is the only order in
+                            // which the feasible set is applied in the frame it
+                            // was declared in.
+                            corrected = a_bc.dot(&corrected).dot(&a_bc.t());
+                        }
+                        gam_linalg::matrix::symmetrize_in_place(&mut corrected);
+                        Some(corrected)
+                    }
+                    Err(reason) => {
+                        log::warn!(
+                            "[CONSTRAINED-Vp] the smoothing-corrected covariance could not be \
+                             truncated to the feasible set ({reason}); publishing the typed \
+                             absence rather than an untruncated marginal, which would over-state \
+                             every constrained interval. The rho-hat-conditional covariance is \
+                             unaffected."
+                        );
+                        None
+                    }
                 }
-                gam_linalg::matrix::symmetrize_in_place(&mut corrected);
-                Some(corrected)
             }
             (Some(base), Some(corr)) => {
                 return Err(EstimationError::RemlOptimizationFailed(format!(

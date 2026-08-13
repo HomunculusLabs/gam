@@ -194,6 +194,157 @@ impl ConstrainedPosteriorCorrection {
         corrected
     }
 
+    /// The same `Σ_π`, assembled as a SUM OF TWO GRAMS instead of as a
+    /// subtraction — so its diagonal cannot be a cancellation and cannot come
+    /// out negative (#2705 group A).
+    ///
+    /// `Σ − GΔGᵀ` is the difference of two nearly equal numbers exactly where
+    /// the answer matters most. A coordinate the constraint PINS has essentially
+    /// all of its variance removed: on `y ~ s(x, shape=convex)` the measured
+    /// entry went from `Σ_ii = 2.30e-2` to `6.23e-13` — eleven digits gone — and
+    /// on the neighbouring sqrt fixture the same subtraction lands at
+    /// `−3.09e-15`, which is not a small variance but a rounding residue with a
+    /// sign. Everything downstream (`se_from_covariance`, the dense SE loop)
+    /// then has to argue about whether that sign is real.
+    ///
+    /// Split the correction at `Δ = W − C`, `C = Cov[u] ⪰ 0` the truncated
+    /// constraint-normal covariance, and the same quantity is two Grams:
+    ///
+    /// ```text
+    ///     Σ − GΔGᵀ = (Σ − G W Gᵀ) + G C Gᵀ = P Σ Pᵀ + G C Gᵀ,   P = I − G A.
+    /// ```
+    ///
+    /// With `Σ = L Lᵀ` and `C = L_C L_Cᵀ` that is `(P L)(P L)ᵀ + (G L_C)(G L_C)ᵀ`,
+    /// and every diagonal entry is a sum of squares. The cancellation does not
+    /// disappear — it moves INSIDE `P L`, where each entry carries an absolute
+    /// error `O(ε‖L‖)` and is then SQUARED, so a pinned coordinate's variance
+    /// picks up `O(p ε² Σ_ii)` instead of `O(ε Σ_ii)`: sixteen orders smaller,
+    /// and non-negative by construction rather than by luck.
+    ///
+    /// `covariance` must be the SPD matrix this correction was built for, and
+    /// `constraints` the system its `rows` index. Both are exactly what the
+    /// caller already holds where a dense `Σ` exists at all.
+    ///
+    /// `C` is a cubature result, so it can carry a small negative eigenvalue —
+    /// `certify_removed_variance` admits `Δ_ii` up to `slack·W_ii` past `W_ii`.
+    /// Eigenvalues inside that certified band are read as the zero they are
+    /// approximating; anything below it is refused, because a `C` that is
+    /// materially indefinite is a broken moment computation and not a rounding
+    /// question.
+    pub fn truncated_covariance_psd(
+        &self,
+        covariance: &Array2<f64>,
+        constraints: &LinearInequalityConstraints,
+    ) -> Result<Array2<f64>, String> {
+        use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
+
+        let p = covariance.nrows();
+        if covariance.ncols() != p {
+            return Err(format!(
+                "truncated covariance needs a square Σ, got {}x{}",
+                covariance.nrows(),
+                covariance.ncols()
+            ));
+        }
+        if self.lift.nrows() != p {
+            return Err(format!(
+                "truncated covariance: the lift has {} rows against a {p}x{p} Σ",
+                self.lift.nrows()
+            ));
+        }
+        if constraints.a.ncols() != p {
+            return Err(format!(
+                "truncated covariance: the constraint system has {} columns against a {p}x{p} Σ",
+                constraints.a.ncols()
+            ));
+        }
+        let q = self.rows.len();
+        if self.lift.ncols() != q || self.removed_normal_variance.dim() != (q, q) {
+            return Err(format!(
+                "truncated covariance: {q} retained row(s) against a lift of {} column(s) and a \
+                 removed-variance block of {:?}",
+                self.lift.ncols(),
+                self.removed_normal_variance.dim()
+            ));
+        }
+        let mut retained = Array2::<f64>::zeros((q, p));
+        for (position, &row) in self.rows.iter().enumerate() {
+            if row >= constraints.a.nrows() {
+                return Err(format!(
+                    "truncated covariance: retained row {row} is outside the {}-row constraint \
+                     system it indexes",
+                    constraints.a.nrows()
+                ));
+            }
+            retained.row_mut(position).assign(&constraints.a.row(row));
+        }
+
+        // `W = A Σ Aᵀ` on the retained face, recomputed from the very Σ being
+        // corrected so `C = W − Δ` cannot mix two different covariances.
+        let sigma_at = covariance.dot(&retained.t());
+        let mut w = retained.dot(&sigma_at);
+        gam_linalg::matrix::symmetrize_in_place(&mut w);
+        let mut truncated_normal = &w - &self.removed_normal_variance;
+        gam_linalg::matrix::symmetrize_in_place(&mut truncated_normal);
+
+        let (eigenvalues, eigenvectors) = truncated_normal
+            .eigh(faer::Side::Lower)
+            .map_err(|error| format!("truncated constraint-normal covariance eigendecomposition: {error:?}"))?;
+        // The cubature certifies `Δ` to `ORTHANT_MOMENT_RELATIVE_TOLERANCE`
+        // relative to the PRE-TRUNCATION scale, so that same band — carried on
+        // the largest pre-truncation variance, times the face dimension the
+        // certificate is stated over — is the resolution at which an eigenvalue
+        // of `C = W − Δ` can be called negative.
+        let pre_truncation_scale = (0..q).fold(0.0_f64, |worst, index| worst.max(w[[index, index]]));
+        let negative_floor = -ORTHANT_MOMENT_RELATIVE_TOLERANCE * (q as f64) * pre_truncation_scale;
+        let mut normal_factor = Array2::<f64>::zeros((q, q));
+        for index in 0..q {
+            let eigenvalue = eigenvalues[index];
+            if !eigenvalue.is_finite() {
+                return Err(format!(
+                    "truncated constraint-normal covariance has a non-finite eigenvalue at {index}"
+                ));
+            }
+            if eigenvalue < negative_floor {
+                return Err(format!(
+                    "the truncated constraint-normal covariance is materially indefinite: \
+                     eigenvalue {eigenvalue:.6e} at {index} is below the cubature's own \
+                     resolution {negative_floor:.6e} (pre-truncation scale \
+                     {pre_truncation_scale:.6e} over {q} retained row(s))"
+                ));
+            }
+            let scale = eigenvalue.max(0.0).sqrt();
+            for row in 0..q {
+                normal_factor[[row, index]] = eigenvectors[[row, index]] * scale;
+            }
+        }
+
+        let sigma_factor = covariance
+            .cholesky(faer::Side::Lower)
+            .map_err(|error| {
+                format!("truncated covariance requires an SPD Σ to factor: {error:?}")
+            })?
+            .lower_triangular();
+        // `P L = L − G(A L)`, `O(p²q)` rather than the `O(p³)` a materialized
+        // `P` would cost.
+        let projected_factor = &sigma_factor - &self.lift.dot(&retained.dot(&sigma_factor));
+        let normal_lift = self.lift.dot(&normal_factor);
+
+        let mut truncated = projected_factor.dot(&projected_factor.t());
+        truncated += &normal_lift.dot(&normal_lift.t());
+        gam_linalg::matrix::symmetrize_in_place(&mut truncated);
+        // State the diagonal's non-negativity rather than inheriting it from
+        // whatever order a GEMM happens to accumulate in — the same reason
+        // `smoothing_correction_gram` writes its own diagonal.
+        for index in 0..p {
+            let projected_row = projected_factor.row(index);
+            let normal_row = normal_lift.row(index);
+            truncated[[index, index]] =
+                projected_row.dot(&projected_row) + normal_row.dot(&normal_row);
+        }
+        Ok(truncated)
+    }
+
     /// `diag(G Δ Gᵀ)` — the per-coefficient variance the truncation removes,
     /// for consumers that only ever build the covariance diagonal.
     pub fn removed_variance_diagonal(&self) -> Array1<f64> {
