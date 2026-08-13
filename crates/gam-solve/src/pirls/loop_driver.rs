@@ -473,6 +473,7 @@ pub(super) fn assemble_pirls_result(
         final_lm_lambda: working_summary.final_lm_lambda,
         final_accept_rho: working_summary.final_accept_rho,
         constraint_kkt: working_summary.constraint_kkt.clone(),
+        final_kkt_tolerance: working_summary.final_kkt_tolerance,
         linear_constraints_transformed,
         reparam_result,
         x_transformed,
@@ -1599,6 +1600,10 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             } else {
                 f64::INFINITY
             },
+            // Zero-iteration synthesis: the closed form is exact and no
+            // certificate was evaluated, so there is no tolerance that decided
+            // anything here.
+            final_kkt_tolerance: None,
             // Zero-iteration synthesis: no LM damping was exercised, so
             // hand the next solve the cold default.
             final_lm_lambda: 1e-6,
@@ -1657,6 +1662,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             final_lm_lambda: working_summary.final_lm_lambda,
             final_accept_rho: working_summary.final_accept_rho,
             constraint_kkt: working_summary.constraint_kkt.clone(),
+        final_kkt_tolerance: working_summary.final_kkt_tolerance,
             linear_constraints_transformed: linear_constraints.clone(),
             reparam_result,
             x_transformed: make_reparam_operator(&x_original, &qs_arc_final, use_sparse_native),

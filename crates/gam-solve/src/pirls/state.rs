@@ -226,6 +226,25 @@ pub struct WorkingModelPirlsResult {
     pub last_step_halving: usize,
     pub max_abs_eta: f64,
     pub constraint_kkt: Option<ConstraintKktDiagnostics>,
+    /// The KKT tolerance this solve's convergence certificate was actually
+    /// decided against — [`crate::pirls::convergence::effective_kkt_tolerance`],
+    /// i.e. the ADAPTIVE value when the outer schedule supplied one and the
+    /// configured tolerance otherwise.
+    ///
+    /// Carried because a refusal that says "the inner mode did not converge"
+    /// is unreadable without it: the certificate is
+    /// `‖g‖ < tol·√n·√p  OR  ‖g‖/(1+natural scale) < tol`, and both bounds move
+    /// with `tol` while `tol` itself tightens monotonically toward
+    /// `reml_tolerance/100` as the outer search converges. Without this number
+    /// a reader cannot tell a fit that stalled from a fit that was asked for
+    /// more precision than the inner solver's own tolerances can deliver
+    /// (#2705 group B).
+    ///
+    /// `None` where no certificate was evaluated at all — the zero-iteration
+    /// closed-form syntheses, which are exact and have nothing to certify. An
+    /// absent measurement stays absent rather than borrowing the configured
+    /// tolerance as if it had decided something.
+    pub final_kkt_tolerance: Option<f64>,
     /// Levenberg-Marquardt damping coefficient at the last accepted
     /// inner iter. Used by the REML runtime to seed the next PIRLS call
     /// at the same outer fit, avoiding 4-6 iters of damping rediscovery
@@ -473,6 +492,11 @@ pub struct PirlsResult {
     pub final_accept_rho: Option<f64>,
     /// Optional KKT diagnostics when inequality constraints were active.
     pub constraint_kkt: Option<ConstraintKktDiagnostics>,
+    /// The KKT tolerance the inner convergence certificate was decided
+    /// against, or `None` where no certificate was evaluated. Mirrors
+    /// [`WorkingModelPirlsResult::final_kkt_tolerance`]; see there for why a
+    /// refusal is unreadable without it (#2705 group B).
+    pub final_kkt_tolerance: Option<f64>,
     /// Linear inequality system enforced in transformed PIRLS coordinates:
     /// `A * beta_transformed >= b`.
     pub linear_constraints_transformed: Option<LinearInequalityConstraints>,
@@ -563,6 +587,7 @@ impl PirlsResult {
             penalized_hessian_transformed: self.penalized_hessian_transformed.clone(),
             stabilizedhessian_transformed: self.stabilizedhessian_transformed.clone(),
             ridge_passport: self.ridge_passport,
+            final_kkt_tolerance: self.final_kkt_tolerance,
             deviance: self.deviance,
             edf: self.edf,
             stable_penalty_term: self.stable_penalty_term,
@@ -661,6 +686,7 @@ impl PirlsResult {
             penalized_hessian_transformed: self.penalized_hessian_transformed.clone(),
             stabilizedhessian_transformed: self.stabilizedhessian_transformed.clone(),
             ridge_passport: self.ridge_passport,
+            final_kkt_tolerance: self.final_kkt_tolerance,
             used_device: self.used_device,
             deviance: self.deviance,
             edf: self.edf,

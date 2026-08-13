@@ -2634,6 +2634,7 @@ where
         last_step_halving,
         max_abs_eta,
         min_penalized_deviance,
+        final_kkt_tolerance: Some(kkt_tolerance),
         final_lm_lambda: lambda,
         final_accept_rho: last_iter_accept_rho,
         exported_laplace_curvature,

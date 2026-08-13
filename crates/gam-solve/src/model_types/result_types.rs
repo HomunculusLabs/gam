@@ -2917,10 +2917,93 @@ pub struct UnifiedFitResultParts {
 }
 
 impl FitConvergenceEvidence {
+    /// The inner certificate's own evidence, rendered for a refusal that is
+    /// otherwise unreadable (#2705 group B).
+    ///
+    /// `FitDidNotConverge` names the inner status and then quotes the OUTER
+    /// stationarity residual, because that is the only certificate it holds.
+    /// On a fit refused for `inner status StalledAtValidMinimum` those two
+    /// numbers describe different problems, and the reader is left to guess why
+    /// the inner mode fell short — which is exactly the question #2705 group B
+    /// records as open. The inner certificate is
+    ///
+    /// ```text
+    ///     ‖g‖ < tol·√n·√p        OR        ‖g‖ / (1 + natural scale) < tol
+    /// ```
+    ///
+    /// and for a CONSTRAINED fit `‖g‖` is not a gradient norm at all: it is
+    /// `max(primal feasibility, dual feasibility, complementarity, stationarity)`
+    /// over the constraint-KKT channels. Printing that max without its parts
+    /// hides which channel is deciding — and the four channels do not carry the
+    /// same units, so which one binds is the whole diagnosis.
+    fn inner_certificate_evidence(parts: &UnifiedFitResultParts) -> String {
+        let Some(pirls) = parts.artifacts.pirls.as_ref() else {
+            return String::new();
+        };
+        let n = pirls.final_eta.len().max(1) as f64;
+        let p = (pirls.penalized_gradient_transformed.len() as f64).max(1.0);
+        let relative_bound_scale = 1.0 + pirls.gradient_natural_scale;
+        let tolerance_text = pirls
+            .final_kkt_tolerance
+            .map_or("not evaluated".to_string(), |value| format!("{value:.6e}"));
+        let dimension_bound_text = pirls.final_kkt_tolerance.map_or_else(
+            || "not evaluated".to_string(),
+            |value| format!("{:.6e}", value * n.sqrt() * p.sqrt()),
+        );
+        let mut evidence = format!(
+            " [inner certificate: kkt_tol={tolerance_text} \
+             dimension_bound={dimension_bound_text} (tol·√{n:.0}·√{p:.0}) \
+             natural_scale={:.6e} raw_gradient_l2={:.6e}",
+            pirls.gradient_natural_scale, pirls.lastgradient_norm,
+        );
+        if let Some(kkt) = pirls.constraint_kkt.as_ref() {
+            let residual = kkt
+                .primal_feasibility
+                .max(kkt.dual_feasibility)
+                .max(kkt.complementarity)
+                .max(kkt.stationarity);
+            let deciding = if residual == kkt.stationarity {
+                "stationarity"
+            } else if residual == kkt.complementarity {
+                "complementarity"
+            } else if residual == kkt.primal_feasibility {
+                "primal_feasibility"
+            } else {
+                "dual_feasibility"
+            };
+            evidence.push_str(&format!(
+                "; constrained residual={residual:.6e} decided by {deciding} \
+                 (primal={:.6e} dual={:.6e} complementarity={:.6e} stationarity={:.6e}) \
+                 active={}/{} rank_deficient={} gradient_inf={:.6e} \
+                 relative={:.6e} vs tol={tolerance_text}",
+                kkt.primal_feasibility,
+                kkt.dual_feasibility,
+                kkt.complementarity,
+                kkt.stationarity,
+                kkt.n_active,
+                kkt.n_constraints,
+                kkt.working_set_rank_deficient,
+                kkt.gradient_scale,
+                residual / relative_bound_scale,
+            ));
+        } else {
+            evidence.push_str(&format!(
+                "; unconstrained relative={:.6e} vs tol={tolerance_text}",
+                pirls.lastgradient_norm / relative_bound_scale,
+            ));
+        }
+        evidence.push(']');
+        evidence
+    }
+
     fn assembly_error(parts: &UnifiedFitResultParts, outer_status: String) -> EstimationError {
         let certificate = parts.artifacts.criterion_certificate.as_ref();
         EstimationError::FitDidNotConverge {
-            inner_status: format!("{:?}", parts.pirls_status),
+            inner_status: format!(
+                "{:?}{}",
+                parts.pirls_status,
+                Self::inner_certificate_evidence(parts)
+            ),
             outer_status,
             outer_iterations: parts.outer_iterations,
             final_value: parts.reml_score,

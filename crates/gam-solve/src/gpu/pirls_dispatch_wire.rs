@@ -615,6 +615,7 @@ mod linux_impl {
             last_step_halving,
             max_abs_eta: max_abs_eta_used,
             constraint_kkt: constraint_kkt_final.clone(),
+            final_kkt_tolerance: Some(input.convergence_tolerance),
             final_lm_lambda,
             final_accept_rho: None,
             min_penalized_deviance,
@@ -679,6 +680,7 @@ mod linux_impl {
             final_lm_lambda,
             final_accept_rho: None,
             constraint_kkt: constraint_kkt_final,
+            final_kkt_tolerance: Some(input.convergence_tolerance),
             linear_constraints_transformed: input.linear_constraints,
             reparam_result: input.reparam_result,
             x_transformed: input.x_transformed_design,
@@ -1004,6 +1006,7 @@ mod linux_impl {
             last_step_halving: 0,
             max_abs_eta,
             constraint_kkt: constraint_kkt_val.clone(),
+            final_kkt_tolerance: None,
             min_penalized_deviance: if zero_iter_penalized.is_finite() {
                 zero_iter_penalized
             } else {
@@ -1091,6 +1094,7 @@ mod linux_impl {
             final_lm_lambda: 1e-6,
             final_accept_rho: None,
             constraint_kkt: constraint_kkt_val,
+            final_kkt_tolerance: None,
             linear_constraints_transformed: input.linear_constraints,
             reparam_result: input.reparam_result,
             x_transformed: input.x_transformed_design,
