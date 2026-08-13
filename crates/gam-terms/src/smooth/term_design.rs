@@ -1989,11 +1989,6 @@ fn design_frobenius_norm(design: &DesignMatrix) -> Result<f64, BasisError> {
     Ok(sumsq.sqrt())
 }
 
-/// The persisted fit-time global-orthogonality chart for a factor-smooth
-/// term, if one was frozen onto its spec (#978). `Some` means this term was
-/// residualized against owner terms at fit time and prediction/refit rebuilds
-/// must replay exactly that column map instead of rederiving anything from
-/// the (new) rows.
 /// The frozen row-space correction `R` for the span-preserving parametric
 /// orthogonalization (#2747), when this term carries one.
 ///
@@ -2007,6 +2002,11 @@ fn frozen_parametric_residualization(
     termspec.frozen_parametric_residualization.as_ref()
 }
 
+/// The persisted fit-time global-orthogonality chart for a factor-smooth
+/// term, if one was frozen onto its spec (#978). `Some` means this term was
+/// residualized against owner terms at fit time and prediction/refit rebuilds
+/// must replay exactly that column map instead of rederiving anything from
+/// the (new) rows.
 fn frozen_global_orthogonality(termspec: &SmoothTermSpec) -> Option<&Array2<f64>> {
     match &termspec.basis {
         SmoothBasisSpec::FactorSumToZero {
@@ -2056,16 +2056,43 @@ fn maybe_smooth_identifiability_transform(
 /// any overlapping linear columns) by `apply_global_smooth_identifiability`.
 ///
 /// This is the universal identifiability invariant for **kernel / radial**
-/// spatial smooths (#531): their realized column span contains the constant
-/// (and, at `Linear` null-space order, the linear monomials), so without this
-/// step the smooth and the parametric intercept fight over the same direction —
-/// a structural rank-1 collision. The collision is invisible to the kernels'
-/// *own* identifiability constraints because those act in **coefficient space at
-/// the K centers**, not on the realized design rows:
+/// spatial smooths (#531): without this step the smooth and the parametric
+/// intercept fight over the same direction. The collision is invisible to the
+/// kernels' *own* identifiability constraints because those act in **coefficient
+/// space at the K centers**, not on the realized design rows:
 ///   - Matérn `CenterSumToZero` enforces `1ᵀα = 0` over the centers, so
-///     `Kα` evaluated at the data rows still spans the constant.
+///     `Kα` evaluated at the data rows still carries a near-constant direction.
 ///   - Duchon / TPS `OrthogonalToParametric` *defers* its centering to this very
 ///     step, which is why it is listed here too.
+///
+/// # This list says which smooths must be ORTHOGONALIZED, not which ones may be
+/// # constrained for free
+///
+/// The text here used to justify the whole class with *"their realized column
+/// span contains the constant … a structural rank-1 collision"*, and that
+/// sentence is measured false for half of it
+/// (`examples/probe_2747_containment_registry`, `‖1 − P_X 1‖/‖1‖` on the
+/// realized design against the `√ε` bar the deletion is licensed at):
+///
+/// ```text
+///     thinplate                                      9.90e-15   contained
+///     duchon                                         1.33e-14   contained
+///     matern (both policies, ν = 3/2 and 5/2)   7.8e-4 .. 8.4e-1   NOT
+///     curv (κ ∈ {−1,0,+1}, ℓ = 0.2 … 100)       5.1e-2 .. 9.5e-1   NOT
+/// ```
+///
+/// The polynomial-nullspace bases really do contain the constant; the kernel
+/// half does not, and for Matérn the residual falls monotonically toward the bar
+/// as the range grows (`8.4e-1 → 7.8e-4` over `ℓ = 0.2 → 10`) — with the range an
+/// ESTIMATED coordinate, so containment is a function of a fitted parameter and
+/// not a property of the family.
+///
+/// That does not shorten this list. Returning `true` here asks for the smooth to
+/// be made ORTHOGONAL to the parametric block, which is licensed for every
+/// member; whether that is done by deleting a coefficient direction (free only
+/// under containment) or by projecting in row space (always) is decided per
+/// build by `apply_global_smooth_identifiability`, on the measured geometry
+/// rather than on a claim about the family (#2747).
 ///
 /// Tensor-product and B-spline bases instead apply a realized-design sum-to-zero
 /// at basis-build time (`apply_sum_to_zero_constraint`), so they already satisfy
@@ -2146,17 +2173,20 @@ fn smooth_requires_parametric_orthogonality(termspec: &SmoothTermSpec) -> bool {
         }
         // Constant-curvature geodesic kernel: same #531 collision class as the
         // raw finite-center Wahba sphere. Its coefficient-space sum-to-zero `z`
-        // leaves the realized `K·z` design spanning the constant on the data
-        // rows, so the global parametric orthogonalization must compose onto
-        // `z` (#532).
+        // leaves the realized `K·z` design carrying a near-constant direction on
+        // the data rows, so the global parametric orthogonalization must compose
+        // onto `z` (#532). It does NOT span the constant — measured at
+        // `5.1e-2 … 9.5e-1` across κ and the range — which is why that
+        // orthogonalization is a projection here and not a deletion (#2747).
         SmoothBasisSpec::ConstantCurvature { spec, .. } => matches!(
             spec.identifiability,
             ConstantCurvatureIdentifiability::CenterSumToZero
         ),
         // Measure-jet representer: identical #531 collision class to the raw
         // finite-center Wahba sphere. Gaussian RBF columns times the
-        // center-space sum-to-zero `z` still span the constant on the data rows,
-        // so `z` must absorb the parametric orthogonalization (#532).
+        // center-space sum-to-zero `z` still carry a near-constant direction on
+        // the data rows, so `z` must absorb the parametric orthogonalization
+        // (#532).
         SmoothBasisSpec::MeasureJet { spec, .. } => matches!(
             spec.identifiability,
             MeasureJetIdentifiability::CenterSumToZero
