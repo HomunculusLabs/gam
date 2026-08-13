@@ -1,5 +1,76 @@
 ## Unreleased
 
+- **A shape-constrained fit could not certify its own inner mode, for two
+  reasons, and both were units errors rather than convergence failures (#2705
+  group B).** `smooths::shape_constrained_fit_survives_its_own_inference_2601`
+  refused three of four shapes with `inner status StalledAtValidMinimum`. The
+  refusal named the inner status and then quoted the OUTER stationarity residual,
+  because that was the only certificate it held — so the first change was to make
+  it carry the inner one: the effective KKT tolerance, both certificate bounds,
+  the natural gradient scale, the inner iteration count and last realized
+  deviance change, and, when constraints are present, the four constraint-KKT
+  channels with the one that DECIDED the max named explicitly. That measurement
+  is what the rest of this entry is built on; no gate moved to produce it.
+
+  **The certificate compared a distance against a gradient bound.**
+  `constrained_stationarity_norm` returned
+  `max(primal_feasibility, dual_feasibility, complementarity, stationarity)` and
+  handed that scalar to `WorkingState::certifies_kkt`, whose two bounds —
+  `τ·√n·√p` and `τ·(1 + ‖score‖ + ‖Sβ‖)` — are both derived FOR A GRADIENT. Only
+  two of the four channels are gradient-space quantities: `primal_feasibility` is
+  a Euclidean DISTANCE in coefficient space (the constraint rows are
+  unit-normalized before it is measured) and `complementarity` is a gradient
+  TIMES a distance. Measured at the refused iterate on `y ~ s(x, shape=convex)`,
+  300 rows of clean linear data: `stationarity = 3.148471e-10` against a
+  dimension bound of `6.244998e-9` — twenty times inside the certificate — while
+  `primal_feasibility = 6.301146e-9` pushed the max past it by a factor of
+  `1.009`. That feasibility number is itself inside
+  `ACTIVE_SET_PRIMAL_FEASIBILITY_TOL = 1e-8`, documented as the tolerance the
+  active-set solver **guarantees** on the iterate it returns, in exactly that
+  metric. The solver delivered its contract and the certificate refused it.
+
+  The gradient certificate now reads `max(stationarity, dual_feasibility)`, and
+  the geometric channels are certified against the contracts that define them by
+  `constraint_geometry_is_certified`, which every acceptance path requires —
+  including the strict one, which was the odd one out, since the soft paths
+  already applied the primal-feasibility conjunct. Complementarity's bound is
+  scaled by the gradient magnitude its multipliers live at; without that factor
+  the same fit passes or fails under a response rescale `y → c·y`. This is not
+  uniformly looser: at `τ = 1e-6` the old test admitted primal feasibility up to
+  `6.2e-5`, four orders past the solver's guarantee, and the new one does not.
+
+  **The one machinery for an exhausted objective was switched off by INACTIVE
+  rows.** The remaining shape reported `last_deviance_change = 2.220446e-16` —
+  exactly `f64::EPSILON`, i.e. the penalized objective had stopped moving at its
+  own arithmetic resolution, leaving no line search and no gain ratio with
+  anything to choose a step by — and `iterations = 300`, the full budget ground
+  out in that state. The exact bare-Hessian Newton decrement and the undamped
+  polish that pursues it exist for exactly that state, and were gated on
+  `linear_constraints.is_none() && coefficient_lower_bounds.is_none() && …`
+  while the comment above that gate stated the actual requirement: *"active
+  constraints carry multipliers"*. Those are different questions, and
+  `active = 0/11` is the difference. With an empty active set every multiplier is
+  zero, `∇L − Aᵀλ = ∇L`, and the constrained KKT system IS the unconstrained
+  stationarity system — the coefficient-space certificate is valid verbatim.
+  Gating on the EXISTENCE of the constraint system denied it to every constrained
+  fit sitting strictly inside its cone, which is the whole population of
+  `shape=monotone_increasing` fitted to data that is already monotone.
+
+  The predicate is now split into its structural half (`arrow_schur.is_none()`,
+  which cannot change during a solve) and its geometric half
+  (`inequalities_are_all_inactive`, asked per use at all three sites, because the
+  active set is a property of the iterate). Because the polish takes
+  UNCONSTRAINED Newton steps — exact while the active set is empty, silent about
+  where they land — each candidate is checked for primal feasibility and refused
+  if it would leave the cone. Refused, not projected: a projection is not a
+  Newton step, and the strict-improvement guard would then be certifying a
+  different point than the one it measured.
+
+  Neither change touches an iteration budget or widens a tolerance, the two
+  levers #2705 records as SPEC-forbidden. Verified: all four shapes of
+  `every_shape_constraint_fits_clean_linear_data_2601` fit and honour their
+  constraint, on the same runner that measured the failure.
+
 - **A shape-constrained fit published two covariance matrices that were not
   covariances, for two different reasons, and both were refused as
   non-convergence (#2705 group A).** `misc::shape_constrained_alo_seed_validation_aborts_1191`
