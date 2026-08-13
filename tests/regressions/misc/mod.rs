@@ -4,6 +4,7 @@ mod beta_generative_noise_ignores_estimated_phi;
 mod beta_observation_interval_ignores_estimated_phi;
 mod beta_phi_reported_at_fitted_eta;
 mod bounded_term_identifiability_audit_zero_column;
+mod box_constrained_coefficient_is_the_truncated_mean_2705;
 mod build_rs_ban_gates_present;
 mod cli_ffi_fit_parity_1196;
 mod conformal_held_out_calibration_fold_size_mismatch;
