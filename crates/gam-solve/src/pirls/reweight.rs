@@ -14,7 +14,8 @@ use super::{
     PirlsStatus, SoftAcceptProgress, WorkingModel, WorkingModelIterationInfo,
     WorkingModelPirlsOptions, WorkingModelPirlsResult, WorkingState,
     add_scaled_diagonal_to_upper_sparse, commit_pending_arrow_latent,
-    compute_constraint_kkt_diagnostics, compute_lm_d2, constrained_stationarity_norm,
+    compute_constraint_kkt_diagnostics, compute_lm_d2, constraint_geometry_is_certified,
+    constrained_stationarity_norm,
     effective_kkt_tolerance, linear_constraints_from_lower_bounds, pirls_soft_acceptance,
     project_coefficients_to_lower_bounds, restore_pending_arrow_latent_if_needed,
     objective_curvature_for_direction, solve_direction_with_dense_factor,
@@ -1609,8 +1610,20 @@ where
                         // Newton decrement is an independent additional
                         // acceptance for ill-conditioned problems where ‖g‖
                         // is intrinsically large but H⁻¹g is already tiny.
-                        if final_state_ref.certifies_kkt(convergence_grad_norm, kkt_tolerance)
-                            || exact_nd_pass
+                        //
+                        // `convergence_grad_norm` is the GRADIENT-SPACE residual
+                        // only; the geometric constraint channels (primal
+                        // feasibility, complementarity) answer to their own
+                        // contracts and are required alongside it, never folded
+                        // into the same max (#2705 group B — see
+                        // `constrained_stationarity_norm`).
+                        if (final_state_ref.certifies_kkt(convergence_grad_norm, kkt_tolerance)
+                            || exact_nd_pass)
+                            && constraint_geometry_is_certified(
+                                beta.as_ref(),
+                                &final_state_ref.gradient,
+                                options.linear_constraints.as_ref(),
+                            )
                         {
                             status = PirlsStatus::Converged;
                             break 'pirls_loop;
@@ -2391,13 +2404,21 @@ where
         // anything accepted here is also a candidate for early-exit, and
         // anything that meets the early criterion would have been rescued
         // here.
-        if state.certifies_kkt(final_projected_grad, kkt_tolerance) {
+        // The geometric constraint channels are a separate, always-required
+        // obligation; `final_projected_grad` is the gradient-space residual only
+        // (#2705 group B).
+        let geometry_certified = constraint_geometry_is_certified(
+            beta.as_ref(),
+            &state.gradient,
+            options.linear_constraints.as_ref(),
+        );
+        if geometry_certified && state.certifies_kkt(final_projected_grad, kkt_tolerance) {
             log::debug!(
                 "[PIRLS] final-state certification: strict KKT \
                  (‖g‖={final_projected_grad:.3e})",
             );
             status = PirlsStatus::Converged;
-        } else if final_exact_decrement_pass {
+        } else if geometry_certified && final_exact_decrement_pass {
             log::debug!(
                 "[PIRLS] final-state certification: exact decrement \
                  (‖g‖={final_projected_grad:.3e}, decrement_sq={:.3e})",

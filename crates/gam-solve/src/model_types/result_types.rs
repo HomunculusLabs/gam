@@ -2953,8 +2953,12 @@ impl FitConvergenceEvidence {
         let mut evidence = format!(
             " [inner certificate: kkt_tol={tolerance_text} \
              dimension_bound={dimension_bound_text} (tol·√{n:.0}·√{p:.0}) \
-             natural_scale={:.6e} raw_gradient_l2={:.6e}",
-            pirls.gradient_natural_scale, pirls.lastgradient_norm,
+             natural_scale={:.6e} raw_gradient_l2={:.6e} iterations={} \
+             last_deviance_change={:.6e}",
+            pirls.gradient_natural_scale,
+            pirls.lastgradient_norm,
+            pirls.iteration,
+            pirls.last_deviance_change,
         );
         if let Some(kkt) = pirls.constraint_kkt.as_ref() {
             let residual = kkt
