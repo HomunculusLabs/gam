@@ -1,5 +1,180 @@
 ## Unreleased
 
+- **The λ̂-selection replay was refused on every real fit, and where it was not
+  refused it minimised a criterion whose Occam term was noise (#2672).** The
+  smooth-term LR reference prices `λ̂` as CHOSEN rather than as given by
+  replaying the outer selection: draw the tested block, minimise the replayed
+  REML criterion over `ln t`, read `W`. Four defects, each found by measuring the
+  previous repair rather than reasoning about it.
+
+  **1. The Occam term was priced by the route `#2644` had already rejected.**
+  The criterion is
+
+  ```text
+  V(t) = ½ Σ_j c_j² e_j/(1 + e_j)  +  ½ [ log|I + T(t)| − log|T(t)|₊ ],
+  T(t) = Σ_i t_i λ̂_i · Wᵀ S_i W
+  ```
+
+  and the bracket is its whole Occam half — the only term that stops the
+  selection running to `t → 0`. Both replay lanes computed it as
+  `Σ_{e > 0} log(1 + 1/e)` over the eigenvalues of the ASSEMBLED whitened sum,
+  with no structural rank and no noise floor. `penalty_logdet.rs`'s own
+  `SpectrumScale` says why that cannot work, and names this configuration: the
+  assembled route prices `log|S_λ|₊` to `O(ε·κ)` against `O(ε·√κ)` from the
+  stacked scaled roots, and `κ` goes past `1e14` when "one λ [is] at its ceiling
+  beside a null-space shrinkage λ near zero" — which is what a null-true default
+  `s(z)` IS, since `double_penalty` is on by default. Measured on a whitened
+  `q = 9` bending+ridge pair:
+
+  ```text
+  ρ̂ = (0, 0)      offset  20.564 vs  20.564     error   0.000
+  ρ̂ = (12, −12)   offset  29.813 vs  29.813     error   0.000
+  ρ̂ = (18, −24)   offset  19.189 vs  53.811     error −34.623
+  ρ̂ = (29, −29)   offset   8.103 vs  63.811     error −55.709
+  ```
+
+  The error does not perturb the selection, it replaces it: the modes lost are
+  the ones carrying `−ln t_i`, i.e. the coercivity that makes the criterion blow
+  up as `λ_i → 0`, so what is left is monotone in `ln t_i` and the replay picks a
+  wall. Same mechanism `from_components` documents under #1237, from the replay's
+  side. An independent numpy lab minimising a Gaussian-σ-known REML both ways
+  puts the two argmins `5.7`–`13.0` nats apart under the exact criterion, always
+  by railing the smaller λ down.
+
+  **2. The geometry was refused on every real fit, silently.** `Wᵀ S W` is
+  symmetric as an object and asymmetric by summation order, and
+  `strict_symmetric_eigh` VALIDATES its input rather than symmetrizing it — the
+  right contract, since a caller with a genuinely non-symmetric matrix has a
+  defect. Every unit test in the module handed the whitening an identity
+  information and a diagonal penalty, where the congruence comes out EXACTLY
+  symmetric and the validator never fires. The integration sweep's first cell is
+  a dense fit, and it declined.
+
+  **3. The whitener formed `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj`, which is a
+  cancellation.** Two matrices whose ratio is `1/(1 − p)`, after an explicit
+  inverse of an ill-conditioned block: at `p = 1 − 1e-12` — an ordinary
+  heavily-shrunk direction — the difference is roundoff amplified twelve orders.
+  The relative eigenvalue floor was then set by a SPURIOUS largest eigenvalue and
+  discarded every direction the data could see. Four of the first twenty
+  replicates of the `n = 60` fixture:
+
+  ```text
+  rep   reference mean   replayed E[W|λ̂]   q(replay)   q(reference)
+    7          0.8557           0.0003        10           11
+    8          0.9600           0.0000         9           11
+   13          0.7060           0.0004        10           11
+   15          0.7894           0.0000        10           11
+  ```
+
+  The published p-value is `p_conditional + [P̂(W_sel ≥ w) − P̂(W_cond ≥ w)]`, a
+  control variate — and a control variate is only one if the subtracted term has
+  the SAME law as the exactly-integrated one. On those replicates the shift was
+  measured against a law with zero mass and added to the tail of a law with all
+  of it. Invisible on any single fit; visible only in the size.
+
+  The same object is available with no cancellation. With
+  `A = B^{1/2} S B^{1/2} = QΛQᵀ`, `Λ = diag(p)`, `B = [H⁻¹]_jj`,
+
+  ```text
+  B^{1/2} Ĩ B^{1/2} = B^{1/2}(B⁻¹ − S)B^{1/2} = I − A = Q(I − Λ)Qᵀ,
+  ```
+
+  so `W = B^{1/2}Q(I − Λ)^{-1/2}` satisfies `WWᵀ = Ĩ⁻¹`, the only subtraction
+  left is the SCALAR `1 − p` (which loses digits exactly when the direction is
+  genuinely unidentified — a statement about the fit), and the retained set
+  becomes `1 − p > 100·q·ε`, a meaningful criterion instead of a relative floor
+  on a cancelled matrix. As a check on the construction, the whitened total
+  penalty at `λ̂` comes out `(I − Λ)^{-1/2}Λ(I − Λ)^{-1/2} = diag(p/(1 − p))` —
+  exactly the generalized spectrum, diagonal, for free. `lr_schur_information` is
+  deleted rather than repaired: nothing needs `Ĩ` itself.
+
+  **4. The conditional tail was resolved six orders below its own answer's
+  noise.** The Imhof tolerance was derived from `FitOptions::tol`, and at the
+  shipped `1e-10` that request is `~1e-10` — `gam-math`'s strict default, priced
+  at 0.13–3.3 s PER P-VALUE, three or four per term.
+  `null_simulation_size_is_calibrated_small_n` runs 960 of them and DID NOT
+  FINISH IN 4000 s, against nextest's 600 s kill: the test this issue exists to
+  un-hide had become a timeout again, by construction rather than by contention.
+  The published accuracy is `quadrature + 2·se`, so resolving the conditional
+  half below the selection shift's own standard error cannot improve the sum,
+  while Imhof's truncation point grows like `ε^{-2/3}`. The request is now
+  floored at `se`, capping the published bound at `3·se` against an irreducible
+  `2·se`.
+
+  **What replaces all four is one object.** `SelectionGeometry` carries the
+  term's λ-FREE components, whitened by the cancellation-free `W`, factored into
+  their own roots, plus their `ρ̂` and the structural rank of their sum; one thin
+  SVD of the stacked scaled roots per grid point supplies the eigenbasis, the
+  criterion's data operator, the statistic's null weights and both
+  log-determinants, with `log|T|₊` over the `t`-free structural rank instead of a
+  sign test on a number `1e18` below the largest. Three things fall out rather
+  than being fixed separately: the one-dimensional lane stops reconstructing
+  `ν_k = p_k/(1 − p_k)` from the shares (a share lives in `[0, 1]`, so a
+  structural zero and `1e-17` of roundoff are one epsilon apart there — and the
+  log-determinant is the one place that difference is worth `log(1 + 1e17)`, as a
+  term LINEAR in `ln t`); its grid gains `ln t = 0` explicitly; and `generalized`
+  is published on every lane, where the multi-scale one had returned
+  `Vec::new()`.
+
+  **And the `ln t` window is now per scale.** The outer search moved each `ρ_i`
+  independently inside its box, so scale `i` reaches `[−B − ρ̂_i, B − ρ̂_i]`. The
+  single common-shift window the `m`-dimensional grid used to receive is the
+  INTERSECTION of those, which truncates every axis to the narrowest and is EMPTY
+  as soon as one λ̂ rails — the normal state of a null-true double-penalty smooth.
+  `generate_common_scale` still derives the intersection, because that lane
+  genuinely moves every scale together.
+
+  A missing replay is no longer an `Option::None` a reader has to attribute by
+  elimination: `SmoothLrSelection::{Replayed, Declined}` names the step that
+  refused, and that is how defect 2 was found.
+
+  **Two tests were stating claims true only of the reference this issue
+  replaced.** The Bartlett file compared `mean(W)` against `ref_df` — the
+  CONDITIONAL mean `E[W | λ̂]`, which the empirical mean does not converge to
+  because `λ̂` is chosen from the same data. Measured: `2.034` against `0.870`, a
+  ratio of `2.34` and `4.18` standard errors, matching the `2.4–2.5` already on
+  the issue for an independent harness. Against the mean of the law the p-value
+  is actually read from — `E[W(λ̂)] = 1.452`, now published — it is `2.09` se. The
+  bar stays at `3·se`; only the quantity moves, and it still fails by ~20 se on
+  the state this issue opened at.
+
+  The grid's per-cell band carried a fixed `+0.015` for "the second-order
+  residual the correction itself leaves (`O(n⁻²)`)". Measured on the grid's
+  hardest cell across `n` at 200 replicates, that residual is neither `O(n⁻²)`
+  nor constant:
+
+  ```text
+  n         30      50     100     200     400
+  first  0.141   0.111   0.080   0.060   0.065
+  est    0.106   0.096   0.070   0.055   0.065      (MC s.e. 0.0154)
+  ```
+
+  — monotone toward nominal, inside the MC band by `n = 200`, quasi-separation
+  rate `0.0` throughout. So it is the quadratic expansion's own finite-sample
+  error and not a defect in the reference: a wrong reference gives an
+  `n`-INDEPENDENT offset. The band now carries half of the cell's OWN first-order
+  distortion instead of a constant, which states a claim about the correction
+  rather than a tolerance and TIGHTENS the band from `0.075` to `0.060` wherever
+  the test is in its regime.
+
+  Two hypotheses died on data collected for something else: the estimated-λ
+  lane's ρ̂-variation term is NOT a double count against the replay (dropping it
+  makes every anti-conservative cell worse), and the Lawley factor's own
+  magnitude does not track the residual it is meant to remove (`c ≈ 1.008`
+  against a distortion of `0.056` at `n = 30`).
+
+  Verified on one 4-core box, `--test-threads=1`:
+
+  ```text
+                                                    at main        after
+  the_two_routes_..._agree_on_real_fits_2672            RED     ok    29s
+  exhaustive_null_simulation_size_grid              pooled .0962  ok   191s  pooled .0564
+  null_simulation_size_is_calibrated_small_n        >4000s, unfinished
+                                                                  ok   358s  pooled .0669
+  poisson_smooth_lr_is_bartlett_corrected_...           RED     ok    58s
+  cargo test -p gam-models --lib selection_replay lr_null        20 passed
+  ```
+
 - **The `geo_disease_*_matern` / `papuan_oce*_matern` cluster refused a fit on a
   curvature the criterion itself measures with the OPPOSITE SIGN, because the
   only measurement in the room was thrown away after a boolean (#2748).**
