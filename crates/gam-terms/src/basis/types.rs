@@ -2985,6 +2985,205 @@ pub fn contained_constraint_directions(
     Ok(out)
 }
 
+/// The span-preserving orthogonalization of a smooth design against a
+/// constraint block: the realized block becomes `X·T − C·R`.
+///
+/// See [`parametric_residualization_for_design`] for the derivation. `T` is the
+/// ordinary coefficient-space transform every basis already carries (it goes
+/// into the basis metadata and restricts the penalties); `R` is the part that is
+/// new, and it is what makes the construction cost no model dimension.
+#[derive(Clone, Debug)]
+pub struct ParametricResidualization {
+    /// `T` — the coefficient-space transform, `p × k`.
+    pub coefficient_transform: Array2<f64>,
+    /// `R = B·T` in the RAW constraint block's own columns, `q × k`. The
+    /// realized block is `X·T − C·R`, so a predict-time rebuild needs `C` at the
+    /// new rows and this matrix, and nothing else.
+    pub row_space_correction: Array2<f64>,
+}
+
+/// Orthogonalize `design` against `constraint_matrix` **without deleting a model
+/// dimension**, by projecting in row space rather than restricting in
+/// coefficient space.
+///
+/// # Why this and not [`orthogonality_transform_for_design`]
+///
+/// That function returns a `Z` spanning `null((XᵀWC)ᵀ)`, so the realized block
+/// becomes `X·Z` with span `col(X) ∩ col(C)^⊥` — it drops one coefficient
+/// direction per parametric direction the cross resolves, whatever the geometry.
+/// `76a520c45` established that such a deletion is free only under CONTAINMENT
+/// (see [`contained_constraint_directions`]): when `C`'s direction is inside
+/// `col(X)`, the deleted function IS the parametric column and the parametric
+/// block keeps it. When it is not, the deleted direction is a genuine function
+/// nothing else carries. That fix withheld the deletion, and left nothing in its
+/// place — measured (gam#2747, `examples/probe_2747_parametric_orthogonality`),
+/// the shipped smooth block then sits at `‖XᵀC‖/(‖X‖‖C‖) = 1.6e-1 … 4.9e-1`
+/// against the `1e-8` bar the same step asserts whenever a transform IS applied,
+/// and `analyze_smooth_ownership`'s hierarchy is inert for every dependent
+/// smooth, because an owner's realized columns are contained in no other basis's
+/// span.
+///
+/// Residualization is the operation that is licensed unconditionally:
+///
+/// ```text
+///     X̃ = X − C(CᵀWC)⁻CᵀWX          span([C | X̃]) = span([C | X])   ALWAYS
+/// ```
+///
+/// — column operations on a block whose partner is in the model — so it makes
+/// `X̃ᵀWC = 0` exactly while the joint span is untouched. The rank of `X̃` falls
+/// by `dim(col X ∩ col C)` and by nothing else, so the whitener below drops
+/// precisely the directions the deletion is entitled to drop and no others.
+///
+/// It is also CONTINUOUS in the containment residual, which the delete/don't
+/// dichotomy is not: the direction the classical constraint removes has
+/// residualized norm exactly `sin θ = ‖1 − P_X 1‖/‖1‖`, so as a basis approaches
+/// containment its extra direction shrinks to zero and the two constructions
+/// meet, instead of the model dimension stepping by one when a fit walks its own
+/// range across a threshold.
+///
+/// # Numerics
+///
+/// `G̃ = X̃ᵀWX̃` is formed from `X̃` STREAMED chunk by chunk, not as
+/// `G − M N⁻ Mᵀ`. The two are equal in exact arithmetic and the second is a
+/// difference of near-equal `O(‖G‖)` quantities precisely in the contained case
+/// this has to resolve — the same argument `contained_constraint_directions`
+/// makes for forming its residual explicitly rather than reading `sin²θ` off
+/// `1 − cos²θ`.
+///
+/// The constraint columns are unit-normalized internally, for the scale reason
+/// [`orthogonality_transform_for_design`] documents at length; the normalization
+/// is folded back into `row_space_correction` so the returned matrix is stated
+/// against the RAW block a predict-time rebuild will reconstruct.
+pub fn parametric_residualization_for_design(
+    design: &DesignMatrix,
+    constraint_matrix: ArrayView2<'_, f64>,
+    weights: Option<ArrayView1<'_, f64>>,
+) -> Result<ParametricResidualization, BasisError> {
+    let n = design.nrows();
+    let p = design.ncols();
+    let q = constraint_matrix.ncols();
+    if p == 0 {
+        return Err(BasisError::InsufficientColumnsForConstraint { found: 0 });
+    }
+    if q == 0 {
+        return Ok(ParametricResidualization {
+            coefficient_transform: Array2::eye(p),
+            row_space_correction: Array2::zeros((0, p)),
+        });
+    }
+    if constraint_matrix.nrows() != n {
+        return Err(BasisError::ConstraintMatrixRowMismatch {
+            basisrows: n,
+            constraintrows: constraint_matrix.nrows(),
+        });
+    }
+    // Column norms are needed twice: to condition the cross/Gram below, and to
+    // restate the correction against the raw block at the end.
+    let mut column_norms = vec![0.0_f64; q];
+    for (col, norm) in column_norms.iter_mut().enumerate() {
+        let mut norm_sq = 0.0_f64;
+        for row in 0..n {
+            let value = constraint_matrix[[row, col]];
+            let weight = weights.map_or(1.0, |ws| ws[row]);
+            norm_sq += weight * value * value;
+        }
+        *norm = norm_sq.sqrt();
+    }
+    let normalized = unit_normalize_constraint_columns(constraint_matrix, weights);
+
+    // `N = ĈᵀWĈ`, and its pseudo-inverse truncated at its own spectral floor so
+    // a constraint block with dependent columns simply loses those directions:
+    // a direction that is a combination of the others is already projected out
+    // by them.
+    let mut constraint_gram = Array2::<f64>::zeros((q, q));
+    for i in 0..q {
+        for j in i..q {
+            let mut acc = 0.0_f64;
+            for row in 0..n {
+                let weight = weights.map_or(1.0, |ws| ws[row]);
+                acc += weight * normalized[[row, i]] * normalized[[row, j]];
+            }
+            constraint_gram[[i, j]] = acc;
+            constraint_gram[[j, i]] = acc;
+        }
+    }
+    let (constraint_evals, constraint_evecs) =
+        FaerEigh::eigh(&constraint_gram, Side::Lower).map_err(BasisError::LinalgError)?;
+    let constraint_top = constraint_evals.iter().cloned().fold(0.0_f64, f64::max);
+    let constraint_floor = constraint_top * (q as f64) * f64::EPSILON;
+    let mut constraint_pinv = Array2::<f64>::zeros((q, q));
+    for slot in 0..q {
+        if constraint_evals[slot] <= constraint_floor {
+            continue;
+        }
+        let scale = 1.0 / constraint_evals[slot];
+        for i in 0..q {
+            for j in 0..q {
+                constraint_pinv[[i, j]] +=
+                    scale * constraint_evecs[[i, slot]] * constraint_evecs[[j, slot]];
+            }
+        }
+    }
+
+    // `B̂ = N⁻ ĈᵀWX` (q × p): the regression of the design on the normalized
+    // constraint block.
+    let (cross, _gram) = design_cross_and_gram(design, normalized.view(), weights)?;
+    let regression = constraint_pinv.dot(&cross.t());
+
+    // `G̃ = X̃ᵀWX̃`, streamed from the explicit residual.
+    let mut residual_gram = Array2::<f64>::zeros((p, p));
+    for start in (0..n).step_by(DESIGN_CROSS_CHUNK_SIZE) {
+        let end = (start + DESIGN_CROSS_CHUNK_SIZE).min(n);
+        let basis_chunk = design
+            .try_row_chunk(start..end)
+            .map_err(|e| BasisError::InvalidInput(e.to_string()))?;
+        let residual_chunk =
+            &basis_chunk - &normalized.slice(s![start..end, ..]).dot(&regression);
+        let weighted = match weights {
+            Some(ws) => {
+                let mut scaled = residual_chunk.clone();
+                for (mut row, &weight) in scaled
+                    .axis_iter_mut(Axis(0))
+                    .zip(ws.slice(s![start..end]).iter())
+                {
+                    row *= weight;
+                }
+                scaled
+            }
+            None => residual_chunk.clone(),
+        };
+        residual_gram += &fast_atb(&residual_chunk, &weighted);
+    }
+    // The streamed accumulation is symmetric in exact arithmetic; make it so in
+    // floating point before the eigensolver is asked to assume it.
+    for i in 0..p {
+        for j in (i + 1)..p {
+            let averaged = 0.5 * (residual_gram[[i, j]] + residual_gram[[j, i]]);
+            residual_gram[[i, j]] = averaged;
+            residual_gram[[j, i]] = averaged;
+        }
+    }
+    let coefficient_transform = positive_spectral_whitener_from_gram(&residual_gram)?;
+
+    // Restate the correction against the RAW constraint columns: with
+    // `Ĉ = C·diag(1/‖c_j‖)`, `Ĉ·B̂·T = C·(diag(1/‖c_j‖)·B̂·T)`.
+    let mut row_space_correction = regression.dot(&coefficient_transform);
+    for (row, norm) in column_norms.iter().enumerate() {
+        let scale = if *norm > 0.0 && norm.is_finite() {
+            1.0 / norm
+        } else {
+            0.0
+        };
+        for col in 0..row_space_correction.ncols() {
+            row_space_correction[[row, col]] *= scale;
+        }
+    }
+    Ok(ParametricResidualization {
+        coefficient_transform,
+        row_space_correction,
+    })
+}
+
 pub fn orthogonality_transform_for_design(
     design: &DesignMatrix,
     constraint_matrix: ArrayView2<'_, f64>,
@@ -3234,5 +3433,194 @@ mod containment_tests {
             column.iter().all(|&v| (v / first - 1.0).abs() < 1e-8),
             "the kept direction must be the constant, got {column:?}"
         );
+    }
+    /// The span-preserving construction, on the fixture that made the deletion
+    /// wrong: two decaying exponentials that CORRELATE with the constant.
+    ///
+    /// Three properties, and they are the whole argument for residualizing
+    /// rather than deleting:
+    ///
+    /// 1. the realized block comes out orthogonal to the constraint at roundoff
+    ///    — the invariant the step exists for;
+    /// 2. it costs NO coefficient direction — the deletion costs one;
+    /// 3. `span([C | X·T − C·R]) == span([C | X])` exactly, which is what makes
+    ///    (2) a fact rather than a preference.
+    #[test]
+    fn residualizing_a_correlated_block_is_orthogonal_and_costs_no_dimension() {
+        let n = 40usize;
+        let mut basis = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            basis[[i, 0]] = (-0.3 * x).exp();
+            basis[[i, 1]] = (-0.9 * x).exp();
+        }
+        let intercept = Array2::<f64>::ones((n, 1));
+        let plan = parametric_residualization_for_design(
+            &dense(basis.clone()),
+            intercept.view(),
+            None,
+        )
+        .expect("test");
+        assert_eq!(
+            plan.coefficient_transform.ncols(),
+            2,
+            "a non-contained constraint costs no coefficient direction"
+        );
+        assert_eq!(plan.row_space_correction.dim(), (1, 2));
+        let realized = basis.dot(&plan.coefficient_transform)
+            - intercept.dot(&plan.row_space_correction);
+        let cross = realized.t().dot(&intercept);
+        let relative = cross.iter().map(|v| v * v).sum::<f64>().sqrt()
+            / (realized.iter().map(|v| v * v).sum::<f64>().sqrt()
+                * intercept.iter().map(|v| v * v).sum::<f64>().sqrt());
+        // The bar is DERIVED rather than chosen. `X̃ᵀC` is accumulated over `n`
+        // products of size `‖x‖‖c‖`, so relative to `‖X̃‖‖C‖` its floating-point
+        // floor carries the amplification `‖X‖/‖X̃‖` — which on a fixture built
+        // to be nearly collinear with its constraint is exactly `1/sin θ` and is
+        // the reason a fixed `1e-14` would be a statement about this fixture
+        // rather than about the arithmetic.
+        let amplification = basis.iter().map(|v| v * v).sum::<f64>().sqrt()
+            / realized.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let floor = (n as f64) * f64::EPSILON * amplification;
+        assert!(
+            floor < 1.0e-8,
+            "the derived floor must stay far below the shipped ORTHOGONALITY_REL_RESIDUAL_TOL \
+             or this assertion is vacuous; got {floor:e} at amplification {amplification:e}"
+        );
+        assert!(
+            relative <= floor,
+            "residualized block must be orthogonal to its constraint at the accumulation's own \
+             floor; got {relative:e} against {floor:e}"
+        );
+        // Span preservation, stated as a measurement: the orthogonal projection
+        // of an arbitrary vector onto `[C | X]` and onto `[C | X·T − C·R]` must
+        // agree. The classical deletion FAILS this, and the same statistic on it
+        // is asserted below so the test cannot pass by the fixture being easy.
+        let mut target = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            target[i] = (-0.6 * x).exp();
+        }
+        let mut original = Array2::<f64>::zeros((n, 3));
+        original.slice_mut(s![.., ..1]).assign(&intercept);
+        original.slice_mut(s![.., 1..]).assign(&basis);
+        let mut residualized = Array2::<f64>::zeros((n, 3));
+        residualized.slice_mut(s![.., ..1]).assign(&intercept);
+        residualized.slice_mut(s![.., 1..]).assign(&realized);
+        let gap = |design: &Array2<f64>| -> f64 {
+            let gram = design.t().dot(design);
+            let rhs = design.t().dot(&target);
+            let (evals, evecs) = FaerEigh::eigh(&gram, Side::Lower).expect("gram");
+            let top = evals.iter().cloned().fold(0.0_f64, f64::max);
+            let projected = evecs.t().dot(&rhs);
+            let mut solved = Array1::<f64>::zeros(projected.len());
+            for i in 0..projected.len() {
+                if evals[i] > top * 1.0e-12 {
+                    solved[i] = projected[i] / evals[i];
+                }
+            }
+            let fitted = design.dot(&evecs.dot(&solved));
+            let residual = &target - &fitted;
+            residual.dot(&residual).sqrt() / target.dot(&target).sqrt()
+        };
+        let original_gap = gap(&original);
+        let residualized_gap = gap(&residualized);
+        assert!(
+            (original_gap - residualized_gap).abs() <= 1.0e-10 * (1.0 + original_gap),
+            "residualization must preserve the model span: {original_gap:e} vs {residualized_gap:e}"
+        );
+        // The negative control: the deletion this replaces LOSES span here.
+        let deletion =
+            orthogonality_transform_for_design(&dense(basis.clone()), intercept.view(), None)
+                .expect("test");
+        assert_eq!(
+            deletion.ncols(),
+            1,
+            "the deletion costs exactly the dimension this test is about"
+        );
+        let mut deleted = Array2::<f64>::zeros((n, 2));
+        deleted.slice_mut(s![.., ..1]).assign(&intercept);
+        deleted.slice_mut(s![.., 1..]).assign(&basis.dot(&deletion));
+        let deleted_gap = gap(&deleted);
+        assert!(
+            deleted_gap > 10.0 * original_gap.max(1.0e-14),
+            "the fixture must be one where the deletion actually loses something: \
+             {original_gap:e} -> {deleted_gap:e}"
+        );
+    }
+
+    /// On a span that CONTAINS the constant, residualization reproduces the
+    /// classical constrained basis: it drops exactly one coefficient direction,
+    /// by the rank test rather than by a predicate, and lands on the same span.
+    ///
+    /// This is the continuity claim made concrete — the two constructions are
+    /// not alternatives that meet at a threshold, they agree at containment.
+    #[test]
+    fn residualizing_a_contained_block_reproduces_the_classical_deletion() {
+        let n = 40usize;
+        let mut basis = Array2::<f64>::zeros((n, 3));
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            basis[[i, 0]] = 1.0;
+            basis[[i, 1]] = x;
+            basis[[i, 2]] = x * x;
+        }
+        let intercept = Array2::<f64>::ones((n, 1));
+        let plan = parametric_residualization_for_design(
+            &dense(basis.clone()),
+            intercept.view(),
+            None,
+        )
+        .expect("test");
+        assert_eq!(
+            plan.coefficient_transform.ncols(),
+            2,
+            "the constant IS in this span, so the rank test drops exactly one direction"
+        );
+        let realized = basis.dot(&plan.coefficient_transform)
+            - intercept.dot(&plan.row_space_correction);
+        let deletion =
+            orthogonality_transform_for_design(&dense(basis.clone()), intercept.view(), None)
+                .expect("test");
+        let deleted = basis.dot(&deletion);
+        assert_eq!(deleted.ncols(), realized.ncols());
+        // Same span: each block's columns are reproduced by the other to
+        // roundoff.
+        let reproduces = |from: &Array2<f64>, to: &Array2<f64>| -> f64 {
+            let gram = from.t().dot(from);
+            let rhs = from.t().dot(to);
+            let (evals, evecs) = FaerEigh::eigh(&gram, Side::Lower).expect("gram");
+            let top = evals.iter().cloned().fold(0.0_f64, f64::max);
+            let mut solved = evecs.t().dot(&rhs);
+            for i in 0..evals.len() {
+                let scale = if evals[i] > top * 1.0e-12 {
+                    1.0 / evals[i]
+                } else {
+                    0.0
+                };
+                for j in 0..solved.ncols() {
+                    solved[[i, j]] *= scale;
+                }
+            }
+            let approximation = from.dot(&evecs.dot(&solved));
+            let gap = to - &approximation;
+            gap.iter().map(|v| v * v).sum::<f64>().sqrt()
+                / to.iter().map(|v| v * v).sum::<f64>().sqrt().max(1.0e-300)
+        };
+        assert!(
+            reproduces(&realized, &deleted) < 1.0e-12,
+            "the deletion's span must be inside the residualization's"
+        );
+        assert!(
+            reproduces(&deleted, &realized) < 1.0e-12,
+            "the residualization's span must be inside the deletion's"
+        );
+        // And the correction is genuinely inert here: with the constant in the
+        // span, the whitener already produced a block orthogonal to it.
+        let cross = realized.t().dot(&intercept);
+        let relative = cross.iter().map(|v| v * v).sum::<f64>().sqrt()
+            / (realized.iter().map(|v| v * v).sum::<f64>().sqrt()
+                * intercept.iter().map(|v| v * v).sum::<f64>().sqrt());
+        assert!(relative < 1.0e-14, "got {relative:e}");
     }
 }
