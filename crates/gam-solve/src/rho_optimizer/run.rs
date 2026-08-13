@@ -2704,6 +2704,97 @@ fn adjudicate_negative_curvature(
             },
         )
     });
+    // ── The escape declined on a BORROWED tolerance; the ladder measured the
+    // ── criterion's own, and it re-tests the descent against that ─────────
+    //
+    // The strict-decrease floor above is `objective_resolution` — the
+    // optimizer's DECLARED tolerance, `rel_cost_tolerance * |V|`. #2690's
+    // standing rule is that `eps_f` is a property of a fixture, measured on the
+    // fixture in hand, and never borrowed; a declared tolerance is the most
+    // borrowed quantity available. Measured on `papuan_oce4_matern_k24` the two
+    // are `2.178e-4` (declared) and `2.549e-11` (the ladder's) — SEVEN orders
+    // apart — and the descent the escape declined there was `~2.3e-7`, four
+    // orders above the criterion's actual noise. The claim was falsifiable all
+    // along; the floor could not see it.
+    //
+    // Three conditions, all measured on this fixture at this point, and the
+    // conjunction is what keeps this from being a looser escape:
+    //
+    //   1. the criterion's own curvature along `v` is NEGATIVE — the ladder
+    //      agrees with the matrix about the sign, rather than the matrix being
+    //      believed;
+    //   2. that curvature is RESOLVED by the ladder's own Law 1 floor
+    //      `(2/sqrt(3))*sqrt(eps_f*|M4|)` — the finest curvature ANY central
+    //      second difference of this criterion could reach — so the descent is
+    //      a property of the criterion and not of the ladder's noise;
+    //   3. some already-evaluated trial is lower than the baseline by more than
+    //      the ARITHMETIC's own `roundoff_floor`, which is all that is left to
+    //      check once (1) and (2) hold: a stationary point with a resolved
+    //      negative curvature descends, and the reseed only has to leave the
+    //      ridge for ARC to refine from where it lands.
+    //
+    // ⚠ (3) is deliberately NOT "some trial beat the measured `2*eps_f`".
+    // A criterion with evaluation error of amplitude `A` produces individual
+    // trials that dip to `-A` by luck, while the ladder's `eps_f` estimate is
+    // that amplitude's RMS over the rungs — so a single-trial test against
+    // `2*eps_f` accepts noise about as often as signal. The
+    // `unresolvable-well #2612` fixture demonstrates it: planted with an
+    // evaluation error of `5e-8` and a well only `3.1e-8` deep, one rung dips
+    // to `-7.6e-8` and beats `2*eps_f ~ 3.5e-8` while carrying no descent at
+    // all. Condition (2) is the one that decides it correctly there —
+    // `|c| = 1e-4` against a Law 1 floor of `1.07e-4`, unresolved — because a
+    // curvature is a property of the WHOLE ladder and averages the noise the
+    // way a single trial cannot.
+    //
+    // Where any of the three fails, nothing changes: on `geo_disease_matern`
+    // the measured curvature is POSITIVE (`+8.15e-5` against a claimed
+    // `-6.4e-6`), so (1) fails and the measurement flows on to the smoothing
+    // correction as a `||dH||_2` instead.
+    let measured_escape = criterion_curvature.as_ref().and_then(|measured| {
+        let curvature = measured.ladder.curvature;
+        if !(curvature < 0.0) {
+            return None;
+        }
+        if !measured
+            .ladder
+            .finite_difference_resolution()
+            .is_ok_and(|resolution| resolution.resolves(curvature))
+        {
+            return None;
+        }
+        let measured_floor = roundoff_floor;
+        if !(measured_floor.is_finite() && measured_floor > 0.0) {
+            return None;
+        }
+        let baseline = restored_baseline?;
+        let mut descent: Option<(f64, f64, f64)> = None;
+        for &(sign, alpha, cost) in &evaluations {
+            if cost < baseline - measured_floor
+                && descent.is_none_or(|(_, _, best): (f64, f64, f64)| cost < best)
+            {
+                descent = Some((sign, alpha, cost));
+            }
+        }
+        descent.map(|(sign, alpha, cost)| (sign, alpha, cost, measured_floor, baseline))
+    });
+    if let Some((sign, alpha, cost, measured_floor, baseline)) = measured_escape {
+        let mut point = rho.clone();
+        for i in 0..n {
+            point[i] += sign * alpha * direction[i];
+        }
+        let point = project_to_bounds(&point, Some(bounds));
+        let measured = criterion_curvature
+            .as_ref()
+            .expect("a measured escape implies a determined ladder");
+        log::info!(
+            "[CERTIFICATE] {context}: the criterion CONFIRMS the reported negative curvature              once its OWN evaluation error is measured rather than declared.              c_criterion={:.6e} (resolved against this fixture's Law 1 floor from the measured              eps_f={:.6e} and M4={:.6e}) against the analytic lambda_min={lambda_min:.6e}; a              trial at step {alpha:.3e} lowered the objective {baseline:.9e} -> {cost:.9e}, a              decrease of {:.6e} against the MEASURED floor {measured_floor:.6e} where the              DECLARED one was {objective_resolution:.6e}. Minting the negative-curvature              escape reseed the declared tolerance was hiding (#2748, #2690, #2357).",
+            measured.ladder.curvature,
+            measured.ladder.evaluation_error,
+            measured.ladder.fourth_derivative,
+            baseline - cost,
+        );
+        return SaddleAdjudication::Descended(point);
+    }
     match criterion_curvature.as_ref() {
         Some(measured) => log::warn!(
             "[CERTIFICATE] {context}: the criterion's OWN curvature along the disputed \

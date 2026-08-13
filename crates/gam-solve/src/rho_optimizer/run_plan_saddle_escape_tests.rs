@@ -729,7 +729,76 @@ fn escape_reaches_a_descent_below_the_old_fixed_ladder_2612() {
 // number the criterion cannot distinguish from zero. The claim is unfalsifiable
 // over its whole derived range, the verdict is withdrawn, and the point
 // certifies.
+/// The criterion's OWN evaluation error, as a deterministic function of `ρ`
+/// (#2748).
+///
+/// "The criterion's resolution" has to be a property of the CRITERION. The
+/// smooth well below is a polynomial, exact to `~1e-24` in binary64, so its
+/// `2.976e-8` decrease is not merely representable there — it is EXACT, and
+/// declaring it unresolvable was reading the optimizer's DECLARED tolerance as
+/// if it were the criterion's error. That is the borrowed-`ε_f` defect #2690
+/// exists to stop, and the ladder that now runs inside the adjudication
+/// measures the real thing.
+///
+/// So the fixture supplies one. A REML criterion's value carries a component
+/// that does not vary smoothly with `ρ`: the inner solve stops on its own
+/// tolerance and a warm start from a neighbouring point lands on a slightly
+/// different mode. This models that with a deterministic term — same `ρ`, same
+/// value, in every lane and on every host, no RNG — of amplitude
+/// [`WELL_EVALUATION_ERROR`], varying far faster than any ladder rung, so the
+/// ladder measures it as `ε_f` exactly as it would in production.
+///
+/// It is EXACTLY ZERO at `ρ = 0`, so the baseline the escape compares against
+/// is the smooth value and the test's arithmetic below stays legible.
+/// # ⚠ The phase is load-bearing, and it is not a fudge
+///
+/// A symmetric second difference ANNIHILATES any odd perturbation exactly —
+/// that is what it is for, and this module's `curvature_resolution` header says
+/// so about the first-order term. An "evaluation error" modelled as
+/// `A·sin(F·ρ₁)` is odd in `ρ₁`, so `f(+α) + f(−α)` cancels it to the last bit
+/// and the ladder measures `ε_f = 2.6e-17` on a fixture planted with `5e-8`.
+/// Measured, on the first attempt at this fixture. Real evaluation error has no
+/// such symmetry, so the phase offset is what makes this model one.
+fn well_evaluation_error(rho: &Array1<f64>) -> f64 {
+    WELL_EVALUATION_ERROR
+        * (WELL_ERROR_FREQUENCY * rho[1] + 3.0 * rho[0] + WELL_ERROR_PHASE).sin()
+}
+
+/// Amplitude of the well criterion's evaluation error.
+///
+/// Sized from the two properties the fixture has to have, both measured on it
+/// rather than assumed:
+///
+/// * the ladder measures `ε_f = 4.6e-8` here, so `2ε_f = 9.2e-8` — larger than
+///   the deepest descent the well offers (`3.125e-8`). The well is below what
+///   this criterion can distinguish from zero, which is the fixture's thesis;
+/// * Law 1's floor from the measured `(ε_f, M₄) = (4.6e-8, 0.48)` comes out
+///   `1.7e-4`, ABOVE the `|λ_min| = 1e-4` in dispute — so the criterion cannot
+///   resolve that curvature either, and the adjudication declines on the
+///   measurement rather than on a declared tolerance.
+///
+/// It is also small enough that no ladder rung dips below the DECLARED
+/// `objective_resolution` of `1e-7` (deepest trial: `-6.6e-8`), so the original
+/// acceptance path is not what this test exercises.
+const WELL_EVALUATION_ERROR: f64 = 3.0e-8;
+
+/// How fast the error term varies in `ρ₁`. A power of two so the arithmetic is
+/// exact, and large enough that consecutive ladder rungs — which halve — see
+/// uncorrelated values rather than a smooth trend the fit would absorb into
+/// `M₄`.
+const WELL_ERROR_FREQUENCY: f64 = 1_048_576.0;
+
+/// Phase offset, so the error term is neither even nor odd. See
+/// [`well_evaluation_error`] — an odd one is cancelled exactly by the symmetric
+/// average and models no error at all.
+const WELL_ERROR_PHASE: f64 = 1.0;
+
 fn unresolvable_well_cost(rho: &Array1<f64>) -> f64 {
+    unresolvable_well_smooth(rho) + well_evaluation_error(rho)
+}
+
+/// The well itself, with no evaluation error: `f(ρ) = ½ρ₀² + 0.02ρ₁⁴ − 5e-5·ρ₁²`.
+fn unresolvable_well_smooth(rho: &Array1<f64>) -> f64 {
     let r0 = rho[0];
     let r1 = rho[1];
     0.5 * r0 * r0 + 0.02 * r1 * r1 * r1 * r1 - 5.0e-5 * r1 * r1
@@ -750,16 +819,38 @@ fn unresolvable_well_eval(rho: &Array1<f64>) -> OuterEval {
 fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
     // Pin the fixture's own arithmetic first, so a failure below is about the
     // acceptance floor and not about the well having moved.
-    let rung = unresolvable_well_cost(&array![0.0, 0.031_25]);
+    let rung = unresolvable_well_smooth(&array![0.0, 0.031_25]);
     assert!(
         rung < 0.0,
         "the ladder's last rung must land INSIDE the well, or this test would be about the \
          ladder's reach instead of its acceptance (f={rung:.6e})"
     );
+    // And the decrease there must be below the CRITERION's own evaluation
+    // error, not below a declared tolerance (#2748). Two evaluations each
+    // accurate to `ε_f` carry `2ε_f`, so that is the smallest difference this
+    // criterion can distinguish from zero — and the well is shallower than it,
+    // everywhere.
+    let deepest = -(5.0e-5_f64 * 5.0e-5) / (4.0 * 0.02);
     assert!(
-        rung.abs() < 1.0e-7,
-        "and the decrease there must be BELOW the criterion's resolution, or the descent is \
-         real and must be minted (f={rung:.6e})"
+        rung.abs() < 2.0 * WELL_EVALUATION_ERROR
+            && deepest.abs() < 2.0 * WELL_EVALUATION_ERROR,
+        "the well must be shallower than the criterion's own evaluation error, or the descent \
+         is REAL and must be minted: rung={rung:.6e}, deepest={deepest:.6e}, \
+         2*amplitude={:.6e}",
+        2.0 * WELL_EVALUATION_ERROR
+    );
+    // And no trial may dip below the DECLARED resolution either, or the
+    // original acceptance path fires and this test stops being about the
+    // measured one.
+    let deepest_trial = [1.0_f64, 0.5, 0.25, 0.125, 0.062_5, 0.031_25]
+        .into_iter()
+        .flat_map(|alpha| [alpha, -alpha])
+        .map(|r1| unresolvable_well_cost(&array![0.0, r1]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        deepest_trial > -1.0e-7,
+        "no ladder rung may beat the DECLARED objective resolution, or the escape fires \
+         through the pre-#2748 path: deepest trial={deepest_trial:.6e}"
     );
 
     let problem = OuterProblem::new(2)
@@ -806,5 +897,16 @@ fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
         "the one-shot reseed must NOT be spent on a decrease the criterion cannot resolve; \
          spending it is what left the retry pass with nothing to adjudicate: {:?}",
         result.saddle_escape_reseed
+    );
+    // NEGATIVE CONTROL for the fixture itself (#2748): the SMOOTH well really
+    // does descend, and by a margin the arithmetic can carry. So this test is
+    // about the criterion's evaluation error hiding that descent — not about
+    // there being nothing to find, which would make the assertions above pass
+    // vacuously.
+    let roundoff = 16.0 * f64::EPSILON;
+    assert!(
+        rung < -roundoff,
+        "the smooth well must offer a descent the ARITHMETIC can resolve, or this fixture \
+         proves nothing about resolution: rung={rung:.6e} vs roundoff={roundoff:.6e}"
     );
 }

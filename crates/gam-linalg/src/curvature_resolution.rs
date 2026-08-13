@@ -472,9 +472,28 @@ pub struct LadderCurvature {
     /// needed is what stops a legitimate fit from reading as an absent
     /// measurement.
     pub fourth_derivative: f64,
-    /// `ε_f`, the criterion's absolute evaluation error, read off the residual
-    /// scatter of the NUMERATOR (whose noise is step-independent) as
-    /// `RMS(residual)/4`.
+    /// `ε_f`, the criterion's own evaluation error, read off the residual
+    /// scatter of the NUMERATOR — whose noise is step-independent — as
+    /// `RMS(residual)/√2`.
+    ///
+    /// # Why `√2` and not `4`
+    ///
+    /// The error model `4ε_f/h²` counts THREE evaluations at their worst case,
+    /// which is the right bound for a single second difference taken in
+    /// isolation. A ladder is not that: every rung shares ONE baseline
+    /// `f(x)`, so that evaluation's error is a constant offset across the whole
+    /// ladder and the fit absorbs it — it contributes no SCATTER. What scatters
+    /// is `f(x+αv)` and `f(x−αv)`, two independent errors per rung, so
+    /// `RMS(N) = √2·ε_f` and the estimator inverts exactly that.
+    ///
+    /// Dividing by `4` instead understates `ε_f` by `2√2`, and it understates
+    /// it in the dangerous direction: `ε_f` feeds Law 1, whose floor is what
+    /// decides whether a measured curvature is a measurement at all. Measured
+    /// on the `unresolvable-well #2612` fixture, planted with an evaluation
+    /// error of `5e-8`: `RMS/4` reports `1.25e-8` and Law 1 then RESOLVES a
+    /// `1e-4` curvature it should not (floor `8.95e-5`), while `RMS/√2` reports
+    /// `3.5e-8` and the floor comes out `1.5e-4`, above the claim, which is the
+    /// verdict that fixture exists to produce.
     pub evaluation_error: f64,
     /// Rungs the fit consumed.
     pub rungs: usize,
@@ -646,9 +665,9 @@ pub fn measure_symmetric_ladder(
     if !residual_variance.is_finite() || residual_variance < 0.0 {
         return None;
     }
-    // The numerator carries up to `4ε_f`, so the scatter read back through that
-    // model is `ε_f = RMS/4`.
-    let evaluation_error = residual_variance.sqrt() / 4.0;
+    // Every rung shares one baseline `f(x)`, so only `f(x±αv)` scatter: two
+    // independent evaluation errors per numerator, hence `RMS = √2·ε_f`.
+    let evaluation_error = residual_variance.sqrt() / 2.0_f64.sqrt();
     // Standard error of the fitted intercept: `sigma^2 * (A^{-1})_11`, back in
     // the original variable.
     let inverse_11 = a22 / determinant;
