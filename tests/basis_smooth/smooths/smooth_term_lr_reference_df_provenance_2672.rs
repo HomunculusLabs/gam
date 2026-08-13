@@ -371,6 +371,50 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
                 replay.generalized
             );
 
+            // THE REPLAY'S CONDITIONAL ARM MUST BE THE LAW WHOSE TAIL IT IS
+            // ADDED TO. The published p-value is
+            // `p_conditional + [P̂(W_sel ≥ w) − P̂(W_cond ≥ w)]`, a control
+            // variate — and a control variate is only a control variate if the
+            // subtracted term has the SAME law as the exactly-integrated one.
+            // The two are assembled by different routes (`[H⁻¹]_jj S_jj` for the
+            // published spectrum, `eig(Ĩ⁻¹ S(λ̂))` whitened for the replay), so
+            // the identity `w_j = 2f̄_j − f̄_j²`, `f̄_j = 1/(1 + ν_j)` is checked
+            // rather than assumed. A mismatch here does not show up as a wrong
+            // p-value on any single fit; it shows up as a shift measured against
+            // the wrong baseline, which is invisible everywhere except in the
+            // size.
+            let from_generalized: f64 = replay
+                .generalized
+                .iter()
+                .map(|nu| {
+                    let shrinkage = 1.0 / (1.0 + nu);
+                    2.0 * shrinkage - shrinkage * shrinkage
+                })
+                .sum();
+            assert!(
+                (from_generalized - p.mean).abs() <= 1e-8 * p.mean.abs().max(1.0),
+                "{formula} [{family}] amplitude={amplitude}: the replay's own null law \
+                 has mean {from_generalized} while the reference whose tail its shift is \
+                 added to has mean {}. The control variate is then a difference of two \
+                 DIFFERENT laws. generalized = {:?}, weights = {:?}",
+                p.mean,
+                replay.generalized,
+                p.weights
+            );
+            // The replay may carry FEWER directions than the reference, and that
+            // is not a discrepancy: a direction whose data share `1 − p` is at
+            // the decomposition's noise floor cannot be whitened, and it carries
+            // `w = 1 − p² = 0` — no mass in either law. The identity above is
+            // what says so, and it is the claim that matters; this only pins
+            // that the replay never invents directions.
+            assert!(
+                replay.generalized.len() <= p.weights.len(),
+                "{formula} [{family}] amplitude={amplitude}: the replay carries {} \
+                 directions against the reference's {}",
+                replay.generalized.len(),
+                p.weights.len()
+            );
+
             // The CONDITIONAL half of the published p-value is the exact tail of
             // the spectrum, to the accuracy the report itself certifies. The
             // driver resolves that tail only as finely as `W` is known (see

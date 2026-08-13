@@ -48,7 +48,7 @@ pub enum SmoothLrReferenceSource {
     /// The spectrum is assembled from `[H⁻¹]_jj` and the term's own λ-weighted
     /// penalty block through the symmetric similarity
     /// `w_j = 1 − eig(B^{1/2} S_jj B^{1/2})²` — see
-    /// [`lr_penalty_shares`] for why that is the same spectrum as
+    /// [`lr_tested_block`] for why that is the same spectrum as
     /// `eig(2·F_jj − F_jj²)` and why it is the better-conditioned way to reach
     /// it.
     NullSpectrum,
@@ -112,7 +112,7 @@ pub enum SmoothLrReferenceSource {
 /// Diagonalize the term's fitted penalty `S_jj` against the Schur-complemented
 /// information `Ĩ_jj` — the pair is symmetric-definite, so a single basis
 /// diagonalizes both, with generalized eigenvalues `ν_k = p_k/(1 − p_k)` read
-/// straight off the penalty shares [`lr_penalty_shares`] already computes. In
+/// straight off the penalty shares [`lr_tested_block`] already computes. In
 /// that basis the tested block is `q` independent standard normals `u_k`, and
 /// BOTH the statistic and the criterion that selects `λ` are closed forms in
 /// them and in the scale `t = λ/λ̂`:
@@ -359,38 +359,21 @@ impl SelectionGeometry {
     /// decomposition refuses, or the components leave nothing penalized —
     /// in every case the caller has nothing to replay.
     fn whiten(
-        information: &Array2<f64>,
+        whitener: &Array2<f64>,
         unit_penalties: &[Array2<f64>],
         log_lambda: &[f64],
     ) -> Option<Self> {
         if unit_penalties.is_empty() || unit_penalties.len() != log_lambda.len() {
             return None;
         }
-        let (values, vectors) =
-            gam_linalg::faer_ndarray::strict_symmetric_eigh(information, faer::Side::Lower).ok()?;
-        let largest = values.iter().copied().fold(0.0_f64, f64::max);
-        if !(largest > 0.0) {
+        let dimension = whitener.ncols();
+        if dimension == 0 || whitener.nrows() == 0 {
             return None;
-        }
-        let floor = largest * 1e-12;
-        let kept: Vec<usize> = (0..values.len())
-            .filter(|&index| values[index] > floor)
-            .collect();
-        if kept.is_empty() {
-            return None;
-        }
-        let dimension = kept.len();
-        let mut whitener = Array2::<f64>::zeros((information.nrows(), dimension));
-        for (column, &index) in kept.iter().enumerate() {
-            let scale = values[index].sqrt();
-            for row in 0..information.nrows() {
-                whitener[[row, column]] = vectors[[row, index]] / scale;
-            }
         }
 
         let mut roots = Vec::with_capacity(unit_penalties.len());
         for penalty in unit_penalties {
-            if penalty.nrows() != information.nrows() || penalty.ncols() != information.ncols() {
+            if penalty.nrows() != whitener.nrows() || penalty.ncols() != whitener.nrows() {
                 return None;
             }
             // `Wᵀ S W` is symmetric as a mathematical object and its two
@@ -399,7 +382,7 @@ impl SelectionGeometry {
             // it for the caller, which is the right contract and the reason this
             // is explicit here. Dropping it is a silent `GeometryRefused` on
             // every real fit.
-            let whitened = symmetrized(whitener.t().dot(penalty).dot(&whitener));
+            let whitened = symmetrized(whitener.t().dot(penalty).dot(whitener));
             if whitened.iter().any(|value| !value.is_finite()) {
                 return None;
             }
@@ -604,8 +587,10 @@ pub enum SmoothLrSelectionDecline {
     /// outside the tested coefficient block. Nothing was selected, so the
     /// conditional law IS the selection law.
     NoPenaltyComponents,
-    /// The Schur-complemented information `Ĩ_jj` was not available, so there is
-    /// no basis in which the tested block is standard normal.
+    /// The Schur-complemented information `Ĩ_jj` has no identified direction:
+    /// every direction of the tested block has a data share `1 − p` at the
+    /// decomposition's own noise floor, so there is no basis in which the block
+    /// is standard normal. A term the penalty has absorbed entirely.
     NoInformation,
     /// The whitening or a component's root refused: `Ĩ_jj` has no identified
     /// direction, a decomposition failed, or the components span nothing.
@@ -675,7 +660,7 @@ impl SmoothLrSelectionReplay {
     /// conditional law IS the selection law and the caller should use it
     /// unmodified.
     fn generate(
-        information: Option<&Array2<f64>>,
+        whitener: &Array2<f64>,
         unit_penalties: &[Array2<f64>],
         log_lambda: &[f64],
         log_scale_windows: &[(f64, f64)],
@@ -685,10 +670,10 @@ impl SmoothLrSelectionReplay {
                 SmoothLrSelectionDecline::NoPenaltyComponents,
             );
         }
-        let Some(information) = information else {
+        if whitener.ncols() == 0 {
             return SmoothLrSelection::Declined(SmoothLrSelectionDecline::NoInformation);
-        };
-        let Some(geometry) = SelectionGeometry::whiten(information, unit_penalties, log_lambda)
+        }
+        let Some(geometry) = SelectionGeometry::whiten(whitener, unit_penalties, log_lambda)
         else {
             return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused);
         };
@@ -2084,7 +2069,7 @@ fn lawley_dispersion_for_family(
 /// that each rung is a strictly weaker instrument on the SAME quantity rather
 /// than a different claim:
 ///
-/// 1. **The spectrum** ([`lr_penalty_shares`]) — needs `[H⁻¹]_jj`
+/// 1. **The spectrum** ([`lr_tested_block`]) — needs `[H⁻¹]_jj`
 ///    and the term's λ-weighted penalty block. Exact.
 /// 2. **Its first two moments** ([`lr_null_spectral_moments`]) — needs only the
 ///    coefficient-influence block, because with `A = 2F − F²`
@@ -2145,8 +2130,8 @@ fn lr_null_reference(
     let influence_moments = lr_null_spectral_moments(influence, coeff_range);
 
     // Rung 1 — the spectrum itself.
-    if let Some(shares) = lr_penalty_shares(hessian_inverse, penalty, coeff_range) {
-        let mut weights: Vec<f64> = shares.iter().map(|&p| 1.0 - p * p).collect();
+    if let Some(block) = lr_tested_block(hessian_inverse, penalty, coeff_range) {
+        let mut weights: Vec<f64> = block.shares.iter().map(|&p| 1.0 - p * p).collect();
         weights.sort_by(|a, b| b.partial_cmp(a).expect("finite weights"));
         let mean: f64 = weights.iter().sum();
         let second_moment: f64 = weights.iter().map(|w| w * w).sum();
@@ -2180,7 +2165,7 @@ fn lr_null_reference(
                 // log-determinant is the one place that difference is worth
                 // `log(1 + 1e17)`.
                 selection: SmoothLrSelectionReplay::generate(
-                    lr_schur_information(hessian_inverse, penalty, coeff_range).as_ref(),
+                    &block.whitener,
                     term_penalties,
                     term_log_lambda,
                     log_scale_windows,
@@ -2202,76 +2187,6 @@ fn lr_null_reference(
         second_moment,
         SmoothLrReferenceSource::SpectralMomentMatch,
     )
-}
-
-/// The Schur-complemented information on the tested block,
-/// `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj`.
-///
-/// This is the object the whole derivation is stated against, and it is
-/// available without ever forming a Schur complement: `[H⁻¹]_jj` IS
-/// `(Ĩ_jj + S_jj)⁻¹` (the block of an inverse is the inverse of the Schur
-/// complement of the OTHER block), so one inversion of a `q × q` symmetric
-/// matrix and one subtraction recover it. The retained block's own penalties are
-/// already inside it, which is correct: the null model keeps them.
-fn lr_schur_information(
-    hessian_inverse: Option<&Array2<f64>>,
-    penalty: Option<&Array2<f64>>,
-    coeff_range: &Range<usize>,
-) -> Option<Array2<f64>> {
-    let (h_inv, s_lambda) = (hessian_inverse?, penalty?);
-    let (start, end) = (coeff_range.start, coeff_range.end);
-    if start >= end
-        || end > h_inv.nrows()
-        || end > h_inv.ncols()
-        || end > s_lambda.nrows()
-        || end > s_lambda.ncols()
-    {
-        return None;
-    }
-    let block = h_inv.slice(s![start..end, start..end]).to_owned();
-    let mut symmetric = block.clone();
-    let q = symmetric.nrows();
-    for row in 0..q {
-        for column in 0..row {
-            let mean = 0.5 * (symmetric[[row, column]] + symmetric[[column, row]]);
-            symmetric[[row, column]] = mean;
-            symmetric[[column, row]] = mean;
-        }
-    }
-    let (values, vectors) =
-        gam_linalg::faer_ndarray::strict_symmetric_eigh(&symmetric, faer::Side::Lower).ok()?;
-    let largest = values.iter().copied().fold(0.0_f64, f64::max);
-    if !(largest > 0.0) {
-        return None;
-    }
-    // `[H⁻¹]_jj` is positive definite; a direction at the reciprocal-condition
-    // floor carries no identified information and is dropped rather than
-    // inverted into a huge eigenvalue that would dominate the whitening.
-    let floor = largest * 1e-12;
-    let mut inverse = Array2::<f64>::zeros((q, q));
-    for (index, &value) in values.iter().enumerate() {
-        if value <= floor {
-            continue;
-        }
-        for row in 0..q {
-            for column in 0..q {
-                inverse[[row, column]] +=
-                    vectors[[row, index]] * vectors[[column, index]] / value;
-            }
-        }
-    }
-    let mut information = inverse - s_lambda.slice(s![start..end, start..end]);
-    for row in 0..q {
-        for column in 0..row {
-            let mean = 0.5 * (information[[row, column]] + information[[column, row]]);
-            information[[row, column]] = mean;
-            information[[column, row]] = mean;
-        }
-    }
-    if information.iter().any(|value| !value.is_finite()) {
-        return None;
-    }
-    Some(information)
 }
 
 /// The term's PENALTY SHARES `p = eig([H⁻¹]_jj · S_jj) ∈ [0, 1]`, sorted
@@ -2317,11 +2232,60 @@ fn lr_schur_information(
 /// them, or the self-adjoint decomposition refuses — the caller then drops to
 /// the two-moment rung rather than scoring against a spectrum it could not
 /// compute.
-fn lr_penalty_shares(
+/// The tested block's penalty shares AND the whitener the replay needs, from
+/// ONE self-adjoint decomposition and with no matrix cancellation anywhere.
+pub(crate) struct LrTestedBlock {
+    /// `p = eig(B^{1/2} S_jj B^{1/2}) ∈ [0, 1]`, ascending.
+    shares: Vec<f64>,
+    /// `W` (`q × dimension`) with `W Wᵀ = Ĩ_jj⁻¹` on the directions the
+    /// Schur-complemented information can see, i.e. those with `1 − p > 0`.
+    ///
+    /// # Why this is not `Ĩ^{-1/2}` computed from `Ĩ`
+    ///
+    /// `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj` is the object the derivation is stated
+    /// against, and forming it that way is a CANCELLATION of two matrices whose
+    /// ratio is `1/(1 − p)`: at `p = 1 − 1e-12` — an ordinary heavily-shrunk
+    /// direction of a null-true smooth — the difference is roundoff amplified
+    /// twelve orders, and the explicit inverse that produces the first term has
+    /// already amplified it once more. Measured on this issue's own `n = 60`
+    /// fixture, that route handed the whitening a spectrum whose largest
+    /// eigenvalue was spurious, and the relative floor then discarded EVERY
+    /// direction the data could see: `q` went `11 → 9` and the replayed law's
+    /// mean went `0.96 → 0.0000` while the reference's stayed at `0.96`. The
+    /// control variate was then a difference of two different laws.
+    ///
+    /// The same object is available with no cancellation at all. With
+    /// `A = B^{1/2} S B^{1/2} = QΛQᵀ` and `Λ = diag(p)`,
+    ///
+    /// ```text
+    /// B^{1/2} Ĩ B^{1/2} = B^{1/2}(B⁻¹ − S)B^{1/2} = I − A = Q(I − Λ)Qᵀ,
+    /// ```
+    ///
+    /// so `Ĩ⁻¹ = B^{1/2}Q(I − Λ)⁻¹QᵀB^{1/2}` and `W = B^{1/2}Q(I − Λ)^{-1/2}`.
+    /// The only subtraction left is the SCALAR `1 − p`, which loses digits
+    /// exactly when the direction is genuinely unidentified — and that is then a
+    /// statement about the fit rather than an artifact. As a check on the whole
+    /// construction, the whitened total penalty at `λ̂` comes out
+    /// `(I − Λ)^{-1/2}Λ(I − Λ)^{-1/2} = diag(p/(1 − p))`, i.e. exactly the
+    /// generalized spectrum, diagonal, for free.
+    whitener: Array2<f64>,
+}
+
+/// Directions the Schur-complemented information cannot separate from the
+/// penalty at all.
+///
+/// `1 − p` is the share of a direction the DATA holds, on a scale where one is
+/// unpenalized and zero is fully absorbed by the penalty. It is an eigenvalue of
+/// `I − A` with `‖A‖ ≤ 1`, so its own noise floor is absolute rather than
+/// relative: `p·ε` for the decomposition, with the same safety factor
+/// `positive_eigenvalue_threshold` uses.
+const SMOOTH_LR_IDENTIFIED_SHARE_FLOOR_FACTOR: f64 = 100.0;
+
+fn lr_tested_block(
     hessian_inverse: Option<&Array2<f64>>,
     penalty: Option<&Array2<f64>>,
     coeff_range: &Range<usize>,
-) -> Option<Vec<f64>> {
+) -> Option<LrTestedBlock> {
     let (h_inv, s_lambda) = (hessian_inverse?, penalty?);
     let (start, end) = (coeff_range.start, coeff_range.end);
     if start >= end
@@ -2336,23 +2300,12 @@ fn lr_penalty_shares(
     // assembled Gram/inverse differ only by summation order. Symmetrize
     // explicitly so the self-adjoint entry point receives the matrix it is being
     // asked about rather than one triangle's rounding of it.
-    let symmetrize = |m: ndarray::ArrayView2<'_, f64>| -> Array2<f64> {
-        let mut out = m.to_owned();
-        let q = out.nrows();
-        for row in 0..q {
-            for col in 0..row {
-                let mean = 0.5 * (out[[row, col]] + out[[col, row]]);
-                out[[row, col]] = mean;
-                out[[col, row]] = mean;
-            }
-        }
-        out
-    };
-    let b = symmetrize(h_inv.slice(s![start..end, start..end]));
-    let s = symmetrize(s_lambda.slice(s![start..end, start..end]));
+    let b = symmetrized(h_inv.slice(s![start..end, start..end]).to_owned());
+    let s = symmetrized(s_lambda.slice(s![start..end, start..end]).to_owned());
     if b.iter().chain(s.iter()).any(|value| !value.is_finite()) {
         return None;
     }
+    let dimension = end - start;
 
     let (b_eigenvalues, b_vectors) =
         gam_linalg::faer_ndarray::strict_symmetric_eigh(&b, faer::Side::Lower).ok()?;
@@ -2365,16 +2318,35 @@ fn lr_penalty_shares(
         column.mapv_inplace(|value| value * root);
     }
     let b_root = root_scaled.dot(&b_vectors.t());
-    let similar = symmetrize(b_root.dot(&s).dot(&b_root).view());
-    let (shrinkage, _) =
+    let similar = symmetrized(b_root.dot(&s).dot(&b_root));
+    let (shrinkage, shrinkage_vectors) =
         gam_linalg::faer_ndarray::strict_symmetric_eigh(&similar, faer::Side::Lower).ok()?;
 
-    let mut spectrum: Vec<f64> = shrinkage.iter().map(|&p| p.clamp(0.0, 1.0)).collect();
-    if spectrum.iter().any(|p| !p.is_finite()) {
+    let shares: Vec<f64> = shrinkage.iter().map(|&p| p.clamp(0.0, 1.0)).collect();
+    if shares.iter().any(|p| !p.is_finite()) {
         return None;
     }
-    spectrum.sort_by(|a, b| a.partial_cmp(b).expect("finite shrinkage"));
-    Some(spectrum)
+    // `W = B^{1/2} Q (I − Λ)^{-1/2}` over the identified directions. `A`'s
+    // spectrum lives in `[0, 1]`, so the floor on `1 − p` is absolute.
+    let floor = SMOOTH_LR_IDENTIFIED_SHARE_FLOOR_FACTOR * (dimension as f64) * f64::EPSILON;
+    let kept: Vec<usize> = (0..shares.len())
+        .filter(|&index| 1.0 - shares[index] > floor)
+        .collect();
+    let mut whitener = Array2::<f64>::zeros((dimension, kept.len()));
+    for (column, &index) in kept.iter().enumerate() {
+        let scale = (1.0 - shares[index]).sqrt();
+        for row in 0..dimension {
+            whitener[[row, column]] = shrinkage_vectors[[row, index]] / scale;
+        }
+    }
+    let whitener = b_root.dot(&whitener);
+    if whitener.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    let mut shares = shares;
+    shares.sort_by(|a, b| a.partial_cmp(b).expect("finite shrinkage"));
+    Some(LrTestedBlock { shares, whitener })
 }
 
 /// `[tr A, tr A²]` for `A = 2·F_jj − F_jj²` on the tested coefficient block.
@@ -2411,7 +2383,7 @@ fn lr_null_spectral_moments(
 mod lr_null_reference_tests {
     use super::{
         SmoothLrReferenceSource, lr_null_reference, lr_null_spectral_moments,
-        lr_penalty_shares,
+        lr_tested_block,
     };
     use ndarray::Array2;
 
@@ -2507,7 +2479,8 @@ mod lr_null_reference_tests {
             let influence = hessian_inverse.dot(&gram);
 
             let weights =
-                lr_penalty_shares(Some(&hessian_inverse), Some(&penalty), &(retained..p))
+                lr_tested_block(Some(&hessian_inverse), Some(&penalty), &(retained..p))
+                    .map(|block| block.shares)
                     .map(|shares| shares.iter().map(|&q| 1.0 - q * q).collect::<Vec<f64>>())
                     .expect("spectrum available");
             let [mean, second] = lr_null_spectral_moments(Some(&influence), &(retained..p))

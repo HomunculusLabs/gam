@@ -215,6 +215,12 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     let mut sum_predicted = 0.0;
     let mut sum_predicted_conditional = 0.0;
     let mut predicted_used = 0usize;
+    // Per-replicate `E[W|λ̂]` from the replay's own draws against the `ref_df`
+    // those draws are supposed to reproduce. The two are the SAME law by an
+    // identity, so this ratio is a pure statement about the draws: it is one to
+    // the accuracy the stratified sampler achieves on its second moment.
+    let mut sum_conditional_ratio = 0.0;
+    let mut worst_conditional_ratio = 1.0_f64;
     let mut rejections_cor = 0usize;
     let mut count = 0usize;
     for rep in 0..REPS {
@@ -245,7 +251,15 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
                 // mean is `c · E[W(λ̂)]`. Comparing the raw `mean(W)` against the
                 // raw predicted mean keeps both on the uncorrected scale.
                 sum_predicted += predicted;
-                sum_predicted_conditional += replay.conditional_mean();
+                let conditional = replay.conditional_mean();
+                sum_predicted_conditional += conditional;
+                if r.ref_df > 0.0 {
+                    let ratio = conditional / r.ref_df;
+                    sum_conditional_ratio += ratio;
+                    if (ratio - 1.0).abs() > (worst_conditional_ratio - 1.0).abs() {
+                        worst_conditional_ratio = ratio;
+                    }
+                }
                 predicted_used += 1;
             }
         }
@@ -284,10 +298,12 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
          mean(p)={mean_p_unc:.4} mean(p*)={mean_p_cor:.4}  size@.05(corrected)={size_cor:.4}  \
          E[W(lambda-hat)]={mean_predicted:.4} (replayed on {predicted_used}) \
          E[W|lambda-hat]={mean_predicted_conditional:.4} \
-         |mean(W)-E[W(lambda-hat)]|={err_predicted:.4} ({:.2} se)",
+         |mean(W)-E[W(lambda-hat)]|={err_predicted:.4} ({:.2} se)  \
+         mean(E[W|lambda-hat]/d)={:.4} worst={worst_conditional_ratio:.4}",
         var_w.sqrt(),
         err_unc / se_w.max(f64::MIN_POSITIVE),
-        err_predicted / se_w.max(f64::MIN_POSITIVE)
+        err_predicted / se_w.max(f64::MIN_POSITIVE),
+        sum_conditional_ratio / predicted_used.max(1) as f64
     );
 
     // (b1) THE REFERENCE IS CALIBRATED: the statistic's empirical null mean agrees
@@ -416,16 +432,43 @@ fn zz_measure_reference_spectral_moments_against_empirical_lr_mean() {
         if !matches!(p.source, SmoothLrReferenceSource::NullSpectrum) {
             fallback += 1;
         }
-        if rep < 12 {
+        if rep < 20 {
+            let (predicted, conditional, replayed_dim, from_generalized) = match p
+                .selection
+                .replay()
+            {
+                Some(replay) => (
+                    replay.selection_mean(),
+                    replay.conditional_mean(),
+                    replay.generalized.len(),
+                    replay
+                        .generalized
+                        .iter()
+                        .map(|nu| {
+                            let shrinkage = 1.0 / (1.0 + nu);
+                            2.0 * shrinkage - shrinkage * shrinkage
+                        })
+                        .sum::<f64>(),
+                ),
+                None => (f64::NAN, f64::NAN, 0, f64::NAN),
+            };
             eprintln!(
-                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4}",
+                "[zz2672] {rep:>4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>9.6} {:>4} | \
+                 E[W(lh)]={predicted:>8.4} E[W|lh]={conditional:>8.4} \
+                 sum_w(gen)={from_generalized:>8.4} q_gen={replayed_dim:>3} \
+                 q_ref={:>3} lane={}",
                 r.statistic_lr,
                 p.mean,
                 p.second_moment,
                 p.chi_square_df,
                 p.scale,
                 r.bartlett_factor,
-                p.null_dim
+                p.null_dim,
+                p.weights.len(),
+                p.selection
+                    .decline()
+                    .map(|reason| reason.label())
+                    .unwrap_or("replayed"),
             );
         }
         sum_w += r.statistic_lr;
