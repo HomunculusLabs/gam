@@ -660,9 +660,8 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
                     let c = ((d + delta_eps) / d).max(f64::MIN_POSITIVE);
                     {
                         let weights = prov.weights.clone();
-                        let sf = |w: f64| {
-                            gam_math::probability::weighted_chi_square_sf(&weights, w)
-                        };
+                        let sf =
+                            |w: f64| gam_math::probability::weighted_chi_square_sf(&weights, w);
                         counts[0].sum_d += prov.chi_square_df;
                         if sf(r.statistic_lr) <= 0.05 {
                             counts[0].raw_05 += 1;

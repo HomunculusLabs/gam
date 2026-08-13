@@ -349,15 +349,23 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             // it is the difference between pricing `λ̂` as chosen and pricing it
             // as given, and a model shape that cannot reach it silently gets
             // the reference this issue measured at `size@.05 = 0.0962`.
-            let replay = p.selection.as_ref().unwrap_or_else(|| {
+            let replay = p.selection.replay().unwrap_or_else(|| {
                 panic!(
                     "{formula} [{family}] amplitude={amplitude}: no selection replay on a \
-                     penalized smooth whose λ̂ the outer search chose. Provenance: {p:?}"
+                     penalized smooth whose λ̂ the outer search chose — declined with \
+                     `{}`. Provenance: {p:?}",
+                    p.selection
+                        .decline()
+                        .map(|reason| reason.label())
+                        .unwrap_or("unreported")
                 )
             });
             assert!(
                 !replay.generalized.is_empty()
-                    && replay.generalized.iter().all(|v| v.is_finite() && *v >= 0.0),
+                    && replay
+                        .generalized
+                        .iter()
+                        .all(|v| v.is_finite() && *v >= 0.0),
                 "{formula} [{family}]: the replay's generalized spectrum is not a \
                  spectrum: {:?}",
                 replay.generalized
@@ -369,10 +377,8 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             // `tail_probability_with_bound`), so the comparison is against
             // `gam-math`'s strict default THROUGH the published bound: the bound
             // has to be honest, not decorative.
-            let strict = gam_math::probability::weighted_chi_square_sf(
-                &p.weights,
-                r.statistic_corrected,
-            );
+            let strict =
+                gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_corrected);
             assert!(
                 (r.p_value_conditional - strict).abs() <= r.p_value_bound + 1e-12,
                 "{formula} [{family}]: the published conditional p {} differs from the \
@@ -393,7 +399,10 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             checked += 1;
         }
     }
-    assert!(checked >= 10, "the sweep must actually run: {checked} cells");
+    assert!(
+        checked >= 10,
+        "the sweep must actually run: {checked} cells"
+    );
     // The replay is not decoration: somewhere in this sweep it has to have moved
     // a published p-value by more than its own Monte-Carlo noise. A replay that
     // never moves anything is the conditional reference with extra steps.
@@ -437,8 +446,7 @@ fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
     for multiple in [1.0_f64, 4.0, 16.0] {
         let statistic = multiple * p.mean;
         let exact = gam_math::probability::weighted_chi_square_sf(&p.weights, statistic);
-        let summary =
-            gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
+        let summary = gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
         // The bar is the dust itself, not a tolerance. The only thing separating
         // this spectrum from a single weight — where the two references are
         // IDENTICAL — is `dust`, and the two laws place that mass differently
@@ -469,8 +477,7 @@ fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
     for multiple in [2.0_f64, 4.0, 8.0] {
         let statistic = multiple * q.mean;
         let exact = gam_math::probability::weighted_chi_square_sf(&q.weights, statistic);
-        let summary =
-            gam_math::probability::chi_square_sf(statistic / q.scale, q.chi_square_df);
+        let summary = gam_math::probability::chi_square_sf(statistic / q.scale, q.chi_square_df);
         assert!(
             summary <= exact + 1e-12,
             "at W = {multiple}·Σw the two-moment summary ({summary}) reports a LARGER \

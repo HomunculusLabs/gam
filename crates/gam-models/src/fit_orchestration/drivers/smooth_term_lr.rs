@@ -393,7 +393,13 @@ impl SelectionGeometry {
             if penalty.nrows() != information.nrows() || penalty.ncols() != information.ncols() {
                 return None;
             }
-            let whitened = whitener.t().dot(penalty).dot(&whitener);
+            // `Wᵀ S W` is symmetric as a mathematical object and its two
+            // triangles differ only by summation order — but
+            // `strict_symmetric_eigh` REFUSES the input rather than symmetrizing
+            // it for the caller, which is the right contract and the reason this
+            // is explicit here. Dropping it is a silent `GeometryRefused` on
+            // every real fit.
+            let whitened = symmetrized(whitener.t().dot(penalty).dot(&whitener));
             if whitened.iter().any(|value| !value.is_finite()) {
                 return None;
             }
@@ -557,11 +563,104 @@ fn psd_root(matrix: &Array2<f64>) -> Option<Array2<f64>> {
     Some(root)
 }
 
+/// The symmetric part of a matrix that is symmetric as a mathematical object.
+///
+/// A congruence `WᵀSW` and an assembled Gram are symmetric by construction and
+/// asymmetric by summation order. `strict_symmetric_eigh` validates its input
+/// rather than symmetrizing it — a deliberate contract, since a caller handing
+/// it a genuinely non-symmetric matrix has a defect — so every congruence on
+/// this path passes through here first.
+fn symmetrized(mut matrix: Array2<f64>) -> Array2<f64> {
+    let dimension = matrix.nrows();
+    for row in 0..dimension {
+        for column in 0..row {
+            let mean = 0.5 * (matrix[[row, column]] + matrix[[column, row]]);
+            matrix[[row, column]] = mean;
+            matrix[[column, row]] = mean;
+        }
+    }
+    matrix
+}
+
 /// The published order of a generalized spectrum: ascending, as
 /// [`SmoothLrSelectionReplay::generalized`] documents.
 fn ascending(mut values: Vec<f64>) -> Vec<f64> {
     values.sort_by(|a, b| a.partial_cmp(b).expect("finite generalized spectrum"));
     values
+}
+
+/// Why a term's reference carries no selection replay, when it carries none.
+///
+/// A missing replay is not neutral — it is the difference between pricing `λ̂`
+/// as CHOSEN and pricing it as given, which this issue measured at
+/// `size@.05 = 0.0962` against nominal `0.05`. So the reference says which step
+/// declined and why, rather than publishing a `None` a reader has to attribute
+/// by elimination. Every one of these is a statement about the FIT, not about
+/// the arithmetic: a term with nothing to select legitimately has no replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothLrSelectionDecline {
+    /// No penalty component reached the driver for this term: it is unpenalized,
+    /// or every component's `λ̂` was zero or non-finite, or the components sit
+    /// outside the tested coefficient block. Nothing was selected, so the
+    /// conditional law IS the selection law.
+    NoPenaltyComponents,
+    /// The Schur-complemented information `Ĩ_jj` was not available, so there is
+    /// no basis in which the tested block is standard normal.
+    NoInformation,
+    /// The whitening or a component's root refused: `Ĩ_jj` has no identified
+    /// direction, a decomposition failed, or the components span nothing.
+    GeometryRefused,
+    /// Every scale's window is closed — the fit is railed against both walls of
+    /// the solver's `ρ` box at once, so there was no `λ` it could have chosen
+    /// instead.
+    WindowClosed,
+    /// A grid point could not be evaluated, so the replay would have been taken
+    /// over a grid with a hole in it. Refused whole rather than sampled partial.
+    GridRefused,
+}
+
+impl SmoothLrSelectionDecline {
+    /// The serialized label surfaced in reports and failure messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            SmoothLrSelectionDecline::NoPenaltyComponents => "no_penalty_components",
+            SmoothLrSelectionDecline::NoInformation => "no_information",
+            SmoothLrSelectionDecline::GeometryRefused => "geometry_refused",
+            SmoothLrSelectionDecline::WindowClosed => "window_closed",
+            SmoothLrSelectionDecline::GridRefused => "grid_refused",
+        }
+    }
+}
+
+/// The λ̂-selection replay, or the named reason there is none.
+///
+/// This is an enum rather than an `Option` so that a consumer cannot read
+/// "no replay" without reading why — the two branches are different statements
+/// about the fit and the driver has always known which one it made.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SmoothLrSelection {
+    /// `λ̂` was replayed over the box the solver left it.
+    Replayed(SmoothLrSelectionReplay),
+    /// It was not, for this reason.
+    Declined(SmoothLrSelectionDecline),
+}
+
+impl SmoothLrSelection {
+    /// The replay, when there is one.
+    pub fn replay(&self) -> Option<&SmoothLrSelectionReplay> {
+        match self {
+            SmoothLrSelection::Replayed(replay) => Some(replay),
+            SmoothLrSelection::Declined(_) => None,
+        }
+    }
+
+    /// The decline reason, when there is no replay.
+    pub fn decline(&self) -> Option<SmoothLrSelectionDecline> {
+        match self {
+            SmoothLrSelection::Replayed(_) => None,
+            SmoothLrSelection::Declined(reason) => Some(*reason),
+        }
+    }
 }
 
 impl SmoothLrSelectionReplay {
@@ -570,17 +669,29 @@ impl SmoothLrSelectionReplay {
     /// point — ONE window per scale, because the outer search moved each `ρ_i`
     /// independently inside that box.
     ///
-    /// Returns `None` when the term has no penalized direction (nothing to
-    /// select), the geometry could not be whitened, or every window is empty
-    /// (the fit is railed against both walls), in which case the conditional law
-    /// IS the selection law and the caller should use it unmodified.
+    /// Declines — with a reason — when the term has no penalized direction
+    /// (nothing to select), the geometry could not be whitened, or every window
+    /// is empty (the fit is railed against both walls), in which case the
+    /// conditional law IS the selection law and the caller should use it
+    /// unmodified.
     fn generate(
-        information: &Array2<f64>,
+        information: Option<&Array2<f64>>,
         unit_penalties: &[Array2<f64>],
         log_lambda: &[f64],
         log_scale_windows: &[(f64, f64)],
-    ) -> Option<Self> {
-        let geometry = SelectionGeometry::whiten(information, unit_penalties, log_lambda)?;
+    ) -> SmoothLrSelection {
+        if unit_penalties.is_empty() || unit_penalties.len() != log_lambda.len() {
+            return SmoothLrSelection::Declined(
+                SmoothLrSelectionDecline::NoPenaltyComponents,
+            );
+        }
+        let Some(information) = information else {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::NoInformation);
+        };
+        let Some(geometry) = SelectionGeometry::whiten(information, unit_penalties, log_lambda)
+        else {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused);
+        };
         Self::from_geometry(
             &geometry,
             log_scale_windows,
@@ -596,16 +707,26 @@ impl SmoothLrSelectionReplay {
         log_scale_windows: &[(f64, f64)],
         diagonal_draws: usize,
         multiscale_draws: usize,
-    ) -> Option<Self> {
+    ) -> SmoothLrSelection {
         if log_scale_windows.len() != geometry.roots.len() {
-            return None;
+            return SmoothLrSelection::Declined(
+                SmoothLrSelectionDecline::NoPenaltyComponents,
+            );
         }
         let scales = geometry.roots.len();
-        if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales)
-            && let Some(replay) =
-                Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws)
-        {
-            return Some(replay);
+        if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales) {
+            return match Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws) {
+                Ok(replay) => SmoothLrSelection::Replayed(replay),
+                // A closed multi-scale window is not the end of the story: the
+                // common-scale slice intersects the same windows and declines
+                // for ITSELF if there is genuinely nothing to move. Any other
+                // refusal is about the geometry, which the slice shares, so it
+                // stands rather than being retried.
+                Err(SmoothLrSelectionDecline::WindowClosed) => {
+                    Self::generate_common_scale(geometry, log_scale_windows, diagonal_draws)
+                }
+                Err(reason) => SmoothLrSelection::Declined(reason),
+            };
         }
         Self::generate_common_scale(geometry, log_scale_windows, diagonal_draws)
     }
@@ -629,29 +750,31 @@ impl SmoothLrSelectionReplay {
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
-    ) -> Option<Self> {
+    ) -> SmoothLrSelection {
         // Moving every scale together, the reachable set is the INTERSECTION of
         // the per-scale windows: a common shift has to keep every `ρ̂_i + ln t`
         // inside the solver's box at once.
         let (mut low, mut high) = (f64::NEG_INFINITY, f64::INFINITY);
         for &(window_low, window_high) in log_scale_windows {
             if !(window_low.is_finite() && window_high.is_finite()) {
-                return None;
+                return SmoothLrSelection::Declined(SmoothLrSelectionDecline::WindowClosed);
             }
             low = low.max(window_low);
             high = high.min(window_high);
         }
         if !(low.is_finite() && high.is_finite()) || high <= low {
-            return None;
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::WindowClosed);
         }
         let zero = vec![0.0_f64; geometry.roots.len()];
-        let fitted = geometry.at(&zero)?;
+        let Some(fitted) = geometry.at(&zero) else {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GridRefused);
+        };
         // `ν_j = eig T(1)`, descending, with the structural rank leading. Only
         // the leading `rank` of them are in `range(T)`; the rest are the term's
         // unpenalized directions and carry no log-determinant term at any `t`.
         let generalized = fitted.eigenvalues.clone();
         if !generalized.iter().take(geometry.rank).any(|&nu| nu > 0.0) {
-            return None;
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused);
         }
         let constant: f64 = generalized
             .iter()
@@ -672,71 +795,62 @@ impl SmoothLrSelectionReplay {
         let fitted_index = log_grid.len() - 1;
 
         let dimension = geometry.dimension;
-        let mut penalty_share = Vec::<Vec<f64>>::with_capacity(log_grid.len());
-        let mut null_weight = Vec::<Vec<f64>>::with_capacity(log_grid.len());
-        let mut determinant = Vec::<f64>::with_capacity(log_grid.len());
-        for &log_t in &log_grid {
+        // Draws first, then ONE pass per grid point carrying a running argmin,
+        // rather than one pass per draw over the whole grid: the grid's share
+        // and weight vectors are then read once each per point instead of once
+        // per (draw, point), and nothing but `draws` scalars is retained.
+        let mut squares = vec![0.0_f64; draws * dimension];
+        let mut row = vec![0.0_f64; dimension];
+        let mut stream = SelectionDrawStream::new(dimension, draws);
+        for draw in 0..draws {
+            stream.fill_chi_square_ones(&mut row);
+            squares[draw * dimension..(draw + 1) * dimension].copy_from_slice(&row);
+        }
+
+        let mut best_criterion = vec![f64::INFINITY; draws];
+        let mut selection_sample = vec![0.0_f64; draws];
+        let mut conditional_sample = vec![0.0_f64; draws];
+        let mut share = vec![0.0_f64; dimension];
+        let mut weight = vec![0.0_f64; dimension];
+        for (index, &log_t) in log_grid.iter().enumerate() {
             let t = log_t.exp();
-            let mut share = Vec::with_capacity(dimension);
-            let mut weight = Vec::with_capacity(dimension);
             // `log|I + tT(1)|`, over EVERY direction: an unpenalized one carries
             // `log(1 + 0) = 0` and is neither special-cased nor dropped.
             let mut log_det_hessian = 0.0_f64;
-            for &nu in &generalized {
+            for (column, &nu) in generalized.iter().enumerate() {
                 let scaled = t * nu;
                 let fraction = if scaled.is_finite() {
                     scaled / (1.0 + scaled)
                 } else {
                     1.0
                 };
-                share.push(fraction);
+                share[column] = fraction;
                 let shrinkage = 1.0 - fraction;
-                weight.push(2.0 * shrinkage - shrinkage * shrinkage);
+                weight[column] = 2.0 * shrinkage - shrinkage * shrinkage;
                 log_det_hessian += scaled.ln_1p();
             }
             // `log|T(t)|₊ = rank·ln t + Σ_{j < rank} ln ν_j`, over the STRUCTURAL
             // rank. Deciding that index set by `ν_j > 0` is what put a spurious
             // `−ln t` per roundoff-positive null direction into the criterion.
-            let log_det_penalty = geometry.rank as f64 * log_t + constant;
-            penalty_share.push(share);
-            null_weight.push(weight);
-            determinant.push(log_det_hessian - log_det_penalty);
-        }
-
-        let mut selection_sample = Vec::with_capacity(draws);
-        let mut conditional_sample = Vec::with_capacity(draws);
-        let fitted_weight = null_weight[fitted_index].clone();
-        let mut squares = vec![0.0_f64; dimension];
-        let mut stream = SelectionDrawStream::new(dimension, draws);
-        for _ in 0..draws {
-            stream.fill_chi_square_ones(&mut squares);
-            // argmin of the criterion over the window.
-            let mut best = f64::INFINITY;
-            let mut best_index = 0usize;
-            for index in 0..log_grid.len() {
-                let share = &penalty_share[index];
-                let mut value = determinant[index];
-                for (&square, &fraction) in squares.iter().zip(share.iter()) {
-                    value += square * fraction;
+            let determinant = log_det_hessian - (geometry.rank as f64 * log_t + constant);
+            for draw in 0..draws {
+                let coordinates = &squares[draw * dimension..(draw + 1) * dimension];
+                let mut criterion = determinant;
+                let mut statistic = 0.0_f64;
+                for column in 0..dimension {
+                    criterion += coordinates[column] * share[column];
+                    statistic += coordinates[column] * weight[column];
                 }
-                if value < best {
-                    best = value;
-                    best_index = index;
+                if criterion < best_criterion[draw] {
+                    best_criterion[draw] = criterion;
+                    selection_sample[draw] = statistic;
+                }
+                if index == fitted_index {
+                    conditional_sample[draw] = statistic;
                 }
             }
-            let selected = &null_weight[best_index];
-            let mut chosen = 0.0_f64;
-            let mut held = 0.0_f64;
-            for ((&square, &weight), &held_weight) in
-                squares.iter().zip(selected.iter()).zip(fitted_weight.iter())
-            {
-                chosen += square * weight;
-                held += square * held_weight;
-            }
-            selection_sample.push(chosen);
-            conditional_sample.push(held);
         }
-        Some(Self {
+        SmoothLrSelection::Replayed(Self {
             generalized: ascending(generalized),
             selection_sample,
             conditional_sample,
@@ -783,13 +897,13 @@ impl SmoothLrSelectionReplay {
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
-    ) -> Option<Self> {
+    ) -> Result<Self, SmoothLrSelectionDecline> {
         let scales = geometry.roots.len();
         if scales < 2 || scales > SMOOTH_LR_SELECTION_MAX_SCALES {
-            return None;
+            return Err(SmoothLrSelectionDecline::GeometryRefused);
         }
         if log_scale_windows.len() != scales {
-            return None;
+            return Err(SmoothLrSelectionDecline::NoPenaltyComponents);
         }
         // One axis per scale, budgeted so the total point count does not grow
         // with `m`. A scale whose own window is empty — its `λ̂` railed against
@@ -803,7 +917,7 @@ impl SmoothLrSelectionReplay {
         let mut movable = 0usize;
         for &(low, high) in log_scale_windows {
             if !(low.is_finite() && high.is_finite()) {
-                return None;
+                return Err(SmoothLrSelectionDecline::WindowClosed);
             }
             if high <= low {
                 axes.push(vec![0.0]);
@@ -817,7 +931,7 @@ impl SmoothLrSelectionReplay {
             );
         }
         if movable == 0 {
-            return None;
+            return Err(SmoothLrSelectionDecline::WindowClosed);
         }
 
         // The grid gets ONE extra point: the fitted `λ̂` itself, `ln t_i = 0` on
@@ -832,11 +946,33 @@ impl SmoothLrSelectionReplay {
         let points = axes.iter().map(|axis| axis.len()).product::<usize>() + 1;
         let fitted_index = points - 1;
 
+        // The grid is STREAMED rather than materialized, and every draw is
+        // projected through one grid point at a time with a single matrix
+        // product.
+        //
+        // The arithmetic is identical — `draws × points × q²` either way — but
+        // the shape is not. The per-draw loop it replaces read
+        // `basis[[row, column]]` with `row` innermost, i.e. a strided,
+        // bounds-checked walk down a column, `draws × q²` times per point; this
+        // is one `(draws × q)·(q × q)` `dot` per point followed by a contiguous
+        // row reduction. It also drops the `points × q × q` of stored bases,
+        // which at `441` points and `q = 11` was the bulk of the replay's
+        // footprint.
         let dimension = geometry.dimension;
-        let mut bases = Vec::<Array2<f64>>::with_capacity(points);
-        let mut shares = Vec::<Vec<f64>>::with_capacity(points);
-        let mut weights_grid = Vec::<Vec<f64>>::with_capacity(points);
-        let mut offsets = Vec::<f64>::with_capacity(points);
+        let mut normals = Array2::<f64>::zeros((draws, dimension));
+        let mut row = vec![0.0_f64; dimension];
+        let mut stream = SelectionDrawStream::new(dimension, draws);
+        for draw in 0..draws {
+            stream.fill_normals(&mut row);
+            for column in 0..dimension {
+                normals[[draw, column]] = row[column];
+            }
+        }
+
+        let mut best_criterion = vec![f64::INFINITY; draws];
+        let mut selection_sample = vec![0.0_f64; draws];
+        let mut conditional_sample = vec![0.0_f64; draws];
+        let mut generalized = Vec::new();
         let mut log_t = vec![0.0_f64; scales];
         for point in 0..points {
             let mut remainder = point;
@@ -849,60 +985,32 @@ impl SmoothLrSelectionReplay {
                     axis[step]
                 };
             }
-            let evaluated = geometry.at(&log_t)?;
-            bases.push(evaluated.basis);
-            shares.push(evaluated.shares);
-            weights_grid.push(evaluated.weights);
-            offsets.push(evaluated.offset);
-        }
-        let generalized = {
-            let fitted = geometry.at(&vec![0.0_f64; scales])?;
-            ascending(fitted.eigenvalues)
-        };
-
-        let mut selection_sample = Vec::with_capacity(draws);
-        let mut conditional_sample = Vec::with_capacity(draws);
-        let mut normals = vec![0.0_f64; dimension];
-        let mut projected = vec![0.0_f64; dimension];
-        let mut stream = SelectionDrawStream::new(dimension, draws);
-        for _ in 0..draws {
-            stream.fill_normals(&mut normals);
-            let mut best = f64::INFINITY;
-            let mut best_index = 0usize;
-            for point in 0..points {
-                let basis = &bases[point];
-                let share = &shares[point];
-                let mut value = offsets[point];
+            let evaluated = geometry
+                .at(&log_t)
+                .ok_or(SmoothLrSelectionDecline::GridRefused)?;
+            if point == fitted_index {
+                generalized = ascending(evaluated.eigenvalues.clone());
+            }
+            let projected = normals.dot(&evaluated.basis);
+            for draw in 0..draws {
+                let coordinates = projected.row(draw);
+                let mut criterion = evaluated.offset;
+                let mut statistic = 0.0_f64;
                 for column in 0..dimension {
-                    let mut coordinate = 0.0_f64;
-                    for row in 0..dimension {
-                        coordinate += basis[[row, column]] * normals[row];
-                    }
-                    value += coordinate * coordinate * share[column];
+                    let square = coordinates[column] * coordinates[column];
+                    criterion += square * evaluated.shares[column];
+                    statistic += square * evaluated.weights[column];
                 }
-                if value < best {
-                    best = value;
-                    best_index = point;
+                if criterion < best_criterion[draw] {
+                    best_criterion[draw] = criterion;
+                    selection_sample[draw] = statistic;
+                }
+                if point == fitted_index {
+                    conditional_sample[draw] = statistic;
                 }
             }
-            let quadratic = |point: usize, out: &mut [f64]| -> f64 {
-                let basis = &bases[point];
-                let weight = &weights_grid[point];
-                let mut total = 0.0_f64;
-                for column in 0..dimension {
-                    let mut coordinate = 0.0_f64;
-                    for row in 0..dimension {
-                        coordinate += basis[[row, column]] * normals[row];
-                    }
-                    out[column] = coordinate;
-                    total += coordinate * coordinate * weight[column];
-                }
-                total
-            };
-            selection_sample.push(quadratic(best_index, &mut projected));
-            conditional_sample.push(quadratic(fitted_index, &mut projected));
         }
-        Some(Self {
+        Ok(Self {
             generalized,
             selection_sample,
             conditional_sample,
@@ -1178,11 +1286,14 @@ pub struct SmoothLrReferenceDf {
     pub null_dim: usize,
     /// Which lane supplied the reference.
     pub source: SmoothLrReferenceSource,
-    /// The λ̂-selection replay, when the term has a penalized direction and the
-    /// fit left the outer criterion room to choose (#2672). `None` means the
-    /// conditional law IS the selection law here — nothing was selected — and
-    /// the tail is read from [`Self::weights`] alone.
-    pub selection: Option<SmoothLrSelectionReplay>,
+    /// The λ̂-selection replay, or the NAMED reason there is none (#2672).
+    ///
+    /// A decline means the conditional law IS the selection law here — nothing
+    /// was selected — and the tail is read from [`Self::weights`] alone. It is
+    /// an enum rather than an `Option` because a missing replay is a statement
+    /// about the fit, and a reader who does not have to look at which statement
+    /// will not.
+    pub selection: SmoothLrSelection,
     /// The relative resolution of the statistic this reference will be asked
     /// about — the fit's own outer convergence tolerance (`FitOptions::tol`).
     ///
@@ -1264,7 +1375,7 @@ impl SmoothLrReferenceDf {
     /// assumed, so a consumer can see the accuracy instead of inheriting it.
     pub fn tail_probability_with_bound(&self, statistic: f64) -> (f64, f64) {
         let (conditional, bound) = self.conditional_tail_with_bound(statistic);
-        let Some(replay) = self.selection.as_ref() else {
+        let Some(replay) = self.selection.replay() else {
             return (conditional, bound);
         };
         if !conditional.is_finite() {
@@ -1275,6 +1386,17 @@ impl SmoothLrReferenceDf {
             (conditional + shift).clamp(0.0, 1.0),
             bound + 2.0 * standard_error,
         )
+    }
+
+    /// The Monte-Carlo standard error the selection replay contributes at this
+    /// statistic, or zero when nothing was replayed.
+    ///
+    /// This is a `O(draws)` pass over two samples, four orders cheaper than the
+    /// quadrature it is used to budget.
+    fn selection_standard_error(&self, statistic: f64) -> f64 {
+        self.selection
+            .replay()
+            .map_or(0.0, |replay| replay.tail_shift(statistic).1)
     }
 
     fn conditional_tail_with_bound(&self, statistic: f64) -> (f64, f64) {
@@ -1288,17 +1410,35 @@ impl SmoothLrReferenceDf {
             // a closed form: no truncation, so no bound to report.
             return (summary(statistic), 0.0);
         }
-        let tolerance = if self.statistic_resolution.is_finite() && self.statistic_resolution > 0.0 {
+        let derived = if self.statistic_resolution.is_finite() && self.statistic_resolution > 0.0 {
             let delta = self.statistic_resolution * (statistic.abs() + self.mean.abs());
-            (summary(statistic) - summary(statistic + delta))
-                .abs()
-                .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST)
+            (summary(statistic) - summary(statistic + delta)).abs()
         } else {
             // A reference built without a fit behind it (a unit test, a
             // hand-assembled spectrum) has no statistic resolution to derive
             // from, so it gets `gam-math`'s own default rather than a guess.
             gam_math::probability::WEIGHTED_CHI_SQUARE_TOLERANCE
         };
+        // AND NO FINER THAN THE ANSWER'S OWN NOISE. The published accuracy of a
+        // replayed p-value is `quadrature + 2·se`, where `se` is the selection
+        // shift's Monte-Carlo standard error. Resolving the conditional half
+        // below `se` cannot improve that sum — it is arithmetic on a number the
+        // other term has already blurred — while Imhof's truncation point grows
+        // like `ε^{-2/3}`, so the request is what the cost is made of. Asking
+        // for exactly `se` caps the published bound at `3·se` against an
+        // irreducible `2·se`, i.e. within 1.5x of an infinitely accurate
+        // quadrature, and it is a DERIVED request rather than a budget: with no
+        // replay the floor is zero and the statistic's own resolution stands.
+        //
+        // Measured: with `FitOptions::tol = 1e-10` the derived request is ~1e-10
+        // — essentially `gam-math`'s strict default — and the module's own table
+        // puts that at 0.13-3.3 s PER P-VALUE. The driver evaluates three or
+        // four per term, and `null_simulation_size_is_calibrated_small_n` runs
+        // 960 of them: it did not finish in 4000 s at the commit this repair
+        // was measured against, against nextest's 600 s kill.
+        let tolerance = derived
+            .max(self.selection_standard_error(statistic))
+            .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST);
         gam_math::probability::weighted_chi_square_sf_to_tolerance(
             &self.weights,
             statistic,
@@ -1948,7 +2088,9 @@ fn lr_null_reference(
         edf,
         null_dim,
         source,
-        selection: None,
+        // The degraded lanes do not have the spectrum, so they cannot have the
+        // geometry the replay is built from either.
+        selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
         statistic_resolution,
     };
     let unit_weight = || {
@@ -1992,15 +2134,11 @@ fn lr_null_reference(
                 // one machine epsilon apart there, and the criterion's
                 // log-determinant is the one place that difference is worth
                 // `log(1 + 1e17)`.
-                selection: lr_schur_information(hessian_inverse, penalty, coeff_range).and_then(
-                    |information| {
-                        SmoothLrSelectionReplay::generate(
-                            &information,
-                            term_penalties,
-                            term_log_lambda,
-                            log_scale_windows,
-                        )
-                    },
+                selection: SmoothLrSelectionReplay::generate(
+                    lr_schur_information(hessian_inverse, penalty, coeff_range).as_ref(),
+                    term_penalties,
+                    term_log_lambda,
+                    log_scale_windows,
                 ),
                 statistic_resolution,
             };
@@ -2631,7 +2769,7 @@ mod lr_null_reference_tests {
 mod selection_replay_tests {
     use super::{
         SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_MAX_SCALES, SelectionGeometry,
-        SmoothLrSelectionReplay,
+        SmoothLrSelection, SmoothLrSelectionDecline, SmoothLrSelectionReplay,
     };
     use ndarray::Array2;
 
@@ -2657,8 +2795,12 @@ mod selection_replay_tests {
     }
 
     fn replay_from(spectrum: &[f64], window: (f64, f64), draws: usize) -> SmoothLrSelectionReplay {
-        SmoothLrSelectionReplay::from_geometry(&diagonal(spectrum), &[window], draws, draws)
-            .expect("replay")
+        match SmoothLrSelectionReplay::from_geometry(&diagonal(spectrum), &[window], draws, draws) {
+            SmoothLrSelection::Replayed(replay) => replay,
+            SmoothLrSelection::Declined(reason) => {
+                panic!("expected a replay, declined: {}", reason.label())
+            }
+        }
     }
 
     /// The replay is a p-value input, so it must not depend on a thread, a
@@ -2872,7 +3014,7 @@ mod selection_replay_tests {
         )
         .expect("single geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_none()
+            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_err()
         );
         // More scales than the grid budget can resolve: declines rather than
         // gridding five axes at four points each — and the dispatcher then hands
@@ -2885,9 +3027,11 @@ mod selection_replay_tests {
             &vec![0.0; SMOOTH_LR_SELECTION_MAX_SCALES + 1],
         )
         .expect("crowded geometry");
-        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_none());
+        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_err());
         assert!(
-            SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256).is_some(),
+            SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256)
+                .replay()
+                .is_some(),
             "a term with more scales than the grid budget still gets the common-scale slice"
         );
         // Every window closed: nothing to select on any axis.
@@ -2899,13 +3043,13 @@ mod selection_replay_tests {
         .expect("pair geometry");
         assert!(
             SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (2.0, 2.0)], 256)
-                .is_none()
+                == Err(SmoothLrSelectionDecline::WindowClosed)
         );
         // But ONE open axis is still a selection, and used to be discarded with
         // the closed one — the intersection of the two windows is empty.
         assert!(
             SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (-6.0, 6.0)], 256)
-                .is_some(),
+                .is_ok(),
             "a scale whose own window is open must still be replayed when a \
              SIBLING scale's window is closed"
         );
@@ -2931,11 +3075,13 @@ mod selection_replay_tests {
             SelectionGeometry::whiten(&Array2::eye(2), &[Array2::zeros((2, 2))], &[0.0]).is_none()
         );
         let geometry = diagonal(&spectrum());
-        assert!(SmoothLrSelectionReplay::from_geometry(&geometry, &[(4.0, -4.0)], 256, 256).is_none());
-        assert!(
-            SmoothLrSelectionReplay::from_geometry(&geometry, &[(f64::NAN, 1.0)], 256, 256)
-                .is_none()
-        );
+        for window in [(4.0_f64, -4.0_f64), (f64::NAN, 1.0)] {
+            assert_eq!(
+                SmoothLrSelectionReplay::from_geometry(&geometry, &[window], 256, 256).decline(),
+                Some(SmoothLrSelectionDecline::WindowClosed),
+                "a closed window must decline with a NAMED reason"
+            );
+        }
     }
 
     /// #2672: the criterion's log-determinant is priced from the stacked scaled
@@ -3000,6 +3146,84 @@ mod selection_replay_tests {
                     moved.offset - base.offset
                 );
             }
+        }
+    }
+
+    /// The geometry has to survive a DENSE information and a DENSE penalty,
+    /// which is the only shape a real fit ever presents.
+    ///
+    /// Every other fixture in this module hands `SelectionGeometry::whiten` an
+    /// identity information and a diagonal penalty, so the congruence
+    /// `Wᵀ S W` comes out EXACTLY symmetric and the self-adjoint entry point's
+    /// input validation never fires. On a real fit it is a product of three
+    /// dense matrices, its two triangles differ by summation order, and
+    /// `strict_symmetric_eigh` — correctly — refuses rather than symmetrizing
+    /// for the caller. That refusal is silent: it becomes
+    /// `SmoothLrSelectionDecline::GeometryRefused`, i.e. no replay at all, on
+    /// EVERY fit. Measured that way before the symmetrization was restored:
+    /// `y ~ s(z) [poisson]` declined with `geometry_refused` on the first cell
+    /// of the integration sweep.
+    #[test]
+    fn the_geometry_survives_a_dense_information_and_a_dense_penalty() {
+        let q = 7;
+        // A deterministic dense SPD information and two dense PSD penalties
+        // with complementary-ish ranges, all built by congruence so nothing is
+        // diagonal and nothing is exactly symmetric in floating point.
+        let mixing = Array2::from_shape_fn((q, q), |(row, column)| {
+            let a = row as f64 + 1.0;
+            let b = column as f64 + 1.0;
+            ((a * 0.7 + b * 1.3).sin() + 0.25 * (a * b).cos()) / (1.0 + 0.1 * a * b)
+        });
+        let information = mixing.dot(&mixing.t()) + Array2::<f64>::eye(q) * 0.5;
+        let mut bending = Array2::<f64>::zeros((q, q));
+        for index in 0..q - 2 {
+            bending[[index, index]] = 1.0;
+            bending[[index, index + 1]] = -0.5;
+            bending[[index + 1, index]] = -0.5;
+        }
+        let bending = mixing.dot(&bending.dot(&mixing.t()));
+        let bending = bending.dot(&bending.t());
+        let ridge = mixing.dot(&mixing.t());
+        for separation in [0.0_f64, 30.0, 55.0] {
+            let geometry = SelectionGeometry::whiten(
+                &information,
+                &[bending.clone(), ridge.clone()],
+                &[0.5 * separation, -0.5 * separation],
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "the geometry refused a dense fit at separation {separation} —                      that is a silent `no replay` on every real model"
+                )
+            });
+            let replay = SmoothLrSelectionReplay::from_geometry(
+                &geometry,
+                &[(-6.0, 6.0), (-6.0, 6.0)],
+                512,
+                512,
+            );
+            let replay = replay.replay().unwrap_or_else(|| {
+                panic!(
+                    "declined at separation {separation}: {:?}",
+                    SmoothLrSelectionReplay::from_geometry(
+                        &geometry,
+                        &[(-6.0, 6.0), (-6.0, 6.0)],
+                        512,
+                        512,
+                    )
+                    .decline()
+                )
+            });
+            assert_eq!(
+                replay.generalized.len(),
+                geometry.dimension,
+                "the published spectrum must cover the block"
+            );
+            assert!(
+                replay
+                    .generalized
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+            );
         }
     }
 
