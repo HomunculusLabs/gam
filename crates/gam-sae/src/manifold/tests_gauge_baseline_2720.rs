@@ -12,9 +12,12 @@
 //! 18 of #2674's 19 fixtures flipped green on that change. So the stall state
 //! that produced `8.24×` and `10.45×` may no longer be reachable.
 //!
-//! This test takes the measurement again at current `main`. It does NOT assert
-//! any particular value — it prints the measurement so we can compare against
-//! the pre-`a386c1e8b` baseline.
+//! This test takes the measurement again at current `main`. It prints the
+//! measurement so we can compare against the pre-`a386c1e8b` baseline.
+//!
+//! Marked `#[ignore]` because it runs a 40-iteration inner solve and does not
+//! assert a regression invariant — it is a manual diagnostic reproducer.
+//! Run with: `cargo test -p gam-sae measure_chart_gauge_orbit -- --ignored --nocapture`
 //!
 //! ## Method
 //!
@@ -58,6 +61,7 @@ fn ard_saddle_state() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
 }
 
 #[test]
+#[ignore = "manual diagnostic reproducer for #2720; run with --ignored --nocapture"]
 fn measure_chart_gauge_orbit_gradient_projection_2720() {
     let (mut term, target, rho) = ard_saddle_state();
 
@@ -72,17 +76,8 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
         1.0e-6,
     );
 
-    let (criterion_value, loss, _cache) = match result {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[2720-baseline] inner solve returned Err: {e:?}");
-            eprintln!("[2720-baseline] the inner solve REFUSED — the stall state");
-            eprintln!("[2720-baseline] this itself is informative: the solver either");
-            eprintln!("[2720-baseline] cannot reach a stationary point, or refuses on");
-            eprintln!("[2720-baseline] a gate that did not exist when 8.24×/10.45× were measured");
-            return;
-        }
-    };
+    let (criterion_value, loss, _cache) = result
+        .expect("[2720-baseline] inner solve REFUSED — this itself is informative: the solver either cannot reach a stationary point, or refuses on a gate that did not exist when 8.24×/10.45× were measured");
 
     eprintln!("[2720-baseline] criterion value = {criterion_value:.6e}");
     eprintln!(
@@ -92,17 +87,12 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
 
     // Assemble the Arrow-Schur system at the inner solve state to extract
     // the KKT gradient.
-    let sys = match term.assemble_arrow_schur(target.view(), &rho, None) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[2720-baseline] assemble_arrow_schur failed: {e}");
-            return;
-        }
-    };
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("[2720-baseline] assemble_arrow_schur failed — fixture drift");
 
     // Extract the joint gradient: [g_t (per row, flattened); g_β]
     let n_rows = sys.rows.len();
-    let coord_dim = sys.rows.first().map(|r| r.gt.len()).unwrap_or(0);
     let border_dim = sys.gb.len();
     let full_len: usize = sys.rows.iter().map(|r| r.gt.len()).sum::<usize>() + border_dim;
 
@@ -119,6 +109,12 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
     }
 
     let grad_norm = grad.dot(&grad).sqrt();
+    assert!(
+        grad_norm.is_finite(),
+        "[2720-baseline] gradient norm is non-finite"
+    );
+
+    let coord_dim = sys.rows.first().map(|r| r.gt.len()).unwrap_or(0);
     eprintln!(
         "[2720-baseline] n_rows={n_rows}, coord_dim={coord_dim}, border_dim={border_dim}"
     );
@@ -137,32 +133,31 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
         offsets
     };
 
-    let gauge_basis = match term.joint_chart_gauge_basis_for_arrow_layout(
-        &row_offsets,
-        border_dim,
-        "2720-baseline chart gauge projection",
-    ) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[2720-baseline] joint_chart_gauge_basis failed: {e}");
-            return;
-        }
-    };
+    let gauge_basis = term
+        .joint_chart_gauge_basis_for_arrow_layout(
+            &row_offsets,
+            border_dim,
+            "2720-baseline chart gauge projection",
+        )
+        .expect("[2720-baseline] joint_chart_gauge_basis failed — fixture drift");
+
+    assert!(
+        !gauge_basis.is_empty(),
+        "[2720-baseline] no gauge directions found — measurement not applicable at this state/fixture"
+    );
 
     eprintln!(
         "[2720-baseline] chart-gauge basis: {} directions",
         gauge_basis.len()
     );
 
-    if gauge_basis.is_empty() {
-        eprintln!("[2720-baseline] no gauge directions found — measurement not applicable");
-        eprintln!("[2720-baseline] at this state/fixture combination");
-        return;
-    }
-
     // Tolerance: same as the acceptance gate.
     let iterate_scale = term.inner_iterate_scale();
     let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * iterate_scale;
+    assert!(
+        tolerance.is_finite() && tolerance > 0.0,
+        "[2720-baseline] tolerance is non-finite or non-positive"
+    );
     eprintln!(
         "[2720-baseline] iterate_scale = {iterate_scale:.6e}, tolerance = {tolerance:.6e}"
     );
@@ -171,11 +166,8 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
     let mut max_ratio = 0.0f64;
     for (i, v) in gauge_basis.iter().enumerate() {
         let proj = grad.dot(v);
-        let ratio = if tolerance > 0.0 {
-            proj.abs() / tolerance
-        } else {
-            f64::INFINITY
-        };
+        assert!(proj.is_finite(), "[2720-baseline] v_{i} projection is non-finite");
+        let ratio = proj.abs() / tolerance;
         max_ratio = max_ratio.max(ratio);
         eprintln!(
             "[2720-baseline] v_{i}: |gᵀv| = {:.6e}  ({:.2}× tolerance)",
@@ -187,32 +179,17 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
     eprintln!("[2720-baseline] ────────────────────────────────────────");
     eprintln!("[2720-baseline] max |gᵀv|/tol = {max_ratio:.2}×");
 
-    // Compare against the pre-a386c1e8b baseline.
     if max_ratio <= 1.0 {
         eprintln!(
             "[2720-baseline] AT OR BELOW TOLERANCE — the orbit derivatives are now"
         );
-        eprintln!(
-            "[2720-baseline] within the acceptance gate. The witness state for"
-        );
-        eprintln!(
-            "[2720-baseline] 8.24×/10.45× may be gone; the modelling fix's"
-        );
-        eprintln!(
-            "[2720-baseline] acceptance criteria need a new fixture."
-        );
+        eprintln!("[2720-baseline] within the acceptance gate. The witness state for");
+        eprintln!("[2720-baseline] 8.24×/10.45× may be gone; the modelling fix's");
+        eprintln!("[2720-baseline] acceptance criteria need a new fixture.");
     } else {
-        eprintln!(
-            "[2720-baseline] ABOVE TOLERANCE — the orbit derivatives are still"
-        );
-        eprintln!(
-            "[2720-baseline] materially above the convergence tolerance."
-        );
-        eprintln!(
-            "[2720-baseline] The modelling question is live and the original"
-        );
-        eprintln!(
-            "[2720-baseline] acceptance criteria may still be applicable."
-        );
+        eprintln!("[2720-baseline] ABOVE TOLERANCE — the orbit derivatives are still");
+        eprintln!("[2720-baseline] materially above the convergence tolerance.");
+        eprintln!("[2720-baseline] The modelling question is live and the original");
+        eprintln!("[2720-baseline] acceptance criteria may still be applicable.");
     }
 }
