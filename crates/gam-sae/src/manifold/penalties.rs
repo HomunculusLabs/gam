@@ -1418,18 +1418,19 @@ impl SaeManifoldTerm {
                 // #2731 — the per-edge decoder products were hand-rolled scalar
                 // triple loops over `p` (the ambient output dimension, up to
                 // 2048 in production). Replaced with cache-efficient
-                // `matrixmultiply`-backed `.dot()` calls. The three hand-rolled
+                // `matrixmultiply`-backed `.dot()` calls. The five hand-rolled
                 // inner products were:
-                //   `cross = B_j B_kᵀ`            — O(m_j·m_k·p), strided column access
-                //   `mb    = cross · B_k`         — O(m_j·m_k·p), column access of B_k
-                //   `sjb   = S_j · B_j`           — O(m_j²·p)
-                //   `mtb   = crossᵀ · B_j`        — O(m_j·m_k·p), column access of B_j
-                //   `skb   = S_k · B_k`           — O(m_k²·p)
-                // The strided column accesses (fixed `o`, varying row) thrash the
-                // cache at p=2048; `.dot()` uses blocked traversal that keeps
-                // tiles in L1. The math is identical; only the summation order
-                // changes (blocked vs sequential), which is well within the
-                // 1e-12 golden-test tolerance at these matrix sizes.
+                //   `cross = B_j B_kᵀ`  — O(m_j·m_k·p), row-contiguous (moderate)
+                //   `mb    = cross · B_k` — O(m_j·m_k·p), strided column access
+                //   `sjb   = S_j · B_j`   — O(m_j²·p), strided column access
+                //   `mtb   = crossᵀ · B_j` — O(m_j·m_k·p), strided column access
+                //   `skb   = S_k · B_k`   — O(m_k²·p), strided column access
+                // The strided column accesses (fixed `o`, varying row) thrash
+                // the cache at p=2048; `.dot()` uses blocked traversal that
+                // keeps tiles in L1. The math is algebraically equivalent; only
+                // the summation order changes (blocked vs sequential), so results
+                // are within existing numerical tolerances but not bit-for-bit
+                // identical.
                 let cross = bj.dot(&bk.t());
                 let s_j = bj.dot(&bj.t());
                 let s_k = bk.dot(&bk.t());
