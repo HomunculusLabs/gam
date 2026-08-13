@@ -26,7 +26,8 @@
 
 use gam_terms::basis::{
     BSplineBasisSpec, BSplineIdentifiability, BSplineKnotSpec, CenterStrategy,
-    ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, OneDimensionalBoundary,
+    ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, MaternBasisSpec,
+    MaternIdentifiability, MaternLengthScale, MaternNu, OneDimensionalBoundary,
 };
 use gam_terms::smooth::{
     LinearCoefficientGeometry, LinearTermSpec, ShapeConstraint, SmoothBasisSpec, SmoothTermSpec,
@@ -383,5 +384,80 @@ fn the_residualization_chart_replays_bit_for_bit_on_a_row_subset_2747() {
         divergence > 1e-6,
         "dropping the chart must visibly change the design, or this test cannot tell a \
          replay from a rederivation; divergence {divergence:e}"
+    );
+}
+
+/// The same two properties on a MATERN smooth, from a spec whose identifiability
+/// is still `CenterSumToZero`.
+///
+/// This arm exists to localize a SECOND gap rather than to re-test the first.
+/// Through `fit_from_formula`, a Matern smooth measures `4.15e-1` against the
+/// intercept even with the projection arm landed
+/// (`examples/probe_2747_parametric_orthogonality`), and this test says why that
+/// cannot be the arm's fault: from an unfrozen spec the same basis comes out
+/// orthogonal at the shipped bar. What differs is the route —
+/// `freeze_geometry_from_metadata` (`spatial_optimization.rs:4849`) freezes the
+/// kappa optimizer's cold-build chart as `MaternIdentifiability::FrozenTransform`,
+/// that chart comes from `realize_single_smooth_term`, whose own comment says it
+/// "never runs the global ownership pass", and
+/// `smooth_requires_parametric_orthogonality`'s doc then excludes
+/// `FrozenTransform` bases on the premise that such a transform "already has the
+/// parametric orthogonalization composed in". For that producer the premise is
+/// false, and it has been since long before #2747.
+#[test]
+fn an_unfrozen_matern_smooth_is_orthogonalized_at_no_cost_2747() {
+    let data = cloud();
+    let matern = SmoothTermSpec {
+        name: "matern".to_string(),
+        basis: SmoothBasisSpec::Matern {
+            feature_cols: vec![0, 1],
+            spec: MaternBasisSpec {
+                center_strategy: CenterStrategy::FarthestPoint {
+                    num_centers: CENTERS,
+                },
+                periodic: None,
+                length_scale: MaternLengthScale::fixed(1.0),
+                nu: MaternNu::ThreeHalves,
+                include_intercept: false,
+                double_penalty: false,
+                identifiability: MaternIdentifiability::CenterSumToZero,
+                aniso_log_scales: None,
+            },
+            input_scale: None,
+        },
+        shape: ShapeConstraint::None,
+        joint_null_rotation: None,
+        frozen_parametric_residualization: None,
+    };
+    let spec = TermCollectionSpec {
+        linear_terms: Vec::new(),
+        random_effect_terms: Vec::new(),
+        smooth_terms: vec![matern],
+    };
+    let design = build_term_collection_design(data.view(), &spec).expect("design builds");
+    let block = block_of(&design, "matern");
+    let intercept = Array2::<f64>::ones((data.nrows(), 1));
+
+    let contained = gam_terms::basis::contained_constraint_directions(
+        &gam_linalg::matrix::DesignMatrix::from(block.clone()),
+        intercept.view(),
+        None,
+    )
+    .expect("containment test runs");
+    assert_eq!(
+        contained.ncols(),
+        0,
+        "premise: the realized Matern span must NOT contain the constant"
+    );
+    let cross = relative_cross(&block, &intercept);
+    assert!(
+        cross <= SHIPPED_ORTHOGONALITY_BAR,
+        "an unfrozen Matern block must be orthogonal to the intercept: {cross:e}"
+    );
+    assert_eq!(
+        block.ncols(),
+        CENTERS - 1,
+        "the center-space sum-to-zero emits `centers - 1` columns and the global \
+         step must hand every one of them through"
     );
 }
