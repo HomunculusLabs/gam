@@ -42,6 +42,7 @@
 //! call for the issue, not something to settle by moving either number — so this
 //! test certifies the identity that is provable and says so.
 
+use gam::data::EncodedDataset;
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use gam_math::probability::normal_cdf;
 use std::io::Write;
@@ -68,15 +69,21 @@ fn standard_normal_pdf(z: f64) -> f64 {
 fn truncated_normal_mean(mean: f64, sd: f64, lower: f64, upper: f64) -> f64 {
     let a = (lower - mean) / sd;
     let b = (upper - mean) / sd;
-    let mass = normal_cdf(b) - normal_cdf(a);
+    let upper_cdf = if b.is_infinite() && b > 0.0 {
+        1.0
+    } else {
+        normal_cdf(b)
+    };
+    let mass = upper_cdf - normal_cdf(a);
     assert!(
         mass > 0.0,
         "the truncation interval must carry positive Gaussian mass: a={a}, b={b}"
     );
-    mean + sd * (standard_normal_pdf(a) - standard_normal_pdf(b)) / mass
+    let upper_pdf = if b.is_infinite() { 0.0 } else { standard_normal_pdf(b) };
+    mean + sd * (standard_normal_pdf(a) - upper_pdf) / mass
 }
 
-fn dataset(x: &[f64], y: &[f64]) -> gam::data::Dataset {
+fn dataset(x: &[f64], y: &[f64]) -> EncodedDataset {
     let mut csv = String::from("x,y\n");
     for i in 0..x.len() {
         csv.push_str(&format!("{:.17e},{:.17e}\n", x[i], y[i]));
@@ -163,4 +170,67 @@ fn a_binding_coefficient_box_reports_the_truncated_posterior_mean_2705() {
              estimand it exists for"
         );
     }
+}
+
+/// The same identity on the ONE-SIDED half-line, which is the shape
+/// `optimization::nonnegative_constraint_kkt_*` reports as "should bind at 0,
+/// got 0.007857". A half-line is the case `constrained_posterior`'s doc
+/// discusses explicitly — the mode sits at the endpoint and the mean does not —
+/// so it is worth pinning separately from the interval.
+#[test]
+fn a_binding_half_line_reports_the_truncated_posterior_mean_2705() {
+    init_parallelism();
+    // Slope −5, so `β ≥ 0` binds and the unconstrained optimum is far outside.
+    let x: Vec<f64> = (0..N)
+        .map(|i| -1.0 + 2.0 * (i as f64) / ((N - 1) as f64))
+        .collect();
+    let y: Vec<f64> = x.iter().map(|&xi| INTERCEPT - SLOPE * xi).collect();
+    let data = dataset(&x, &y);
+    let cross_product: f64 = x.iter().map(|xi| xi * xi).sum();
+
+    let unconstrained = match fit_from_formula("y ~ x", &data, &FitConfig::default()) {
+        Ok(FitResult::Standard(fit)) => fit,
+        _ => panic!("the unconstrained control must fit"),
+    };
+    let centre = unconstrained.fit.beta[1];
+    assert!(
+        (centre + SLOPE).abs() < 1e-6,
+        "the control must recover the negative noise-free slope, got {centre}"
+    );
+
+    let fitted = match fit_from_formula("y ~ nonnegative(x)", &data, &FitConfig::default()) {
+        Ok(FitResult::Standard(fit)) => fit,
+        Ok(_) => panic!("`y ~ nonnegative(x)` is a Standard GAM fit"),
+        Err(error) => panic!("`y ~ nonnegative(x)` must fit: {error}"),
+    };
+    let reported = fitted.fit.beta[1];
+    assert!(
+        reported >= 0.0,
+        "`nonnegative(x)` reported {reported:.12}, which is outside the half-line it \
+         was given"
+    );
+
+    // Mode on the bound: the deviance is the residual sum of squares at β = 0.
+    let deviance_at_bound = centre * centre * cross_product;
+    let deviance = fitted.fit.deviance;
+    assert!(
+        (deviance - deviance_at_bound).abs() <= 1e-9 * deviance_at_bound.max(1.0),
+        "`nonnegative(x)` must be fitted AT the bound: deviance {deviance:.9} against \
+         the residual sum of squares at β=0, {deviance_at_bound:.9}"
+    );
+
+    // And what is reported is the half-line truncated mean.
+    let phi = fitted.fit.standard_deviation.powi(2);
+    let sd = (phi / cross_product).sqrt();
+    let expected = truncated_normal_mean(centre, sd, 0.0, f64::INFINITY);
+    assert!(
+        (reported - expected).abs() <= 1e-6 * expected.abs().max(1e-6),
+        "`nonnegative(x)` reported {reported:.12} but the half-line truncated mean of \
+         N({centre:.9}, {sd:.9}²) on [0, ∞) is {expected:.12}"
+    );
+    assert!(
+        reported > 0.0,
+        "the half-line truncated mean is strictly interior at every finite multiplier, \
+         so a reported exact zero means this fixture no longer measures the estimand"
+    );
 }
