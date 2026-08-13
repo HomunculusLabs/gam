@@ -209,6 +209,12 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     // that disagrees with the empirical one" -- two different defects, and the
     // means alone cannot tell them apart.
     let mut sum_factor = 0.0;
+    // The reference's OWN predicted mean for this replicate: `E[W(λ̂)]` under the
+    // selection law the p-value is read from. `ref_df` is the CONDITIONAL mean
+    // `E[W | λ̂]`, which the empirical mean is not comparable to (see (b1)).
+    let mut sum_predicted = 0.0;
+    let mut sum_predicted_conditional = 0.0;
+    let mut predicted_used = 0usize;
     let mut rejections_cor = 0usize;
     let mut count = 0usize;
     for rep in 0..REPS {
@@ -231,6 +237,18 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
         sum_p_unc += r.p_value_uncorrected;
         sum_p_cor += r.p_value_corrected;
         ref_df += r.ref_df;
+        if let Some(replay) = r.ref_df_provenance.selection.replay() {
+            let predicted = replay.selection_mean();
+            if predicted.is_finite() {
+                // `W* = W/c`, so the reference the CORRECTED statistic is scored
+                // against is the same law with every weight scaled by `c` — its
+                // mean is `c · E[W(λ̂)]`. Comparing the raw `mean(W)` against the
+                // raw predicted mean keeps both on the uncorrected scale.
+                sum_predicted += predicted;
+                sum_predicted_conditional += replay.conditional_mean();
+                predicted_used += 1;
+            }
+        }
         if r.p_value_corrected <= 0.05 {
             rejections_cor += 1;
         }
@@ -256,13 +274,20 @@ fn poisson_smooth_lr_is_bartlett_corrected_and_better_calibrated() {
     let err_unc = (mean_w - mean_d).abs();
     let err_cor = (mean_w_star - mean_d).abs();
     let size_cor = rejections_cor as f64 / n_used;
+    let mean_predicted = sum_predicted / predicted_used.max(1) as f64;
+    let mean_predicted_conditional = sum_predicted_conditional / predicted_used.max(1) as f64;
+    let err_predicted = (mean_w - mean_predicted).abs();
     eprintln!(
         "[#1063 sweep] n={N} used={count}/{REPS}  mean(W)={mean_w:.4} sd(W)={:.4} \
          se(mean W)={se_w:.4}  d={mean_d:.4}  |mean(W)-d|={err_unc:.4} ({:.2} se)  \
          c={mean_factor:.6}  mean(W*)={mean_w_star:.4}  |mean(W*)-d|={err_cor:.4}  \
-         mean(p)={mean_p_unc:.4} mean(p*)={mean_p_cor:.4}  size@.05(corrected)={size_cor:.4}",
+         mean(p)={mean_p_unc:.4} mean(p*)={mean_p_cor:.4}  size@.05(corrected)={size_cor:.4}  \
+         E[W(lambda-hat)]={mean_predicted:.4} (replayed on {predicted_used}) \
+         E[W|lambda-hat]={mean_predicted_conditional:.4} \
+         |mean(W)-E[W(lambda-hat)]|={err_predicted:.4} ({:.2} se)",
         var_w.sqrt(),
-        err_unc / se_w.max(f64::MIN_POSITIVE)
+        err_unc / se_w.max(f64::MIN_POSITIVE),
+        err_predicted / se_w.max(f64::MIN_POSITIVE)
     );
 
     // (b1) THE REFERENCE IS CALIBRATED: the statistic's empirical null mean agrees

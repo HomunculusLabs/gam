@@ -725,6 +725,96 @@ fn zz_measure_size_under_candidate_reference_shapes_2672() {
     );
 }
 
+/// DIAGNOSTIC (not a contract, #2672): the hardest cell of the grid against `n`.
+///
+/// `null_simulation_size_is_calibrated_small_n` lands every cell inside its band
+/// except `bernoulli/logit, k = 12` at `n ∈ {30, 50}`. Two readings have opposite
+/// consequences and the grid cannot tell them apart at two points:
+///
+/// * a REFERENCE defect — something in the null law is wrong for a binary
+///   response with a wide basis, and it will not go away with `n`;
+/// * the QUADRATIC EXPANSION's own error — the whole reference (and the Lawley
+///   factor that corrects it) is a second-order expansion of the likelihood
+///   about the penalized fit, and `30` Bernoulli trials against an 11-column
+///   smooth is where that expansion is worst. It must then fall off with `n`.
+///
+/// The discriminator is `n`, and it is run here rather than argued: the same
+/// cell across a range of `n`, at a budget that resolves the difference, with
+/// the QUASI-SEPARATION count reported alongside. A binary response fitted by a
+/// wiggly spline on few points separates, and a separated fit has an unbounded
+/// unpenalized likelihood — which is exactly the state in which a quadratic
+/// expansion of that likelihood has nothing to say.
+#[test]
+fn zz_measure_bernoulli_wide_basis_size_versus_n_2672() {
+    init_parallelism();
+
+    const REPS: usize = 200;
+    let ns = [30usize, 50, 100, 200, 400];
+    let family = NullFamily::BernoulliLogit;
+    let k = 12usize;
+
+    eprintln!(
+        "[zz2672-n] {:>16} {:>5} {:>5} {:>5} | size@.05 first/est   size@.01 first/est | \
+         mean_W  mean_d  ratio | sep%",
+        "family", "n", "k", "used"
+    );
+    for &n in &ns {
+        let mut counts = SizeCounts::default();
+        let mut refused = 0usize;
+        let mut sum_w = 0.0;
+        let mut sum_d = 0.0;
+        let mut separated = 0usize;
+        for rep in 0..REPS {
+            let seed = mix_seed(family.label(), n, k, rep);
+            let data = null_replicate(family, n, seed);
+            match run_one(family, k, &data) {
+                Ok(Some(r)) => {
+                    // A fit whose LR statistic is many times its own reference
+                    // mean is the separation signature: the unpenalized
+                    // alternative has run away, and no second-order expansion of
+                    // the likelihood about the penalized fit describes it.
+                    if r.statistic_lr.is_finite()
+                        && r.ref_df.is_finite()
+                        && r.ref_df > 0.0
+                        && r.statistic_lr > 12.0 * r.ref_df
+                    {
+                        separated += 1;
+                    }
+                    if r.statistic_lr.is_finite() && r.ref_df.is_finite() {
+                        sum_w += r.statistic_lr;
+                        sum_d += r.ref_df;
+                    }
+                    counts.ingest(&r);
+                }
+                Ok(None) => {}
+                Err(_) => refused += 1,
+            }
+        }
+        let used = counts.used.max(1) as f64;
+        eprintln!(
+            "[zz2672-n] {:>16} {n:>5} {k:>5} {:>5} |   {:.3} / {:.3}         {:.3} / {:.3}   | \
+             {:>6.3}  {:>6.3}  {:>5.2} | {:>4.1} (ref! {refused})",
+            family.label(),
+            counts.used,
+            counts.size(counts.rej_first_05),
+            counts.size(counts.rej_est_05),
+            counts.size(counts.rej_first_01),
+            counts.size(counts.rej_est_01),
+            sum_w / used,
+            sum_d / used,
+            (sum_w / used) / (sum_d / used).max(f64::MIN_POSITIVE),
+            100.0 * separated as f64 / used,
+        );
+    }
+    eprintln!(
+        "[zz2672-n] read: nominal 0.05 / 0.01; MC s.e. at {REPS} reps is {:.4} / {:.4}. \
+         A size that falls toward nominal WITH the separation rate is the quadratic \
+         expansion; one that does not is the reference.",
+        size_se(0.05, REPS),
+        size_se(0.01, REPS)
+    );
+}
+
 /// Deterministic per-cell, per-replicate seed so the grid is fully reproducible
 /// and the cells are independent (no shared RNG stream across cells).
 fn mix_seed(label: &str, n: usize, k: usize, rep: usize) -> u64 {

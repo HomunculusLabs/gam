@@ -1016,6 +1016,51 @@ impl SmoothLrSelectionReplay {
             conditional_sample,
         })
     }
+    /// `E[W(λ̂)]` under the replayed SELECTION law — the mean of the reference
+    /// this term's p-value is actually read from.
+    ///
+    /// It is published because it is the only quantity that makes the
+    /// construction checkable at the level of a moment. `ref_df = Σ_j w_j` is
+    /// the CONDITIONAL mean `E[W | λ̂]`, and under a null DGP the empirical mean
+    /// of `W` does NOT converge to it: `λ̂` is picked from the same data, so the
+    /// pairing is per-replicate and the unconditional means need not agree —
+    /// measured on this issue's own fixture at a ratio of `2.34`. Reading that
+    /// ratio as a defect is the mistake this thread made twice. What the
+    /// empirical mean IS comparable to is this number.
+    pub fn selection_mean(&self) -> f64 {
+        Self::mean(&self.selection_sample)
+    }
+
+    /// `E[W | λ̂]` on the SAME draws — the conditional law's mean, for the
+    /// paired comparison that shows what the selection did.
+    pub fn conditional_mean(&self) -> f64 {
+        Self::mean(&self.conditional_sample)
+    }
+
+    /// The Monte-Carlo standard error of [`Self::selection_mean`], from the
+    /// sample's own spread rather than from an assumed shape.
+    pub fn selection_mean_standard_error(&self) -> f64 {
+        let draws = self.selection_sample.len();
+        if draws < 2 {
+            return f64::NAN;
+        }
+        let mean = self.selection_mean();
+        let variance = self
+            .selection_sample
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / draws as f64;
+        (variance / draws as f64).sqrt()
+    }
+
+    fn mean(sample: &[f64]) -> f64 {
+        if sample.is_empty() {
+            return f64::NAN;
+        }
+        sample.iter().sum::<f64>() / sample.len() as f64
+    }
+
     /// `(shift, standard_error)`: how much the selection moves the tail at
     /// `statistic`, and the Monte-Carlo standard error of that shift.
     ///
