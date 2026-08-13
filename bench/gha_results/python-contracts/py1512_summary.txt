@@ -1,9 +1,9 @@
 # python-contracts full-suite triage (#1512) — recovered summary
 
 collected            1478
-passed               1255
+passed               1254
 skipped              79
-failed (diagnosed)   108
+failed (diagnosed)   109
 errored (diagnosed)  0
 CENSORED             36   (worker killed at the per-test bound;
                           the JUnit records no reason and time=0.000)
@@ -135,24 +135,24 @@ it is a call that had not returned when the bound expired.
 
 ## 20 slowest tests that DID report a duration
 
-      298.7s  tests.test_survival_api_regressions::test_joint_competing_risks_survival_is_reachable_from_fit
-      259.4s  tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test::test_negbin_dispersion_location_scale_is_predictable
-      201.9s  tests.bug_hunt_transformation_normal_predict_returns_pit_of_response_not_conditional_mean_test::test_transformation_normal_predict_returns_conditional_mean_not_pit
-      178.6s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
-      177.2s  tests.test_sae_manifold_oos_reencode_issue_2132::test_selected_rho_survives_save_load_roundtrip
-      164.4s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
-      161.9s  tests.bug_hunt_flexible_link_engages_and_predicts_test::test_flexible_link_engages_predicts_and_is_monotone_on_probit_data
-      134.2s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
-      130.8s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[1]
-      130.5s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
-       99.0s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
+      279.8s  tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test::test_negbin_dispersion_location_scale_is_predictable
+      258.8s  tests.bug_hunt_smooth_significance_ref_df_floor_and_null_fpr_test::test_null_false_positive_rate_is_calibrated
+      255.4s  tests.test_survival_api_regressions::test_joint_competing_risks_survival_is_reachable_from_fit
+      193.1s  tests.bug_hunt_transformation_normal_predict_returns_pit_of_response_not_conditional_mean_test::test_transformation_normal_predict_returns_conditional_mean_not_pit
+      174.8s  tests.test_sae_manifold_oos_reencode_issue_2132::test_selected_rho_survives_save_load_roundtrip
+      174.1s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
+      173.3s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
+      162.6s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
+      156.1s  tests.bug_hunt_flexible_link_engages_and_predicts_test::test_flexible_link_engages_predicts_and_is_monotone_on_probit_data
+      144.3s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[1]
+      120.0s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
+      107.9s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
        90.0s  tests.test_survival_marginal_slope_clustered_pc_808::test_survival_marginal_slope_clustered_pc_converges_808
+       80.1s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
+       75.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
+       70.8s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
        60.1s  tests.test_survival_save_load_roundtrip::test_survival_marginal_slope_save_load_predict_roundtrips
-       55.8s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
-       55.4s  tests.test_python_api::test_transformation_normal_predicts_without_raw_pgs
-       54.3s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
-       53.8s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
-       53.5s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
-       52.8s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
-       45.1s  tests.test_survival_api_regressions::test_survival_marginal_slope_fit_returns
+       54.8s  tests.test_python_api::test_transformation_normal_predicts_without_raw_pgs
+       52.5s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
+       51.4s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
 
