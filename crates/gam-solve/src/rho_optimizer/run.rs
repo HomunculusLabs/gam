@@ -9408,3 +9408,7 @@ mod certify_resume_progress_tests;
 #[cfg(test)]
 #[path = "outer_stationarity_band_tests.rs"]
 mod outer_stationarity_band_tests;
+
+#[cfg(test)]
+#[path = "criterion_curvature_ladder_tests_2748.rs"]
+mod criterion_curvature_ladder_tests_2748;
