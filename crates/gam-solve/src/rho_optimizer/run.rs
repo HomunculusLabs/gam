@@ -2559,30 +2559,21 @@ fn adjudicate_negative_curvature(
     let mut evaluations: Vec<(f64, f64, f64)> = Vec::new();
     for sign in [primary_sign, -primary_sign] {
         for &alpha in escape_step_scales.iter() {
-            let mut trial = rho.clone();
+            let mut exact = rho.clone();
             for i in 0..n {
-                trial[i] += sign * alpha * direction[i];
+                exact[i] += sign * alpha * direction[i];
             }
-            let trial = project_to_bounds(&trial, Some(bounds));
+            let trial = project_to_bounds(&exact, Some(bounds));
             // A fully box-clamped trial that lands back on ρ probes nothing.
             if outer_theta_bitwise_eq(&trial, rho) {
                 clamped_onto_rho += 1;
                 continue;
             }
-            // A PARTIALLY clamped trial is not `ρ ± αv` either, so it cannot enter
-            // the symmetric average -- the second difference would be taken
-            // between two different directions. It still probes descent, which
-            // is what the loop is for, so only the ladder skips it.
-            let unclamped = outer_theta_bitwise_eq(
-                &trial,
-                &{
-                    let mut exact = rho.clone();
-                    for i in 0..n {
-                        exact[i] += sign * alpha * direction[i];
-                    }
-                    exact
-                },
-            );
+            // A PARTIALLY clamped trial is not `ρ ± αv` either, so it cannot
+            // enter the symmetric average — the second difference would be
+            // taken between two different directions. It still probes descent,
+            // which is what this loop is for, so only the ladder skips it.
+            let unclamped = outer_theta_bitwise_eq(&trial, &exact);
             probed += 1;
             match obj.eval_cost(&trial) {
                 Ok(cost) if cost.is_finite() => {
