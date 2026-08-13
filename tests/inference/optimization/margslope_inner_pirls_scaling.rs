@@ -121,6 +121,7 @@ fn build_problem(n: usize, flex: bool) -> Problem {
 
     // Single 1D cubic B-spline smooth on `x` (column 0). 8 internal knots.
     let smooth = SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "f_x".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,

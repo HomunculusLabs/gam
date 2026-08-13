@@ -789,6 +789,42 @@ pub struct SmoothTermSpec {
     /// `save → load → predict` is bit-equivalent to in-memory prediction.
     #[serde(default)]
     pub joint_null_rotation: Option<crate::basis::JointNullRotation>,
+    /// The span-preserving parametric orthogonalization this term carries
+    /// (#2747), when it takes that arm. Persisted so `save → load → predict`
+    /// rebuilds the design the fitted coefficients belong to.
+    #[serde(default)]
+    pub frozen_parametric_residualization: Option<ParametricResidualizationChart>,
+}
+
+/// The predict-time replay record of a span-preserving parametric
+/// orthogonalization (#2747): this term's realized block is `X·T − C·R`.
+///
+/// `T` is not here — it is the ordinary coefficient transform, already absorbed
+/// into the basis metadata, so a rebuilt `design_local` arrives with it applied.
+/// What cannot be absorbed is `R`, because it multiplies the CONSTRAINT block
+/// rather than the basis.
+///
+/// `R` is TRAINING-ROW data and is never re-derived, for the same reason
+/// `frozen_global_orthogonality` is not (#978): the fit already decided this
+/// term's residualization, and rederiving it from prediction rows would
+/// silently evaluate a different model. `C` itself IS rebuilt at the new rows —
+/// that is what `C` is — from a recipe that is deterministic given the spec: the
+/// intercept and owned linear axes come from
+/// `build_parametric_constraint_block_for_term`, and the owner smooths are named
+/// here rather than re-derived, because which owners bound is decided by a
+/// cross-residual on the FIT rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParametricResidualizationChart {
+    /// Indices into `TermCollectionSpec::smooth_terms` of the owner smooths
+    /// whose realized designs joined the constraint block, in the order
+    /// `build_constraint_block` stacked them.
+    pub owner_terms: Vec<usize>,
+    /// Whether the parametric block (intercept + owned linear axes) led the
+    /// constraint block. Recorded rather than recomputed so a spec that changes
+    /// shape cannot silently re-order the columns `correction`'s rows index.
+    pub has_parametric_block: bool,
+    /// `R`, `q × k`, stated against the RAW constraint columns.
+    pub correction: Array2<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -843,6 +879,13 @@ pub struct SmoothTerm {
     /// Chart convention is per kind: post-`Q` `Z` for `sz` (the raw rebuild
     /// reapplies `Q` itself, #700), full `Q·Z` chart for `fs`.
     pub unabsorbed_global_orthogonality: Option<Array2<f64>>,
+    /// The span-preserving parametric orthogonalization applied to this term
+    /// (#2747): its realized block is `X·T − C·R`.
+    /// `freeze_term_collection_from_design` copies this onto
+    /// `SmoothTermSpec::frozen_parametric_residualization` so a predict-time
+    /// rebuild subtracts the same correction instead of emitting a design the
+    /// fitted coefficients do not match.
+    pub parametric_residualization: Option<ParametricResidualizationChart>,
 }
 
 impl SmoothTerm {
@@ -1437,6 +1480,7 @@ impl TermCollectionSpec {
                 SmoothBasisSpec::ByVariable { inner, .. } => {
                     validate_smooth_basis_frozen(inner, label, &st.name)?;
                     let nested = SmoothTermSpec {
+            frozen_parametric_residualization: None,
                         name: st.name.clone(),
                         basis: (**inner).clone(),
                         shape: st.shape,
@@ -1776,6 +1820,7 @@ impl TermCollectionSpec {
                         linear_terms: vec![],
                         random_effect_terms: vec![],
                         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                             name: st.name.clone(),
                             basis: (**smooth).clone(),
                             shape: st.shape,
@@ -3959,6 +4004,7 @@ mod spatial_psi_bound_coordinate_tests {
             linear_terms: Vec::new(),
             random_effect_terms: Vec::new(),
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -4027,6 +4073,7 @@ mod spatial_psi_bound_coordinate_tests {
                 linear_terms: Vec::new(),
                 random_effect_terms: Vec::new(),
                 smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                     name: "matern".to_string(),
                     basis: SmoothBasisSpec::Matern {
                         feature_cols: vec![0, 1],
@@ -7750,6 +7797,7 @@ pub fn build_by_smooth_local(
     workspace: &mut crate::basis::BasisWorkspace,
 ) -> Result<LocalSmoothTermBuild, BasisError> {
     let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: term.name.clone(),
         basis: (*smooth).clone(),
         shape: term.shape,
@@ -8102,6 +8150,7 @@ pub fn build_factor_smooth(
             spec: factor_smooth_marginal_for_replay(&spec.marginal),
         };
         let sz_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term_name.to_string(),
             basis: SmoothBasisSpec::FactorSumToZero {
                 inner: Box::new(inner),
@@ -8202,6 +8251,7 @@ pub fn build_factor_smooth(
         marginal_spec.double_penalty = false;
     }
     let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: format!("{term_name}::marginal"),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col,
@@ -8531,6 +8581,7 @@ pub fn build_single_local_smooth_term(
             defer_inner_model_centering_to_factor_level_wrapper(&mut inner_basis);
         }
         let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term.name.clone(),
             basis: inner_basis,
             shape: term.shape,
@@ -8575,6 +8626,7 @@ pub fn build_single_local_smooth_term(
                 );
             }
             let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: format!("{}::inner", term.name),
                 basis: (**inner).clone(),
                 shape: ShapeConstraint::None,
@@ -9615,6 +9667,7 @@ pub fn build_smooth_design_withworkspace_unvalidated(
         local_designs.push(built.design);
 
         terms_out.push(SmoothTerm {
+            parametric_residualization: None,
             name: term.name.clone(),
             coeff_range: col_start..col_end,
             shape: term.shape,
@@ -9695,6 +9748,7 @@ mod factor_smooth_heldout_group_tests {
         frozen: Option<Vec<u64>>,
     ) -> SmoothTermSpec {
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "fs_heldout".to_string(),
             basis: SmoothBasisSpec::FactorSmooth {
                 spec: FactorSmoothSpec {

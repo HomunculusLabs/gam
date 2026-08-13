@@ -911,6 +911,86 @@ fn smooth_basis_kind_label(basis: &SmoothBasisSpec) -> &'static str {
     }
 }
 
+/// How one smooth's realized design is made orthogonal to its constraint block.
+///
+/// The two arms are not a preference. A DELETION costs one coefficient direction
+/// per parametric direction and is free only where that direction is inside the
+/// design's span; RESIDUALIZATION costs none and is available always. See the
+/// fork in [`apply_global_smooth_identifiability`] and the derivation on
+/// [`crate::basis::parametric_residualization_for_design`].
+enum GlobalIdentifiabilityPlan {
+    /// No constraint block for this term.
+    Absent,
+    /// Every resolvable constraint direction is contained in the design's span,
+    /// so `X·Z` loses nothing. This arm is the pre-`76a520c45` path bit for bit.
+    Delete { block: Array2<f64> },
+    /// At least one direction is not contained: project in row space instead, so
+    /// the model keeps the function the deletion would have removed.
+    Residualize { block: Array2<f64> },
+}
+
+/// `X − C·R`, keeping `X`'s storage decision: the two are stacked into one
+/// [`gam_linalg::matrix::BlockDesignOperator`] and the subtraction becomes the
+/// sign of `R` inside a single coefficient transform, so a lazy design stays
+/// lazy and the correction is never materialized as an `n × k` block of its own.
+fn subtract_row_space_correction(
+    design: DesignMatrix,
+    constraint: ArrayView2<'_, f64>,
+    correction: ArrayView2<'_, f64>,
+    termname: &str,
+) -> Result<DesignMatrix, BasisError> {
+    use gam_linalg::matrix::{BlockDesignOperator, DesignBlock};
+    let p = design.ncols();
+    let q = constraint.ncols();
+    let k = correction.ncols();
+    if correction.nrows() != q || p != k {
+        return Err(BasisError::InvalidInput(format!(
+            "row-space correction shape mismatch for term '{termname}': design is {}x{p}, \
+             constraint is {}x{q}, correction is {}x{k}",
+            design.nrows(),
+            constraint.nrows(),
+            correction.nrows(),
+        )));
+    }
+    if q == 0 {
+        return Ok(design);
+    }
+    let design_block = match design {
+        DesignMatrix::Dense(inner) => DesignBlock::Dense(inner),
+        DesignMatrix::Sparse(inner) => DesignBlock::Sparse(inner),
+    };
+    let stacked = BlockDesignOperator::new(vec![
+        design_block,
+        DesignBlock::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            constraint.to_owned(),
+        )),
+    ])
+    .map_err(BasisError::InvalidInput)?;
+    // `[I ; −R]`: the identity on the design's own columns, the negated
+    // correction on the constraint's.
+    let mut transform = Array2::<f64>::zeros((p + q, k));
+    for i in 0..p {
+        transform[[i, i]] = 1.0;
+    }
+    for i in 0..q {
+        for j in 0..k {
+            transform[[p + i, j]] = -correction[[i, j]];
+        }
+    }
+    let operator = gam_linalg::matrix::CoefficientTransformOperator::new(
+        gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(stacked)),
+        transform,
+    )
+    .map_err(|e| {
+        BasisError::InvalidInput(format!(
+            "row-space correction failed for term '{termname}': {e}"
+        ))
+    })?;
+    Ok(DesignMatrix::Dense(
+        gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(operator)),
+    ))
+}
+
 fn build_constraint_block(
     n: usize,
     parametric_block: Option<&Array2<f64>>,
@@ -1075,6 +1155,8 @@ fn apply_global_smooth_identifiability(
     let mut local_dims = vec![0usize; smooth.terms.len()];
     let mut local_linear_constraints = vec![None; smooth.terms.len()];
     let mut local_unabsorbed_z = vec![None::<Array2<f64>>; smooth.terms.len()];
+    let mut local_residualization =
+        vec![None::<ParametricResidualizationChart>; smooth.terms.len()];
 
     let SmoothStructureAnalysis {
         ownership_order,
@@ -1150,17 +1232,28 @@ fn apply_global_smooth_identifiability(
                     .expect("owner design must be available before dependent smooth")
             })
             .collect::<Vec<_>>();
-        let needs_parametric_block = replay_z.is_none()
-            && !skip_global_transform
-            && (smooth_has_overlapping_linear_terms(linear_terms, termspec)
-                || !smooth_intrinsic_parametric_feature_cols(linear_terms, termspec).is_empty()
-                || smooth_requires_parametric_orthogonality(termspec)
-                // A factor-by-level smooth must always be centered against its
-                // gated level indicator (see `factor_by_level_gate`) so its
-                // within-level constant cannot collide with the treatment-coded
-                // factor main effect — even when no continuous linear term
-                // overlaps it (e.g. `s(x, by=fac)` with no `+ x`).
-                || factor_by_level_gate(termspec).is_some());
+        // A frozen span-preserving residualization (#2747) says this term's
+        // realized block is `X·T − C·R`, so `C` must be rebuilt at these rows
+        // whatever the transform gates say — the metadata already carried `T`
+        // through, and the correction is the half it could not absorb.
+        let replay_correction = frozen_parametric_residualization(termspec);
+        let needs_parametric_block = match replay_correction {
+            Some(chart) => chart.has_parametric_block,
+            None => {
+                replay_z.is_none()
+                    && !skip_global_transform
+                    && (smooth_has_overlapping_linear_terms(linear_terms, termspec)
+                        || !smooth_intrinsic_parametric_feature_cols(linear_terms, termspec)
+                            .is_empty()
+                        || smooth_requires_parametric_orthogonality(termspec)
+                        // A factor-by-level smooth must always be centered against its
+                        // gated level indicator (see `factor_by_level_gate`) so its
+                        // within-level constant cannot collide with the treatment-coded
+                        // factor main effect — even when no continuous linear term
+                        // overlaps it (e.g. `s(x, by=fac)` with no `+ x`).
+                        || factor_by_level_gate(termspec).is_some())
+            }
+        };
         let parametric_block = if !needs_parametric_block {
             None
         } else {
@@ -1170,37 +1263,82 @@ fn apply_global_smooth_identifiability(
                 termspec,
             )?)
         };
-        let c_local =
-            if skip_global_transform || (parametric_block.is_none() && owner_blocks.is_empty()) {
-                None
-            } else {
-                // Residualize against the part of the constraint block this
-                // smooth's span actually CONTAINS, not the part it merely
-                // overlaps. The transform below deletes one coefficient
-                // direction per constrained direction, and a deletion is free
-                // only under containment — otherwise it removes a function the
-                // parametric block does not carry and the model cannot
-                // represent it at all. See
-                // `contained_constraint_directions` for the measurement that
-                // forced this and for the principal-angle test it makes. When
-                // the whole block is contained (every basis this step was
-                // written for) the block comes back verbatim and nothing moves.
-                let raw = build_constraint_block(
-                    data.nrows(),
-                    parametric_block.as_ref(),
-                    &owner_blocks,
-                )?;
-                let contained = crate::basis::contained_constraint_directions(
-                    &design_local,
-                    raw.view(),
-                    None,
-                )?;
-                if contained.ncols() == 0 {
-                    None
+        // The replay's own owner blocks, named by the chart rather than
+        // re-derived: which owners bound is decided by a cross-residual on the
+        // FIT rows, so recomputing it here is the #978 error.
+        let replay_owner_blocks = match replay_correction {
+            Some(chart) => chart
+                .owner_terms
+                .iter()
+                .map(|owner_idx| {
+                    local_designs.get(*owner_idx).and_then(|slot| slot.as_ref()).ok_or_else(|| {
+                        BasisError::InvalidInput(format!(
+                            "term '{}' replays a parametric residualization against owner term {owner_idx}, which is not available at this point of the rebuild",
+                            termspec.name
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        // How this term's design gets made orthogonal to its constraint block.
+        //
+        // A DELETION — the `X·Z` with `Z` spanning `null((XᵀC)ᵀ)` this step has
+        // always applied — removes one coefficient direction per parametric
+        // direction the cross resolves, and that is free only under
+        // CONTAINMENT: when `C`'s direction is inside `col(X)`, the deleted
+        // function IS the parametric column and the parametric block keeps it.
+        // Otherwise it removes a function nothing else carries (#2747;
+        // `contained_constraint_directions` carries the derivation and the
+        // principal-angle test).
+        //
+        // `76a520c45` withheld the deletion in that case and left NOTHING in
+        // its place, which drops the invariant this whole step exists for.
+        // Measured (`examples/probe_2747_parametric_orthogonality`): every
+        // Matérn and constant-curvature block then sits at
+        // `‖XᵀC‖/(‖X‖‖C‖) = 3e-1 … 5e-1` against the `1e-8` bar asserted twenty
+        // lines below whenever a transform IS applied, and — because an owner
+        // smooth's realized columns are contained in no other basis's span —
+        // `analyze_smooth_ownership`'s hierarchy became inert for EVERY
+        // dependent smooth, including the contained (thin-plate) class.
+        //
+        // So the fork is not delete-or-nothing. It is delete (free, and
+        // bit-identical to what shipped) where the block is wholly contained,
+        // and RESIDUALIZE — `X̃ = X − C(CᵀC)⁻CᵀX`, span-preserving by
+        // construction — everywhere else.
+        let plan = if replay_correction.is_some() {
+            // A replay decides nothing; the fit already did.
+            GlobalIdentifiabilityPlan::Absent
+        } else if skip_global_transform
+            || (parametric_block.is_none() && owner_blocks.is_empty())
+        {
+            GlobalIdentifiabilityPlan::Absent
+        } else {
+                let raw =
+                    build_constraint_block(data.nrows(), parametric_block.as_ref(), &owner_blocks)?;
+                let contained =
+                    crate::basis::contained_constraint_directions(&design_local, raw.view(), None)?;
+                if raw.ncols() == 0 {
+                    GlobalIdentifiabilityPlan::Absent
+                } else if contained.ncols() == raw.ncols() {
+                    // Every resolvable direction is contained. `contained` is the
+                    // original block verbatim in that case, so this arm is the
+                    // pre-`76a520c45` path bit for bit.
+                    GlobalIdentifiabilityPlan::Delete { block: contained }
                 } else {
-                    Some(contained)
+                    GlobalIdentifiabilityPlan::Residualize { block: raw }
                 }
             };
+        let c_local = match &plan {
+            GlobalIdentifiabilityPlan::Absent => None,
+            GlobalIdentifiabilityPlan::Delete { block }
+            | GlobalIdentifiabilityPlan::Residualize { block } => Some(block.clone()),
+        };
+        // The residualization correction `R`, when this term takes that arm. It
+        // is TRAINING-ROW data exactly as the transform beside it is (#978), so
+        // a rebuild replays the frozen one and never re-derives it; only `C`
+        // itself is rebuilt at the new rows, which is what `C` is.
+        let mut residualization: Option<crate::basis::ParametricResidualization> = None;
         let z_opt = if let Some(z) = replay_z {
             if design_local.ncols() != z.nrows() {
                 gam_problem::bail_dim_basis!(
@@ -1213,6 +1351,15 @@ fn apply_global_smooth_identifiability(
             Some(z.clone())
         } else if skip_global_transform {
             None
+        } else if let GlobalIdentifiabilityPlan::Residualize { block } = &plan {
+            let plan = crate::basis::parametric_residualization_for_design(
+                &design_local,
+                block.view(),
+                None, // fixed subspace: do not use iteration-varying PIRLS weights
+            )?;
+            let transform = plan.coefficient_transform.clone();
+            residualization = Some(plan);
+            Some(transform)
         } else {
             match maybe_smooth_identifiability_transform(
                 termspec,
@@ -1231,10 +1378,55 @@ fn apply_global_smooth_identifiability(
         let coefficient_gauge = z_opt
             .as_ref()
             .map(|z| gam_problem::Gauge::from_block_transforms(&[z.clone()]));
-        let design_constrained = if let Some(gauge) = coefficient_gauge.as_ref() {
+        // A frozen chart replays the same two objects the fit produced: the
+        // coefficient transform (which the basis metadata already carries, so
+        // `design_local` arrives with it applied) and the row-space correction.
+        let design_transformed = if let Some(gauge) = coefficient_gauge.as_ref() {
             apply_smooth_transform_to_design(design_local, &gauge.block_transform(0), &term.name)?
         } else {
             design_local
+        };
+        let design_constrained = match (residualization.as_ref(), replay_correction) {
+            (Some(plan), _) => {
+                let Some(block) = c_local.as_ref() else {
+                    gam_problem::bail_invalid_basis!(
+                        "term '{}' produced a parametric residualization with no constraint block",
+                        term.name
+                    );
+                };
+                subtract_row_space_correction(
+                    design_transformed,
+                    block.view(),
+                    plan.row_space_correction.view(),
+                    &term.name,
+                )?
+            }
+            (None, Some(chart)) => {
+                // Predict-time replay. `C` is rebuilt at the NEW rows — the
+                // parametric half from the same spec-deterministic recipe the
+                // fit used, the owner half from the terms the chart NAMES — and
+                // only the correction itself is frozen.
+                let block = build_constraint_block(
+                    data.nrows(),
+                    parametric_block.as_ref(),
+                    &replay_owner_blocks,
+                )?;
+                if block.ncols() != chart.correction.nrows() {
+                    gam_problem::bail_dim_basis!(
+                        "frozen parametric residualization mismatch for term '{}': rebuilt constraint block has {} columns but the persisted fit-time correction has {} rows",
+                        term.name,
+                        block.ncols(),
+                        chart.correction.nrows()
+                    );
+                }
+                subtract_row_space_correction(
+                    design_transformed,
+                    block.view(),
+                    chart.correction.view(),
+                    &term.name,
+                )?
+            }
+            (None, None) => design_transformed,
         };
 
         if let Some(c_ref) = c_local.as_ref() {
@@ -1447,6 +1639,16 @@ fn apply_global_smooth_identifiability(
                 None
             };
 
+        // A rebuild that REPLAYED a frozen chart must re-export it, or the next
+        // freeze would drop it and the model would stop being predictable.
+        local_residualization[idx] = residualization
+            .as_ref()
+            .map(|plan| ParametricResidualizationChart {
+                owner_terms: owner_indices.clone(),
+                has_parametric_block: parametric_block.is_some(),
+                correction: plan.row_space_correction.clone(),
+            })
+            .or_else(|| replay_correction.cloned());
         local_dims[idx] = design_constrained.ncols();
         local_designs[idx] = Some(design_constrained);
         local_active_penalties[idx] = filtered.active;
@@ -1557,6 +1759,7 @@ fn apply_global_smooth_identifiability(
             // Factor-smooth kinds export the chart their metadata could not
             // absorb; the freeze persists it onto the spec for replay (#978).
             unabsorbed_global_orthogonality: local_unabsorbed_z[idx].clone(),
+            parametric_residualization: local_residualization[idx].clone(),
         });
         if let Some(lin_local) = &local_linear_constraints[idx] {
             for r in 0..lin_local.a.nrows() {
@@ -1791,6 +1994,19 @@ fn design_frobenius_norm(design: &DesignMatrix) -> Result<f64, BasisError> {
 /// residualized against owner terms at fit time and prediction/refit rebuilds
 /// must replay exactly that column map instead of rederiving anything from
 /// the (new) rows.
+/// The frozen row-space correction `R` for the span-preserving parametric
+/// orthogonalization (#2747), when this term carries one.
+///
+/// Unlike [`frozen_global_orthogonality`] this lives on the TERM spec rather
+/// than inside a basis kind, because every basis can take the residualizing arm
+/// — the predicate is the geometry of the realized design against its constraint
+/// block, not the basis family.
+fn frozen_parametric_residualization(
+    termspec: &SmoothTermSpec,
+) -> Option<&ParametricResidualizationChart> {
+    termspec.frozen_parametric_residualization.as_ref()
+}
+
 fn frozen_global_orthogonality(termspec: &SmoothTermSpec) -> Option<&Array2<f64>> {
     match &termspec.basis {
         SmoothBasisSpec::FactorSumToZero {
@@ -1881,6 +2097,7 @@ fn smooth_requires_parametric_orthogonality(termspec: &SmoothTermSpec) -> bool {
         SmoothBasisSpec::ByVariable { inner, .. }
         | SmoothBasisSpec::FactorSumToZero { inner, .. } => {
             smooth_requires_parametric_orthogonality(&SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: termspec.name.clone(),
                 basis: (**inner).clone(),
                 shape: termspec.shape,
@@ -1889,6 +2106,7 @@ fn smooth_requires_parametric_orthogonality(termspec: &SmoothTermSpec) -> bool {
         }
         SmoothBasisSpec::BySmooth { smooth, .. } => {
             smooth_requires_parametric_orthogonality(&SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: termspec.name.clone(),
                 basis: (**smooth).clone(),
                 shape: termspec.shape,

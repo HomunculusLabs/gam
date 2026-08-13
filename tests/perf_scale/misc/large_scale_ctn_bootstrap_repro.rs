@@ -36,6 +36,7 @@ fn build_data(n: usize, d: usize, seed: u64) -> Array2<f64> {
 
 fn duchon_pc_term(name: &str, d: usize, centers: usize, power: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (0..d).collect(),

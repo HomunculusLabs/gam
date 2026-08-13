@@ -229,6 +229,7 @@ fn build_iso_kappa_fixture(
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "variant_1d".to_string(),
             basis,
             shape: ShapeConstraint::None,
@@ -717,6 +718,7 @@ fn iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_2d".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: (0..d).collect(),
@@ -1565,6 +1567,7 @@ fn build_duchon_probit_setup() -> DuchonProbitSetup {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -2172,6 +2175,7 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -2352,6 +2356,7 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -2629,6 +2634,7 @@ fn rho_gradient_part_ladder_family_2454(
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

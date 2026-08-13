@@ -119,6 +119,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0],
@@ -225,6 +226,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1, 2],
@@ -279,6 +281,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -354,6 +357,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -437,6 +441,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -560,6 +565,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -756,6 +762,7 @@ mod spatial_length_scale_monotone_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],

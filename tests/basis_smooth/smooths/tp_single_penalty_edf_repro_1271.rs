@@ -72,6 +72,7 @@ fn tp_spec(double_penalty: bool) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0],

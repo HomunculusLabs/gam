@@ -33,8 +33,8 @@ use std::path::PathBuf;
 
 use crate::basis::{
     BSplineBasisSpec, BSplineKnotSpec, CenterStrategy, ConstantCurvatureBasisSpec, DuchonBasisSpec,
-    MaternBasisSpec, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
-    OneDimensionalBoundary, SphereMethod, SphericalSplineBasisSpec, ThinPlateBasisSpec,
+    MaternBasisSpec, MaternLengthScale, MaternNu, MeasureJetBasisSpec, OneDimensionalBoundary,
+    SphereMethod, SphericalSplineBasisSpec, ThinPlateBasisSpec,
 };
 use crate::smooth::{
     BySmoothKind, ByVariableSpec, SmoothBasisSpec, SmoothTermSpec, TensorBSplineSpec,
@@ -1162,6 +1162,7 @@ mod tests {
 
     fn bspline_term() -> SmoothTermSpec {
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s(x)".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,

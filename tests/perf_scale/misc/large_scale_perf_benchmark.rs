@@ -352,6 +352,7 @@ fn te_xh_design_spec(
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "te_xh".to_string(),
             basis: SmoothBasisSpec::TensorBSpline {
                 feature_cols: vec![0, 1],

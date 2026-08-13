@@ -40,6 +40,7 @@ fn tensor_periodic_margin_is_exactly_cyclic_at_period_boundary() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "te(theta,h)".to_string(),
             basis: SmoothBasisSpec::TensorBSpline {
                 feature_cols: vec![0, 1],
@@ -78,6 +79,7 @@ fn radial_periodic_smooth_uses_ghost_centers_but_freezes_original_centers() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s(theta,h)".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

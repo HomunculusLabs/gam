@@ -3137,8 +3137,7 @@ pub fn parametric_residualization_for_design(
         let basis_chunk = design
             .try_row_chunk(start..end)
             .map_err(|e| BasisError::InvalidInput(e.to_string()))?;
-        let residual_chunk =
-            &basis_chunk - &normalized.slice(s![start..end, ..]).dot(&regression);
+        let residual_chunk = &basis_chunk - &normalized.slice(s![start..end, ..]).dot(&regression);
         let weighted = match weights {
             Some(ws) => {
                 let mut scaled = residual_chunk.clone();
@@ -3428,7 +3427,10 @@ mod containment_tests {
         // The kept direction must BE the constant, up to scale and sign.
         let column = contained.column(0).to_owned();
         let first = column[0];
-        assert!(first.abs() > 1e-8, "the kept direction must be non-degenerate");
+        assert!(
+            first.abs() > 1e-8,
+            "the kept direction must be non-degenerate"
+        );
         assert!(
             column.iter().all(|&v| (v / first - 1.0).abs() < 1e-8),
             "the kept direction must be the constant, got {column:?}"
@@ -3455,20 +3457,17 @@ mod containment_tests {
             basis[[i, 1]] = (-0.9 * x).exp();
         }
         let intercept = Array2::<f64>::ones((n, 1));
-        let plan = parametric_residualization_for_design(
-            &dense(basis.clone()),
-            intercept.view(),
-            None,
-        )
-        .expect("test");
+        let plan =
+            parametric_residualization_for_design(&dense(basis.clone()), intercept.view(), None)
+                .expect("test");
         assert_eq!(
             plan.coefficient_transform.ncols(),
             2,
             "a non-contained constraint costs no coefficient direction"
         );
         assert_eq!(plan.row_space_correction.dim(), (1, 2));
-        let realized = basis.dot(&plan.coefficient_transform)
-            - intercept.dot(&plan.row_space_correction);
+        let realized =
+            basis.dot(&plan.coefficient_transform) - intercept.dot(&plan.row_space_correction);
         let cross = realized.t().dot(&intercept);
         let relative = cross.iter().map(|v| v * v).sum::<f64>().sqrt()
             / (realized.iter().map(|v| v * v).sum::<f64>().sqrt()
@@ -3566,19 +3565,16 @@ mod containment_tests {
             basis[[i, 2]] = x * x;
         }
         let intercept = Array2::<f64>::ones((n, 1));
-        let plan = parametric_residualization_for_design(
-            &dense(basis.clone()),
-            intercept.view(),
-            None,
-        )
-        .expect("test");
+        let plan =
+            parametric_residualization_for_design(&dense(basis.clone()), intercept.view(), None)
+                .expect("test");
         assert_eq!(
             plan.coefficient_transform.ncols(),
             2,
             "the constant IS in this span, so the rank test drops exactly one direction"
         );
-        let realized = basis.dot(&plan.coefficient_transform)
-            - intercept.dot(&plan.row_space_correction);
+        let realized =
+            basis.dot(&plan.coefficient_transform) - intercept.dot(&plan.row_space_correction);
         let deletion =
             orthogonality_transform_for_design(&dense(basis.clone()), intercept.view(), None)
                 .expect("test");

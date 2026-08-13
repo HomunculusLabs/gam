@@ -256,6 +256,7 @@ fn duchon_aniso_pc_spec(name: &str, pc_dim: usize, k_centers: usize) -> TermColl
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: name.to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: (0..pc_dim).collect(),
@@ -532,7 +533,10 @@ fn large_scale_reml_stress_main() {
         Some(eta) if !eta.is_empty() => {
             let moved = eta.iter().any(|v| v.abs() > 1e-8);
             let parts: Vec<String> = eta.iter().map(|v| format!("{v:+.4}")).collect();
-            format!("aniso_log_scales=[{}] moved_off_seed={moved}", parts.join(","))
+            format!(
+                "aniso_log_scales=[{}] moved_off_seed={moved}",
+                parts.join(",")
+            )
         }
         _ => "aniso_log_scales=<absent>".to_string(),
     };
@@ -556,9 +560,7 @@ fn large_scale_reml_stress_main() {
         // this fit actually recover? `1 - (rel_l2 / linear_only)²` in variance
         // terms; 0% means the smoother matched a straight line, 100% means it
         // recovered everything the line missed.
-        100.0
-            * (1.0
-                - (rel_l2 * rel_l2) / (linear_only_rel_l2 * linear_only_rel_l2).max(1e-30)),
+        100.0 * (1.0 - (rel_l2 * rel_l2) / (linear_only_rel_l2 * linear_only_rel_l2).max(1e-30)),
     );
 
     assert!(
@@ -608,7 +610,6 @@ fn large_scale_reml_stress_main() {
         fitted.fit.outer_iterations,
         elapsed.as_secs_f64(),
     );
-
 }
 
 /// #2708: report WHICH of the three candidate causes the coverage number is
@@ -632,13 +633,7 @@ fn large_scale_reml_stress_main() {
 /// Also printed: `|z| > 3` frequency against the 0.27% a standard normal gives.
 /// A heavy tail with a near-nominal centre is the outcome the two-way split does
 /// not cover, and it would mean an interaction rather than either single cause.
-fn report_coverage_diagnostics(
-    z: &[f64],
-    resid: &[f64],
-    se: &[f64],
-    radius: &[f64],
-    x0: &[f64],
-) {
+fn report_coverage_diagnostics(z: &[f64], resid: &[f64], se: &[f64], radius: &[f64], x0: &[f64]) {
     if z.is_empty() {
         eprintln!("[cov-diag] no finite points");
         return;
@@ -661,7 +656,11 @@ fn report_coverage_diagnostics(
     // leverage-dependent variance component.
     let binned_sd = |key: &[f64], label: &str| {
         let mut idx: Vec<usize> = (0..key.len()).collect();
-        idx.sort_by(|&a, &b| key[a].partial_cmp(&key[b]).unwrap_or(std::cmp::Ordering::Equal));
+        idx.sort_by(|&a, &b| {
+            key[a]
+                .partial_cmp(&key[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         const BINS: usize = 5;
         let per = idx.len() / BINS;
         if per == 0 {
@@ -670,17 +669,21 @@ fn report_coverage_diagnostics(
         let mut out = String::new();
         for b in 0..BINS {
             let lo = b * per;
-            let hi = if b + 1 == BINS { idx.len() } else { (b + 1) * per };
+            let hi = if b + 1 == BINS {
+                idx.len()
+            } else {
+                (b + 1) * per
+            };
             let slice = &idx[lo..hi];
             let m = slice.len() as f64;
             let mu = slice.iter().map(|&i| z[i]).sum::<f64>() / m;
-            let sd = (slice
-                .iter()
-                .map(|&i| (z[i] - mu).powi(2))
-                .sum::<f64>()
-                / (m - 1.0).max(1.0))
-            .sqrt();
-            out.push_str(&format!(" [{:.3}..{:.3}] sd={sd:.3} mean={mu:+.3};", key[slice[0]], key[slice[slice.len() - 1]]));
+            let sd = (slice.iter().map(|&i| (z[i] - mu).powi(2)).sum::<f64>() / (m - 1.0).max(1.0))
+                .sqrt();
+            out.push_str(&format!(
+                " [{:.3}..{:.3}] sd={sd:.3} mean={mu:+.3};",
+                key[slice[0]],
+                key[slice[slice.len() - 1]]
+            ));
         }
         eprintln!("[cov-diag] SD(z) by {label}:{out}");
     };
@@ -691,14 +694,22 @@ fn report_coverage_diagnostics(
     // systematic sign pattern here is approximation error, not sampling error.
     {
         let mut idx: Vec<usize> = (0..x0.len()).collect();
-        idx.sort_by(|&a, &b| x0[a].partial_cmp(&x0[b]).unwrap_or(std::cmp::Ordering::Equal));
+        idx.sort_by(|&a, &b| {
+            x0[a]
+                .partial_cmp(&x0[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         const BINS: usize = 8;
         let per = idx.len() / BINS;
         if per > 0 {
             let mut out = String::new();
             for b in 0..BINS {
                 let lo = b * per;
-                let hi = if b + 1 == BINS { idx.len() } else { (b + 1) * per };
+                let hi = if b + 1 == BINS {
+                    idx.len()
+                } else {
+                    (b + 1) * per
+                };
                 let slice = &idx[lo..hi];
                 let mu = slice.iter().map(|&i| resid[i]).sum::<f64>() / slice.len() as f64;
                 out.push_str(&format!(" [{:+.2}]={mu:+.4};", x0[slice[slice.len() / 2]]));
@@ -883,10 +894,7 @@ fn large_scale_reml_stress_coverage() {
             // the half-width below reports.
             let se_corr = (pred_upper[i] - pred_lower[i]) / (2.0 * NORMAL_95_TWO_SIDED_Z);
             let row = holdout_dense.row(i);
-            let se_cond = row
-                .dot(&covariance_conditional.dot(&row))
-                .max(0.0)
-                .sqrt();
+            let se_cond = row.dot(&covariance_conditional.dot(&row)).max(0.0).sqrt();
             let resid = truth_i - pred_mean[i];
 
             if truth_i >= pred_lower[i] && truth_i <= pred_upper[i] {

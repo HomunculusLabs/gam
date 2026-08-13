@@ -17,9 +17,9 @@ use crate::basis::{
     MaternIdentifiability, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
     MeasureJetIdentifiability, OneDimensionalBoundary, SpatialIdentifiability, SphereMethod,
     SphereWahbaKernel, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
-    ThinPlateBasisSpec, auto_spatial_center_strategy, default_num_centers,
-    default_spatial_center_strategy, default_spherical_harmonic_degree, plan_spatial_basis,
-    count_unique_coordinate_rows, select_r_uniform_subsample_centers, thin_plate_penalty_order,
+    ThinPlateBasisSpec, auto_spatial_center_strategy, count_unique_coordinate_rows,
+    default_num_centers, default_spatial_center_strategy, default_spherical_harmonic_degree,
+    plan_spatial_basis, select_r_uniform_subsample_centers, thin_plate_penalty_order,
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
@@ -648,6 +648,7 @@ pub fn build_termspec(
                             // BySmooth envelope.
                             for (level_bits, level_label) in levels {
                                 smooth_terms.push(SmoothTermSpec {
+                                    frozen_parametric_residualization: None,
                                     name: format!("{label}:by={by_name}[{level_label}]"),
                                     basis: SmoothBasisSpec::ByVariable {
                                         inner: Box::new(inner_basis.clone()),
@@ -665,6 +666,7 @@ pub fn build_termspec(
                         }
                         ColumnKindTag::Binary | ColumnKindTag::Continuous => {
                             smooth_terms.push(SmoothTermSpec {
+                                frozen_parametric_residualization: None,
                                 name: label.clone(),
                                 basis: SmoothBasisSpec::ByVariable {
                                     inner: Box::new(inner_basis),
@@ -679,6 +681,7 @@ pub fn build_termspec(
                     }
                 } else {
                     smooth_terms.push(SmoothTermSpec {
+                        frozen_parametric_residualization: None,
                         name: label.clone(),
                         basis: inner_basis,
                         shape,
@@ -5708,6 +5711,7 @@ mod tests {
             linear_terms: Vec::new(),
             random_effect_terms: Vec::new(),
             smooth_terms: vec![SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "spatial".to_string(),
                 basis,
                 shape: ShapeConstraint::None,

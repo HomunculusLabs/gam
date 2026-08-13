@@ -71,6 +71,7 @@ fn psi_gram_tensor_fast_path_skips_n_row_lane_and_matches_streamed() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "fast_path_skip".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -503,6 +504,7 @@ fn psi_gram_skip_forced_rotation_beta_error_ladder_diag() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "forced_skip_diag".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],

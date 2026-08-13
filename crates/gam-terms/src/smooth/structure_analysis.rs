@@ -49,6 +49,7 @@ fn smooth_basis_family_rank(term: &SmoothTermSpec) -> u8 {
         SmoothBasisSpec::ByVariable { inner, .. }
         | SmoothBasisSpec::FactorSumToZero { inner, .. } => {
             smooth_basis_family_rank(&SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: term.name.clone(),
                 basis: (**inner).clone(),
                 shape: term.shape,
@@ -65,6 +66,7 @@ fn smooth_basis_family_rank(term: &SmoothTermSpec) -> u8 {
         SmoothBasisSpec::ConstantCurvature { .. } => 8,
         SmoothBasisSpec::MeasureJet { .. } => 9,
         SmoothBasisSpec::BySmooth { smooth, .. } => smooth_basis_family_rank(&SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term.name.clone(),
             basis: (**smooth).clone(),
             shape: term.shape,
@@ -79,6 +81,7 @@ pub fn smooth_has_frozen_identifiability(term: &SmoothTermSpec) -> bool {
         SmoothBasisSpec::ByVariable { inner, .. }
         | SmoothBasisSpec::FactorSumToZero { inner, .. } => {
             smooth_has_frozen_identifiability(&SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: term.name.clone(),
                 basis: (**inner).clone(),
                 shape: term.shape,
@@ -321,6 +324,7 @@ mod tests {
 
     fn term(name: &str, basis: SmoothBasisSpec) -> SmoothTermSpec {
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: name.to_string(),
             basis,
             shape: ShapeConstraint::None,
