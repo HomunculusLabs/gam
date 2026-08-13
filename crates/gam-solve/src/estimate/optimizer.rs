@@ -157,9 +157,22 @@ fn reserve_dense_covariance_bundle(p: usize) -> Option<gam_runtime::resource::Me
     const CUBATURE_SIGMA_POINTS: usize = 2 * AUTO_CUBATURE_MAX_EIGENVECTORS;
     const RETAINED_CUBATURE_INVERSES: usize = CUBATURE_SIGMA_POINTS;
     const IN_FLIGHT_CUBATURE_HESSIAN_AND_INVERSE: usize = 2 * CUBATURE_SIGMA_POINTS;
+    /// A constrained fit assembles its truncated covariance as a sum of Grams
+    /// (`ConstrainedPosteriorCorrection::truncated_covariance_psd`, #2705 group
+    /// A), which holds three `p × p` blocks live at once: the Cholesky factor of
+    /// `Σ`, the projected factor `P L`, and the Gram it accumulates into. Plus
+    /// the untruncated conditional covariance the marginal composition keeps so
+    /// the corrected estimand can be built from `Vb`, not from `Σ_π`.
+    ///
+    /// Priced here rather than left to slack, because the whole point of this
+    /// reservation is that several individually acceptable `p × p` allocations
+    /// must not jointly exceed the ledger — and #2724 is on record for what an
+    /// allocating route costs when the pricing does not follow it.
+    const CONSTRAINED_TRUNCATION_WORKSPACES: usize = 4;
     const PEAK_SQUARE_MATRIX_EQUIVALENTS: usize = STORED_SQUARE_MATRICES
         + BASE_FACTORIZATION_AND_GEMM_WORKSPACES
         + FIRST_ORDER_SMOOTHING_WORKSPACES
+        + CONSTRAINED_TRUNCATION_WORKSPACES
         + RETAINED_CUBATURE_INVERSES
         + IN_FLIGHT_CUBATURE_HESSIAN_AND_INVERSE;
 

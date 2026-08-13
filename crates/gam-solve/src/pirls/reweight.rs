@@ -222,6 +222,31 @@ pub(crate) fn constraint_kkt_admits_soft_accept(
 /// non-degenerate" — which is precisely the set of states for which a
 /// 20-iteration monotone sub-tolerance plateau with a sub-tolerance model
 /// prediction is an honest "no useful progress is available" certificate.
+pub(crate) fn constraint_kkt_admits_progress_exhausted_stall(
+    options: &WorkingModelPirlsOptions,
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+    kkt_tolerance: f64,
+) -> bool {
+    let diag = match options.linear_constraints.as_ref() {
+        Some(lin) => Some(compute_constraint_kkt_diagnostics(beta, gradient, lin)),
+        None => options.coefficient_lower_bounds.as_ref().and_then(|lb| {
+            linear_constraints_from_lower_bounds(lb)
+                .map(|lin| compute_constraint_kkt_diagnostics(beta, gradient, &lin))
+        }),
+    };
+    match diag {
+        None => true,
+        Some(kkt) => {
+            let cleanliness_band = kkt_tolerance * 10.0;
+            !kkt.working_set_rank_deficient
+                && kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
+                && kkt.dual_feasibility <= cleanliness_band
+                && kkt.complementarity <= cleanliness_band
+        }
+    }
+}
+
 /// Whether NO inequality is active at this iterate — the condition under which
 /// the plain coefficient-space Newton certificate (the exact decrement, and the
 /// undamped polish that pursues it) is exactly valid for a fit that carries a
@@ -275,31 +300,6 @@ pub(crate) fn iterate_is_primal_feasible(
         None => true,
         Some(kkt) => {
             kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
-        }
-    }
-}
-
-pub(crate) fn constraint_kkt_admits_progress_exhausted_stall(
-    options: &WorkingModelPirlsOptions,
-    beta: &Array1<f64>,
-    gradient: &Array1<f64>,
-    kkt_tolerance: f64,
-) -> bool {
-    let diag = match options.linear_constraints.as_ref() {
-        Some(lin) => Some(compute_constraint_kkt_diagnostics(beta, gradient, lin)),
-        None => options.coefficient_lower_bounds.as_ref().and_then(|lb| {
-            linear_constraints_from_lower_bounds(lb)
-                .map(|lin| compute_constraint_kkt_diagnostics(beta, gradient, &lin))
-        }),
-    };
-    match diag {
-        None => true,
-        Some(kkt) => {
-            let cleanliness_band = kkt_tolerance * 10.0;
-            !kkt.working_set_rank_deficient
-                && kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
-                && kkt.dual_feasibility <= cleanliness_band
-                && kkt.complementarity <= cleanliness_band
         }
     }
 }
