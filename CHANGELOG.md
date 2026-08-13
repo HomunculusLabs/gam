@@ -1,5 +1,130 @@
 ## Unreleased
 
+- **`76a520c45` withheld a deletion the geometry did not license and dropped the
+  ORTHOGONALIZATION with it: the smooth-ownership hierarchy was inert for every
+  dependent smooth (#2747).** `apply_global_smooth_identifiability` exists to
+  enforce one invariant — the realized smooth block is orthogonal to
+  `[intercept | owned linear axes | owner smooths]` — and it enforced it by
+  DELETING one coefficient direction per constraint direction. `76a520c45`
+  established that the deletion is free only under CONTAINMENT (the parametric
+  direction inside the design's span, so the deleted function IS the parametric
+  column) and withheld it otherwise. It left nothing in its place.
+
+  The premise the deletion had always rested on —
+  `smooth_requires_parametric_orthogonality`'s *"their realized column span
+  contains the constant … a structural rank-1 collision"* — is measured false for
+  half the class it names (`examples/probe_2747_containment_registry`,
+  `‖1 − P_X 1‖/‖1‖` on the realized design against the `√ε` bar):
+
+  ```text
+  thinplate                                      9.90e-15   contained
+  duchon                                         1.33e-14   contained
+  matern (both policies, ν = 3/2 and 5/2)   7.8e-4 .. 8.4e-1   NOT
+  curv (κ ∈ {−1,0,+1}, ℓ = 0.2 … 100)       5.1e-2 .. 9.5e-1   NOT
+  ```
+
+  and the Matérn column carries the point that decides how the gate has to be
+  written: the residual falls monotonically toward the bar as the range grows
+  (`8.4e-1 → 7.8e-4` over `ℓ = 0.2 → 10`), and the range is an ESTIMATED
+  coordinate. Containment is a function of a fitted parameter, not a property of
+  a family, so no per-family list can encode it and a delete/don't gate makes the
+  model DIMENSION step by one when a fit walks its own range across a threshold.
+
+  What that cost, measured through the shipped pipeline
+  (`examples/probe_2747_parametric_orthogonality`, `‖XᵀC‖/(‖X‖‖C‖)` against the
+  `1e-8` bar the same function asserts whenever a transform IS applied):
+
+  ```text
+                             before      after     deleted directions
+  curv(x1,x2)               4.72e-1   1.17e-14      0 (was 1)
+  x1 + curv(x1,x2)          4.89e-1   1.13e-14      0 (was 2)
+  s(x1) + curv(x1,x2)       2.70e-1   7.15e-15      0
+  s(x1) + tps(x1,x2)        1.64e-1   1.30e-14      0
+  tps / duchon, ± x1        3.0e-14   unchanged     bit-identical
+  ```
+
+  The `s(x1) + tps` row is the one that shows the reach: thin-plate is the
+  CONTAINED class and it was still `1.64e-1` against its owner, because the
+  constraint block for a dependent smooth is `[1 | owner's realized columns]` and
+  an owner's basis columns are contained in no other basis's span. So the
+  containment gate withheld the whole block rather than one direction of it, and
+  `analyze_smooth_ownership`'s hierarchy — the machinery that stops a broader
+  smooth refitting structure its owner already carries (#978, #1470) — stopped
+  binding for every dependent smooth in the library.
+
+  **The fix is that the fork was never delete-or-nothing.** A deletion is
+  licensed by containment; an ORTHOGONALIZATION is licensed always:
+
+  ```text
+  X̃ = X − C(CᵀWC)⁻CᵀWX        span([C | X̃]) = span([C | X])   for every X, C
+  ```
+
+  — a column operation on a block whose partner is in the model. So
+  `apply_global_smooth_identifiability` now deletes where the block is wholly
+  contained (bit-identical to what shipped; thin-plate and Duchon do not move)
+  and PROJECTS everywhere else, keeping every coefficient direction while making
+  `X̃ᵀWC = 0` exactly. The rank of `X̃` falls by `dim(col X ∩ col C)` and by
+  nothing else, so the whitener drops precisely the directions the deletion is
+  entitled to drop. It is also continuous in the containment residual — the
+  direction the classical constraint removes has residualized norm exactly
+  `sin θ = ‖1 − P_X 1‖/‖1‖` — so the two constructions AGREE at containment
+  instead of meeting at a threshold.
+
+  The fit is preserved where the theory says it must be: `y ~ curv` residual ss
+  `9.926900 → 9.926900`, edf `23.455911 → 23.455912`, because with an unpenalized
+  parametric block residualization is a reparametrization of the same fitted
+  model. Where the partner is penalized — the `s(x1) + …` rows — the fit moves,
+  which is the hierarchy binding again.
+
+  Numerics: `G̃ = X̃ᵀWX̃` is streamed from the EXPLICIT residual rather than formed
+  as `G − M N⁻ Mᵀ`, which is a difference of near-equal `O(‖G‖)` quantities
+  precisely in the contained case it has to resolve. Storage: `X` and `C` are
+  stacked into one `BlockDesignOperator` and the minus sign lives inside a single
+  `CoefficientTransformOperator`, so a lazy design stays lazy and `C·R` is never
+  materialized.
+
+  Replay: `ParametricResidualizationChart` on `SmoothTerm`, frozen onto
+  `SmoothTermSpec` beside the joint-null rotation. It carries `R`, the owner
+  terms it was built against and whether the parametric block led — because `R`
+  is TRAINING-ROW data and must be replayed, not re-derived (#978), while `C`
+  itself is rebuilt at the new rows, which is what `C` is.
+
+  Gated by `parametric_orthogonality_costs_no_dimension_2747` (five gates on the
+  shipped pipeline, each asserting its own premise — the realized span must NOT
+  contain the constant, or the deletion would be free and the test would measure
+  nothing) and by three unit gates on the numerical core, whose orthogonality bar
+  is DERIVED (`n·ε·‖X‖/‖X̃‖`, the floor of an `n`-term accumulation carrying the
+  `1/sin θ` amplification) and asserted to sit far below the shipped `1e-8` so it
+  cannot pass vacuously. The replay gate's negative control drops the chart from
+  the same frozen spec and requires the design to MOVE, because a rederivation's
+  output looks exactly like a design.
+
+  **Named and deliberately NOT fixed here: a second producer.**
+  `freeze_geometry_from_metadata` (`spatial_optimization.rs:4849`) freezes the κ
+  optimizer's cold-build chart as `MaternIdentifiability::FrozenTransform`; that
+  chart comes from `realize_single_smooth_term`, whose own comment says it "never
+  runs the global ownership pass"; and
+  `smooth_requires_parametric_orthogonality`'s doc excludes `FrozenTransform`
+  bases on the premise that such a transform "already has the parametric
+  orthogonalization composed in". For that producer the premise is false, so
+  every spatial smooth whose geometry the κ optimizer froze skips the global step
+  entirely, and has done since long before #2747 — which is why a Matérn fit
+  still measures `4.15e-1` through `fit_from_formula` with the projection arm
+  landed. `an_unfrozen_matern_smooth_is_orthogonalized_at_no_cost_2747` pins that
+  the arm is not at fault: from an unfrozen spec the identical basis comes out
+  orthogonal at the shipped bar with all `centers − 1` columns.
+
+- **The κ criterion's acceptance was met and unmeasured (#2747).** Both fixtures
+  are green at `ee7b9a2fa`: `profile_ci_covers_planted_curvature_across_replicates`
+  covers 9/9 with 0 unresolved, κ̂ interior on 8 of 9 (the state the issue opened
+  on was `railed_at_upper_bound` 9/9), mean κ̂ `+1.070` against a planted `+1.0`,
+  sign right 9/9, over replicates that now span `0.5×`/`1×`/`2×` the auto range;
+  `flatness_test_holds_size_across_flat_replicates` rejects 1/9 at α = 0.05 with
+  0 unresolved. The estimator half of that issue was finished by
+  `1f76fb35f` (one kernel, one range) → `337e6aa86` (ψ = (κ, η)) → `4b618f0ba`
+  (the contrast gauge) → `76a520c45`, and the last of those had never been run
+  against the fixture it was written for.
+
 - **The λ̂-selection replay was refused on every real fit, and where it was not
   refused it minimised a criterion whose Occam term was noise (#2672).** The
   smooth-term LR reference prices `λ̂` as CHOSEN rather than as given by
