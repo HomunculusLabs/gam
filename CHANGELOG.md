@@ -1,5 +1,125 @@
 ## Unreleased
 
+- **The `geo_disease_*_matern` / `papuan_oce*_matern` cluster refused a fit on a
+  curvature the criterion itself measures with the OPPOSITE SIGN, because the
+  only measurement in the room was thrown away after a boolean (#2748).**
+
+  Ten of the eleven scenarios the last benchmark verdict lists as `errored` fail
+  with one signature. Reproduced locally in 22 s through `bench/run_suite.py`:
+
+  ```
+  rho Hessian has negative curvature -6.404e-6 below the outer certificate's own
+  bar 6.379e-6 ... measured here as 2.396439e-16 [analytic (Weyl, ||dH||_2); set
+  by eigensolver backward error] ... the penalty map certified 0 null direction(s)
+  ```
+
+  The whole verdict rides on `intrinsic = sigma - sum_k g_k v_k^2 = -2.473e-8`,
+  the only part of that eigenvalue that is a statement about the criterion, and
+  it is judged against `2.4e-16` — the EIGENSOLVER's backward error.
+  `curvature_resolution`'s own module doc says in bold that this number answers
+  *"given this matrix, how wrong is sigma?"* and that a site asking *"how wrong
+  is this matrix?"* must not be handed it. That warning was firing in production.
+
+  **Why #2676's deflation does not fire here, measured rather than assumed.**
+  Inside ONE fit:
+
+  ```
+  one_minus_cos(S_0, S_2) = 6.164524e-11   at an earlier point
+  one_minus_cos(S_0, S_2) = 6.017409e-14   at the REFUSING point
+  ```
+
+  Three orders apart. The penalties do not depend on rho; they depend on psi, the
+  jointly-optimised length scale. Round-off does not move three orders with psi.
+  So the Matern mass and stiffness operators are genuinely DISTINCT operators
+  that become proportional as the length scale collapses the kernel matrix — a
+  real near-invariance, not an exact one. `PenaltyMapInvariance` certifies only
+  exact ones, so it certifies nothing, and with no certified subspace every
+  measured component of `||dH||_2` at that site is vacuous or absent:
+
+  | component | value |
+  |---|---|
+  | eigensolver backward error | `2.396439e-16` |
+  | rho-Hessian symmetrization defect | `0.000000e0` (symmetrized in place) |
+  | outer-gradient re-evaluation defect | `0.000000e0` |
+  | penalty-map invariance residual | unavailable (certified nullity 0) |
+
+  **And the outer certificate had already ruled the other way on the same
+  number.** Two lines above the refusal, same run:
+
+  ```
+  [CERTIFICATE] standard REML: the criterion CONTRADICTS the reported negative
+  curvature. lambda_min=-6.404092e-6 on the judged sub-block, and 2 feasible
+  trial(s) along its eigenvector -- both signs -- lowered the objective nowhere.
+  ```
+
+  Same matrix to six digits, same point, opposite verdicts — #2428 exactly, with
+  the subsystem that actually evaluated the criterion losing.
+
+  **The repair is a measurement, not a bar.** No floor moved, no tolerance was
+  chosen. `adjudicate_negative_curvature` already evaluates the criterion on both
+  sides of the point along the disputed eigenvector; that is a symmetric probe
+  ladder, and `curvature_resolution`'s header already states that `eps_f` and
+  `M4` "come free from any symmetric probe ladder that has already been run". It
+  was being spent on one boolean.
+
+  * `measure_symmetric_ladder` fits `N(alpha) = c*alpha^2 + (M4/12)*alpha^4` to
+    the raw second-difference NUMERATOR, whose noise is step-independent — so
+    plain least squares there IS the inverse-variance-weighted fit of the
+    quotient, whose noise is `4 eps_f/alpha^2`. It returns the criterion's own
+    curvature with a standard error, `M4` as twelve times the slope, and `eps_f`
+    as the residual scatter over four.
+  * The ladder is EXTENDED until it can determine that fit. The falsifiability
+    ladder stops at `sqrt(2*objective_resolution/|lambda_min|)`, which for a
+    small claim is `>= 1`, i.e. ONE rung — and one rung cannot fit two
+    parameters. The extension halves to `alpha_end =
+    sqrt(roundoff_floor/|lambda_min|)`, where the claim's own predicted numerator
+    reaches the objective's arithmetic floor, plus two halvings so the plateau
+    `eps_f` is read from is more than a point. Both ends are derived from the
+    claim in dispute.
+  * `v'Hv` and `d2/dalpha2 V(theta+alpha v)|_0` are the same number computed two
+    ways, so their difference is exactly zero in exact arithmetic and, by Weyl,
+    a certified LOWER BOUND on `||dH||_2`. It is carried on `OuterResult` into
+    `invert_identified_rho_hessian` as a `MeasuredHessianError`, and only when
+    the disputed direction lies entirely inside the rho block.
+
+  **What it measured on the failing fixture.**
+
+  ```
+  c_criterion = +8.153228e-5 +/- 6.616477e-6   vs analytic lambda_min = -6.404082e-6
+  12 rungs; measured eps_f = 3.254032e-7, M4 = 1.094027e-2
+  measured ||dH||_2 from the disagreement = 8.131990e-5
+  ```
+
+  The criterion's curvature along that eigenvector is POSITIVE and thirteen times
+  the magnitude the analytic Hessian claimed. `zero_bound` goes
+  `2.396439e-16 -> 8.131990e-5`, the classification goes
+  `["G","A","A"] -> ["Z","Z","A"]`, and the scenario mints
+  (`status = ok`, 87 s).
+
+  **The negative control fired in production, unprompted.** The same fit's
+  iso-kappa joint arm adjudicated a different point and measured
+  `c_criterion = -1.060226e-6` against `lambda_min = -1.060914e-6` — agreement to
+  `6.9e-10`, so `||dH||_2 = 6.3e-10` and nothing widened. Where the analytic
+  Hessian is right, this measures nothing.
+
+  **Two names stopped being true and were fixed with it.** `zero_bound` used to be
+  only an eigensolver backward error, so `|sigma| <= zero_bound` and "the penalty
+  map's certified null" were the same population and sharing the name
+  `StructuralZero` cost nothing. They are eleven orders apart now.
+  `UnresolvableCurvature` is a third variant, and the three finally say three
+  things: excused by STRUCTURE (exactly flat, no measurement can change it), by
+  RESOLUTION (may be real, but the matrix is not known well enough for its sign
+  to be a measurement), by the CHAIN RULE (`sum_k g_k v_k^2` carries no
+  second-order content) — the split the #2676 thread argued for and did not
+  build. And `InvertedRhoHessian::eigenvalue_backward_error_bound`, which has
+  carried the MAXIMUM over several measured components since #2748's architecture
+  landed, is renamed `curvature_resolution`.
+
+  **`haberman_5yr` is NOT this and is not fixed here.** It fails
+  `NOT STATIONARY (|Pg|=1.101e0 > bound=3.636e-6)` with `railed=[5]` and
+  `line_search=StepSizeTooSmall after 50 attempt(s)` — an outer BFGS
+  non-convergence, a separate population, exactly as #2748's body predicted.
+
 - **"The box does not bind at its bound" is the wrong reading of #2705 group C's
   residual: the box binds exactly, and the reported coefficient is the truncated
   posterior MEAN — matching its closed form to 8 significant figures.** On the
