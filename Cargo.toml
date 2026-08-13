@@ -467,7 +467,3 @@ path = "examples/probe_2747_range_normalization.rs"
 [[example]]
 name = "probe_2747_pipeline_vs_profile"
 path = "examples/probe_2747_pipeline_vs_profile.rs"
-
-[[example]]
-name = "probe_2705_shape_constrained_inference"
-path = "examples/probe_2705_shape_constrained_inference.rs"
