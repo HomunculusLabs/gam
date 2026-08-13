@@ -1,5 +1,78 @@
 ## Unreleased
 
+- **A shape-constrained fit published two covariance matrices that were not
+  covariances, for two different reasons, and both were refused as
+  non-convergence (#2705 group A).** `misc::shape_constrained_alo_seed_validation_aborts_1191`
+  died at `posterior covariance diagonal 4 is not positive and representable:
+  -3.08607306376274e-15`, and the corrected covariance of the same fixture had
+  earlier been measured at `-9.954853058256977e-9`. Neither number is a small
+  variance; both are what is left when a subtraction has spent all of its digits.
+
+  **The composition.** `beta_covariance_corrected` was assembled as
+  `beta_covariance + smoothing_correction`, i.e.
+  `(Σ − GΔGᵀ) + (Vp − Σ) = Vp − GΔGᵀ` — with the lift `G` and the removed
+  variance `Δ` derived from `Σ = Vb`, the ρ̂-CONDITIONAL covariance, and then
+  subtracted from `Vp = Vb + J·V_ρ·Jᵀ`, the ρ-MARGINAL one. That matrix is the
+  truncation of neither covariance. Along a coordinate the constraint pins,
+  `(GΔGᵀ)_ii` cancels `Σ_ii` to eleven digits, so whatever `(Vp − Σ)_ii` happens
+  to be becomes the WHOLE published variance — and that increment is legitimately
+  sign-indefinite: the cubature branch computes
+  `φ̂·E_ρ[H(ρ)⁻¹] + Cov_ρ[β̂] − φ̂·H_opt⁻¹`, a difference of two averages which is
+  positive semidefinite only as a SUM with `Vb`. The measured decomposition on
+  `y ~ s(x, shape=convex)` reads `Σ_ii = 2.302618e-2` removed to
+  `6.229531e-13`, with a `−3.025454e-9` smoothing increment on top.
+
+  The right composition follows from the estimand rather than from the sign. The
+  feasible set constrains `β` and says nothing about `ρ`, so the indicator
+  `1_C(β)` factors straight out of the ρ-integral —
+  `∫ π(β,ρ|y)·1_C(β) dρ = 1_C(β)·∫ π(β,ρ|y) dρ` — i.e. the β-marginal of the
+  TRUNCATED joint posterior is exactly the truncation of the β-marginal of the
+  untruncated one. So the truncation belongs on `Vp`, applied last, with its own
+  lift `G_p = Vp·Aᵀ·W_p⁻¹` and its own orthant moments at `W_p = A·Vp·Aᵀ`. The
+  ρ̂-conditional covariance keeps its truncation at `Σ`, which is right, because
+  that estimand really is conditional on `ρ̂`.
+
+  **The assembly.** `Σ − GΔGᵀ` has no digits left on a pinned coordinate, and `Δ`
+  is a cubature result certified to `1e-3` RELATIVE, so `Δ_ii` overshooting
+  `Σ_ii` by an ulp is admissible arithmetic that publishes a negative variance.
+  Splitting the correction at `Δ = W − C`, with `C = Cov[u] ⪰ 0` the truncated
+  constraint-normal covariance, writes the identical quantity as two Grams:
+
+  ```text
+  Σ − GΔGᵀ = (Σ − G W Gᵀ) + G C Gᵀ = P Σ Pᵀ + G C Gᵀ
+           = (P L)(P L)ᵀ + (G L_C)(G L_C)ᵀ,     P = I − G A
+  ```
+
+  so every diagonal entry is a sum of squares. The cancellation does not
+  disappear — it moves INSIDE `P L`, where each entry carries an absolute error
+  `O(ε‖L‖)` and is then SQUARED, so a pinned coordinate's variance picks up
+  `O(p ε² Σ_ii)` instead of `O(ε Σ_ii)`: sixteen orders smaller, and non-negative
+  by construction rather than by luck. `P L = L − G(A L)` costs `O(p²q)`, so the
+  only new `O(p³)` work is one Cholesky of a matrix the dense branch has already
+  inverted.
+
+  Three consequences landed at the sites they belong to. The dense standard-error
+  gate accepts an exactly-zero diagonal **when a truncation was applied** — zero
+  is the `λ → ∞` limit of the removal and is now reported cleanly instead of as a
+  `±ε·Σ_ii` residue, and a strict `> 0` test would refuse the fit for producing
+  the right answer; unconstrained fits keep `> 0`, which is the singular-Hessian
+  catch that gate exists for. The FACTORIZED branch has no dense `Σ` to factor,
+  so it keeps the subtraction and now carries the subtraction's own MEASURED
+  resolution `16·ε·max(base, removed)`, reading a residue inside that band as the
+  zero it approximates and refusing anything outside it with the decomposition
+  attached. And a materially indefinite `C` — past the cubature's own `1e-3`
+  relative certificate — is refused rather than clamped, because that is a broken
+  moment computation and not a rounding question.
+
+  Verified: `misc::shape_constrained_alo_seed_validation_aborts_1191` passes
+  (all four shapes, 400 rows of `sqrt(x)`); five unit tests in `gam-solve`
+  including one that reproduces the negative variance under a two-ulp cubature
+  overshoot and one that asserts the Gram assembly and the subtraction agree
+  entry by entry; and a new property-side regression that reads BOTH published
+  matrices on all four shapes and asserts each has a non-negative spectrum to its
+  own assembly resolution, refusing to pass vacuously if no shape publishes a
+  corrected covariance at all.
+
 - **The certified REML score's VALUE enclosure was a natural interval extension,
   so its overestimation was FIRST ORDER in the cell width with constant `rank`,
   and the certified search refused designs it could certify (residual of
