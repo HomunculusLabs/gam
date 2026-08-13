@@ -3030,15 +3030,17 @@ mod smoothing_correction_outcome_tests {
                             h, 0, &finalgrad, None, &[],
                         ) {
                             Ok(inv) => format!(
-                                "active={}/{} structural_zero={} below_gradient_floor={} \
-                                 eigenvalues={:?} classes={:?} backward_error={:.6e}",
+                                "active={}/{} structural_zero={} unresolvable_curvature={} \
+                                 below_gradient_floor={} eigenvalues={:?} classes={:?} \
+                                 curvature_resolution={:.6e}",
                                 inv.active_rank,
                                 h.nrows(),
                                 inv.structural_zero,
+                                inv.unresolvable_curvature,
                                 inv.below_gradient_floor,
                                 inv.eigenvalues,
                                 inv.classifications,
-                                inv.eigenvalue_backward_error_bound,
+                                inv.curvature_resolution,
                             ),
                             Err(err) => format!("inverter refused: {err}"),
                         }

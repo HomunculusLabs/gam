@@ -462,7 +462,15 @@ pub struct LadderCurvature {
     /// It covers evaluation noise and model misfit together, which is what a
     /// comparison against this curvature needs.
     pub curvature_uncertainty: f64,
-    /// `M₄`, twelve times the fitted slope against `α²`.
+    /// Twelve times the fitted slope against `α²`, i.e. the ladder's estimate
+    /// of the fourth directional derivative — **signed**, as fitted.
+    ///
+    /// Law 1 wants a BOUND `M₄`, which is a magnitude, and a criterion whose
+    /// quartic term happens to be negative is perfectly ordinary (measured:
+    /// `-1.106535e-6` on `geo_disease_matern`'s iso-kappa joint arm). Keeping
+    /// the sign here and taking the magnitude at the one place a bound is
+    /// needed is what stops a legitimate fit from reading as an absent
+    /// measurement.
     pub fourth_derivative: f64,
     /// `ε_f`, the criterion's absolute evaluation error, read off the residual
     /// scatter of the NUMERATOR (whose noise is step-independent) as
@@ -485,7 +493,10 @@ impl LadderCurvature {
     pub fn finite_difference_resolution(
         &self,
     ) -> Result<CurvatureResolution, CurvatureResolutionError> {
-        CurvatureResolution::finite_difference(self.evaluation_error, self.fourth_derivative)
+        // `|M₄|`: the fitted quartic coefficient carries a sign, the error
+        // model `(h²/12)·M₄` needs a magnitude, and `4ε_f/h² + h²|M₄|/12` is
+        // the bound either way.
+        CurvatureResolution::finite_difference(self.evaluation_error, self.fourth_derivative.abs())
     }
 
     /// The **measured** `‖δH‖₂` implied by an analytic Hessian disagreeing with
