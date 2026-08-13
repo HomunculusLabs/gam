@@ -44,7 +44,7 @@
 
 use gam::data::EncodedDataset;
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
-use gam_math::probability::normal_cdf;
+use gam_math::probability::{normal_cdf, normal_logsf};
 use std::io::Write;
 
 const INTERCEPT: f64 = 2.0;
@@ -66,21 +66,29 @@ fn standard_normal_pdf(z: f64) -> f64 {
 }
 
 /// `E[X | X ∈ [lower, upper]]` for `X ~ N(mean, sd²)`.
+///
+/// The half-line case is evaluated in LOG SPACE, because it is the one that
+/// cannot be done any other way. `Φ̄(6.246) = 2.1e-10`, so forming it as
+/// `1 − Φ(6.246)` loses everything below the sixth significant figure — and the
+/// first version of this test failed by exactly that much (`1.06e-5` relative)
+/// with the ENGINE on the accurate side. `constrained_posterior` reaches for
+/// `normal_logsf` / `signed_probit_logcdf_and_mills_ratio` for this reason; a
+/// reference that does not is measuring its own cancellation.
 fn truncated_normal_mean(mean: f64, sd: f64, lower: f64, upper: f64) -> f64 {
     let a = (lower - mean) / sd;
+    if upper.is_infinite() && upper > 0.0 {
+        // `φ(a)/Φ̄(a) = exp(ln φ(a) − ln Φ̄(a))`, with
+        // `ln φ(a) = −a²/2 − ½·ln(2π)`.
+        let log_pdf = -0.5 * a * a - 0.5 * (2.0 * std::f64::consts::PI).ln();
+        return mean + sd * (log_pdf - normal_logsf(a)).exp();
+    }
     let b = (upper - mean) / sd;
-    let upper_cdf = if b.is_infinite() && b > 0.0 {
-        1.0
-    } else {
-        normal_cdf(b)
-    };
-    let mass = upper_cdf - normal_cdf(a);
+    let mass = normal_cdf(b) - normal_cdf(a);
     assert!(
         mass > 0.0,
         "the truncation interval must carry positive Gaussian mass: a={a}, b={b}"
     );
-    let upper_pdf = if b.is_infinite() { 0.0 } else { standard_normal_pdf(b) };
-    mean + sd * (standard_normal_pdf(a) - upper_pdf) / mass
+    mean + sd * (standard_normal_pdf(a) - standard_normal_pdf(b)) / mass
 }
 
 fn dataset(x: &[f64], y: &[f64]) -> EncodedDataset {
