@@ -140,6 +140,8 @@ mod gaussian_high_edf_scale_tests;
 mod gaussian_observation_interval_calibration_tests;
 #[cfg(test)]
 mod invert_regularized_rho_hessian_tests;
+#[cfg(test)]
+mod constrained_marginal_truncation_2705_tests;
 // Finite-difference debug probes on `ExternalJointHyperEvaluator`
 // (`debug_full_h`). These are `pub` inherent methods so the #1601-orphaned
 // design-assembly regression guards re-homed into gam-models (a separate crate)

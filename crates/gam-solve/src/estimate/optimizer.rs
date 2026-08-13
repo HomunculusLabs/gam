@@ -185,6 +185,63 @@ fn reserve_dense_covariance_bundle(p: usize) -> Option<gam_runtime::resource::Me
     }
 }
 
+/// Truncate the ρ-MARGINAL posterior covariance to the fit's feasible set,
+/// in place (#2705 group A).
+///
+/// `covariance` arrives as `Vp = Vb + J·V_ρ·Jᵀ` built from the UNTRUNCATED
+/// conditional `Vb`, and leaves as the covariance of `N(β_unc, Vp)` restricted
+/// to `{β : Aβ ≥ b}`. The truncation is rebuilt AT `Vp` — its own lift
+/// `G_p = Vp·Aᵀ·W_p⁻¹` and its own orthant moments at `W_p = A·Vp·Aᵀ` — because
+/// a lift derived from a different covariance is not a projector for this one,
+/// and subtracting it is not a truncation of anything.
+///
+/// A geometry whose moments were DECLINED never truncated the conditional
+/// covariance either, so there is nothing here to keep consistent with and the
+/// marginal is published untruncated, exactly as the conditional one is.
+///
+/// A failure is propagated rather than degraded. The identical call already
+/// succeeded on this constraint system at `Vb`, and `W_p = W + (A J)V_ρ(A J)ᵀ`
+/// is `W` plus a PSD term — better conditioned, not worse — so a refusal here is
+/// a genuine anomaly and not the routine cost of an upgrade.
+pub(crate) fn apply_marginal_constraint_truncation(
+    geometry: &crate::constrained_posterior::ConstrainedPosteriorGeometry,
+    covariance: &mut Array2<f64>,
+) -> Result<(), EstimationError> {
+    if geometry.decline().is_some() {
+        return Ok(());
+    }
+    let center = geometry.unconstrained_center().map_err(|reason| {
+        EstimationError::RemlOptimizationFailed(format!(
+            "smoothing-corrected covariance cannot be truncated to the feasible set: {reason}"
+        ))
+    })?;
+    let p = covariance.nrows();
+    if geometry.constraints.a.ncols() != p || center.len() != p {
+        return Err(EstimationError::RemlOptimizationFailed(format!(
+            "constrained posterior geometry has {} constraint columns and a length-{} centre \
+             against a {p}x{p} corrected covariance",
+            geometry.constraints.a.ncols(),
+            center.len(),
+        )));
+    }
+    let marginal_correction =
+        crate::constrained_posterior::constrained_posterior_correction_from_covariance(
+            covariance,
+            center,
+            &geometry.constraints,
+        )
+        .map_err(|reason| {
+            EstimationError::RemlOptimizationFailed(format!(
+                "smoothing-corrected covariance could not be truncated to the feasible set: \
+                 {reason}"
+            ))
+        })?;
+    if let Some(correction) = marginal_correction {
+        correction.apply_to_covariance_in_place(covariance);
+    }
+    Ok(())
+}
+
 /// Reserve the square matrices that remain live even when inference stays
 /// factorized: the two PIRLS Hessian surfaces, the fitted reparameterization,
 /// its exported copy, the reusable factor, the exported original-basis
@@ -2178,6 +2235,14 @@ where
     // can say which producer's budget the negative diagonal is inside.
     let mut constrained_diagonal_uncertainty: Option<Array1<f64>> = None;
     let mut constrained_removed_variance: Option<Array1<f64>> = None;
+    // The ρ̂-conditional covariance `Vb = φ·H⁻¹` BEFORE the feasible set
+    // truncates it. Present only when a truncation was actually applied, i.e.
+    // exactly when `beta_covariance` is no longer that matrix.
+    //
+    // The corrected covariance is a different estimand from the conditional one
+    // and needs the untruncated matrix to build: see the composition argument at
+    // the `beta_covariance_corrected` assembly below (#2705 group A).
+    let mut untruncated_conditional_covariance: Option<Array2<f64>> = None;
     let mut beta_covariance_frequentist = None;
     let mut coefficient_influence = None;
     let mut weighted_gram = None;
@@ -2803,6 +2868,7 @@ where
             if let Some(correction) = constrained_correction {
                 constrained_removed_variance = Some(correction.removed_variance_diagonal());
                 constrained_diagonal_uncertainty = Some(correction.diagonal_uncertainty());
+                untruncated_conditional_covariance = Some(posterior_covariance.clone());
                 correction.apply_to_covariance_in_place(&mut posterior_covariance);
             }
             beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
@@ -3226,10 +3292,57 @@ where
         // (≈ c²) again would make the correction scale as c⁴, inflating every
         // predict() interval for large-magnitude responses (#582). cov_scale is
         // applied once, where it belongs: in Vb = scaled_covariance(H⁻¹, cov_scale).
+        //
+        // #2705 group A — WHICH `Vb` the sum starts from, when the fit carries
+        // inequality constraints.
+        //
+        // `beta_covariance` is the ρ̂-CONDITIONAL posterior covariance and, for a
+        // constrained fit, it has already been truncated to the feasible set:
+        // `Σ_π = Σ − GΔGᵀ`. Adding `J·V_ρ·Jᵀ` to THAT produced a matrix that is
+        // the truncation of neither covariance:
+        //
+        //     (Σ − GΔGᵀ) + (Vp − Σ)  =  Vp − GΔGᵀ,
+        //
+        // with `G` and `Δ` derived from `Σ`, not from `Vp`. Along a coordinate
+        // the constraint pins, `(GΔGᵀ)_ii` cancels `Σ_ii` to eleven digits, so
+        // whatever `(Vp − Σ)_ii` happens to be becomes the WHOLE reported
+        // variance — and `Vp − Σ` is a legitimately sign-indefinite second-order
+        // increment (the cubature branch is `φ̂·E_ρ[H(ρ)⁻¹] + Cov_ρ[β̂] − φ̂·H_opt⁻¹`,
+        // a difference of two averages, PSD only as a SUM with `Vb`). On
+        // `y ~ s(x, shape=convex)` that left `Σ_ii = 2.30e-2` truncated to
+        // `6.23e-13` with a `−3.03e-9` smoothing increment on top, i.e. a
+        // materially negative published variance, and `se_from_covariance`
+        // refused the fit.
+        //
+        // The correct composition follows from the estimand. The feasible set
+        // constrains β and says nothing about ρ, so the indicator `1_C(β)`
+        // factors straight out of the ρ-integral:
+        //
+        //     ∫ π(β,ρ|y)·1_C(β) dρ  =  1_C(β)·∫ π(β,ρ|y) dρ,
+        //
+        // i.e. the β-marginal of the TRUNCATED joint posterior is exactly the
+        // truncation of the β-marginal of the untruncated one. So the truncation
+        // belongs on `Vp`, applied last, with its own `G_p = Vp·Aᵀ·W_p⁻¹` and its
+        // own orthant moments at `W_p = A·Vp·Aᵀ` — not inherited from `Σ`.
+        //
+        // Two properties come with it, both of which the old order lacked: the
+        // published matrix is a genuine truncated-Gaussian covariance, so it sits
+        // between `P·Vp·Pᵀ ⪰ 0` and `Vp` instead of below both; and the
+        // constraint's effect on the reported interval is measured at the width
+        // the interval actually has, rather than at the conditional width.
+        //
+        // The ρ̂-CONDITIONAL `beta_covariance` keeps its own truncation at `Σ` —
+        // that one is right, because that estimand really is conditional on ρ̂.
         beta_covariance_corrected = match (&beta_covariance, &smoothing_correction) {
             (Some(base_cov), Some(corr)) if base_cov.as_array().dim() == corr.dim() => {
-                let mut corrected = base_cov.as_array().clone();
+                let mut corrected = untruncated_conditional_covariance
+                    .as_ref()
+                    .unwrap_or_else(|| base_cov.as_array())
+                    .clone();
                 corrected += corr;
+                if let Some(geometry) = constrained_posterior.as_ref() {
+                    apply_marginal_constraint_truncation(geometry, &mut corrected)?;
+                }
                 if let Some(a_bc) = bias_correction_jacobian.as_ref() {
                     if a_bc.dim() != corrected.dim() {
                         return Err(EstimationError::RemlOptimizationFailed(format!(
