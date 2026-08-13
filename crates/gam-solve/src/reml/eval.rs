@@ -1090,6 +1090,7 @@ impl<'a> RemlState<'a> {
         dispersion_phi: f64,
         finalgrad_norm: f64,
         outer_gradient: &Array1<f64>,
+        caller_measured_hessian_error: &[gam_linalg::curvature_resolution::MeasuredHessianError],
     ) -> Result<SmoothingCorrectionOutcome, EstimationError> {
         use SmoothingCorrectionFallbackSeverity::{NumericalFailure, Routine};
 
@@ -1100,6 +1101,7 @@ impl<'a> RemlState<'a> {
             final_lambdas,
             final_fit,
             outer_gradient,
+            caller_measured_hessian_error,
         );
         let first_order_correction = first_order.correction.clone();
         let first_order_rho_covariance = first_order.rho_covariance.clone();
@@ -2986,6 +2988,7 @@ mod smoothing_correction_outcome_tests {
                     dispersion_phi,
                     finalgrad_norm,
                     &finalgrad,
+                    &[],
                 )
                 .expect("smoothing correction evaluation");
             let after = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);

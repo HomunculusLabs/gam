@@ -1294,6 +1294,7 @@ pub(crate) fn compute_smoothing_correction(
     lambdas: &Array1<f64>,
     final_fit: &pirls::PirlsResult,
     outer_gradient: &Array1<f64>,
+    caller_measured_hessian_error: &[gam_linalg::curvature_resolution::MeasuredHessianError],
 ) -> SmoothingCorrectionComputation {
     use gam_linalg::faer_ndarray::FaerCholesky;
 
@@ -1576,6 +1577,13 @@ pub(crate) fn compute_smoothing_correction(
                     ),
                 );
             }
+            // #2748: whatever the OUTER certificate measured about this same
+            // matrix at this same point, by evaluating the criterion along the
+            // direction it disputed. It is the only component here that answers
+            // "how wrong is this matrix?"; the two above are exactly-zero
+            // identities of the assembly's bookkeeping and the eigensolver's
+            // component answers a different question entirely.
+            components.extend_from_slice(caller_measured_hessian_error);
             components
         },
     ) {

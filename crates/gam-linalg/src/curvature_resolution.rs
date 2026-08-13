@@ -282,8 +282,7 @@ impl CurvatureResolution {
         let optimal_step = (48.0 * evaluation_error / fourth_derivative).sqrt().sqrt();
         // Substituting h* back: each term becomes sqrt(eps_f*M4)/sqrt(3), so
         // the sum is (2/sqrt(3))*sqrt(eps_f*M4).
-        let resolution =
-            (2.0 / 3.0_f64.sqrt()) * (evaluation_error * fourth_derivative).sqrt();
+        let resolution = (2.0 / 3.0_f64.sqrt()) * (evaluation_error * fourth_derivative).sqrt();
         Ok(Self {
             law: CurvatureLaw::FiniteDifferenceOfValues,
             resolution,
@@ -483,7 +482,9 @@ impl LadderCurvature {
     /// criterion — which is a statement about value-based measurement and, per
     /// this module's Law 2, is NOT a bound on a separately-coded analytic
     /// Hessian's error.
-    pub fn finite_difference_resolution(&self) -> Result<CurvatureResolution, CurvatureResolutionError> {
+    pub fn finite_difference_resolution(
+        &self,
+    ) -> Result<CurvatureResolution, CurvatureResolutionError> {
         CurvatureResolution::finite_difference(self.evaluation_error, self.fourth_derivative)
     }
 
@@ -640,8 +641,7 @@ pub fn measure_symmetric_ladder(
     // Standard error of the fitted intercept: `sigma^2 * (A^{-1})_11`, back in
     // the original variable.
     let inverse_11 = a22 / determinant;
-    let curvature_uncertainty =
-        (residual_variance * inverse_11).sqrt() / (scale * scale);
+    let curvature_uncertainty = (residual_variance * inverse_11).sqrt() / (scale * scale);
     if !curvature_uncertainty.is_finite() {
         return None;
     }
@@ -853,8 +853,14 @@ mod tests {
     /// negative or `NaN` one.
     #[test]
     fn a_non_positive_step_has_an_infinite_error_bound() {
-        assert_eq!(finite_difference_error_bound(1.0e-8, 1.0, 0.0), f64::INFINITY);
-        assert_eq!(finite_difference_error_bound(1.0e-8, 1.0, -1.0e-3), f64::INFINITY);
+        assert_eq!(
+            finite_difference_error_bound(1.0e-8, 1.0, 0.0),
+            f64::INFINITY
+        );
+        assert_eq!(
+            finite_difference_error_bound(1.0e-8, 1.0, -1.0e-3),
+            f64::INFINITY
+        );
     }
 
     /// Several measured components of `‖δH‖₂` combine by MAXIMUM, and the
@@ -876,7 +882,9 @@ mod tests {
             Some("penalty-map invariance residual")
         );
         assert!(
-            resolution.to_string().contains("penalty-map invariance residual"),
+            resolution
+                .to_string()
+                .contains("penalty-map invariance residual"),
             "the display must name what decided: {resolution}"
         );
         // The curvature this refused at main is inside it; a decade more is not.
@@ -889,12 +897,17 @@ mod tests {
     #[test]
     fn one_component_is_bit_identical_to_the_single_measurement_law() {
         let value = 7.414_101e-16_f64;
-        let from_one = CurvatureResolution::analytic_weyl_from_components(&[
-            MeasuredHessianError::new("eigensolver backward error", value),
-        ])
-        .expect("one non-negative component");
+        let from_one =
+            CurvatureResolution::analytic_weyl_from_components(&[MeasuredHessianError::new(
+                "eigensolver backward error",
+                value,
+            )])
+            .expect("one non-negative component");
         let direct = CurvatureResolution::analytic_weyl(value).expect("non-negative");
-        assert_eq!(from_one.resolution().to_bits(), direct.resolution().to_bits());
+        assert_eq!(
+            from_one.resolution().to_bits(),
+            direct.resolution().to_bits()
+        );
         assert_eq!(from_one.law(), direct.law());
     }
 
@@ -962,9 +975,14 @@ mod tests {
         for index in 0..12 {
             let quadratic = 0.5 * curvature * step * step;
             let quartic = m4 * step.powi(4) / 24.0;
-            let forward = baseline + gradient * step + quadratic + quartic
+            let forward = baseline
+                + gradient * step
+                + quadratic
+                + quartic
                 + deterministic_wobble(2 * index, eps_f);
-            let backward = baseline - gradient * step + quadratic + quartic
+            let backward = baseline - gradient * step
+                + quadratic
+                + quartic
                 + deterministic_wobble(2 * index + 1, eps_f);
             probes.push(SymmetricProbe::new(step, forward, backward));
             step *= 0.5;
@@ -1017,9 +1035,7 @@ mod tests {
         let mut probes = Vec::new();
         let mut step = 1.0_f64;
         for index in 0..10 {
-            let value = baseline
-                + 0.5 * curvature * step * step
-                + m4 * step.powi(4) / 24.0;
+            let value = baseline + 0.5 * curvature * step * step + m4 * step.powi(4) / 24.0;
             probes.push(SymmetricProbe::new(
                 step,
                 value + deterministic_wobble(2 * index, eps_f),
@@ -1058,9 +1074,8 @@ mod tests {
         );
         // And so must anything inside the error bar.
         assert_eq!(
-            measured.hessian_error_against(
-                measured.curvature + 0.5 * measured.curvature_uncertainty
-            ),
+            measured
+                .hessian_error_against(measured.curvature + 0.5 * measured.curvature_uncertainty),
             0.0,
             "a disagreement inside the ladder's own error bar has demonstrated nothing"
         );
@@ -1075,46 +1090,54 @@ mod tests {
     fn a_ladder_that_cannot_determine_the_fit_returns_no_measurement() {
         let baseline = 1.0_f64;
         // Two rungs: two parameters, no residual degree of freedom.
-        assert!(measure_symmetric_ladder(
-            baseline,
-            &[
-                SymmetricProbe::new(1.0, 1.5, 1.5),
-                SymmetricProbe::new(0.5, 1.125, 1.125),
-            ]
-        )
-        .is_none());
+        assert!(
+            measure_symmetric_ladder(
+                baseline,
+                &[
+                    SymmetricProbe::new(1.0, 1.5, 1.5),
+                    SymmetricProbe::new(0.5, 1.125, 1.125),
+                ]
+            )
+            .is_none()
+        );
         // Three rungs at ONE step: the design cannot separate α² from α⁴.
-        assert!(measure_symmetric_ladder(
-            baseline,
-            &[
-                SymmetricProbe::new(1.0, 1.5, 1.5),
-                SymmetricProbe::new(1.0, 1.5, 1.5),
-                SymmetricProbe::new(1.0, 1.5, 1.5),
-            ]
-        )
-        .is_none());
+        assert!(
+            measure_symmetric_ladder(
+                baseline,
+                &[
+                    SymmetricProbe::new(1.0, 1.5, 1.5),
+                    SymmetricProbe::new(1.0, 1.5, 1.5),
+                    SymmetricProbe::new(1.0, 1.5, 1.5),
+                ]
+            )
+            .is_none()
+        );
         // Non-finite evaluations are dropped, and dropping enough of them
         // leaves too few rungs.
-        assert!(measure_symmetric_ladder(
-            baseline,
-            &[
-                SymmetricProbe::new(1.0, f64::NAN, 1.5),
-                SymmetricProbe::new(0.5, 1.125, f64::INFINITY),
-                SymmetricProbe::new(0.25, 1.03, 1.03),
-                SymmetricProbe::new(0.125, 1.008, 1.008),
-            ]
-        )
-        .is_none());
+        assert!(
+            measure_symmetric_ladder(
+                baseline,
+                &[
+                    SymmetricProbe::new(1.0, f64::NAN, 1.5),
+                    SymmetricProbe::new(0.5, 1.125, f64::INFINITY),
+                    SymmetricProbe::new(0.25, 1.03, 1.03),
+                    SymmetricProbe::new(0.125, 1.008, 1.008),
+                ]
+            )
+            .is_none()
+        );
         // A non-finite baseline has no numerator at all.
-        assert!(measure_symmetric_ladder(
-            f64::NAN,
-            &[
-                SymmetricProbe::new(1.0, 1.5, 1.5),
-                SymmetricProbe::new(0.5, 1.125, 1.125),
-                SymmetricProbe::new(0.25, 1.03, 1.03),
-            ]
-        )
-        .is_none());
+        assert!(
+            measure_symmetric_ladder(
+                f64::NAN,
+                &[
+                    SymmetricProbe::new(1.0, 1.5, 1.5),
+                    SymmetricProbe::new(0.5, 1.125, 1.125),
+                    SymmetricProbe::new(0.25, 1.03, 1.03),
+                ]
+            )
+            .is_none()
+        );
     }
 
     /// The ladder's `ε_f` and `M₄` feed Law 1, and the resolution that comes
@@ -1128,8 +1151,7 @@ mod tests {
         let mut probes = Vec::new();
         let mut step = 1.0_f64;
         for index in 0..10 {
-            let value =
-                baseline + 0.5 * curvature * step * step + m4 * step.powi(4) / 24.0;
+            let value = baseline + 0.5 * curvature * step * step + m4 * step.powi(4) / 24.0;
             probes.push(SymmetricProbe::new(
                 step,
                 value + deterministic_wobble(2 * index, eps_f),
@@ -1157,5 +1179,4 @@ mod tests {
             resolution.resolution()
         );
     }
-
 }

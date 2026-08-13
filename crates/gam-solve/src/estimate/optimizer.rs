@@ -3077,6 +3077,21 @@ where
         // stays unscaled.
         if beta_covariance_unscaled.is_some() {
             let no_outer_gradient = Array1::<f64>::zeros(0);
+            let measured_hessian_error: Vec<
+                gam_linalg::curvature_resolution::MeasuredHessianError,
+            > = outer_result
+                .criterion_hessian_error
+                .as_ref()
+                .filter(|measured| measured.restricted_to_leading(final_rho.len()).is_some())
+                .map(|measured| measured.hessian_error_2norm())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|value| {
+                    vec![gam_linalg::curvature_resolution::MeasuredHessianError::new(
+                        "outer-certificate criterion-vs-analytic curvature disagreement                          |v'Hv - d2V/dalpha2| along the disputed eigenvector",
+                        value,
+                    )]
+                })
+                .unwrap_or_default();
             let smoothing_outcome = reml_state.compute_smoothing_correction_auto(
                 &final_rho,
                 &lambdas,
@@ -3093,6 +3108,23 @@ where
                     .final_gradient
                     .as_ref()
                     .unwrap_or(&no_outer_gradient),
+                // #2748: the outer certificate does not only accept or refuse
+                // this point -- when it disputes a negative curvature it
+                // EVALUATES the criterion along that direction, and the
+                // disagreement between what the criterion says the curvature is
+                // and what the analytic Hessian claimed is a measured `||dH||_2`
+                // for the assembly. `invert_identified_rho_hessian` is about to
+                // judge the SAME matrix at the SAME point; without this it does
+                // so against an eigensolver's backward error, which bounds the
+                // decomposition and says nothing about the assembly, and refuses
+                // fits this certificate accepted (#2428).
+                //
+                // The direction must lie inside the rho block for the bound to
+                // transfer: `|v'(dH)v| <= ||dH||_2` is about the sub-block's own
+                // error only when `v` has no component outside it. A wider theta
+                // whose disputed direction reaches into psi yields no component
+                // here, which is an absent measurement, not a zero.
+                &measured_hessian_error,
             )?;
             match smoothing_outcome {
                 super::reml::eval::SmoothingCorrectionOutcome::Unavailable { reason, .. } => {
