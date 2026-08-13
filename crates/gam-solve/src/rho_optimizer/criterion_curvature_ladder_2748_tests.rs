@@ -84,9 +84,22 @@ impl OuterObjective for PlantedCriterion {
     fn eval_with_order(
         &mut self,
         theta: &Array1<f64>,
-        _order: OuterEvalOrder,
+        order: OuterEvalOrder,
     ) -> Result<OuterEval, EstimationError> {
-        self.eval(theta)
+        // A planted criterion has closed-form derivatives at every order, so
+        // the value-only lane must agree with the derivative-bearing one at the
+        // same theta. Honouring the order rather than ignoring it is what makes
+        // that agreement a property of the fixture instead of an accident.
+        let full = self.eval(theta)?;
+        Ok(match order {
+            OuterEvalOrder::Value => OuterEval {
+                cost: full.cost,
+                gradient: Array1::<f64>::zeros(theta.len()),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            },
+            OuterEvalOrder::ValueAndGradient | OuterEvalOrder::ValueGradientHessian => full,
+        })
     }
     fn reset(&mut self) {
         // The planted criterion is a pure function of theta: there is no warm
