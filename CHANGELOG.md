@@ -1,5 +1,53 @@
 ## Unreleased
 
+- **"The box does not bind at its bound" is the wrong reading of #2705 group C's
+  residual: the box binds exactly, and the reported coefficient is the truncated
+  posterior MEAN — matching its closed form to 8 significant figures.** On the
+  noise-free line `y = 2 + 5x`, `y ~ linear(x, min=0, max=1)` reports a slope of
+  `0.902139` where `bounded(x, min=0, max=1)` reports `1.000000`, and three tests
+  assert the reported coefficient must sit at the bound.
+
+  The mode IS at the bound. The fit's own `deviance` is `229.6`, and
+  `(5 − 1)²·XᵀX = 16·14.35 = 229.6` exactly — the residual sum of squares at
+  `β = 1`. What is reported is a different estimand: for
+  `X ~ N(β̂_unc, φ̂/XᵀX)` truncated to `[min, max]`, evaluated at the fit's own
+  published `φ̂`,
+
+  ```text
+  bound   sd          closed form     reported        difference
+  1       0.640513    0.902138628     0.902138522     1.1e-7
+  2       0.480384    1.926593682     1.926593656     2.6e-8
+  3       0.320256    2.951062455     2.951062437     1.7e-8
+  4       0.160128    3.975531227     3.975531219     8.7e-9
+  ```
+
+  and the reported VARIANCE agrees too — `covariance_conditional[1,1] =
+  9.163014e-3` against the truncated-normal variance `9.163460e-3`, inside the
+  orthant cubature's own `1e-3` relative certificate. The apparent deficit is not
+  a solver shortfall that happens to be the right size; it is a closed form
+  evaluated correctly, and it is SPEC rule 3 — *"posterior mean must always be
+  the default (never MAP)"* — working as written, as `constrained_posterior`'s
+  module documentation states outright.
+
+  What remains is a question about the ESTIMAND rather than about the active-set
+  solver. `bounded()` publishes `1.000000` on the same data because its latent
+  interval transform `β = min + width·σ(θ)` stretches the boundary to `θ = ±∞`,
+  so ITS posterior concentrates at the bound: the two documented ways to box a
+  coefficient impose different priors and therefore publish different numbers.
+  Deciding which one a user asking for a box should receive is a scope call, and
+  moving either number to clear the bar is the failure mode SPEC warns about — so
+  nothing was moved. What landed is the part that is provable: a regression that
+  pins the reported coefficient to its closed form across four bounds AND on the
+  one-sided half-line (the `nonnegative()` family's `0.007857`), asserts via the
+  deviance identity that the mode really is at the bound, and refuses to pass
+  vacuously if the reported value ever becomes the bound itself.
+
+  One thing the exercise corrected in the test rather than in the engine: the
+  half-line reference first missed by `1.06e-5` relative, because
+  `Φ̄(6.245) = 2.1e-10` formed as `1 − Φ(6.245)` in binary64 keeps only six
+  significant figures. Recomputed in log space the reference and the engine agree
+  to eleven. The engine was on the accurate side throughout.
+
 - **A shape-constrained fit could not certify its own inner mode, for two
   reasons, and both were units errors rather than convergence failures (#2705
   group B).** `smooths::shape_constrained_fit_survives_its_own_inference_2601`
