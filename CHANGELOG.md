@@ -1,5 +1,68 @@
 ## Unreleased
 
+- **The repair, measured end to end: `rel_l2` 0.3395 → 0.1042, and the optimizer
+  finds the signal axis by itself (#2735).** Same data, same seed, the fixture's
+  own generator at `n=3000, K=60, pc_dim=6` — a shape 17× smaller in `n` and 8×
+  smaller in `K` than the one the `0.10` bar is written for:
+
+  ```text
+      route                                  η spread   REML      rel_l2   wall
+      fit_term_collection_forspec (before)      0.140   1736.54   0.3395    3.3 s
+      production entry + per-axis ψ (after)     2.854    819.81   0.1042   1289.5 s
+
+      learned_eta = [+1.8891, -0.0467, +0.1071, -0.0457, -0.9387, -0.9651]
+      learned_length_scale = 2.0225  (seeded at 1.0)
+  ```
+
+  The criterion falls 917 nats and the held-out error falls 3.26×, essentially
+  onto the bar. The largest contrast by a wide margin lands on **axis 0** — the
+  axis carrying the entire `0.4·sin(π x₀)` — while axes 4 and 5, which carry
+  linear coefficients `−0.15` and `+0.10` and no non-linear content at all, are
+  pushed to the far end. Nothing told it which axis mattered.
+
+  Cost, stated rather than buried: 1289.5 s against 3.3 s. The outer problem
+  went from 9 coordinates to 15 and every ψ trial rebuilds the basis.
+
+- **The Duchon operator-penalty ψ derivative differentiated a penalty the design
+  never ships — two pre-existing desyncs, both on the ISOTROPIC route (#2735).**
+
+  Found by running the production entry, which refused with *"spatial kappa
+  optimization is unavailable for one or more eligible spatial terms"* and named
+  no term and no reason. Every `Ok(None)` on that path now logs which term
+  declined and why; the first run with those lines said it outright — the
+  producer emitted 4 active penalty blocks against the realized design's 9.
+
+  1. **The metric.** `duchon_operator_penalty_candidates` builds its collocation
+     operators with `aniso = None`, deliberately, and its own doc says why: *"the
+     anisotropy lives entirely in the curvature (Primary) RKHS Gram … Keeping
+     these low-order stabilizers isotropic makes their η-gradient identically
+     zero."* The derivative read `spec.aniso_log_scales` instead.
+  2. **The split.** When `scale_dims` is on, the value REPLACES the single
+     `Σ‖∇f‖²` with `dim` per-axis `Σ(∂f/∂x_a)²` blocks — one
+     `PenaltySource::OperatorRelevance { axis }` each. The derivative emitted one
+     `OperatorTension` regardless, and the consumer zips positionally, so the
+     tension ψ-derivative was attributed to `OperatorRelevance { 0 }` and the
+     other `dim − 1` relevance blocks had no ψ-derivative at all.
+
+  Fixing (1) simplifies the per-axis work it invalidates: with the operators
+  isotropic their η-gradient is identically zero, so `∂S/∂ψ_a = (1/d)·∂S/∂log κ`
+  and `∂²S/∂ψ_a² = (1/d²)·∂²S/∂log κ²`. Normalization passes that scaling through
+  exactly, so the per-axis bundles are the isotropic one scaled.
+
+  Worth recording, because it bears on a claim in the tree: penalty ARD
+  (`OperatorRelevance`, documented as *"the replacement for brittle kernel-η
+  optimization"*) and metric anisotropy are not substitutes. `λ_a ∫(∂f/∂x_a)²`
+  controls how much the fit VARIES along an axis; it cannot add resolution the
+  kernel does not have. A radial kernel with an isotropic metric cannot wiggle
+  fast along `x₀` and slowly elsewhere at any `λ`. That is the same statement as
+  this fixture's own reference table, where an isotropic 500-centre smoother tops
+  out at `0.2290`.
+
+  **The gate that would have caught it did not exist.** A sum-identity or
+  second-vs-first check cannot see either desync — both compare the derivative
+  against itself. Only differencing the SHIPPED VALUE can, which is why the
+  native half (which had such a test from the start) was right from the start.
+
 - **A metric estimated from the knot cloud cannot see which axis the response
   varies along, so freezing it there is not "standardize the geometry, then
   learn the smoothness" — it is not learning the geometry at all (#2735).**
