@@ -2497,15 +2497,44 @@ impl<'a> RemlState<'a> {
     ///
     /// # Outer-consistency / continuity
     ///
-    /// The threshold-based activation is technically discontinuous in ρ (a
-    /// direction can cross `τ` as ρ moves). That discontinuity is harmless for
-    /// the outer REML by construction: a direction crosses the threshold only
-    /// at `|γ_r| ≈ τ = sqrt((24/5)/n_eff) = O(n^{−1/2})`, so its contribution to
-    /// `Δ_b` is `O(γ_r²) = O(1/n)` — the same order as the Laplace floor error
-    /// that the criterion already carries and below the inner KKT tolerance
-    /// band. The correction value therefore vanishes continuously as a
-    /// direction approaches the threshold, so the spliced objective is
-    /// continuous to leading order and does not bias ρ selection.
+    /// **The activation used to be a predicate evaluated at ρ, and the argument
+    /// that this was harmless is measured false (#2748).** It read:
+    ///
+    /// > a direction crosses the threshold only at `|γ_r| ≈ τ = O(n^{−1/2})`,
+    /// > so its contribution to `Δ_b` is `O(γ_r²) = O(1/n)` — the same order as
+    /// > the Laplace floor error the criterion already carries. The correction
+    /// > value therefore vanishes continuously as a direction approaches the
+    /// > threshold.
+    ///
+    /// `(5/24)γ_r²` is the CUBIC term, and `τ` is defined as the `γ` at which
+    /// exactly that term equals `1/n_eff`. But the quadrature integrates the
+    /// FULL non-Gaussian remainder, so what the predicate switches is the cubic
+    /// term plus every higher one. Measured on `haberman_5yr` at the crossing:
+    /// `1/n_eff = 3.268e-3`, `(5/24)γ² = 3.26e-3` as designed — and
+    /// `Δ_b = 3.1144e-2`, **9.5× the floor the argument bounds it by.** The
+    /// correction does not vanish as a direction approaches `τ`; it arrives at
+    /// full size.
+    ///
+    /// The consequence is not a bias, it is a fit that cannot exist. `V` jumped
+    /// `1.744282e2 → 1.744593e2` — exactly `Δ_b` — between two adjacent
+    /// line-search trial points at `|g| = 2.045e-2`, and no sufficient-decrease
+    /// test can pass across a jump larger than `c₁·α·|gᵀd|` for any `α`. Worse,
+    /// the ON region's minimum SITS on the switching surface (declining the
+    /// correction raises the cost by `Δ_b`, so the descent is drawn to the
+    /// boundary and stays there): `max|γ|` walked `0.141 → 0.126 → 0.125` onto
+    /// `τ = 0.125` and stopped. Eleven `matern` scenarios died of a different
+    /// cause; `haberman_5yr` died of this one.
+    ///
+    /// So the admission is now a property of the MODEL, latched on first
+    /// admission and held for the fit
+    /// ([`RemlState::block_correction_admission`]), and the block is the
+    /// `m` largest-`|γ_r|` positive-curvature directions at each ρ rather than
+    /// a set defined by a threshold crossing. The spliced objective is a
+    /// function of ρ again, and the spliced gradient stays exact: the four
+    /// channels differentiate `Δ_b` at a fixed block, and a ρ-dependent
+    /// admission would contribute a term they do not carry — the same
+    /// objective↔gradient desync this site already declines the splice over for
+    /// ψ coordinates and for the Beta family.
     /// Per-bundle-cached wrapper around [`Self::block_local_quadrature_correction_compute`].
     ///
     /// The block-local correction is a deterministic function of this bundle's
@@ -2680,28 +2709,66 @@ impl<'a> RemlState<'a> {
         // verdict tied to the actual information content.
         let n_eff = c_weights.iter().filter(|&&c| c != 0.0).count() as f64;
         let verdict = laplace_trustworthiness_from_skewness(&directional, n_eff);
-        if !verdict.fallback_required() {
+
+        // The admission this fit already latched, if any (#2748). `0` means the
+        // correction has never been admitted, so the τ predicate still decides
+        // whether it is admitted HERE — which is what makes a fit that never
+        // engages bit-identical to the pre-#2748 fit. Once admitted, the block
+        // dimension is the model's and `τ` no longer switches anything.
+        let latched_block_dim = self
+            .block_correction_admission
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .checked_sub(1);
+        if latched_block_dim.is_none() && !verdict.fallback_required() {
             return Ok(zero());
         }
 
-        // Build the block subspace V_b from the flagged H-eigenvectors.
+        // Build the block subspace V_b. Under a latched admission the block is
+        // the `m` largest-|γ_r| positive-curvature directions, NOT the set that
+        // happens to clear `τ` at this ρ: a set defined by a threshold crossing
+        // changes cardinality as ρ moves, and every change is a jump of a whole
+        // direction's contribution to `Δ_b`. Ranking is the continuous
+        // extension of the same rule — it agrees with it exactly wherever the
+        // flagged set has the latched size, which is every ρ the pre-#2748 fit
+        // was already stable on.
         let sym_h = (h_total + &h_total.t()) * 0.5;
         let (evals, evecs) = sym_h.eigh(Side::Lower).map_err(|e| {
             EstimationError::InvalidInput(format!(
                 "#784 block-local fallback eigendecomposition failed: {e}"
             ))
         })?;
-        let mut block_cols: Vec<usize> = Vec::new();
-        for &r in &verdict.untrustworthy_directions {
-            if r < evals.len() && evals[r] > 0.0 {
-                block_cols.push(r);
+        let mut admissible: Vec<usize> = (0..evals.len().min(directional.len()))
+            .filter(|&r| evals[r] > 0.0 && directional[r].is_finite())
+            .collect();
+        let block_cols: Vec<usize> = match latched_block_dim {
+            Some(m) => {
+                // Descending |γ_r|, ties broken by index so the selection is a
+                // deterministic function of (H, γ) and not of sort stability.
+                admissible.sort_by(|&a, &b| {
+                    directional[b]
+                        .abs()
+                        .partial_cmp(&directional[a].abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(&b))
+                });
+                admissible.truncate(m);
+                admissible.sort_unstable();
+                admissible
             }
-        }
+            None => verdict
+                .untrustworthy_directions
+                .iter()
+                .copied()
+                .filter(|&r| r < evals.len() && evals[r] > 0.0)
+                .collect(),
+        };
         if block_cols.is_empty() {
             return Ok(zero());
         }
         let m = block_cols.len();
         if m > gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM {
+            // Only reachable before the latch: a latched `m` is one that was
+            // already admitted, and admission required clearing this cap.
             log::info!(
                 "[#784] block-local correction declined: {m} curvature-heavy directions exceed \
                  the deterministic Gauss-Hermite product cap {}",
@@ -2822,19 +2889,51 @@ impl<'a> RemlState<'a> {
         // correction itself and the O(1/n_eff) Laplace error it is meant to
         // remove. This makes admission a deterministic accuracy certificate,
         // not a Monte-Carlo efficiency heuristic.
+        //
+        // It decides ADMISSION and nothing else (#2748). Once the fit has
+        // latched an admission, this test is reported and no longer switches:
+        // a rule that drops the whole `Δ_b` whenever the paired rules disagree
+        // is a second predicate on ρ, and it re-introduces exactly the jump the
+        // latch exists to remove — measured toggling 143 times against 235
+        // admissions inside ONE `haberman_5yr` fit. A quadrature error that
+        // varies with ρ perturbs the criterion CONTINUOUSLY, which the outer
+        // loop's noise-floor machinery is built for; a criterion that drops a
+        // 3e-2 term and picks it up again is not a function.
         let resolution_target = abs_value.min(laplace_floor);
-        if !(quadrature.quadrature_error < resolution_target) {
+        let resolved = quadrature.quadrature_error < resolution_target;
+        if !resolved {
             log::info!(
-                "[#784] block-local correction declined: paired Gauss-Hermite error \
+                "[#784] block-local correction {}: paired Gauss-Hermite error \
                  {:.4e} does not resolve min(|Δ_b|, 1/n_eff)={resolution_target:.4e} \
                  (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, nodes={}, 1/n_eff={:.3e})",
+                if latched_block_dim.is_some() {
+                    "spliced UNRESOLVED (admission already latched, #2748)"
+                } else {
+                    "declined"
+                },
                 quadrature.quadrature_error,
                 verdict.max_abs_skewness,
                 verdict.threshold,
                 quadrature.node_count,
                 laplace_floor,
             );
-            return Ok(zero());
+            if latched_block_dim.is_none() {
+                return Ok(zero());
+            }
+        }
+
+        // Latch the admission on the first evaluation that reaches here with
+        // every gate cleared. Everything below this point splices, so this is
+        // the exact boundary of "the correction is part of this model".
+        if latched_block_dim.is_none() {
+            self.block_correction_admission
+                .store(m + 1, std::sync::atomic::Ordering::Relaxed);
+            log::info!(
+                "[#784] block-local correction ADMITTED for this fit: block dimension m={m} is \
+                 now the model's, and the tau={:.3} activation no longer switches the criterion \
+                 on and off along the outer search (#2748)",
+                verdict.threshold,
+            );
         }
 
         log::info!(
@@ -4487,6 +4586,7 @@ impl<'a> RemlState<'a> {
             warm_start_rho: RwLock::new(None),
             prev_warm_start_beta: RwLock::new(None),
             prev_warm_start_rho: RwLock::new(None),
+            block_correction_admission: AtomicUsize::new(0),
             ift_quality_runtime: std::sync::Mutex::new(Default::default()),
             hypergradient_runtime: std::sync::Mutex::new(None),
             ift_mode_response_slot: std::sync::Mutex::new(None),

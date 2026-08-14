@@ -64,6 +64,12 @@ fn zscore(features: &mut [[f64; 3]]) {
 fn main() {
     init_parallelism();
     let args: Vec<String> = std::env::args().collect();
+    // Arg 4 is the log level; the repo's own progress logger owns verbosity
+    // (examples skip dev-deps, so `env_logger` is not available here).
+    gam_solve::progress_log::init_logging_at(
+        gam_solve::progress_log::parse_level_directive(args.get(4).map_or("warn", String::as_str))
+            .unwrap_or(log::LevelFilter::Warn),
+    );
     let double_penalty = args.get(1).map(|a| a != "false").unwrap_or(true);
     // Arg 2 is either a smooth COUNT (the first `n` features) or an explicit
     // comma-separated feature list, so a two-term isolation does not need a
