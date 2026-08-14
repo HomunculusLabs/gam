@@ -2541,7 +2541,10 @@ fn adjudicate_negative_curvature(
     } else {
         roundoff_floor
     };
-    let mut best: Option<(f64, Array1<f64>)> = None;
+    // `(cost, point, sign, alpha)`. The step that produced the point is carried
+    // because the ladder ANSWERS a different question from the one the reseed
+    // asks (#2612): see [`expand_confirmed_descent`].
+    let mut best: Option<(f64, Array1<f64>, f64, f64)> = None;
     // #2665 bookkeeping: "no descending trial", "every trial clamped back onto
     // rho" and "every trial evaluated non-finite" are three different failures
     // that all leave `best == None`. Count them so the declined exit below says
@@ -2582,7 +2585,7 @@ fn adjudicate_negative_curvature(
                     }
                     best_seen_cost = best_seen_cost.min(cost);
                     if cost < baseline_cost - strict_floor {
-                        best = Some((cost, trial));
+                        best = Some((cost, trial, sign, alpha));
                         // The ladder descends in α and the reseed only has to
                         // LEAVE the ridge — ARC refines from wherever it lands
                         // — so the first (largest) descending step is the
@@ -2645,15 +2648,26 @@ fn adjudicate_negative_curvature(
             None
         }
     };
-    if let Some((cost, point)) = best {
+    if let Some((cost, _, sign, alpha)) = best {
+        let descent = expand_confirmed_descent(
+            obj,
+            rho,
+            &direction,
+            sign,
+            alpha,
+            cost,
+            strict_floor,
+            bounds,
+            context,
+        );
         log::info!(
             "[CERTIFICATE] {context}: interior strict saddle (λ_min={lambda_min:.3e} < 0, |Pg| \
              within band); minting a negative-curvature escape reseed (objective {:.6e} → \
              {:.6e}) for one retry (#2357)",
             baseline_cost,
-            cost,
+            descent.cost,
         );
-        return SaddleAdjudication::Descended(point);
+        return SaddleAdjudication::Descended(descent.point);
     }
     let smallest_step = escape_step_scales
         .last()
@@ -2778,46 +2792,17 @@ fn adjudicate_negative_curvature(
         descent.map(|(sign, alpha, cost)| (sign, alpha, cost, measured_floor, baseline))
     });
     if let Some((sign, alpha, cost, measured_floor, baseline)) = measured_escape {
-        let mut point = rho.clone();
-        for i in 0..n {
-            point[i] += sign * alpha * direction[i];
-        }
-        let point = project_to_bounds(&point, Some(bounds));
-        // PROBE (#2612, temporary): the escape ladder only ever steps DOWN from
-        // alpha=1, so the reseed cannot travel more than one e-fold in log-lambda.
-        // Measure how far the confirmed descent actually runs before deciding what
-        // the escape step should be.
-        {
-            let mut sweep: Vec<String> = Vec::new();
-            for &(s, a, c) in &evaluations {
-                sweep.push(format!("(ladder sign={s:+.0} a={a:.4e} cost={c:.12e})"));
-            }
-            let mut a = alpha;
-            for _ in 0..12 {
-                a *= 2.0;
-                let mut trial = rho.clone();
-                for i in 0..n {
-                    trial[i] += sign * a * direction[i];
-                }
-                let projected = project_to_bounds(&trial, Some(bounds));
-                let clamped = !outer_theta_bitwise_eq(&projected, &trial);
-                match obj.eval_cost(&projected) {
-                    Ok(c) => sweep.push(format!(
-                        "(expand sign={sign:+.0} a={a:.4e} cost={c:.12e} clamped={clamped})"
-                    )),
-                    Err(_) => sweep.push(format!("(expand sign={sign:+.0} a={a:.4e} EVAL-FAILED)")),
-                }
-                if clamped {
-                    break;
-                }
-            }
-            let _ = obj.eval_cost(rho);
-            log::info!(
-                "[PROBE-2612-RIDGE] {context}: baseline={baseline:.12e} chosen(sign={sign:+.0} \
-                 alpha={alpha:.4e} cost={cost:.12e}) direction={direction:?} :: {}",
-                sweep.join(" ")
-            );
-        }
+        let descent = expand_confirmed_descent(
+            obj,
+            rho,
+            &direction,
+            sign,
+            alpha,
+            cost,
+            measured_floor,
+            bounds,
+            context,
+        );
         let measured = criterion_curvature
             .as_ref()
             .expect("a measured escape implies a determined ladder");
@@ -2828,7 +2813,7 @@ fn adjudicate_negative_curvature(
             measured.ladder.fourth_derivative,
             baseline - cost,
         );
-        return SaddleAdjudication::Descended(point);
+        return SaddleAdjudication::Descended(descent.point);
     }
     match criterion_curvature.as_ref() {
         Some(measured) => log::warn!(
@@ -2880,6 +2865,231 @@ fn adjudicate_negative_curvature(
         best_seen_cost,
         criterion_curvature,
     }
+}
+
+/// The escape point a CONFIRMED negative-curvature descent actually supports
+/// (#2612), after the step has been extended past the falsifiability ladder.
+#[derive(Clone, Debug)]
+struct ConfirmedDescent {
+    /// Reseed point, already projected into the box.
+    point: Array1<f64>,
+    /// Step along `sign · direction` the point sits at.
+    alpha: f64,
+    /// Objective there, as measured in the expansion's own instrument state.
+    cost: f64,
+    /// Doublings evaluated. `0` means the ladder's own step stood — either
+    /// nothing beyond it improved, or it was already the box intersection.
+    expansions: usize,
+    /// Whether the accepted step IS the box intersection along the ray, i.e.
+    /// the descent ran to the constraint face rather than stopping inside it.
+    on_box_face: bool,
+}
+
+/// The largest `α ≥ 0` for which `ρ + α·d` stays inside the box, exactly.
+///
+/// `f64::INFINITY` when no coordinate the ray moves is bounded in the direction
+/// it moves. Coordinates with `d_i == 0` never bind — the ray does not move
+/// them — which is what lets the railed block (where `direction` is exactly
+/// zero by construction) sit at its bounds without capping the step at `0`.
+fn max_feasible_step_along(
+    rho: &Array1<f64>,
+    ray: &Array1<f64>,
+    bounds: &(Array1<f64>, Array1<f64>),
+) -> f64 {
+    let (lower, upper) = bounds;
+    let mut alpha = f64::INFINITY;
+    for i in 0..rho.len() {
+        let step = ray[i];
+        if step > 0.0 {
+            if let Some(&limit) = upper.get(i) {
+                alpha = alpha.min((limit - rho[i]) / step);
+            }
+        } else if step < 0.0 {
+            if let Some(&limit) = lower.get(i) {
+                alpha = alpha.min((limit - rho[i]) / step);
+            }
+        }
+    }
+    alpha.max(0.0)
+}
+
+/// Extend a confirmed negative-curvature descent to the step the criterion
+/// actually supports, instead of the step the falsifiability ladder happened to
+/// stop at (#2612).
+///
+/// # The two questions one ladder was answering
+///
+/// [`adjudicate_negative_curvature`] builds a single step ladder `α = 1, ½, ¼,
+/// …` down to `α_min = sqrt(2·objective_resolution/|λ_min|)` and uses it twice.
+/// As a falsifier it is exactly right: the smallest step at which the claim
+/// `½|λ_min|α²` still predicts something the criterion can represent is the end
+/// of the range in which the claim could be refuted, so probing DOWN from one
+/// e-fold in log-λ is the whole falsifiable range and finding no descent in it
+/// contradicts the matrix.
+///
+/// As a step rule it is wrong, and wrong in a direction the mathematics names.
+/// Along a direction of negative curvature the quadratic model
+///
+/// ```text
+///     V(ρ + αv) − V(ρ) ≈ α(g·v) + ½λ_min α²,    λ_min < 0
+/// ```
+///
+/// decreases WITHOUT BOUND in `α` once the sign is chosen so the linear term is
+/// non-positive. A model with no interior minimiser cannot supply a step length;
+/// the step has to come from the objective itself and from the feasible box —
+/// which is the standard treatment of a negative-curvature direction and is
+/// exactly what a trust region does when its solution lands on the boundary.
+/// Capping the reseed at the falsifier's largest rung silently asserts the
+/// opposite: that one e-fold is as far as any such descent ever runs.
+///
+/// # What it cost, measured
+///
+/// On the `#2612` banded quasi-separated fixture the escape direction is `−e₁`
+/// to six digits and the criterion falls monotonically along it all the way to
+/// the box wall:
+///
+/// ```text
+///   baseline        1.786314898942e1
+///   ladder  α=1     1.786314894043e1
+///   ladder  α=½     1.786314883184e1   <- the ladder's pick, decrease 1.6e-7
+///   α=1             1.786314862766e1
+///   α=2             1.786314814710e1
+///   α=4             1.786314708132e1
+///   α=8             1.786314488769e1   <- box intersection, decrease 4.1e-6
+/// ```
+///
+/// so the wall step is worth **26×** the ladder's, and the BFGS resume seeded at
+/// the ladder's point makes no progress at all (reseed and next refused point
+/// bit-identical), leaving the escape as the only thing moving ρ — one e-fold
+/// per escape, against `OUTER_SADDLE_ESCAPE_BUDGET = 3`, on a ridge six e-folds
+/// long. The fit refused.
+///
+/// # The rule, and why it needs no constant
+///
+/// Double the confirmed step while the criterion strictly improves, clamped to
+/// the exact box intersection `max_feasible_step_along`, and keep the best point
+/// seen. Termination is structural: the box intersection is finite whenever the
+/// ray moves any bounded coordinate, doubling reaches it in `⌈log₂(α_box/α)⌉`
+/// steps, and any non-improving trial stops the sweep immediately. The accepted
+/// point is always the lowest measured, so it is never worse than the ladder's.
+///
+/// # One evaluation is spent making the comparison honest
+///
+/// The incumbent's cost came from the falsifiability ladder, which ran before
+/// the symmetric extension and before the checkpoint restore, so it was measured
+/// in a different profiled-inner state. Measured on the same fixture, the SAME
+/// point (`sign = −1, α = 1`) evaluated in the ladder and again afterwards
+/// differs by `3.1e-7` — larger than the descent being adjudicated — because the
+/// profiled criterion carries warm-start hysteresis well above the `ε_f` the
+/// symmetric ladder measures on itself. Re-evaluating the incumbent here puts
+/// the whole comparison chain in one instrument state, for the same reason
+/// `restored_baseline` is re-measured rather than reused.
+#[allow(clippy::too_many_arguments)]
+fn expand_confirmed_descent(
+    obj: &mut dyn OuterObjective,
+    rho: &Array1<f64>,
+    direction: &Array1<f64>,
+    sign: f64,
+    alpha: f64,
+    cost: f64,
+    strict_floor: f64,
+    bounds: &(Array1<f64>, Array1<f64>),
+    context: &str,
+) -> ConfirmedDescent {
+    /// Runaway bound on the doubling sweep. Not a modelling choice — the sweep's
+    /// END is the box intersection — but a bound on what a pathologically small
+    /// confirmed step could ask for. Binding it is logged rather than silently
+    /// truncating the range the escape claims to have searched.
+    const MAX_EXPANSIONS: usize = 64;
+
+    let n = rho.len();
+    let ray = direction.mapv(|value| sign * value);
+    let point_at = |alpha: f64| -> Array1<f64> {
+        let mut point = rho.clone();
+        for i in 0..n {
+            point[i] += alpha * ray[i];
+        }
+        project_to_bounds(&point, Some(bounds))
+    };
+    let alpha_box = max_feasible_step_along(rho, &ray, bounds);
+    let mut best = ConfirmedDescent {
+        point: point_at(alpha),
+        alpha,
+        cost,
+        expansions: 0,
+        on_box_face: alpha_box.is_finite() && alpha >= alpha_box,
+    };
+    if !(alpha.is_finite() && alpha > 0.0) || !strict_floor.is_finite() || strict_floor < 0.0 {
+        return best;
+    }
+    // The incumbent, re-measured in THIS instrument state so every comparison
+    // below is between values the same profiled inner solve produced.
+    if let Ok(reference) = obj.eval_cost(&best.point)
+        && reference.is_finite()
+    {
+        best.cost = reference;
+    }
+    let mut expansions = 0usize;
+    let mut truncated = false;
+    let mut current = alpha;
+    while current < alpha_box {
+        if expansions >= MAX_EXPANSIONS {
+            truncated = true;
+            break;
+        }
+        let next = (2.0 * current).min(alpha_box);
+        if !(next > current) || !next.is_finite() {
+            break;
+        }
+        expansions += 1;
+        let trial = point_at(next);
+        // A doubling that lands back on ρ (the whole ray clamped away) probes
+        // nothing and cannot be a reseed.
+        if outer_theta_bitwise_eq(&trial, rho) {
+            break;
+        }
+        match obj.eval_cost(&trial) {
+            Ok(trial_cost) if trial_cost.is_finite() && trial_cost < best.cost - strict_floor => {
+                best = ConfirmedDescent {
+                    point: trial,
+                    alpha: next,
+                    cost: trial_cost,
+                    expansions,
+                    on_box_face: next >= alpha_box,
+                };
+                current = next;
+            }
+            _ => break,
+        }
+    }
+    if best.expansions > 0 || truncated {
+        log::info!(
+            "[CERTIFICATE] {context}: the confirmed negative-curvature descent was extended past \
+             the falsifiability ladder's step alpha={alpha:.6e} to alpha={:.6e} over {} \
+             doubling(s) ({} evaluated), objective {:.9e} -> {:.9e}; box intersection along the \
+             ray is alpha_box={alpha_box:.6e} and the accepted step {} it (#2612).{}",
+            best.alpha,
+            best.expansions,
+            expansions,
+            cost,
+            best.cost,
+            if best.on_box_face { "IS" } else { "is inside" },
+            if truncated {
+                format!(" -- TRUNCATED at the {MAX_EXPANSIONS}-doubling budget, so the ray was not searched to the box")
+            } else {
+                String::new()
+            },
+        );
+    }
+    // Same contract as the adjudication's own checkpoint restore: leave the
+    // profiled inner state at ρ, not at the last probe.
+    if let Err(err) = obj.eval_cost(rho) {
+        log::warn!(
+            "[CERTIFICATE] {context}: failed to restore the objective to the checkpoint after \
+             extending the negative-curvature descent: {err}"
+        );
+    }
+    best
 }
 
 /// Extend an adjudication's symmetric probe ladder until it can determine a
