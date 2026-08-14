@@ -100,6 +100,55 @@ fn native_target(term: &SaeManifoldTerm) -> Array2<f64> {
     phi.dot(decoder)
 }
 
+/// H·v under the joint [t (per-row); β] packing, from the arrow blocks:
+/// row i: (H_tt δt)_i + H_tβ δβ ; border: Σ_i H_βt δt_i + H_ββ δβ.
+/// If this and the solver agree (‖HΔ+g‖ small), the packing is consistent.
+fn joint_h_matvec(sys: &ArrowSchurSystem, v: ArrayView1<'_, f64>) -> Array1<f64> {
+    let border_dim = sys.gb.len();
+    let coord_dims: Vec<usize> = sys.rows.iter().map(|r| r.gt.len()).collect();
+    let total_t: usize = coord_dims.iter().sum();
+    assert_eq!(v.len(), total_t + border_dim, "joint vector length");
+    let mut out = Array1::<f64>::zeros(total_t + border_dim);
+    let mut off = 0usize;
+    for (row_idx, row) in sys.rows.iter().enumerate() {
+        let d = coord_dims[row_idx];
+        let dt = v.slice(s![off..off + d]);
+        // (H_tt δt)_i
+        let mut htt_dt = row.htt.dot(&dt);
+        // + H_tβ δβ
+        if !row.htbeta.is_empty() && border_dim > 0 {
+            let db = v.slice(s![total_t..]);
+            htt_dt.scaled_add(1.0, &row.htbeta.dot(&db));
+        }
+        for (i, &val) in htt_dt.iter().enumerate() {
+            out[off + i] = val;
+        }
+        off += d;
+    }
+    // border: Σ_i H_βt δt_i + H_ββ δβ
+    if border_dim > 0 {
+        let db = v.slice(s![total_t..]);
+        let mut hbb_db = if sys.hbb.is_empty() {
+            Array1::zeros(border_dim)
+        } else {
+            sys.hbb.dot(&db)
+        };
+        let mut off2 = 0usize;
+        for (row_idx, row) in sys.rows.iter().enumerate() {
+            let d = coord_dims[row_idx];
+            if !row.htbeta.is_empty() {
+                let dt = v.slice(s![off2..off2 + d]);
+                hbb_db.scaled_add(1.0, &(row.htbeta.t().dot(&dt)));
+            }
+            off2 += d;
+        }
+        for (i, &val) in hbb_db.iter().enumerate() {
+            out[total_t + i] = val;
+        }
+    }
+    out
+}
+
 #[test]
 #[ignore = "manual diagnostic; run with --ignored --nocapture"]
 fn step_projection_at_poincare_circle_stall_2720() {
@@ -252,6 +301,34 @@ fn step_projection_at_poincare_circle_stall_2720() {
             for (i, &v) in delta_beta.iter().enumerate() {
                 delta[coord_dim * n_rows + i] = v;
             }
+
+            // ==== ORACLE P1 checks: joint-packed-layout consistency ====
+            // (a) Newton residual ‖HΔ+g‖/‖g‖ ≈ 0 validates that H, g, and Δ
+            //     share one ordering — layout, gradient, and step in one eq.
+            let h_delta = joint_h_matvec(&sys, delta.view());
+            let residual = &h_delta + &grad;
+            let res_rel = residual.dot(&residual).sqrt() / grad.dot(&grad).sqrt();
+            eprintln!(
+                "[step-probe] poincare/circle Newton residual ‖HΔ+g‖/‖g‖ = {res_rel:.3e} \
+                 (validates joint packing of H, g, Δ)"
+            );
+            // (b) Gauge-basis orthonormality QᵀQ ≈ I; without it ‖Qᵀg‖ is
+            //     not a projection norm.
+            for (i, vi) in basis.iter().enumerate() {
+                for (j, vj) in basis.iter().enumerate().skip(i) {
+                    let gram = vi.dot(vj);
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (gram - want).abs() < 1.0e-10,
+                        "[step-probe] gauge Gram QᵀQ[{i}][{j}]={gram:.3e} ≠ {want}"
+                    );
+                }
+            }
+            eprintln!(
+                "[step-probe] gauge Gram QᵀQ ≈ I verified ({} dirs)",
+                basis.len()
+            );
+
             let d_norm = delta.dot(&delta).sqrt();
             let mut d_in_sq = 0.0f64;
             for v in basis.iter() {
@@ -259,22 +336,28 @@ fn step_projection_at_poincare_circle_stall_2720() {
             }
             let d_in_norm = d_in_sq.sqrt();
             let gd = grad.dot(&delta);
+            let cos_theta = if d_norm * g_norm > 0.0 {
+                gd / (d_norm * g_norm)
+            } else {
+                f64::NAN
+            };
+            let d_in_share = if d_norm > 0.0 {
+                d_in_norm / d_norm
+            } else {
+                f64::NAN
+            };
             eprintln!(
                 "[step-probe] poincare/circle step: ‖Δ‖={d_norm:.6e}, in-orbit \
-                 ‖QᵀΔ‖={d_in_norm:.6e} ({:.6} of ‖Δ‖), gᵀΔ={gd:.6e}",
-                if d_norm > 0.0 {
-                    d_in_norm / d_norm
-                } else {
-                    f64::NAN
-                }
+                 ‖QᵀΔ‖={d_in_norm:.6e} ({d_in_share:.6} of ‖Δ‖), gᵀΔ={gd:.6e}, \
+                 cos θ={cos_theta:.6}"
             );
-            if d_norm > 0.0 && d_in_norm / d_norm < 1.0e-8 {
+            if d_in_share < 1.0e-8 {
                 eprintln!(
                     "[step-probe] VERDICT: step is gauge-PROJECTED at the stall — the original mechanism claim holds HERE"
                 );
             } else {
                 eprintln!(
-                    "[step-probe] VERDICT: step carries in-orbit motion at the stall; projection claim does not hold here either"
+                    "[step-probe] VERDICT: step carries in-orbit motion ({d_in_share:.4}) at the stall; projection claim does not hold here either"
                 );
             }
         }
