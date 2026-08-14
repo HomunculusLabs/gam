@@ -43,28 +43,15 @@
 use super::*;
 
 /// One seeded term of the requested kind on the Fixture-B circle cloud
-/// (`tests_gauge_frame_roundtrip_2720`): n=42, p=48, same LCG.
+/// (`planted_circle_cloud`, re-exported from tests_gauge_frame_roundtrip_2720:
+/// n=42, p=48, the ACTUAL #2253/#2234 LCG). An earlier revision of this file
+/// re-implemented the fixture with a different generator and sinusoid basis
+/// vectors while claiming "same LCG" — that was wrong, and every number from
+/// the self-consistent-target probe on that revision belongs to a different
+/// dataset than the other probes. All probes now share the one fixture.
 fn seeded_circle_term(kind: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>) {
-    let n = 42usize;
-    let p = 48usize;
-    let mut state = 0x2468_ace0_1357_9bdfu64;
-    let mut next_unit = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        (state >> 11) as f64 / (1u64 << 53) as f64
-    };
-    let b0: Vec<f64> = (0..p).map(|j| (j as f64 * 0.7).sin() * 0.9).collect();
-    let b1: Vec<f64> = (0..p).map(|j| (j as f64 * 1.3 + 0.9).cos() * 0.9).collect();
-    let two_pi = std::f64::consts::TAU;
-    let mut z = Array2::<f64>::zeros((n, p));
-    for i in 0..n {
-        let theta = two_pi * next_unit();
-        for j in 0..p {
-            let noise = 0.01 * (2.0 * next_unit() - 1.0);
-            z[[i, j]] = theta.cos() * b0[j] + theta.sin() * b1[j] + noise;
-        }
-    }
+    use crate::manifold::tests_gauge_frame_roundtrip_2720::planted_circle_cloud;
+    let z = planted_circle_cloud();
     let minimal = build_sae_minimal_seed(SaeMinimalSeedRequest {
         target: z.view(),
         atom_basis: vec![kind.to_string()],
