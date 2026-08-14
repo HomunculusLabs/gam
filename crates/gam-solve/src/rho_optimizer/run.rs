@@ -2871,7 +2871,6 @@ fn adjudicate_negative_curvature(
     }
 }
 
-/// The escape point a CONFIRMED negative-curvature descent actually supports
 /// The falsifiability ladder's own confirmed step, as handed to the expansion.
 ///
 /// These four travel together — they are one measurement (a signed step along
@@ -2894,6 +2893,7 @@ struct LadderConfirmedStep {
     strict_floor: f64,
 }
 
+/// The escape point a CONFIRMED negative-curvature descent actually supports
 /// (#2612), after the step has been extended past the falsifiability ladder.
 #[derive(Clone, Debug)]
 struct ConfirmedDescent {
@@ -3048,6 +3048,12 @@ fn expand_confirmed_descent(
         on_box_face: alpha_box.is_finite() && alpha >= alpha_box,
     };
     if !(alpha.is_finite() && alpha > 0.0) || !strict_floor.is_finite() || strict_floor < 0.0 {
+        return best;
+    }
+    // Nothing to extend into: the confirmed step already reaches (or was clamped
+    // at) the box intersection, so the ray has no room left. Returning before the
+    // re-measure below keeps this case exactly as cheap as it was.
+    if !(alpha < alpha_box) {
         return best;
     }
     // The incumbent, re-measured in THIS instrument state so every comparison
