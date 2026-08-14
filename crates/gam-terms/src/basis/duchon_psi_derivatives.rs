@@ -178,6 +178,127 @@ pub(crate) fn scaled_log_kappa_derivatives(
     (first, second)
 }
 
+/// The outer coordinate a Duchon ψ-derivative differentiates (gam#2735).
+///
+/// The anisotropic Duchon metric is `u² = Σ_a exp(2 ψ_a) h_a²`, and the ψ
+/// coordinates the outer REML solve owns are the **raw** `ψ_a`: each one
+/// decodes simultaneously into the global scale `κ = exp(mean ψ)` and the
+/// centered contrast `η_a = ψ_a − mean ψ`, so
+///
+/// ```text
+///     ∂ log κ / ∂ψ_a = 1/d           ∂η_b / ∂ψ_a = δ_ab − 1/d
+/// ```
+///
+/// `Global` is the all-ones direction of that frame — moving every `ψ_a` by the
+/// same amount leaves every contrast fixed and multiplies `κ`. That is not a
+/// convention, it is an identity, and it is what
+/// [`duchon_axis_log_kappa_derivatives`] reproduces by construction:
+/// summing its first derivative over `a`, and its second over `(a, b)`, gives
+/// [`scaled_log_kappa_derivatives`] exactly. The isotropic route is therefore a
+/// contraction of the anisotropic one rather than a parallel derivation that
+/// could drift from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DuchonPsiDirection {
+    /// `ψ = log κ`. Every contrast — and therefore every metric weight
+    /// `w_a = exp(2η_a)` appearing explicitly in the operator-penalty blocks —
+    /// is constant along this direction.
+    Global,
+    /// The raw per-axis coordinate `ψ_a`.
+    Axis(usize),
+}
+
+impl DuchonPsiDirection {
+    /// `∂η_b/∂ψ_direction` — the rate at which the centered contrast on axis
+    /// `b` moves. Zero for [`DuchonPsiDirection::Global`] by definition.
+    #[inline(always)]
+    pub(crate) fn contrast_rate(self, b: usize, dim: usize) -> f64 {
+        match self {
+            DuchonPsiDirection::Global => 0.0,
+            DuchonPsiDirection::Axis(a) => {
+                f64::from(a == b) - 1.0 / dim.max(1) as f64
+            }
+        }
+    }
+
+    /// `∂w_b/∂ψ_direction` and `∂²w_b/∂ψ_direction²` for the metric weight
+    /// `w_b = exp(2 η_b)`, which appears as an explicit factor (not only inside
+    /// `r`) wherever a Duchon operator block differentiates the kernel in the
+    /// data frame: `∂φ/∂x_b = q · w_b · h_b`.
+    #[inline(always)]
+    pub(crate) fn metric_weight_jet(self, weight: f64, b: usize, dim: usize) -> (f64, f64) {
+        let rate = self.contrast_rate(b, dim);
+        (2.0 * rate * weight, 4.0 * rate * rate * weight)
+    }
+}
+
+/// Per-axis ψ derivatives of a radial scalar `F(r; κ) = κ^E G(κ r)`.
+///
+/// `axis_share[a] = s_a / r²` where `s_a = exp(2 η_a) h_a²` is the per-axis
+/// weighted squared displacement produced by `aniso_distance_and_components`;
+/// the shares are non-negative and sum to one. Writing
+///
+/// ```text
+///     A = r F_r                 B = r² F_rr − r F_r                 c = E/d
+/// ```
+///
+/// the exact chain rule through `(κ, η)` collapses to
+///
+/// ```text
+///     ∂F/∂ψ_a        = c F + A σ_a
+///     ∂²F/∂ψ_a∂ψ_b   = B σ_a σ_b + c A (σ_a + σ_b) + 2 A σ_a δ_ab + c² F
+/// ```
+///
+/// `A` and `B` are exactly the two combinations [`scaled_log_kappa_derivatives`]
+/// already forms, so the per-axis jet needs no radial quantity the isotropic
+/// jet does not, and — crucially — it is finite at collision: `σ` is bounded by
+/// 1 and both `A` and `B` vanish with `r`, so no `1/r` ever appears.
+///
+/// Contracting over the all-ones direction returns the isotropic jet:
+/// `Σ_a first = E F + r F_r` and `Σ_{a,b} second = E² F + (2E+1) r F_r + r² F_rr`.
+#[inline(always)]
+pub(crate) fn duchon_axis_log_kappa_derivatives(
+    value: f64,
+    radial_first: f64,
+    radialsecond: f64,
+    exponent: f64,
+    r: f64,
+    dim: usize,
+    axis_share: f64,
+    second_axis_share: f64,
+    same_axis: bool,
+) -> (f64, f64) {
+    let a_term = r * radial_first;
+    let b_term = r * r * radialsecond - a_term;
+    let c = exponent / dim.max(1) as f64;
+    let first = c * value + a_term * axis_share;
+    let second = b_term * axis_share * second_axis_share
+        + c * a_term * (axis_share + second_axis_share)
+        + if same_axis {
+            2.0 * a_term * axis_share
+        } else {
+            0.0
+        }
+        + c * c * value;
+    (first, second)
+}
+
+/// Normalized per-axis shares `σ_a = s_a / r²` of the anisotropic squared
+/// distance, with the symmetric convention `σ_a = 1/d` at collision.
+///
+/// At `r = 0` both `A = r F_r` and `B = r² F_rr − r F_r` vanish for every
+/// radial scalar the Duchon jets produce, so the share is multiplied by zero
+/// and the convention only has to keep `Σ_a σ_a = 1` — which is what makes the
+/// isotropic contraction identity hold at collision too.
+#[inline(always)]
+pub(crate) fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
+    let d = components.len().max(1);
+    let r2 = r * r;
+    if !(r2 > 0.0) || !r2.is_finite() {
+        return vec![1.0 / d as f64; components.len()];
+    }
+    components.iter().map(|&s| s / r2).collect()
+}
+
 #[inline(always)]
 pub(crate) fn duchon_q_psi_triplet_from_jets(
     jets: &DuchonRadialJets,
