@@ -73,6 +73,7 @@ fn bspline_spec() -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,

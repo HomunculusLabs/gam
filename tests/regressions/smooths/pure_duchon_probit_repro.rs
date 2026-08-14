@@ -61,6 +61,7 @@ fn linear(name: &str, feature_col: usize) -> LinearTermSpec {
 /// Pure scale-free Duchon over PC1,PC2,PC3 (data columns 1,2,3).
 fn duchon_pc3(name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (1..4).collect(),
@@ -86,6 +87,7 @@ fn duchon_pc3(name: &str) -> SmoothTermSpec {
 /// Matérn over PC1,PC2,PC3 — the confirmed FATAL case (#531 update comment).
 fn matern_pc3(name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: (1..4).collect(),

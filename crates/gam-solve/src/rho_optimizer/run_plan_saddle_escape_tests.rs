@@ -729,7 +729,76 @@ fn escape_reaches_a_descent_below_the_old_fixed_ladder_2612() {
 // number the criterion cannot distinguish from zero. The claim is unfalsifiable
 // over its whole derived range, the verdict is withdrawn, and the point
 // certifies.
+/// The criterion's OWN evaluation error, as a deterministic function of `ρ`
+/// (#2748).
+///
+/// "The criterion's resolution" has to be a property of the CRITERION. The
+/// smooth well below is a polynomial, exact to `~1e-24` in binary64, so its
+/// `2.976e-8` decrease is not merely representable there — it is EXACT, and
+/// declaring it unresolvable was reading the optimizer's DECLARED tolerance as
+/// if it were the criterion's error. That is the borrowed-`ε_f` defect #2690
+/// exists to stop, and the ladder that now runs inside the adjudication
+/// measures the real thing.
+///
+/// So the fixture supplies one. A REML criterion's value carries a component
+/// that does not vary smoothly with `ρ`: the inner solve stops on its own
+/// tolerance and a warm start from a neighbouring point lands on a slightly
+/// different mode. This models that with a deterministic term — same `ρ`, same
+/// value, in every lane and on every host, no RNG — of amplitude
+/// [`WELL_EVALUATION_ERROR`], varying far faster than any ladder rung, so the
+/// ladder measures it as `ε_f` exactly as it would in production.
+///
+/// It is EXACTLY ZERO at `ρ = 0`, so the baseline the escape compares against
+/// is the smooth value and the test's arithmetic below stays legible.
+/// # ⚠ The phase is load-bearing, and it is not a fudge
+///
+/// A symmetric second difference ANNIHILATES any odd perturbation exactly —
+/// that is what it is for, and this module's `curvature_resolution` header says
+/// so about the first-order term. An "evaluation error" modelled as
+/// `A·sin(F·ρ₁)` is odd in `ρ₁`, so `f(+α) + f(−α)` cancels it to the last bit
+/// and the ladder measures `ε_f = 2.6e-17` on a fixture planted with `5e-8`.
+/// Measured, on the first attempt at this fixture. Real evaluation error has no
+/// such symmetry, so the phase offset is what makes this model one.
+fn well_evaluation_error(rho: &Array1<f64>) -> f64 {
+    WELL_EVALUATION_ERROR
+        * (WELL_ERROR_FREQUENCY * rho[1] + 3.0 * rho[0] + WELL_ERROR_PHASE).sin()
+}
+
+/// Amplitude of the well criterion's evaluation error.
+///
+/// Sized from the two properties the fixture has to have, both measured on it
+/// rather than assumed:
+///
+/// * the ladder measures `ε_f = 4.6e-8` here, so `2ε_f = 9.2e-8` — larger than
+///   the deepest descent the well offers (`3.125e-8`). The well is below what
+///   this criterion can distinguish from zero, which is the fixture's thesis;
+/// * Law 1's floor from the measured `(ε_f, M₄) = (4.6e-8, 0.48)` comes out
+///   `1.7e-4`, ABOVE the `|λ_min| = 1e-4` in dispute — so the criterion cannot
+///   resolve that curvature either, and the adjudication declines on the
+///   measurement rather than on a declared tolerance.
+///
+/// It is also small enough that no ladder rung dips below the DECLARED
+/// `objective_resolution` of `1e-7` (deepest trial: `-6.6e-8`), so the original
+/// acceptance path is not what this test exercises.
+const WELL_EVALUATION_ERROR: f64 = 3.0e-8;
+
+/// How fast the error term varies in `ρ₁`. A power of two so the arithmetic is
+/// exact, and large enough that consecutive ladder rungs — which halve — see
+/// uncorrelated values rather than a smooth trend the fit would absorb into
+/// `M₄`.
+const WELL_ERROR_FREQUENCY: f64 = 1_048_576.0;
+
+/// Phase offset, so the error term is neither even nor odd. See
+/// [`well_evaluation_error`] — an odd one is cancelled exactly by the symmetric
+/// average and models no error at all.
+const WELL_ERROR_PHASE: f64 = 1.0;
+
 fn unresolvable_well_cost(rho: &Array1<f64>) -> f64 {
+    unresolvable_well_smooth(rho) + well_evaluation_error(rho)
+}
+
+/// The well itself, with no evaluation error: `f(ρ) = ½ρ₀² + 0.02ρ₁⁴ − 5e-5·ρ₁²`.
+fn unresolvable_well_smooth(rho: &Array1<f64>) -> f64 {
     let r0 = rho[0];
     let r1 = rho[1];
     0.5 * r0 * r0 + 0.02 * r1 * r1 * r1 * r1 - 5.0e-5 * r1 * r1
@@ -750,16 +819,38 @@ fn unresolvable_well_eval(rho: &Array1<f64>) -> OuterEval {
 fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
     // Pin the fixture's own arithmetic first, so a failure below is about the
     // acceptance floor and not about the well having moved.
-    let rung = unresolvable_well_cost(&array![0.0, 0.031_25]);
+    let rung = unresolvable_well_smooth(&array![0.0, 0.031_25]);
     assert!(
         rung < 0.0,
         "the ladder's last rung must land INSIDE the well, or this test would be about the \
          ladder's reach instead of its acceptance (f={rung:.6e})"
     );
+    // And the decrease there must be below the CRITERION's own evaluation
+    // error, not below a declared tolerance (#2748). Two evaluations each
+    // accurate to `ε_f` carry `2ε_f`, so that is the smallest difference this
+    // criterion can distinguish from zero — and the well is shallower than it,
+    // everywhere.
+    let deepest = -(5.0e-5_f64 * 5.0e-5) / (4.0 * 0.02);
     assert!(
-        rung.abs() < 1.0e-7,
-        "and the decrease there must be BELOW the criterion's resolution, or the descent is \
-         real and must be minted (f={rung:.6e})"
+        rung.abs() < 2.0 * WELL_EVALUATION_ERROR
+            && deepest.abs() < 2.0 * WELL_EVALUATION_ERROR,
+        "the well must be shallower than the criterion's own evaluation error, or the descent \
+         is REAL and must be minted: rung={rung:.6e}, deepest={deepest:.6e}, \
+         2*amplitude={:.6e}",
+        2.0 * WELL_EVALUATION_ERROR
+    );
+    // And no trial may dip below the DECLARED resolution either, or the
+    // original acceptance path fires and this test stops being about the
+    // measured one.
+    let deepest_trial = [1.0_f64, 0.5, 0.25, 0.125, 0.062_5, 0.031_25]
+        .into_iter()
+        .flat_map(|alpha| [alpha, -alpha])
+        .map(|r1| unresolvable_well_cost(&array![0.0, r1]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        deepest_trial > -1.0e-7,
+        "no ladder rung may beat the DECLARED objective resolution, or the escape fires \
+         through the pre-#2748 path: deepest trial={deepest_trial:.6e}"
     );
 
     let problem = OuterProblem::new(2)
@@ -806,5 +897,344 @@ fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
         "the one-shot reseed must NOT be spent on a decrease the criterion cannot resolve; \
          spending it is what left the retry pass with nothing to adjudicate: {:?}",
         result.saddle_escape_reseed
+    );
+    // NEGATIVE CONTROL for the fixture itself (#2748): the SMOOTH well really
+    // does descend, and by a margin the arithmetic can carry. So this test is
+    // about the criterion's evaluation error hiding that descent — not about
+    // there being nothing to find, which would make the assertions above pass
+    // vacuously.
+    let roundoff = 16.0 * f64::EPSILON;
+    assert!(
+        rung < -roundoff,
+        "the smooth well must offer a descent the ARITHMETIC can resolve, or this fixture \
+         proves nothing about resolution: rung={rung:.6e} vs roundoff={roundoff:.6e}"
+    );
+}
+
+// ─── #2612 the escape step is the objective's, not the falsifier's ───
+//
+// The #2357/#2155 fixtures above are DOUBLE WELLS: the saddle at ρ₁ = 0 sits
+// exactly one unit from its minima, so a reseed capped at the falsifiability
+// ladder's largest rung (α = 1, one e-fold in log-λ) lands on the answer by
+// coincidence of scale. Nothing above can see a cap, because nothing above
+// needs to travel.
+//
+// The #2612 multinomial ridge is the other shape, and it is the common one for
+// a smoothing parameter: the criterion is stationary, gently CONCAVE, and falls
+// monotonically along the free direction all the way to the box wall — the
+// λ → 0 face — with no interior minimiser at all. Distilled:
+//
+//   f(ρ) = ½·ρ₀²  −  ½·ε·ρ₁²,        ε = 1e-3
+//   ∇f    = (ρ₀, −ε·ρ₁)
+//   H     = diag(1, −ε)
+//
+// At ρ = (0, 0) the gradient vanishes and `H` is indefinite, exactly as in the
+// wells above; unlike them, `argmin` over the box is the FACE ρ₁ = ±rho_bound
+// and the descent runs the whole width of the box. A reseed capped at α = 1
+// covers 1/30th of it, which on the real fixture cost one
+// `OUTER_SADDLE_ESCAPE_BUDGET` unit per e-fold and refused the fit six e-folds
+// short.
+//
+// Both directions descend identically here, so the sign is a tie and either
+// face is correct; the assertions are on |ρ₁|.
+const RIDGE_CURVATURE: f64 = 1e-3;
+
+fn ridge_cost(rho: &Array1<f64>) -> f64 {
+    0.5 * rho[0] * rho[0] - 0.5 * RIDGE_CURVATURE * rho[1] * rho[1]
+}
+
+fn ridge_eval(rho: &Array1<f64>) -> OuterEval {
+    OuterEval {
+        cost: ridge_cost(rho),
+        gradient: array![rho[0], -RIDGE_CURVATURE * rho[1]],
+        hessian: HessianValue::Dense(array![[1.0, 0.0], [0.0, -RIDGE_CURVATURE]]),
+        inner_beta_hint: None,
+    }
+}
+
+/// The face this ridge runs to. Stated by the fixture rather than inherited
+/// from the default box, so the assertions below are about the escape and not
+/// about `rho_bound`'s value.
+const RIDGE_BOX_FACE: f64 = 30.0;
+
+fn ridge_problem() -> OuterProblem {
+    OuterProblem::new(2)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_bounds(
+            array![-RIDGE_BOX_FACE, -RIDGE_BOX_FACE],
+            array![RIDGE_BOX_FACE, RIDGE_BOX_FACE],
+        )
+        .with_initial_rho(array![0.0, 0.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        })
+}
+
+#[test]
+fn saddle_escape_reseed_travels_to_the_box_face_on_a_monotone_ridge_2612() {
+    // The load-bearing statement of #2612, at the unit that decides it: on a
+    // stationary point whose free direction descends monotonically to the box,
+    // the minted reseed must be the step the OBJECTIVE supports — the face —
+    // and not the largest rung of the falsifiability ladder.
+    let problem = ridge_problem();
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(ridge_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(ridge_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let rejection = audit_stationary_point(&mut obj, array![0.0, 0.0], "monotone-ridge #2612")
+        .expect_err("a stationary point on an indefinite ridge must be refused, not certified");
+    let result = &rejection.result;
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("refused certificate must be recorded");
+    assert!(
+        cert.is_stationary(),
+        "the gradient vanishes identically at the ridge point: {}",
+        cert.summary()
+    );
+    assert_eq!(
+        cert.hessian_psd(),
+        Some(false),
+        "diag(1, -{RIDGE_CURVATURE}) must read indefinite: {}",
+        cert.summary()
+    );
+    let reseed = result
+        .saddle_escape_reseed
+        .as_ref()
+        .expect("a refused indefinite ridge must mint a negative-curvature escape reseed");
+    let face = RIDGE_BOX_FACE;
+    assert!(
+        (reseed[1].abs() - face).abs() < 1e-6,
+        "the reseed must land on the box face |ρ₁| = {face}, which is where the descent this \
+         escape confirmed actually ends; got ρ = {reseed:?}. A reseed at |ρ₁| ≈ 1 is the \
+         falsifiability ladder's largest rung being reused as a step length — the #2612 defect, \
+         which cost one escape-budget unit per e-fold and refused the fit six e-folds short"
+    );
+    assert!(
+        reseed[0].abs() < 1e-9,
+        "the escape must move ONLY the indefinite coordinate, holding the PSD ρ₀ at its \
+         optimum: {reseed:?}"
+    );
+    // The fixture's own negative control: the face really is far from the rung
+    // the old code could reach, so passing is not an accident of scale (this is
+    // exactly what the double wells above cannot say).
+    assert!(
+        face > 10.0,
+        "the ridge fixture needs a box many e-folds wide or it cannot distinguish a travelling \
+         escape from a capped one: face={face}"
+    );
+}
+
+#[test]
+fn saddle_escape_expansion_does_not_overshoot_a_genuine_well_2612() {
+    // The guard on the repair: extending the step must stop where the objective
+    // stops improving, so a genuine interior well is still escaped TO ITS
+    // MINIMUM and not past it to the box. The #2357 double well has its minima
+    // at ρ₁ = ±1 and rises steeply beyond (f(±2) = +2 against f(±1) = −¼), so an
+    // expansion that ignored the objective would land at ρ₁ = ±30 and be caught
+    // here.
+    let problem = saddle_problem();
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(saddle_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(saddle_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let rejection = audit_stationary_point(&mut obj, array![0.0, 0.0], "well-overshoot #2612")
+        .expect_err("an interior strict saddle must be refused, not certified");
+    let reseed = rejection
+        .result
+        .saddle_escape_reseed
+        .as_ref()
+        .expect("a refused interior saddle must mint a negative-curvature escape reseed")
+        .clone();
+    assert!(
+        reseed[1].abs() <= 1.0 + 1e-9,
+        "the double well's descent ENDS at |ρ₁| = 1 (f = −¼, against f = +2 at |ρ₁| = 2), so an \
+         expanded step must stop there rather than running to the box: {reseed:?}"
+    );
+    assert!(
+        saddle_cost(&reseed) < saddle_cost(&array![0.0, 0.0]) - 1e-9,
+        "and it must still be a strict descent: f={} against the saddle's {}",
+        saddle_cost(&reseed),
+        saddle_cost(&array![0.0, 0.0]),
+    );
+}
+
+#[test]
+fn outer_search_clears_a_monotone_ridge_on_the_gradient_only_plan_2612() {
+    // End to end, on the plan the multinomial fit actually runs. `#2612`'s fit
+    // is a custom family, and `fit_custom_family` sets `prefer_gradient_only`
+    // (the generic REML/LAML Hessian consumes the order-four family tower,
+    // so the exact Hessian is reserved for the terminal certificate), which
+    // routes the search to BFGS. That matters here: an ARC search reads the
+    // analytic Hessian and can follow a negative-curvature direction on its
+    // own, so a pipeline test that let the planner pick ARC would be green
+    // whether or not the escape can travel. This one pins the gradient-only
+    // plan, where the escape IS the only thing that can cross the ridge.
+    //
+    // The sharp discriminator for the step rule is the unit test above; this
+    // asserts the property the fit needs — reach the face and certify there,
+    // with ρ₁ railed the reduced Hessian is the 1×1 PSD block [1].
+    let problem = ridge_problem().with_prefer_gradient_only(true);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(ridge_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(ridge_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "monotone-ridge pipeline #2612")
+        .expect("the outer search must reach the ridge's box face and certify there");
+    let face = RIDGE_BOX_FACE;
+    assert!(
+        result.converged(),
+        "must converge on the face, not refuse on the ridge: rho={:?}",
+        result.rho
+    );
+    assert!(
+        (result.rho[1].abs() - face).abs() < 1e-4,
+        "must land on the box face |ρ₁| = {face}: rho={:?}",
+        result.rho,
+    );
+    assert!(
+        result
+            .criterion_certificate
+            .as_ref()
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
+        "the face is a constrained minimum: with ρ₁ railed the reduced Hessian is [1], PSD",
+    );
+}
+
+// ─── #2612 a criterion whose minimum over the box is a CORNER ────────
+//
+// The ridge fixture above has ONE indefinite coordinate, so one escape clears
+// it. That is still inside the premise `OUTER_SADDLE_ESCAPE_BUDGET = 3` rests
+// on — *"a genuine saddle is cleared in one escape"* — and so it cannot test
+// that premise.
+//
+// This one is outside it, and it is the shape the multinomial fit has:
+//
+//   f(ρ) = ½·ρ₀²  −  ½·Σ_{j=1..K} ε_j·ρ_j²,     ε = (5, 4, 3, 2, 1)·1e-3
+//
+// stationary at the origin, `H = diag(1, −ε₁, …, −ε_K)` indefinite in EVERY
+// ρ_j, and `argmin` over the box is the CORNER `ρ₀ = 0, ρ_j = ±30`. There is
+// nothing pathological here — a concave quadratic on a box attains its minimum
+// at a vertex, and refusing that point is refusing the answer.
+//
+// The escape can only retire the coordinates one at a time: the eigenvector of
+// the most negative curvature is a single axis, the expanded step runs to the
+// face along it, and that coordinate rails. `judged_subspace_basis` then makes
+// the next escape's direction exactly zero there, so the free block shrinks by
+// one per escape and the sequence is monotone in TWO quantities at once — the
+// criterion strictly decreases and the free dimension strictly shrinks. It is
+// finite by construction and needs `K` escapes.
+//
+// With `K = 5` against a budget of 3 the fit is refused with two coordinates
+// still un-retired. That is the measurement the premise cannot survive, and it
+// is here as a fixture rather than as an argument.
+const CORNER_CURVATURES: [f64; 5] = [5.0e-3, 4.0e-3, 3.0e-3, 2.0e-3, 1.0e-3];
+const CORNER_BOX_FACE: f64 = 30.0;
+
+fn corner_cost(rho: &Array1<f64>) -> f64 {
+    let mut cost = 0.5 * rho[0] * rho[0];
+    for (j, &curvature) in CORNER_CURVATURES.iter().enumerate() {
+        cost -= 0.5 * curvature * rho[j + 1] * rho[j + 1];
+    }
+    cost
+}
+
+fn corner_eval(rho: &Array1<f64>) -> OuterEval {
+    let dim = CORNER_CURVATURES.len() + 1;
+    let mut gradient = Array1::<f64>::zeros(dim);
+    let mut hessian = Array2::<f64>::zeros((dim, dim));
+    gradient[0] = rho[0];
+    hessian[[0, 0]] = 1.0;
+    for (j, &curvature) in CORNER_CURVATURES.iter().enumerate() {
+        gradient[j + 1] = -curvature * rho[j + 1];
+        hessian[[j + 1, j + 1]] = -curvature;
+    }
+    OuterEval {
+        cost: corner_cost(rho),
+        gradient,
+        hessian: HessianValue::Dense(hessian),
+        inner_beta_hint: None,
+    }
+}
+
+fn corner_problem() -> OuterProblem {
+    let dim = CORNER_CURVATURES.len() + 1;
+    OuterProblem::new(dim)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(true)
+        .with_bounds(
+            Array1::from_elem(dim, -CORNER_BOX_FACE),
+            Array1::from_elem(dim, CORNER_BOX_FACE),
+        )
+        .with_initial_rho(Array1::<f64>::zeros(dim))
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        })
+}
+
+#[test]
+fn outer_search_reaches_a_corner_minimum_that_needs_more_than_one_escape_2612() {
+    // The premise `OUTER_SADDLE_ESCAPE_BUDGET` rests on, as a fixture. Every
+    // escape here is a strict descent AND retires one coordinate onto a rail, so
+    // the sequence is finite by construction; capping it by a count refuses a
+    // point the criterion is still descending toward.
+    let problem = corner_problem();
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(corner_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(corner_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "corner-minimum pipeline #2612")
+        .expect(
+            "a concave quadratic on a box attains its minimum at a VERTEX; refusing that point \
+             is refusing the answer",
+        );
+    assert!(
+        result.converged(),
+        "must converge at the corner: rho={:?}",
+        result.rho
+    );
+    assert!(
+        result.rho[0].abs() < 1e-4,
+        "the convex coordinate must sit at its optimum ρ₀ = 0: {:?}",
+        result.rho
+    );
+    for j in 1..=CORNER_CURVATURES.len() {
+        assert!(
+            (result.rho[j].abs() - CORNER_BOX_FACE).abs() < 1e-4,
+            "every concave coordinate must be retired onto a face: coordinate {j} sits at {} in \
+             {:?}",
+            result.rho[j],
+            result.rho
+        );
+    }
+    assert!(
+        result
+            .criterion_certificate
+            .as_ref()
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
+        "with every concave coordinate railed the reduced Hessian is [1], PSD",
     );
 }

@@ -35,6 +35,7 @@ fn frozen_bspline_spec_and_data() -> (TermCollectionSpec, Array2<f64>) {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s(x)".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -77,6 +78,7 @@ fn frozen_bspline_spec_and_data() -> (TermCollectionSpec, Array2<f64>) {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s(x)".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -165,6 +167,7 @@ fn nonzero_anchor_derivative_carries_exact_affine_slope() {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "anchored s(x)".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,

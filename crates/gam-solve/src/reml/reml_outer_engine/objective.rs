@@ -1302,8 +1302,21 @@ pub fn reml_laml_evaluate(
     // parts the criterion value carries, not just their sum. Computed inside
     // the parallel map and returned alongside the entry (rayon workers cannot
     // see the requesting thread's thread-local window).
+    // `tr(K · Ḣ)` under whichever kernel the cost's log-determinant pairs with.
+    // ONE definition, shared by the ρ block's audit split below and by the ψ/ext
+    // block further down: the two must contract the same kernel or their
+    // `logdet_h` parts would be measured against different surfaces.
+    let trace_logdet_drift =
+        |drift: &DriftDerivResult| match (&solution.penalty_subspace_trace, drift) {
+            (Some(kernel), DriftDerivResult::Dense(matrix)) => {
+                kernel.trace_projected_logdet(matrix)
+            }
+            (Some(kernel), DriftDerivResult::Operator(op)) => kernel.trace_operator(op.as_ref()),
+            (None, DriftDerivResult::Dense(matrix)) => hop.trace_logdet_h_k(matrix, None),
+            (None, DriftDerivResult::Operator(op)) => hop.trace_logdet_operator(op.as_ref()),
+        };
     let capture_rho_parts = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
-    type RhoGradEntry = (usize, f64, f64, f64, f64, f64, f64);
+    type RhoGradEntry = (usize, f64, f64, f64, f64, f64, f64, f64, f64);
     let rho_grad_entries: Vec<RhoGradEntry> = (0..k)
         .into_par_iter()
         .map(|idx| {
@@ -1447,6 +1460,23 @@ pub fn reml_laml_evaluate(
             } else {
                 (0.0, 0.0, 0.0)
             };
+            // The same FROZEN / MODE-RESPONSE split the ψ block publishes
+            // (#2765). `Ḣ_k = λ_k S_k + D_β H[v_k]`, and only the second half
+            // reads the coefficient mode response — so when a `logdet_h`
+            // disagreement has to be attributed, the split is what says which
+            // half owns it. The frozen half is additionally a SIGN CHECK that
+            // needs no oracle: `tr(K · λ_k S_k)` with `K` and `S_k` both PSD
+            // cannot be negative.
+            let (part_frozen_logdet_h, part_mode_response_logdet_h) =
+                if capture_rho_parts && incl_logdet_h {
+                    let frozen = penalty_total_drift_result(coord, curvature_lambdas[idx], None);
+                    let mode_response = rho_corrections[idx]
+                        .as_ref()
+                        .map_or(0.0, |drift| trace_logdet_drift(drift));
+                    (0.5 * trace_logdet_drift(&frozen), 0.5 * mode_response)
+                } else {
+                    (0.0, 0.0)
+                };
             let block_quadratic = if capture_rho_parts && idx < penalty_quad_atom.lambdas.len() {
                 penalty_quad_atom.block_quadratics[idx]
             } else {
@@ -1459,13 +1489,26 @@ pub fn reml_laml_evaluate(
                 block_quadratic,
                 part_fixed_beta,
                 part_logdet_h,
+                part_frozen_logdet_h,
+                part_mode_response_logdet_h,
                 part_logdet_s,
             )
         })
         .collect();
     let mut rho_audit_parts: Vec<crate::estimate::outer_eval_capture::RhoGradientParts> =
         Vec::new();
-    for (idx, value, lambda, block_quadratic, fixed_beta, ld_h, ld_s) in rho_grad_entries {
+    for (
+        idx,
+        value,
+        lambda,
+        block_quadratic,
+        fixed_beta,
+        ld_h,
+        frozen_ld_h,
+        mode_response_ld_h,
+        ld_s,
+    ) in rho_grad_entries
+    {
         grad[idx] = value;
         if capture_rho_parts {
             rho_audit_parts.push(crate::estimate::outer_eval_capture::RhoGradientParts {
@@ -1476,6 +1519,8 @@ pub fn reml_laml_evaluate(
                 dim: solution.penalty_coords[idx].dim(),
                 fixed_beta,
                 logdet_h: ld_h,
+                frozen_logdet_h: frozen_ld_h,
+                mode_response_logdet_h: mode_response_ld_h,
                 logdet_s: ld_s,
                 total: value,
             });
@@ -1618,15 +1663,6 @@ pub fn reml_laml_evaluate(
     // All extended coordinates store canonical fixed-β stationarity
     // derivatives g_i = F_{βi}. IFT gives β_i = -H^{-1}g_i, exactly like
     // the ρ block.
-    let trace_logdet_drift =
-        |drift: &DriftDerivResult| match (&solution.penalty_subspace_trace, drift) {
-            (Some(kernel), DriftDerivResult::Dense(matrix)) => {
-                kernel.trace_projected_logdet(matrix)
-            }
-            (Some(kernel), DriftDerivResult::Operator(op)) => kernel.trace_operator(op.as_ref()),
-            (None, DriftDerivResult::Dense(matrix)) => hop.trace_logdet_h_k(matrix, None),
-            (None, DriftDerivResult::Operator(op)) => hop.trace_logdet_operator(op.as_ref()),
-        };
     let capture_logdet_trace_parts =
         crate::estimate::outer_eval_capture::outer_gradient_component_capture_enabled();
     type ExtGradientParts = (usize, f64, f64, f64, f64, f64, f64);

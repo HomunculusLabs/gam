@@ -849,6 +849,32 @@ impl<'a> CheckpointingObjective<'a> {
         beta_for_exact_rho(guard.as_ref(), rho)
     }
 
+    /// The per-evaluation `(ρ, V, ∇V)` trail, at `debug`.
+    ///
+    /// Every outer objective the runner drives is wrapped here, so this is the
+    /// one place that sees EVERY evaluation of EVERY route — the line search's
+    /// trial points included. Without it, a `line_search=StepSizeTooSmall`
+    /// refusal ("the direction descended but no step improved the objective")
+    /// can only be investigated by rebuilding the design outside the fit and
+    /// hoping the reconstruction is the same criterion; #2748's `haberman_5yr`
+    /// arm spent a full measurement cycle discovering that a faithful-looking
+    /// rebuild disagreed with the fit's own `|g|` by 35x. The trail settles
+    /// that question from inside the fit, in the coordinates the solver uses.
+    ///
+    /// `ρ` is printed in full: the whole point is to be able to difference two
+    /// consecutive trial points by hand, and a norm cannot be differenced.
+    fn trace_eval(&self, rho: &Array1<f64>, cost: f64, gradient: Option<&Array1<f64>>, what: &str) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let gradient_norm = gradient.map_or(f64::NAN, |g| g.dot(g).sqrt());
+        log::debug!(
+            "[OUTER eval] #{} {what} cost={cost:.15e} |g|={gradient_norm:.6e} rho={:?}",
+            self.eval_counter.load(Ordering::Relaxed),
+            rho.to_vec(),
+        );
+    }
+
     fn note(&self, rho: &Array1<f64>, beta: Option<&Array1<f64>>, cost: f64) {
         if self.reactive_waypoint_active.load(Ordering::Relaxed) {
             return;
@@ -925,6 +951,7 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
 
     fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
         let v = self.inner.eval_cost(rho)?;
+        self.trace_eval(rho, v, None, "value");
         // `eval_cost` carries no inner-β handle — persist ρ-only.
         self.note(rho, None, v);
         Ok(v)
@@ -938,6 +965,7 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
 
     fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
         let r = self.inner.eval(rho)?;
+        self.trace_eval(rho, r.cost, Some(&r.gradient), "value+gradient");
         self.note(rho, r.inner_beta_hint.as_ref(), r.cost);
         Ok(r)
     }
@@ -948,6 +976,7 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         order: OuterEvalOrder,
     ) -> Result<OuterEval, EstimationError> {
         let r = self.inner.eval_with_order(rho, order)?;
+        self.trace_eval(rho, r.cost, Some(&r.gradient), &format!("{order:?}"));
         self.note(rho, r.inner_beta_hint.as_ref(), r.cost);
         Ok(r)
     }

@@ -15,8 +15,8 @@ use super::{
     write_survival_binary_prediction_csv, write_survival_prediction_csv,
 };
 use super::{
-    Cli, Command, FitArgs, InferenceCovarianceMode, PredictArgs, PredictModeArg, SampleArgs, run_fit,
-    run_predict, run_sample, write_model_json,
+    Cli, Command, FitArgs, InferenceCovarianceMode, PredictArgs, PredictModeArg, SampleArgs,
+    run_fit, run_predict, run_sample, write_model_json,
 };
 use crate::config_resolve::{
     SurvivalInverseLinkInput, parse_survival_inverse_link as parse_config_survival_inverse_link,
@@ -1700,13 +1700,16 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write left-truncated csv", e));
 
-    for (requested, expected) in [(None, MEDIAN_EXIT), (Some(EXPLICIT_ANCHOR), EXPLICIT_ANCHOR)] {
+    for (requested, expected) in [
+        (None, MEDIAN_EXIT),
+        (Some(EXPLICIT_ANCHOR), EXPLICIT_ANCHOR),
+    ] {
         let model_path = td.path().join(match requested {
             Some(_) => "weibull_explicit.model.json",
             None => "weibull_default.model.json",
         });
         run_fit(FitArgs {
-        inference: true,
+            inference: true,
             expectile_tau: None,
             data: train_path.clone(),
             request: None,
@@ -2620,8 +2623,8 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
     });
     let loaded = SavedModel::load_from_path(&model_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "reload hessian-only model", e));
-    let covariance =
-        covariance_from_model(&loaded, InferenceCovarianceMode::Conditional).unwrap_or_else(|e| {
+    let covariance = covariance_from_model(&loaded, InferenceCovarianceMode::Conditional)
+        .unwrap_or_else(|e| {
             panic!(
                 "{} failed: {:?}",
                 "recover covariance from saved penalized Hessian", e
@@ -2663,18 +2666,15 @@ fn hessian_only_saved_model_reports_the_truncated_covariance_on_an_active_face()
     let center = array![0.25];
     let constraints = LinearInequalityConstraints::new(array![[1.0]], array![0.25])
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "build the active constraint row", e));
-    let correction = constrained_posterior_correction_from_covariance(
-        &ambient,
-        &center,
-        &constraints,
-    )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "build the truncation correction", e))
-    .unwrap_or_else(|| {
-        panic!(
-            "a row whose wall sits exactly at the ambient centre must be retained; \
+    let correction =
+        constrained_posterior_correction_from_covariance(&ambient, &center, &constraints)
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "build the truncation correction", e))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a row whose wall sits exactly at the ambient centre must be retained; \
              a `None` correction here would make this test pass by absence"
-        )
-    });
+                )
+            });
     // Guard the fixture itself: the face is retained AND it removes variance.
     assert_eq!(
         correction.rows,
@@ -2787,10 +2787,14 @@ fn hessian_only_saved_model_reports_the_truncated_covariance_on_an_active_face()
             "constrained hessian-only model should save", e
         )
     });
-    let loaded = SavedModel::load_from_path(&model_path)
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "reload constrained hessian-only model", e));
-    let covariance =
-        covariance_from_model(&loaded, InferenceCovarianceMode::Conditional).unwrap_or_else(|e| {
+    let loaded = SavedModel::load_from_path(&model_path).unwrap_or_else(|e| {
+        panic!(
+            "{} failed: {:?}",
+            "reload constrained hessian-only model", e
+        )
+    });
+    let covariance = covariance_from_model(&loaded, InferenceCovarianceMode::Conditional)
+        .unwrap_or_else(|e| {
             panic!(
                 "{} failed: {:?}",
                 "recover truncated covariance from saved penalized Hessian", e
@@ -4048,6 +4052,7 @@ fn warns_for_repeated_univariate_duchon_spatial_terms() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "pc1".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0],
@@ -4069,6 +4074,7 @@ fn warns_for_repeated_univariate_duchon_spatial_terms() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "pc2".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![1],
@@ -4090,6 +4096,7 @@ fn warns_for_repeated_univariate_duchon_spatial_terms() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "pc3".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![2],
@@ -4132,6 +4139,7 @@ fn does_notwarn_for_singlemultivariate_matern_spatial_term() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1, 2],
@@ -4165,6 +4173,7 @@ fn warns_for_repeated_univariate_thinplate_spatial_terms() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "pc1".to_string(),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![0],
@@ -4182,6 +4191,7 @@ fn warns_for_repeated_univariate_thinplate_spatial_terms() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "pc2".to_string(),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![1],
@@ -4226,6 +4236,7 @@ fn warns_for_linear_terms_overlappingwith_smoothvariables() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon(pc1, pc2, pc3)".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1, 2],
@@ -4266,6 +4277,7 @@ fn warns_for_nested_smooth_terms_with_hierarchical_ownership() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "duchon(pc1, pc2)".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0, 1],
@@ -4287,6 +4299,7 @@ fn warns_for_nested_smooth_terms_with_hierarchical_ownership() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "s(pc1)".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 0,
@@ -9320,7 +9333,10 @@ fn probe_2695_live_warp() {
                 let saved = SavedModel::load_from_path(&out_path).expect("load");
                 let beta_w = saved.beta_link_wiggle.clone().unwrap_or_default();
                 let amp = beta_w.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
-                println!("[2695-LIVE] degree={degree} FIT OK  max|beta_w|={amp:.6e} p_w={}", beta_w.len());
+                println!(
+                    "[2695-LIVE] degree={degree} FIT OK  max|beta_w|={amp:.6e} p_w={}",
+                    beta_w.len()
+                );
             }
             Err(e) => {
                 let rejects: Vec<String> = e

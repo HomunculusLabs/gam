@@ -186,6 +186,7 @@ fn spec_1d(aniso: bool) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -392,7 +393,10 @@ fn kappa_iso_1d_convergence_diagnostic() {
             outcome.as_ref().err(),
         );
     }
-    eprintln!("[kappa-diag] all {} configurations converged", outcomes.len());
+    eprintln!(
+        "[kappa-diag] all {} configurations converged",
+        outcomes.len()
+    );
 }
 
 /// Pin the sample-size threshold at which the isotropic-analytic κ optimizer

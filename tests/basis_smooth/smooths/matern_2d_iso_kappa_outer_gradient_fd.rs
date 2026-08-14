@@ -186,6 +186,7 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_2d_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

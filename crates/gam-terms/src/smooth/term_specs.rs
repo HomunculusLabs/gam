@@ -789,6 +789,42 @@ pub struct SmoothTermSpec {
     /// `save → load → predict` is bit-equivalent to in-memory prediction.
     #[serde(default)]
     pub joint_null_rotation: Option<crate::basis::JointNullRotation>,
+    /// The span-preserving parametric orthogonalization this term carries
+    /// (#2747), when it takes that arm. Persisted so `save → load → predict`
+    /// rebuilds the design the fitted coefficients belong to.
+    #[serde(default)]
+    pub frozen_parametric_residualization: Option<ParametricResidualizationChart>,
+}
+
+/// The predict-time replay record of a span-preserving parametric
+/// orthogonalization (#2747): this term's realized block is `X·T − C·R`.
+///
+/// `T` is not here — it is the ordinary coefficient transform, already absorbed
+/// into the basis metadata, so a rebuilt `design_local` arrives with it applied.
+/// What cannot be absorbed is `R`, because it multiplies the CONSTRAINT block
+/// rather than the basis.
+///
+/// `R` is TRAINING-ROW data and is never re-derived, for the same reason
+/// `frozen_global_orthogonality` is not (#978): the fit already decided this
+/// term's residualization, and rederiving it from prediction rows would
+/// silently evaluate a different model. `C` itself IS rebuilt at the new rows —
+/// that is what `C` is — from a recipe that is deterministic given the spec: the
+/// intercept and owned linear axes come from
+/// `build_parametric_constraint_block_for_term`, and the owner smooths are named
+/// here rather than re-derived, because which owners bound is decided by a
+/// cross-residual on the FIT rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParametricResidualizationChart {
+    /// Indices into `TermCollectionSpec::smooth_terms` of the owner smooths
+    /// whose realized designs joined the constraint block, in the order
+    /// `build_constraint_block` stacked them.
+    pub owner_terms: Vec<usize>,
+    /// Whether the parametric block (intercept + owned linear axes) led the
+    /// constraint block. Recorded rather than recomputed so a spec that changes
+    /// shape cannot silently re-order the columns `correction`'s rows index.
+    pub has_parametric_block: bool,
+    /// `R`, `q × k`, stated against the RAW constraint columns.
+    pub correction: Array2<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -843,6 +879,13 @@ pub struct SmoothTerm {
     /// Chart convention is per kind: post-`Q` `Z` for `sz` (the raw rebuild
     /// reapplies `Q` itself, #700), full `Q·Z` chart for `fs`.
     pub unabsorbed_global_orthogonality: Option<Array2<f64>>,
+    /// The span-preserving parametric orthogonalization applied to this term
+    /// (#2747): its realized block is `X·T − C·R`.
+    /// `freeze_term_collection_from_design` copies this onto
+    /// `SmoothTermSpec::frozen_parametric_residualization` so a predict-time
+    /// rebuild subtracts the same correction instead of emitting a design the
+    /// fitted coefficients do not match.
+    pub parametric_residualization: Option<ParametricResidualizationChart>,
 }
 
 impl SmoothTerm {
@@ -1437,6 +1480,7 @@ impl TermCollectionSpec {
                 SmoothBasisSpec::ByVariable { inner, .. } => {
                     validate_smooth_basis_frozen(inner, label, &st.name)?;
                     let nested = SmoothTermSpec {
+            frozen_parametric_residualization: None,
                         name: st.name.clone(),
                         basis: (**inner).clone(),
                         shape: st.shape,
@@ -1776,6 +1820,7 @@ impl TermCollectionSpec {
                         linear_terms: vec![],
                         random_effect_terms: vec![],
                         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                             name: st.name.clone(),
                             basis: (**smooth).clone(),
                             shape: st.shape,
@@ -3317,13 +3362,43 @@ pub fn spatial_term_uses_per_axis_psi(resolvedspec: &TermCollectionSpec, term_id
     if eta.len() != d {
         return false;
     }
-    !matches!(
-        resolvedspec
-            .smooth_terms
-            .get(term_idx)
-            .map(|term| &term.basis),
-        Some(SmoothBasisSpec::Duchon { .. })
-    )
+    // gam#2735 — a hybrid Duchon's per-axis η IS a REML coordinate wherever its
+    // per-axis ψ derivative surface is complete.
+    //
+    // It used to be excluded outright, on the reading that "η is a FIXED,
+    // geometry-derived basis parameter … standardize the geometry, then learn
+    // the smoothness". That reading is right about the SEED and wrong about the
+    // estimand: `initial_aniso_contrasts` reads the per-axis spread of the KNOT
+    // CLOUD, which is a property of where the inputs are and carries no
+    // information about which axis the RESPONSE varies along. On a design whose
+    // inputs are isotropic and whose signal is not — `large_scale_reml_stress`
+    // draws `X ~ N(0, I)` and puts its entire non-linear content on one axis —
+    // the seeded contrasts are sampling noise, and freezing them there costs
+    // 1795 nats of criterion and 3.6x of held-out reconstruction error against
+    // the η the criterion itself prefers. The contrasts are identifiable (they
+    // change the kernel's shape, not merely its scale), so REML can and should
+    // estimate them, exactly as it already does for the anisotropic Matérn.
+    //
+    // The capability predicate — not this site — decides which specs qualify;
+    // anything it declines stays on its single isotropic ψ axis, bit-identically
+    // to before.
+    let Some(term) = resolvedspec.smooth_terms.get(term_idx) else {
+        return false;
+    };
+    match &term.basis {
+        SmoothBasisSpec::Duchon { spec, .. } => {
+            // A joint null rotation `Q` has to be applied to every ψ-derivative
+            // block — the isotropic arm does it explicitly in
+            // `try_build_spatial_term_log_kappa_derivative`. The per-axis
+            // consumer does not, so a rotated Duchon term stays isotropic
+            // rather than shipping an unrotated per-axis derivative against a
+            // rotated design. (The anisotropic Matérn has the same gap; it is
+            // pre-existing and not touched here.)
+            term.joint_null_rotation.is_none()
+                && crate::basis::duchon_spec_supports_axis_psi(spec, d)
+        }
+        _ => true,
+    }
 }
 
 pub fn set_spatial_length_scale(
@@ -3380,12 +3455,17 @@ pub fn spatial_term_supports_hyper_optimization(
         return false;
     }
 
-    // Duchon anisotropy η is a FIXED, geometry-derived basis parameter, NOT a
-    // REML hyper axis: the metric is estimated once from the knot-cloud spread
-    // (`auto_seed_aniso_contrasts`, applied on every Duchon basis build) and the
-    // Hilbert-scale λ's carry all learned smoothness. So a pure Duchon (no κ)
-    // contributes no outer optimization axis even when `scale_dims` is on —
-    // "standardize the geometry, then learn the smoothness." Only an explicit
+    // Duchon anisotropy η is SEEDED from geometry and ESTIMATED by REML
+    // (gam#2735). `auto_seed_aniso_contrasts` still supplies the starting
+    // contrasts from the knot-cloud spread on every Duchon basis build — that is
+    // a good seed, because it standardizes a genuinely elongated input cloud
+    // before the search begins. What it cannot do is finish the job: the knot
+    // cloud says where the inputs ARE, not which axis the RESPONSE varies along,
+    // so on an isotropic design it seeds noise and a frozen η is then simply
+    // wrong. `spatial_term_uses_per_axis_psi` enrolls the contrasts as outer ψ
+    // coordinates wherever `duchon_spec_supports_axis_psi` certifies the
+    // per-axis derivative surface; a pure Duchon (no κ) is one of the
+    // configurations it declines, so that path is unchanged. Only an explicit
     // kernel length scale κ (the Matérn / hybrid path) is optimized here.
     //
     // ISOTROPIC Matérn: the *default* `matern(x1, x2)` is isotropic
@@ -3959,6 +4039,7 @@ mod spatial_psi_bound_coordinate_tests {
             linear_terms: Vec::new(),
             random_effect_terms: Vec::new(),
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -4027,6 +4108,7 @@ mod spatial_psi_bound_coordinate_tests {
                 linear_terms: Vec::new(),
                 random_effect_terms: Vec::new(),
                 smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                     name: "matern".to_string(),
                     basis: SmoothBasisSpec::Matern {
                         feature_cols: vec![0, 1],
@@ -7750,6 +7832,7 @@ pub fn build_by_smooth_local(
     workspace: &mut crate::basis::BasisWorkspace,
 ) -> Result<LocalSmoothTermBuild, BasisError> {
     let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: term.name.clone(),
         basis: (*smooth).clone(),
         shape: term.shape,
@@ -8102,6 +8185,7 @@ pub fn build_factor_smooth(
             spec: factor_smooth_marginal_for_replay(&spec.marginal),
         };
         let sz_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term_name.to_string(),
             basis: SmoothBasisSpec::FactorSumToZero {
                 inner: Box::new(inner),
@@ -8202,6 +8286,7 @@ pub fn build_factor_smooth(
         marginal_spec.double_penalty = false;
     }
     let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: format!("{term_name}::marginal"),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col,
@@ -8531,6 +8616,7 @@ pub fn build_single_local_smooth_term(
             defer_inner_model_centering_to_factor_level_wrapper(&mut inner_basis);
         }
         let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term.name.clone(),
             basis: inner_basis,
             shape: term.shape,
@@ -8575,6 +8661,7 @@ pub fn build_single_local_smooth_term(
                 );
             }
             let inner_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: format!("{}::inner", term.name),
                 basis: (**inner).clone(),
                 shape: ShapeConstraint::None,
@@ -9615,6 +9702,7 @@ pub fn build_smooth_design_withworkspace_unvalidated(
         local_designs.push(built.design);
 
         terms_out.push(SmoothTerm {
+            parametric_residualization: None,
             name: term.name.clone(),
             coeff_range: col_start..col_end,
             shape: term.shape,
@@ -9695,6 +9783,7 @@ mod factor_smooth_heldout_group_tests {
         frozen: Option<Vec<u64>>,
     ) -> SmoothTermSpec {
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "fs_heldout".to_string(),
             basis: SmoothBasisSpec::FactorSmooth {
                 spec: FactorSmoothSpec {

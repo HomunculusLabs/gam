@@ -159,6 +159,7 @@ fn periodic_bspline_terms_build_with_cyclic_penalty_and_formula_alias() {
     let x = array![0.0, 0.125, 0.25, 0.5, 0.75, 1.0];
     let data = Array2::from_shape_vec((x.len(), 1), x.to_vec()).unwrap();
     let term = SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "periodic_u".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,

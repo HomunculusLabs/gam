@@ -250,6 +250,7 @@ fn survival_static_spatial_psi_blocks_match_shared_engine() {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "spatial".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

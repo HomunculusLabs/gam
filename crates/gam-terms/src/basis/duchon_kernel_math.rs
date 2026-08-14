@@ -611,6 +611,77 @@ pub(crate) fn duchon_p_from_nullspace_order(order: DuchonNullspaceOrder) -> usiz
     }
 }
 
+/// Whether a Duchon spec's **per-axis** ψ derivative surface is complete, so
+/// its `aniso_log_scales` may be enrolled as outer REML coordinates (gam#2735).
+///
+/// This is a capability question, not a policy one, and it is asked of the spec
+/// alone so the answer cannot depend on which call site is asking. It returns
+/// `false` — leaving the term on its single isotropic ψ axis, exactly as
+/// before — for every configuration whose per-axis derivative is not derived:
+///
+/// * a **scale-free** (`length_scale = None`) Duchon: every ψ-derivative
+///   builder in the family refuses it, isotropic included;
+/// * a **periodic** Duchon: the periodic path is a different builder with its
+///   own chart, and no per-axis route through it exists;
+/// * a term with no per-axis contrasts to learn (`d ≤ 1`, or η absent / the
+///   wrong length);
+/// * a spec whose ACTIVE operator penalty routes through the **closed-form
+///   Lebesgue block**, which replaces the collocation Gram on the value side
+///   and whose ψ-derivative is derived only for the isotropic direction.
+///   Enrolling one of those would ship a block whose value and gradient came
+///   from two different constructions.
+///
+/// The closed-form check sweeps every null-space order the realized build could
+/// degrade to (`duchon_effective_nullspace_order` only ever reduces), because
+/// the predicate is asked here — before centers exist — and a spec that becomes
+/// unsupported only after degradation must not be enrolled.
+pub fn duchon_spec_supports_axis_psi(spec: &DuchonBasisSpec, dim: usize) -> bool {
+    if dim <= 1 || spec.length_scale.is_none() || spec.periodic.is_some() {
+        return false;
+    }
+    match spec.aniso_log_scales.as_deref() {
+        Some(eta) if eta.len() == dim => {}
+        _ => return false,
+    }
+    let s_order = spec.power_as_usize() as f64;
+    if s_order != spec.power {
+        // The partial-fraction jets require an integer spectral power; the
+        // fractional path never reaches the ψ-derivative surface at all.
+        return false;
+    }
+    let requested_p = duchon_p_from_nullspace_order(spec.nullspace_order);
+    let tension_requested = matches!(
+        spec.operator_penalties.tension,
+        OperatorPenaltySpec::Active { .. }
+    );
+    let stiffness_requested = matches!(
+        spec.operator_penalties.stiffness,
+        OperatorPenaltySpec::Active { .. }
+    );
+    for p_order in 1..=requested_p.max(1) {
+        let two_pps = 2.0 * (p_order as f64 + spec.power);
+        // Mirror the builder's auto-disable: a penalty the kernel is too rough
+        // to admit is never assembled, so it cannot reach the closed form.
+        let tension_active = tension_requested && two_pps > dim as f64 + 1.0;
+        let stiffness_active = stiffness_requested && two_pps > dim as f64 + 2.0;
+        if tension_active
+            && crate::basis::duchon_closed_form_operator_penalty_converges(
+                1, p_order, s_order, dim,
+            )
+        {
+            return false;
+        }
+        if stiffness_active
+            && crate::basis::duchon_closed_form_operator_penalty_converges(
+                2, p_order, s_order, dim,
+            )
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Returns the effective Duchon null-space order, auto-degrading when the
 /// requested order leaves no radial kernel degrees of freedom.
 ///

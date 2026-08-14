@@ -1,5 +1,580 @@
 ## Unreleased
 
+- **The repair, measured end to end: `rel_l2` 0.3395 → 0.1042, and the optimizer
+  finds the signal axis by itself (#2735).** Same data, same seed, the fixture's
+  own generator at `n=3000, K=60, pc_dim=6` — a shape 17× smaller in `n` and 8×
+  smaller in `K` than the one the `0.10` bar is written for:
+
+  ```text
+      route                                  η spread   REML      rel_l2   wall
+      fit_term_collection_forspec (before)      0.140   1736.54   0.3395    3.3 s
+      production entry + per-axis ψ (after)     2.854    819.81   0.1042   1289.5 s
+
+      learned_eta = [+1.8891, -0.0467, +0.1071, -0.0457, -0.9387, -0.9651]
+      learned_length_scale = 2.0225  (seeded at 1.0)
+  ```
+
+  The criterion falls 917 nats and the held-out error falls 3.26×, essentially
+  onto the bar. The largest contrast by a wide margin lands on **axis 0** — the
+  axis carrying the entire `0.4·sin(π x₀)` — while axes 4 and 5, which carry
+  linear coefficients `−0.15` and `+0.10` and no non-linear content at all, are
+  pushed to the far end. Nothing told it which axis mattered.
+
+  Cost, stated rather than buried: 1289.5 s against 3.3 s. The outer problem
+  went from 9 coordinates to 15 and every ψ trial rebuilds the basis.
+
+- **The Duchon operator-penalty ψ derivative differentiated a penalty the design
+  never ships — two pre-existing desyncs, both on the ISOTROPIC route (#2735).**
+
+  Found by running the production entry, which refused with *"spatial kappa
+  optimization is unavailable for one or more eligible spatial terms"* and named
+  no term and no reason. Every `Ok(None)` on that path now logs which term
+  declined and why; the first run with those lines said it outright — the
+  producer emitted 4 active penalty blocks against the realized design's 9.
+
+  1. **The metric.** `duchon_operator_penalty_candidates` builds its collocation
+     operators with `aniso = None`, deliberately, and its own doc says why: *"the
+     anisotropy lives entirely in the curvature (Primary) RKHS Gram … Keeping
+     these low-order stabilizers isotropic makes their η-gradient identically
+     zero."* The derivative read `spec.aniso_log_scales` instead.
+  2. **The split.** When `scale_dims` is on, the value REPLACES the single
+     `Σ‖∇f‖²` with `dim` per-axis `Σ(∂f/∂x_a)²` blocks — one
+     `PenaltySource::OperatorRelevance { axis }` each. The derivative emitted one
+     `OperatorTension` regardless, and the consumer zips positionally, so the
+     tension ψ-derivative was attributed to `OperatorRelevance { 0 }` and the
+     other `dim − 1` relevance blocks had no ψ-derivative at all.
+
+  Fixing (1) simplifies the per-axis work it invalidates: with the operators
+  isotropic their η-gradient is identically zero, so `∂S/∂ψ_a = (1/d)·∂S/∂log κ`
+  and `∂²S/∂ψ_a² = (1/d²)·∂²S/∂log κ²`. Normalization passes that scaling through
+  exactly, so the per-axis bundles are the isotropic one scaled.
+
+  Worth recording, because it bears on a claim in the tree: penalty ARD
+  (`OperatorRelevance`, documented as *"the replacement for brittle kernel-η
+  optimization"*) and metric anisotropy are not substitutes. `λ_a ∫(∂f/∂x_a)²`
+  controls how much the fit VARIES along an axis; it cannot add resolution the
+  kernel does not have. A radial kernel with an isotropic metric cannot wiggle
+  fast along `x₀` and slowly elsewhere at any `λ`. That is the same statement as
+  this fixture's own reference table, where an isotropic 500-centre smoother tops
+  out at `0.2290`.
+
+  **The gate that would have caught it did not exist.** A sum-identity or
+  second-vs-first check cannot see either desync — both compare the derivative
+  against itself. Only differencing the SHIPPED VALUE can, which is why the
+  native half (which had such a test from the start) was right from the start.
+
+- **A metric estimated from the knot cloud cannot see which axis the response
+  varies along, so freezing it there is not "standardize the geometry, then
+  learn the smoothness" — it is not learning the geometry at all (#2735).**
+  `spatial_term_uses_per_axis_psi` excluded every `SmoothBasisSpec::Duchon` from
+  per-axis ψ enrollment, so a hybrid Duchon term's `aniso_log_scales` were set
+  once by `initial_aniso_contrasts` — the per-axis spread of the knot cloud —
+  and never moved again. That seed is a statement about where the inputs ARE.
+  On `large_scale_reml_stress`, whose inputs are iid `N(0, I)` and whose entire
+  non-linear content is `0.4·sin(π x₀)`, it is sampling noise.
+
+  Measured on the fixture's own generator at `n=6000, K=150, pc_dim=6`, one fit
+  per explicit η along the single ray `η = (c, −c/5, −c/5, −c/5, −c/5, −c/5)`:
+
+  ```text
+      η ray        REML criterion    held-out rel_l2
+      sentinel           3359.16             0.3261
+      c = 0.25           3221.59             0.3038
+      c = 0.50           2783.65             0.2430
+      c = 0.75           2164.18             0.1650
+      c = 1.00           1734.85             0.1112
+      c = 1.50           1563.84             0.0914
+  ```
+
+  The criterion falls **1795 nats** and the held-out error falls **3.6×**,
+  crossing the `0.10` bar at this shape, along a direction the outer loop was
+  structurally forbidden from taking. The criterion and the held-out error agree
+  about that direction at every step, which is what makes it a defect rather
+  than an objective/estimand disagreement.
+
+  The contrasts are identifiable — they change the kernel's SHAPE, not merely
+  its scale — so REML can and should estimate them, exactly as it already does
+  for the anisotropic Matérn. The repair enrolls them.
+
+- **The isotropic ψ derivative is now a CONTRACTION of the per-axis one, not a
+  parallel derivation (#2735).** For a radial scalar `F(r; κ) = κ^E G(κ r)`,
+  with `A = r F_r`, `B = r² F_rr − r F_r`, `σ_a = s_a/r²` and `c = E/d`:
+
+  ```text
+      ∂F/∂ψ_a       = c F + A σ_a
+      ∂²F/∂ψ_a∂ψ_b  = B σ_a σ_b + c A (σ_a + σ_b) + 2 A σ_a δ_ab + c² F
+  ```
+
+  `Σ_a` of the first is `E F + r F_r`; `Σ_{a,b}` of the second is
+  `E² F + (2E+1) r F_r + r² F_rr`. Those are `scaled_log_kappa_derivatives`
+  verbatim. `A` and `B` are the same two combinations the isotropic helper
+  already forms, and both vanish with `r`, so the per-axis jet is finite at
+  collision with no `1/r` anywhere. `duchon_radial_core_psi_triplet` — the old
+  single-direction bundle — is retired: keeping a second way to spell the
+  isotropic contraction is the drift the split exists to prevent.
+
+  For a block carrying `m` explicit metric weights the same algebra collapses to
+  `∂B/∂ψ_a = M_a(B) + (δ/d)·B`, where `M_a` is the scale-free per-axis
+  derivative. That is not an analogy to the anisotropic Matérn: the Matérn
+  helpers `hessian_operator_eta_entry` / `_eta2_entry` ARE this construction at
+  `δ = 0` (its kernel carries no `κ^δ` prefactor), and they are reused rather
+  than re-derived. `E_F − 2m = δ` for every block the operator penalty
+  assembles — `D0` (`F = φ`, `m = 0`), the `D1` gradient (`F = q`, `m = 1`), the
+  `D2` diagonal (`F = q`, `m = 1`) and its mixed term (`F = t`, `m = 2`).
+
+  Collision is handled exactly and separately, NOT through the lift: every `s_a`
+  vanishes at `r = 0`, so the block's only ψ dependence is `w_axis · φ_rr(0; κ)`
+  — and `φ_rr` at the origin is not a pure power of `κ`, because the
+  even-dimensional log-Riesz representative carries κ-dependent finite parts.
+  That is precisely why the existing code refuses the scaling shortcut there.
+
+- **A capability predicate, so the enrollment cannot outrun the derivative
+  (#2735).** `duchon_spec_supports_axis_psi` answers from the spec alone.
+  It declines — leaving the term on its single isotropic ψ axis,
+  bit-identically to before — the scale-free spectrum, the periodic path,
+  fractional spectral powers, terms with no contrasts to learn, terms carrying a
+  joint null rotation (which the per-axis consumer does not apply and the
+  isotropic one does), and any spec whose ACTIVE operator penalty routes through
+  the closed-form Lebesgue block, whose ψ-derivative exists only for the
+  isotropic direction. Shipping one of those would mean a block whose value and
+  gradient came from two different constructions. The closed-form sweep covers
+  every null-space order the realized build could degrade to, because
+  `duchon_effective_nullspace_order` only ever reduces and the predicate is
+  asked before centers exist.
+
+- **A fixture's entry point is part of what it claims to test (#2735).**
+  `large_scale_reml_stress_main` called `fit_term_collection_forspec` — the
+  fixed-geometry entry, which builds the design once and optimizes λ — while its
+  header promised "the full Duchon-on-PC GAM pipeline end-to-end". Neither the
+  global length scale nor the per-axis anisotropy ever moved, so the held-out
+  reconstruction it scored was the best a smoother can do at one arbitrary
+  length scale under a response-blind metric. It now calls
+  `fit_term_collectionwith_spatial_length_scale_optimization`, the entry
+  `StandardFitRequest` uses, with the pilot geometry initializer disabled so the
+  measurement is of what the full-data outer solve learns rather than partly of
+  a subsample, and scores `fitted.resolvedspec` — the trained spec — because
+  refreezing the caller's spec would have scored the seed.
+
+- **An escape that RETIRES a coordinate onto a rail is not the pathology the
+  small cap exists for (#2612).** `OUTER_SADDLE_ESCAPE_BUDGET = 3` carried the
+  premise *"a genuine saddle is cleared in one escape"*, which this lane measured
+  false twice: the banded multinomial fixture descends monotonically for six
+  e-folds to the wall, and penguins takes four successive escapes that each run
+  to a face (`α_box = 9.39, 4.77, 9.14, 6.11`) while the criterion falls
+  `2.158034 → 2.156725`.
+
+  The distinction the count could not make: the escape direction is exactly zero
+  on every railed coordinate (`judged_subspace_basis`), so the ray's box
+  intersection can only be set by a FREE one, and a reseed that lands ON the face
+  has therefore retired a previously-free coordinate onto a rail. There are only
+  `n` coordinates to retire and the criterion strictly decreased on the way, so
+  such an escape cannot be the repeating pathology; it is bounded by
+  `OUTER_CERTIFY_RESUME_BUDGET` like every other reseed kind and by
+  `certify_resume_made_progress`, which stops the loop the moment a resume fails
+  to strictly improve. An INTERIOR escape retires nothing and can in principle
+  repeat forever — and the pathology #2155/#2363 names, a bimodal inner solve
+  whose warm re-descent reports a phantom improvement the cold certificate cannot
+  reproduce, is exactly the case that fools the descent gate — so the small cap
+  stays and now applies only to the escapes it was written for.
+
+  The fixture is the premise itself:
+  `f(ρ) = ½ρ₀² − ½Σ_{j=1..5} ε_j ρ_j²`, `ε = (5,4,3,2,1)·10⁻³`, stationary at the
+  origin and indefinite in every `ρ_j`, whose `argmin` over the box is the CORNER.
+  A concave quadratic on a box attains its minimum at a vertex; refusing that
+  point is refusing the answer. It needs five escapes because the
+  minimum-curvature eigenvector is a single axis and each expanded step retires
+  one coordinate. The `#2357`/`#2155` double wells sit exactly one unit from
+  their minima and the ridge fixture has one indefinite coordinate, so neither can
+  see a cap of any size — this is the first fixture in that file outside the
+  premise. Measured on one binary, changing only this: `12 passed; 1 failed` →
+  `13 passed; 0 failed`; `gam-solve --lib -- rho_optimizer::` 363/363.
+
+- **A negative-curvature direction has no interior minimiser, so its escape step
+  could not come from the falsifiability ladder (#2612).**
+  `adjudicate_negative_curvature` built ONE step ladder — `α = 1, ½, ¼, …` down to
+  `α_min = sqrt(2·objective_resolution/|λ_min|)` — and used it for two different
+  jobs. As a *falsifier* it is exactly right and is untouched: the smallest step
+  at which the claim `½|λ_min|α²` still predicts something the criterion can
+  represent is the end of the range in which the claim could be refuted. As a
+  *step rule* it is wrong, because along a direction of negative curvature
+
+  ```text
+      V(ρ + αv) − V(ρ) ≈ α(g·v) + ½λ_min α²,    λ_min < 0
+  ```
+
+  decreases without bound once the sign is chosen so the linear term is
+  non-positive. A model with no interior minimiser cannot supply a step length;
+  it has to come from the objective and the feasible box — the standard treatment
+  of a negative-curvature direction, and exactly what a trust region does when
+  its solution lands on the boundary. Capping the reseed at the falsifier's
+  largest rung silently asserted the opposite: that one e-fold in log-λ is as far
+  as any such descent ever runs.
+
+  Measured on the `#2612` banded quasi-separated fixture, where the escape
+  direction is `−e₁` to six digits:
+
+  ```text
+    baseline        1.786314898942e1
+    ladder  α=1     1.786314894043e1
+    ladder  α=½     1.786314883184e1   <- the ladder's pick, decrease 1.6e-7
+    α=1             1.786314862766e1
+    α=2             1.786314814710e1
+    α=4             1.786314708132e1
+    α=8             1.786314488769e1   <- box intersection, decrease 4.1e-6
+  ```
+
+  Monotone to the wall, and the wall step is worth **26×** the ladder's. The BFGS
+  resume seeded at the ladder's point made *no* progress (reseed and next refused
+  point bit-identical), so the escape was the only thing moving ρ — one e-fold per
+  escape, against `OUTER_SADDLE_ESCAPE_BUDGET = 3`, on a ridge six e-folds long.
+  The fit refused with `hessian_psd=NO curvature_source=terminal-analytic
+  railed=[2,3,4,5]`.
+
+  The rule: double the confirmed step while the criterion strictly improves,
+  clamped to the exact box intersection along the ray. No constant — termination
+  is structural, since the intersection is finite whenever the ray moves any
+  bounded coordinate, doubling reaches it in `⌈log₂(α_box/α)⌉` steps, and any
+  non-improving trial stops the sweep. The accepted point is the lowest measured,
+  so it is never worse than the ladder's. `MAX_EXPANSIONS = 64` bounds a
+  pathologically small confirmed step and is LOGGED when it binds.
+
+  One extra evaluation re-measures the incumbent in the expansion's own instrument
+  state. That is not tidiness: the same point (`sign = −1, α = 1`) evaluated in
+  the falsifiability ladder and again afterwards differs by `3.1e-7` on this
+  fixture — larger than the descent being adjudicated — because the profiled
+  criterion carries warm-start hysteresis well above the `ε_f = 7.45e-10` the
+  symmetric ladder measures on itself.
+
+  ```text
+    before   FIT FAILED after 6.5 s
+    after    FIT OK in 2.9 s, ONE escape (4 doublings, α_box = 5.470155,
+             "the accepted step IS it")
+             acc=0.9750 logloss=0.07682 mean_argmax_p=0.9599 calib_gap=-0.01513
+  ```
+
+  bit-identical to a control with the escape budget raised to 40 (not landed).
+  The escaped coordinate lands on the zero-smoothing rail, `λ = 2.0000e-4 =
+  exp(−8.517193)`, where it is railed and leaves the certificate a PSD reduced
+  block. `multinomial_separation_arming_2612` 3/3 in 4.6 s (was 1 FAIL);
+  `gam-solve --lib -- rho_optimizer::` 362/362, and with the expansion disabled
+  the two new travel assertions are the only reds.
+
+  The `#2357`/`#2155` escape fixtures are double wells whose saddle sits *exactly
+  one unit* from its minima, so nothing in that file could ever see the cap. The
+  new fixtures are the shape that can: a stationary ridge with **no interior
+  minimiser**, plus the guard that the expansion must not overshoot a genuine
+  well, plus an end-to-end run pinned to `prefer_gradient_only` — because an ARC
+  search reads the analytic Hessian and can follow negative curvature by itself,
+  so letting the planner choose ARC would make a pipeline test green either way.
+
+  Rejected: raising the escape budget (moves a constant to clear a bar and leaves
+  the one-e-fold cap in place everywhere else); relaxing the curvature gate (the
+  criterion's own symmetric ladder CONFIRMS the sign and resolves it against its
+  Law 1 floor, so the verdict is correct and it was the response that was wrong);
+  switching the outer search to ARC (`prefer_gradient_only` exists because the
+  generic REML/LAML Hessian consumes the order-four family tower, and the escape
+  has to work for the gradient-only plan regardless).
+
+- **`76a520c45` withheld a deletion the geometry did not license and dropped the
+  ORTHOGONALIZATION with it: the smooth-ownership hierarchy was inert for every
+  dependent smooth (#2747).** `apply_global_smooth_identifiability` exists to
+  enforce one invariant — the realized smooth block is orthogonal to
+  `[intercept | owned linear axes | owner smooths]` — and it enforced it by
+  DELETING one coefficient direction per constraint direction. `76a520c45`
+  established that the deletion is free only under CONTAINMENT (the parametric
+  direction inside the design's span, so the deleted function IS the parametric
+  column) and withheld it otherwise. It left nothing in its place.
+
+  The premise the deletion had always rested on —
+  `smooth_requires_parametric_orthogonality`'s *"their realized column span
+  contains the constant … a structural rank-1 collision"* — is measured false for
+  half the class it names (`examples/probe_2747_containment_registry`,
+  `‖1 − P_X 1‖/‖1‖` on the realized design against the `√ε` bar):
+
+  ```text
+  thinplate                                      9.90e-15   contained
+  duchon                                         1.33e-14   contained
+  matern (both policies, ν = 3/2 and 5/2)   7.8e-4 .. 8.4e-1   NOT
+  curv (κ ∈ {−1,0,+1}, ℓ = 0.2 … 100)       5.1e-2 .. 9.5e-1   NOT
+  ```
+
+  and the Matérn column carries the point that decides how the gate has to be
+  written: the residual falls monotonically toward the bar as the range grows
+  (`8.4e-1 → 7.8e-4` over `ℓ = 0.2 → 10`), and the range is an ESTIMATED
+  coordinate. Containment is a function of a fitted parameter, not a property of
+  a family, so no per-family list can encode it and a delete/don't gate makes the
+  model DIMENSION step by one when a fit walks its own range across a threshold.
+
+  What that cost, measured through the shipped pipeline
+  (`examples/probe_2747_parametric_orthogonality`, `‖XᵀC‖/(‖X‖‖C‖)` against the
+  `1e-8` bar the same function asserts whenever a transform IS applied):
+
+  ```text
+                             before      after     deleted directions
+  curv(x1,x2)               4.72e-1   1.17e-14      0 (was 1)
+  x1 + curv(x1,x2)          4.89e-1   1.13e-14      0 (was 2)
+  s(x1) + curv(x1,x2)       2.70e-1   7.15e-15      0
+  s(x1) + tps(x1,x2)        1.64e-1   1.30e-14      0
+  tps / duchon, ± x1        3.0e-14   unchanged     bit-identical
+  ```
+
+  The `s(x1) + tps` row is the one that shows the reach: thin-plate is the
+  CONTAINED class and it was still `1.64e-1` against its owner, because the
+  constraint block for a dependent smooth is `[1 | owner's realized columns]` and
+  an owner's basis columns are contained in no other basis's span. So the
+  containment gate withheld the whole block rather than one direction of it, and
+  `analyze_smooth_ownership`'s hierarchy — the machinery that stops a broader
+  smooth refitting structure its owner already carries (#978, #1470) — stopped
+  binding for every dependent smooth in the library.
+
+  **The fix is that the fork was never delete-or-nothing.** A deletion is
+  licensed by containment; an ORTHOGONALIZATION is licensed always:
+
+  ```text
+  X̃ = X − C(CᵀWC)⁻CᵀWX        span([C | X̃]) = span([C | X])   for every X, C
+  ```
+
+  — a column operation on a block whose partner is in the model. So
+  `apply_global_smooth_identifiability` now deletes where the block is wholly
+  contained (bit-identical to what shipped; thin-plate and Duchon do not move)
+  and PROJECTS everywhere else, keeping every coefficient direction while making
+  `X̃ᵀWC = 0` exactly. The rank of `X̃` falls by `dim(col X ∩ col C)` and by
+  nothing else, so the whitener drops precisely the directions the deletion is
+  entitled to drop. It is also continuous in the containment residual — the
+  direction the classical constraint removes has residualized norm exactly
+  `sin θ = ‖1 − P_X 1‖/‖1‖` — so the two constructions AGREE at containment
+  instead of meeting at a threshold.
+
+  The fit is preserved where the theory says it must be: `y ~ curv` residual ss
+  `9.926900 → 9.926900`, edf `23.455911 → 23.455912`, because with an unpenalized
+  parametric block residualization is a reparametrization of the same fitted
+  model. Where the partner is penalized — the `s(x1) + …` rows — the fit moves,
+  which is the hierarchy binding again.
+
+  Numerics: `G̃ = X̃ᵀWX̃` is streamed from the EXPLICIT residual rather than formed
+  as `G − M N⁻ Mᵀ`, which is a difference of near-equal `O(‖G‖)` quantities
+  precisely in the contained case it has to resolve. Storage: `X` and `C` are
+  stacked into one `BlockDesignOperator` and the minus sign lives inside a single
+  `CoefficientTransformOperator`, so a lazy design stays lazy and `C·R` is never
+  materialized.
+
+  Replay: `ParametricResidualizationChart` on `SmoothTerm`, frozen onto
+  `SmoothTermSpec` beside the joint-null rotation. It carries `R`, the owner
+  terms it was built against and whether the parametric block led — because `R`
+  is TRAINING-ROW data and must be replayed, not re-derived (#978), while `C`
+  itself is rebuilt at the new rows, which is what `C` is.
+
+  Gated by `parametric_orthogonality_costs_no_dimension_2747` (five gates on the
+  shipped pipeline, each asserting its own premise — the realized span must NOT
+  contain the constant, or the deletion would be free and the test would measure
+  nothing) and by three unit gates on the numerical core, whose orthogonality bar
+  is DERIVED (`n·ε·‖X‖/‖X̃‖`, the floor of an `n`-term accumulation carrying the
+  `1/sin θ` amplification) and asserted to sit far below the shipped `1e-8` so it
+  cannot pass vacuously. The replay gate's negative control drops the chart from
+  the same frozen spec and requires the design to MOVE, because a rederivation's
+  output looks exactly like a design.
+
+  **Named and deliberately NOT fixed here: a second producer.**
+  `freeze_geometry_from_metadata` (`spatial_optimization.rs:4849`) freezes the κ
+  optimizer's cold-build chart as `MaternIdentifiability::FrozenTransform`; that
+  chart comes from `realize_single_smooth_term`, whose own comment says it "never
+  runs the global ownership pass"; and
+  `smooth_requires_parametric_orthogonality`'s doc excludes `FrozenTransform`
+  bases on the premise that such a transform "already has the parametric
+  orthogonalization composed in". For that producer the premise is false, so
+  every spatial smooth whose geometry the κ optimizer froze skips the global step
+  entirely, and has done since long before #2747 — which is why a Matérn fit
+  still measures `4.15e-1` through `fit_from_formula` with the projection arm
+  landed. `an_unfrozen_matern_smooth_is_orthogonalized_at_no_cost_2747` pins that
+  the arm is not at fault: from an unfrozen spec the identical basis comes out
+  orthogonal at the shipped bar with all `centers − 1` columns.
+
+- **The κ criterion's acceptance was met and unmeasured (#2747).** Both fixtures
+  are green at `ee7b9a2fa`: `profile_ci_covers_planted_curvature_across_replicates`
+  covers 9/9 with 0 unresolved, κ̂ interior on 8 of 9 (the state the issue opened
+  on was `railed_at_upper_bound` 9/9), mean κ̂ `+1.070` against a planted `+1.0`,
+  sign right 9/9, over replicates that now span `0.5×`/`1×`/`2×` the auto range;
+  `flatness_test_holds_size_across_flat_replicates` rejects 1/9 at α = 0.05 with
+  0 unresolved. The estimator half of that issue was finished by
+  `1f76fb35f` (one kernel, one range) → `337e6aa86` (ψ = (κ, η)) → `4b618f0ba`
+  (the contrast gauge) → `76a520c45`, and the last of those had never been run
+  against the fixture it was written for.
+
+- **The λ̂-selection replay was refused on every real fit, and where it was not
+  refused it minimised a criterion whose Occam term was noise (#2672).** The
+  smooth-term LR reference prices `λ̂` as CHOSEN rather than as given by
+  replaying the outer selection: draw the tested block, minimise the replayed
+  REML criterion over `ln t`, read `W`. Four defects, each found by measuring the
+  previous repair rather than reasoning about it.
+
+  **1. The Occam term was priced by the route `#2644` had already rejected.**
+  The criterion is
+
+  ```text
+  V(t) = ½ Σ_j c_j² e_j/(1 + e_j)  +  ½ [ log|I + T(t)| − log|T(t)|₊ ],
+  T(t) = Σ_i t_i λ̂_i · Wᵀ S_i W
+  ```
+
+  and the bracket is its whole Occam half — the only term that stops the
+  selection running to `t → 0`. Both replay lanes computed it as
+  `Σ_{e > 0} log(1 + 1/e)` over the eigenvalues of the ASSEMBLED whitened sum,
+  with no structural rank and no noise floor. `penalty_logdet.rs`'s own
+  `SpectrumScale` says why that cannot work, and names this configuration: the
+  assembled route prices `log|S_λ|₊` to `O(ε·κ)` against `O(ε·√κ)` from the
+  stacked scaled roots, and `κ` goes past `1e14` when "one λ [is] at its ceiling
+  beside a null-space shrinkage λ near zero" — which is what a null-true default
+  `s(z)` IS, since `double_penalty` is on by default. Measured on a whitened
+  `q = 9` bending+ridge pair:
+
+  ```text
+  ρ̂ = (0, 0)      offset  20.564 vs  20.564     error   0.000
+  ρ̂ = (12, −12)   offset  29.813 vs  29.813     error   0.000
+  ρ̂ = (18, −24)   offset  19.189 vs  53.811     error −34.623
+  ρ̂ = (29, −29)   offset   8.103 vs  63.811     error −55.709
+  ```
+
+  The error does not perturb the selection, it replaces it: the modes lost are
+  the ones carrying `−ln t_i`, i.e. the coercivity that makes the criterion blow
+  up as `λ_i → 0`, so what is left is monotone in `ln t_i` and the replay picks a
+  wall. Same mechanism `from_components` documents under #1237, from the replay's
+  side. An independent numpy lab minimising a Gaussian-σ-known REML both ways
+  puts the two argmins `5.7`–`13.0` nats apart under the exact criterion, always
+  by railing the smaller λ down.
+
+  **2. The geometry was refused on every real fit, silently.** `Wᵀ S W` is
+  symmetric as an object and asymmetric by summation order, and
+  `strict_symmetric_eigh` VALIDATES its input rather than symmetrizing it — the
+  right contract, since a caller with a genuinely non-symmetric matrix has a
+  defect. Every unit test in the module handed the whitening an identity
+  information and a diagonal penalty, where the congruence comes out EXACTLY
+  symmetric and the validator never fires. The integration sweep's first cell is
+  a dense fit, and it declined.
+
+  **3. The whitener formed `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj`, which is a
+  cancellation.** Two matrices whose ratio is `1/(1 − p)`, after an explicit
+  inverse of an ill-conditioned block: at `p = 1 − 1e-12` — an ordinary
+  heavily-shrunk direction — the difference is roundoff amplified twelve orders.
+  The relative eigenvalue floor was then set by a SPURIOUS largest eigenvalue and
+  discarded every direction the data could see. Four of the first twenty
+  replicates of the `n = 60` fixture:
+
+  ```text
+  rep   reference mean   replayed E[W|λ̂]   q(replay)   q(reference)
+    7          0.8557           0.0003        10           11
+    8          0.9600           0.0000         9           11
+   13          0.7060           0.0004        10           11
+   15          0.7894           0.0000        10           11
+  ```
+
+  The published p-value is `p_conditional + [P̂(W_sel ≥ w) − P̂(W_cond ≥ w)]`, a
+  control variate — and a control variate is only one if the subtracted term has
+  the SAME law as the exactly-integrated one. On those replicates the shift was
+  measured against a law with zero mass and added to the tail of a law with all
+  of it. Invisible on any single fit; visible only in the size.
+
+  The same object is available with no cancellation. With
+  `A = B^{1/2} S B^{1/2} = QΛQᵀ`, `Λ = diag(p)`, `B = [H⁻¹]_jj`,
+
+  ```text
+  B^{1/2} Ĩ B^{1/2} = B^{1/2}(B⁻¹ − S)B^{1/2} = I − A = Q(I − Λ)Qᵀ,
+  ```
+
+  so `W = B^{1/2}Q(I − Λ)^{-1/2}` satisfies `WWᵀ = Ĩ⁻¹`, the only subtraction
+  left is the SCALAR `1 − p` (which loses digits exactly when the direction is
+  genuinely unidentified — a statement about the fit), and the retained set
+  becomes `1 − p > 100·q·ε`, a meaningful criterion instead of a relative floor
+  on a cancelled matrix. As a check on the construction, the whitened total
+  penalty at `λ̂` comes out `(I − Λ)^{-1/2}Λ(I − Λ)^{-1/2} = diag(p/(1 − p))` —
+  exactly the generalized spectrum, diagonal, for free. `lr_schur_information` is
+  deleted rather than repaired: nothing needs `Ĩ` itself.
+
+  **4. The conditional tail was resolved six orders below its own answer's
+  noise.** The Imhof tolerance was derived from `FitOptions::tol`, and at the
+  shipped `1e-10` that request is `~1e-10` — `gam-math`'s strict default, priced
+  at 0.13–3.3 s PER P-VALUE, three or four per term.
+  `null_simulation_size_is_calibrated_small_n` runs 960 of them and DID NOT
+  FINISH IN 4000 s, against nextest's 600 s kill: the test this issue exists to
+  un-hide had become a timeout again, by construction rather than by contention.
+  The published accuracy is `quadrature + 2·se`, so resolving the conditional
+  half below the selection shift's own standard error cannot improve the sum,
+  while Imhof's truncation point grows like `ε^{-2/3}`. The request is now
+  floored at `se`, capping the published bound at `3·se` against an irreducible
+  `2·se`.
+
+  **What replaces all four is one object.** `SelectionGeometry` carries the
+  term's λ-FREE components, whitened by the cancellation-free `W`, factored into
+  their own roots, plus their `ρ̂` and the structural rank of their sum; one thin
+  SVD of the stacked scaled roots per grid point supplies the eigenbasis, the
+  criterion's data operator, the statistic's null weights and both
+  log-determinants, with `log|T|₊` over the `t`-free structural rank instead of a
+  sign test on a number `1e18` below the largest. Three things fall out rather
+  than being fixed separately: the one-dimensional lane stops reconstructing
+  `ν_k = p_k/(1 − p_k)` from the shares (a share lives in `[0, 1]`, so a
+  structural zero and `1e-17` of roundoff are one epsilon apart there — and the
+  log-determinant is the one place that difference is worth `log(1 + 1e17)`, as a
+  term LINEAR in `ln t`); its grid gains `ln t = 0` explicitly; and `generalized`
+  is published on every lane, where the multi-scale one had returned
+  `Vec::new()`.
+
+  **And the `ln t` window is now per scale.** The outer search moved each `ρ_i`
+  independently inside its box, so scale `i` reaches `[−B − ρ̂_i, B − ρ̂_i]`. The
+  single common-shift window the `m`-dimensional grid used to receive is the
+  INTERSECTION of those, which truncates every axis to the narrowest and is EMPTY
+  as soon as one λ̂ rails — the normal state of a null-true double-penalty smooth.
+  `generate_common_scale` still derives the intersection, because that lane
+  genuinely moves every scale together.
+
+  A missing replay is no longer an `Option::None` a reader has to attribute by
+  elimination: `SmoothLrSelection::{Replayed, Declined}` names the step that
+  refused, and that is how defect 2 was found.
+
+  **Two tests were stating claims true only of the reference this issue
+  replaced.** The Bartlett file compared `mean(W)` against `ref_df` — the
+  CONDITIONAL mean `E[W | λ̂]`, which the empirical mean does not converge to
+  because `λ̂` is chosen from the same data. Measured: `2.034` against `0.870`, a
+  ratio of `2.34` and `4.18` standard errors, matching the `2.4–2.5` already on
+  the issue for an independent harness. Against the mean of the law the p-value
+  is actually read from — `E[W(λ̂)] = 1.452`, now published — it is `2.09` se. The
+  bar stays at `3·se`; only the quantity moves, and it still fails by ~20 se on
+  the state this issue opened at.
+
+  The grid's per-cell band carried a fixed `+0.015` for "the second-order
+  residual the correction itself leaves (`O(n⁻²)`)". Measured on the grid's
+  hardest cell across `n` at 200 replicates, that residual is neither `O(n⁻²)`
+  nor constant:
+
+  ```text
+  n         30      50     100     200     400
+  first  0.141   0.111   0.080   0.060   0.065
+  est    0.106   0.096   0.070   0.055   0.065      (MC s.e. 0.0154)
+  ```
+
+  — monotone toward nominal, inside the MC band by `n = 200`, quasi-separation
+  rate `0.0` throughout. So it is the quadratic expansion's own finite-sample
+  error and not a defect in the reference: a wrong reference gives an
+  `n`-INDEPENDENT offset. The band now carries half of the cell's OWN first-order
+  distortion instead of a constant, which states a claim about the correction
+  rather than a tolerance and TIGHTENS the band from `0.075` to `0.060` wherever
+  the test is in its regime.
+
+  Two hypotheses died on data collected for something else: the estimated-λ
+  lane's ρ̂-variation term is NOT a double count against the replay (dropping it
+  makes every anti-conservative cell worse), and the Lawley factor's own
+  magnitude does not track the residual it is meant to remove (`c ≈ 1.008`
+  against a distortion of `0.056` at `n = 30`).
+
+  Verified on one 4-core box, `--test-threads=1`:
+
+  ```text
+                                                    at main        after
+  the_two_routes_..._agree_on_real_fits_2672            RED     ok    29s
+  exhaustive_null_simulation_size_grid              pooled .0962  ok   191s  pooled .0564
+  null_simulation_size_is_calibrated_small_n        >4000s, unfinished
+                                                                  ok   358s  pooled .0669
+  poisson_smooth_lr_is_bartlett_corrected_...           RED     ok    58s
+  cargo test -p gam-models --lib selection_replay lr_null        20 passed
+  ```
+
 - **The `geo_disease_*_matern` / `papuan_oce*_matern` cluster refused a fit on a
   curvature the criterion itself measures with the OPPOSITE SIGN, because the
   only measurement in the room was thrown away after a boolean (#2748).**

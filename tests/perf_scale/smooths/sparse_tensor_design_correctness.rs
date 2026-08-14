@@ -176,6 +176,7 @@ fn build_non_periodic_design(n: usize) -> (DesignMatrix, Array2<f64>) {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "te_xh".to_string(),
             basis: SmoothBasisSpec::TensorBSpline {
                 feature_cols: vec![0, 1],
@@ -252,6 +253,7 @@ fn build_cylinder_design(n: usize) -> (DesignMatrix, Array2<f64>) {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "te_theta_h".to_string(),
             basis: SmoothBasisSpec::TensorBSpline {
                 feature_cols: vec![0, 1],

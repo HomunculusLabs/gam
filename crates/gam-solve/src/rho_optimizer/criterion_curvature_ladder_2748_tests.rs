@@ -40,16 +40,28 @@ struct PlantedCriterion {
     criterion_curvature: Array2<f64>,
     quartic_direction: Array1<f64>,
     fourth_derivative: f64,
+    /// Amplitude of a deterministic, high-frequency, NOT-odd term standing in
+    /// for the criterion's own evaluation error. Zero for the noiseless
+    /// fixtures.
+    evaluation_error: f64,
     evaluations: std::sync::Arc<std::sync::Mutex<usize>>,
 }
 
 impl PlantedCriterion {
     fn value(&self, theta: &Array1<f64>) -> f64 {
         let projection = self.quartic_direction.dot(theta);
+        // The error term is a deterministic function of theta -- same theta,
+        // same value, every lane, every host, no RNG -- with a phase offset so
+        // it is neither even nor odd. An ODD error is cancelled exactly by the
+        // symmetric second difference, so a model without the phase models
+        // nothing (measured: eps_f came back 2.6e-17 on a fixture planted with
+        // 5e-8).
+        let error = self.evaluation_error * (1_048_576.0 * projection + 1.0).sin();
         self.baseline
             + self.gradient.dot(theta)
             + 0.5 * theta.dot(&self.criterion_curvature.dot(theta))
             + self.fourth_derivative * projection.powi(4) / 24.0
+            + error
     }
 }
 
@@ -153,6 +165,7 @@ fn planted(spec: Planted) -> (PlantedCriterion, Array1<f64>, Array1<f64>, Array2
         criterion_curvature: build(spec.criterion_vv),
         quartic_direction: v.clone(),
         fourth_derivative: spec.fourth_derivative,
+        evaluation_error: 0.0,
         evaluations: std::sync::Arc::new(std::sync::Mutex::new(0)),
     };
     (
@@ -260,24 +273,105 @@ fn the_ladder_recovers_a_criterion_curvature_the_analytic_hessian_got_wrong_2748
     );
 }
 
-/// NEGATIVE CONTROL, and the one that keeps this from being a licence: when the
-/// analytic Hessian is HONEST, the ladder agrees and measures exactly nothing.
+/// POSITIVE CONTROL for the escape the DECLARED tolerance was hiding (#2748).
 ///
-/// Without this the routine could report a magnitude on every adjudicated fit
-/// and silently widen every downstream curvature gate. In production the same
-/// control fired on `geo_disease_matern`'s iso-kappa joint arm:
-/// `c_criterion = -1.060226e-6` against `λ_min = -1.060914e-6`, a measured
-/// `‖δH‖₂` of `6.3e-10` — six orders below the chain-rule term, so it moved
-/// nothing.
+/// Same shape as `papuan_oce4_matern_k24`, planted: the analytic Hessian is
+/// HONEST — the criterion really does curve down by `-5.897e-7` along `v` — and
+/// the descent that curvature offers is `~2.9e-7`, four orders above the
+/// criterion's own evaluation error but THREE orders below the
+/// `objective_resolution` the optimizer declares. Before this change the escape
+/// declined it and the fit died at the smoothing correction on a curvature the
+/// criterion agrees with.
+///
+/// The test asserts both halves: the old rule could not have accepted this
+/// (the decrease is below the declared floor), and the new one does, because
+/// the ladder measured the criterion's own error instead of borrowing a
+/// tolerance.
 #[test]
-fn an_honest_analytic_hessian_measures_no_error_at_all_2748() {
-    let curvature = -1.060914e-6_f64;
+fn an_honest_negative_curvature_escapes_on_the_measured_floor_the_declared_one_hid_2748() {
+    let curvature = -5.897486e-7_f64;
+    let declared_resolution = 2.178e-4_f64;
+    let (mut objective, theta, gradient, hessian, direction) = planted(Planted {
+        criterion_vv: curvature,
+        analytic_vv: curvature,
+        fourth_derivative: 1.506824e-6,
+        gradient_scale: 4.761e-7,
+    });
+    let baseline = objective.value(&theta);
+    let bounds = wide_bounds();
+
+    // PRE-REGISTERED: the best descent this curvature offers anywhere in the
+    // box is below the DECLARED resolution, so the pre-#2748 rule could only
+    // have declined it. Without this the test could pass by the old path.
+    let best_descent = 0.5 * curvature.abs();
+    assert!(
+        best_descent < declared_resolution,
+        "the fixture must be one the declared floor hides: {best_descent:.3e} vs \
+         {declared_resolution:.3e}"
+    );
+
+    let verdict = adjudicate_negative_curvature(
+        &mut objective,
+        &theta,
+        &gradient,
+        &hessian,
+        &[],
+        None,
+        baseline,
+        declared_resolution,
+        &bounds,
+        "planted #2748 measured-floor escape",
+    );
+    let SaddleAdjudication::Descended(point) = verdict else {
+        panic!(
+            "a curvature the criterion CONFIRMS, resolved against the criterion's own \
+             measured error, is a real saddle and must mint the escape: {verdict:?}"
+        );
+    };
+    let landed = objective.value(&point);
+    assert!(
+        landed < baseline,
+        "the minted reseed must be strictly lower: {landed:.12e} vs {baseline:.12e}"
+    );
+    assert!(
+        baseline - landed < declared_resolution,
+        "and by LESS than the declared resolution, which is the whole point: \
+         {:.6e} vs {declared_resolution:.6e}",
+        baseline - landed
+    );
+    // The step lies along the probed direction, so the reseed leaves the ridge
+    // rather than wandering.
+    let displacement = &point - &theta;
+    let along = displacement.dot(&direction).abs();
+    assert!(
+        (along - displacement.dot(&displacement).sqrt()).abs() <= 1.0e-12,
+        "the reseed must move along the disputed eigenvector"
+    );
+}
+
+/// NEGATIVE CONTROL, and the one that keeps the escape from being a licence:
+/// when the criterion's own error is LARGER than the descent on offer, the
+/// escape declines and the verdict is withdrawn.
+///
+/// This is `a_descent_below_the_criterion_resolution_is_not_an_escape_2612`'s
+/// property, restated in the criterion's own units instead of a declared
+/// tolerance's. The claim here is `-1e-4` against a criterion whose measured
+/// `eps_f` puts Law 1's floor ABOVE it, so the curvature is not a measurement
+/// and nothing is minted.
+///
+/// The noise is deliberately NOT odd in the probed direction: a symmetric
+/// second difference annihilates any odd perturbation exactly, so an odd model
+/// of evaluation error models none.
+#[test]
+fn a_curvature_the_criterion_cannot_resolve_is_not_an_escape_2748() {
+    let curvature = -1.0e-4_f64;
     let (mut objective, theta, gradient, hessian, _direction) = planted(Planted {
         criterion_vv: curvature,
         analytic_vv: curvature,
-        fourth_derivative: 3.0e-3,
-        gradient_scale: 1.06e-6,
+        fourth_derivative: 0.48,
+        gradient_scale: 1.0e-12,
     });
+    objective.evaluation_error = 3.0e-8;
     let baseline = objective.value(&theta);
     let bounds = wide_bounds();
 
@@ -289,28 +383,37 @@ fn an_honest_analytic_hessian_measures_no_error_at_all_2748() {
         &[],
         None,
         baseline,
-        2.095e-3,
+        1.0e-7,
         &bounds,
-        "planted #2748 honest-Hessian control",
+        "planted #2748 unresolvable-curvature control",
     );
     let SaddleAdjudication::Contradicted {
         criterion_curvature,
         ..
     } = verdict
     else {
-        panic!("the planted descent is below the criterion's declared resolution, so no trial can descend: {verdict:?}");
+        panic!(
+            "a curvature Law 1 cannot resolve on this criterion must NOT mint an escape: \
+             {verdict:?}"
+        );
     };
-    let measured = criterion_curvature.expect("the ladder must determine a fit here too");
+    let measured = criterion_curvature.expect("the ladder must still determine a fit");
+    let resolution = measured
+        .ladder
+        .finite_difference_resolution()
+        .expect("a positive measured pair yields Law 1");
     assert!(
-        (measured.ladder.curvature - curvature).abs() <= 1.0e-2 * curvature.abs(),
-        "the ladder must recover the planted curvature on the honest fixture too: got {:.6e}",
-        measured.ladder.curvature
+        !resolution.resolves(measured.ladder.curvature),
+        "this fixture exists because the claim sits UNDER the criterion's own Law 1 floor; \
+         if it no longer does the control proves nothing: |c|={:.6e} vs floor {:.6e}",
+        measured.ladder.curvature.abs(),
+        resolution.resolution()
     );
-    assert_eq!(
-        measured.hessian_error_2norm(),
-        0.0,
-        "an honest Hessian must measure NO assembly error, or every gate downstream widens \
-         on every adjudicated fit"
+    assert!(
+        measured.ladder.evaluation_error > 1.0e-9,
+        "the planted evaluation error must actually be measured, or the noise model is odd \
+         and the symmetric average cancelled it: eps_f={:.6e}",
+        measured.ladder.evaluation_error
     );
 }
 
@@ -352,13 +455,44 @@ fn a_genuine_saddle_still_descends_and_never_reaches_the_ladder_2748() {
         objective.value(&point) < baseline,
         "the minted reseed must be a strictly lower point"
     );
-    // The escape found its descent on the first rung of the first sign, then
-    // the restore. No ladder extension ran.
+    // The escape found its descent on the first rung of the first sign, so the
+    // ladder extension — the MEASUREMENT this test is about — never ran.
+    //
+    // The evaluations it does pay for are all step search, and every one of them
+    // is derived (#2612): the falsification rung, the checkpoint restore, the
+    // incumbent re-measured in the expansion's own instrument state, one per
+    // doubling out to the box intersection along the ray, and the final restore.
+    // On this planted criterion the descent really is unbounded inside the box —
+    // `f(α) = baseline + g·α − 800α² + α⁴/24` does not turn back until
+    // `α = √19200 ≈ 138.6`, far outside `α_box = 30/√½ ≈ 42.4` — so the
+    // expansion runs to the face, which is the correct answer and not a cost to
+    // be avoided. The bound below is that arithmetic, not a recorded count: if
+    // the extension ever ran it would add two evaluations per rung down to the
+    // roundoff plateau and blow straight past it.
+    let alpha_box = 30.0 / 0.5_f64.sqrt();
+    let doublings = alpha_box.log2().ceil() as usize;
+    let budget = 1 + 1 + 1 + doublings + 1;
     assert!(
-        *counter.lock().expect("counter") <= 3,
-        "a confirmed saddle must not pay for a measurement it does not need; \
-         {} evaluations",
+        *counter.lock().expect("counter") <= budget,
+        "a confirmed saddle must not pay for a measurement it does not need: \
+         {} evaluations against a derived budget of {budget} (1 falsification rung + 1 checkpoint \
+         restore + 1 incumbent re-measure + {doublings} doubling(s) to alpha_box={alpha_box:.4} + \
+         1 restore)",
         *counter.lock().expect("counter")
+    );
+    // And the positive statement those evaluations bought, which is the point of
+    // paying for them: on a descent with no interior minimiser the reseed is the
+    // box face, not the falsifier's largest rung (#2612).
+    let travelled = point
+        .iter()
+        .zip(theta.iter())
+        .map(|(after, before)| (after - before).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (travelled - 30.0).abs() < 1e-9,
+        "the descent runs to the box, so the reseed must sit ON it: travelled {travelled:.6e} \
+         against a bound of 30. A reseed one e-fold out is the falsifiability ladder's rung being \
+         reused as a step length: {point:?}"
     );
 }
 

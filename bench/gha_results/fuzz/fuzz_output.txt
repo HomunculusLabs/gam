@@ -1,6 +1,6 @@
 Running 100 trials
-  Seed start:        2047621599 [auto]
-  Replay this run:   --seed-start 2047621599
+  Seed start:        839290055 [auto]
+  Replay this run:   --seed-start 839290055
   Scenario source:   /home/runner/work/gam/gam/bench/scenarios.json
   Filters: family=all model=all basis=all
   Gamfit timeout:    60s
@@ -11,30 +11,16 @@ Running 100 trials
   Metadata: /home/runner/work/gam/gam/bench/fuzz_results.meta.json
 
 Skipped 2 trial(s) above scenario cost cap 200000; max skipped cost=3950000
-  [  1/100] geo_disease_eas_tp_k6          bino/gam/tps   auc:gamfit=0.8261 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=20.6s mgcv=0.0s(to-failure)
+  [  1/100] geo_disease_eas3_duchon_k6     bino/gam/ducho auc:gamfit=0.8275 auc:mgcv=0.8275 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=2.3s mgcv=2.0s
+  [  2/100] geo_disease_eas3_duchon_k12    bino/gam/ducho auc:gamfit=0.8315 auc:mgcv=0.8315 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=50.4s mgcv=2.0s
+  [  3/100] geo_disease_eas3_duchon_k24    bino/gam/ducho auc:gamfit=0.8262 auc:mgcv=0.8262 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=19.6s mgcv=2.0s
+  [  4/100] geo_disease_eas3_matern_k6     bino/gam/mater auc:gamfit=0.8221 auc:mgcv=0.8293 gap=+0.0071 n=  6000 p=  3 [ok]  gamfit=7.1s mgcv=2.1s
+  [  5/100] geo_disease_eas3_matern_k12    bino/gam/mater auc:gamfit=0.8201 auc:mgcv=0.8234 gap=+0.0033 n=  6000 p=  3 [ok]  gamfit=28.1s mgcv=1.9s
+  [  6/100] geo_disease_eas3_matern_k24    bino/gam/mater auc:gamfit=0.8208 auc:mgcv=0.8244 gap=+0.0036 n=  6000 p=  3 [ok]  gamfit=21.5s mgcv=1.9s
+  [  7/100] geo_disease_eas3_psperpc_k6    bino/gam/ps    auc:gamfit=0.8279 auc:mgcv=0.8279 gap=-0.0000 n=  6000 p=  3 [ok]  gamfit=75.4s mgcv=1.0s
+  [  8/100] geo_disease_eas3_psperpc_k12   bino/gam/ps    auc:gamfit=0.8269 auc:mgcv=0.8271 gap=+0.0002 n=  6000 p=  3 [ok]  gamfit=56.1s mgcv=1.0s
+  [  9/100] geo_disease_eas3_psperpc_k24   bino/gam/ps    auc:gamfit=0.8274 auc:mgcv=0.8272 gap=-0.0003 n=  6000 p=  3 [ok]  gamfit=80.1s mgcv=2.1s
+  [ 10/100] papuan_oce_tp_k12              bino/gam/tps   auc:gamfit=0.8131 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=18.2s mgcv=0.0s(to-failure)
     -- MGCV FAILURE --
     error: r_mgcv fit failed: negative length vectors are not allowed
-  [  2/100] geo_disease_eas_tp_k12         bino/gam/tps   auc:gamfit=0.8244 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=12.5s mgcv=0.0s(to-failure)
-    -- MGCV FAILURE --
-    error: r_mgcv fit failed: negative length vectors are not allowed
-  [  3/100] geo_disease_eas_tp_k24         bino/gam/tps   auc:gamfit=0.8248 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=373.8s mgcv=0.0s(to-failure)
-    -- MGCV FAILURE --
-    error: r_mgcv fit failed: negative length vectors are not allowed
-  [  4/100] geo_disease_eas_duchon_k6      bino/gam/ducho auc:gamfit=0.8256 auc:mgcv=0.8257 gap=+0.0001 n=  6000 p= 16 [ok]  gamfit=33.3s mgcv=4.0s
-  [  5/100] geo_disease_eas_duchon_k12     bino/gam/ducho auc:gamfit=0.8259 auc:mgcv=0.8260 gap=+0.0001 n=  6000 p= 16 [ok]  gamfit=23.3s mgcv=3.8s
-  [  6/100] geo_disease_eas_duchon_k6_down bino/gam/ducho auc:gamfit=0.6364 auc:mgcv=  ERR gap= N/A  n=    60 p= 16 [no-verdict:mgcv_error]
-    -- MGCV FAILURE --
-    error: r_mgcv predict failed: logistic-normal Gauss-Hermite quadrature did not converge by order 256
-  [  7/100] geo_disease_eas_duchon_k6_down bino/gam/ducho auc:gamfit=0.8485 auc:mgcv=  ERR gap= N/A  n=   120 p= 16 [no-verdict:mgcv_error]
-    -- MGCV FAILURE --
-    error: r_mgcv predict failed: logistic-normal Gauss-Hermite quadrature did not converge by order 256
-  [  8/100] geo_disease_eas_duchon_k6_down bino/gam/ducho auc:gamfit=0.8419 auc:mgcv=0.8426 gap=+0.0007 n=   600 p= 16 [ok]  gamfit=1.0s mgcv=0.3s
-  [  9/100] geo_disease_eas_duchon_k4_down bino/gam/ducho auc:gamfit=1.0000 auc:mgcv=1.0000 gap=+0.0000 n=    12 p= 16 [ok]
-  [ 10/100] geo_disease_eas_duchon_k4_down bino/gam/ducho auc:gamfit=0.0000 auc:mgcv=0.6667 gap=+0.6667 n=    20 p= 16 [FAIL:gap] !!!  gamfit=1.5s mgcv=0.0s
-  [ 11/100] geo_disease_eas_duchon_k4_down bino/gam/ducho auc:gamfit=0.7727 auc:mgcv=  ERR gap= N/A  n=    60 p= 16 [no-verdict:mgcv_error]
-    -- MGCV FAILURE --
-    error: r_mgcv predict failed: logistic-normal Gauss-Hermite quadrature did not converge by order 256
-  [ 12/100] geo_disease_eas_duchon_k24     bino/gam/ducho auc:gamfit=0.8278 auc:mgcv=0.8212 gap=-0.0066 n=  6000 p= 16 [ok]  gamfit=214.2s mgcv=3.8s
-  [ 13/100] geo_disease_eas_matern_k6      bino/gam/mater auc:gamfit=0.8283 auc:mgcv=0.8239 gap=-0.0044 n=  6000 p= 16 [ok]  gamfit=11.2s mgcv=4.0s
-  [ 14/100] geo_disease_eas_matern_k12     bino/gam/mater auc:gamfit=0.8260 auc:mgcv=0.8239 gap=-0.0021 n=  6000 p= 16 [ok]  gamfit=31.0s mgcv=4.0s
-  [ 15/100] geo_disease_eas_matern_k24     bino/gam/mater auc:gamfit=0.8297 auc:mgcv=0.8263 gap=-0.0034 n=  6000 p= 16 [ok]  gamfit=58.0s mgcv=3.7s
+  [ 11/100] papuan_oce_duchon_k12          bino/gam/ducho auc:gamfit=0.8136 auc:mgcv=0.8134 gap=-0.0002 n=  6000 p= 16 [ok]  gamfit=33.8s mgcv=3.6s

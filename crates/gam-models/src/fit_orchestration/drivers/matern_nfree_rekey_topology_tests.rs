@@ -72,6 +72,7 @@ mod matern_nfree_rekey_topology_tests {
             linear_terms: Vec::new(),
             random_effect_terms: Vec::new(),
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "spatial".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],

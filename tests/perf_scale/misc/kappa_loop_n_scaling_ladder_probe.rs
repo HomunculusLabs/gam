@@ -49,6 +49,7 @@ fn spec_1d() -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],

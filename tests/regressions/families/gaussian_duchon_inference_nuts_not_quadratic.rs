@@ -37,6 +37,7 @@ use std::time::Instant;
 
 fn duchon2_smooth(name: &str, centers: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: vec![0, 1],
@@ -233,7 +234,16 @@ fn gaussian_duchon_rho_posterior_inference_is_not_quadratic_in_n() {
         "smoothing parameters must be unchanged by ρ-posterior sampling (max |Δλ|={max_lambda_dev:.3e})"
     );
     assert!(
-        (no_post.fit.reml_score().expect("the fit reports a REML/LAML criterion") - with_post.fit.reml_score().expect("the fit reports a REML/LAML criterion")).abs() < 1e-9,
+        (no_post
+            .fit
+            .reml_score()
+            .expect("the fit reports a REML/LAML criterion")
+            - with_post
+                .fit
+                .reml_score()
+                .expect("the fit reports a REML/LAML criterion"))
+        .abs()
+            < 1e-9,
         "REML score must be unchanged by ρ-posterior sampling"
     );
 }

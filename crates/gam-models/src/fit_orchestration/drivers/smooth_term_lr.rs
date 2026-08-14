@@ -48,7 +48,7 @@ pub enum SmoothLrReferenceSource {
     /// The spectrum is assembled from `[H⁻¹]_jj` and the term's own λ-weighted
     /// penalty block through the symmetric similarity
     /// `w_j = 1 − eig(B^{1/2} S_jj B^{1/2})²` — see
-    /// [`lr_penalty_shares`] for why that is the same spectrum as
+    /// [`lr_tested_block`] for why that is the same spectrum as
     /// `eig(2·F_jj − F_jj²)` and why it is the better-conditioned way to reach
     /// it.
     NullSpectrum,
@@ -112,7 +112,7 @@ pub enum SmoothLrReferenceSource {
 /// Diagonalize the term's fitted penalty `S_jj` against the Schur-complemented
 /// information `Ĩ_jj` — the pair is symmetric-definite, so a single basis
 /// diagonalizes both, with generalized eigenvalues `ν_k = p_k/(1 − p_k)` read
-/// straight off the penalty shares [`lr_penalty_shares`] already computes. In
+/// straight off the penalty shares [`lr_tested_block`] already computes. In
 /// that basis the tested block is `q` independent standard normals `u_k`, and
 /// BOTH the statistic and the criterion that selects `λ` are closed forms in
 /// them and in the scale `t = λ/λ̂`:
@@ -359,41 +359,30 @@ impl SelectionGeometry {
     /// decomposition refuses, or the components leave nothing penalized —
     /// in every case the caller has nothing to replay.
     fn whiten(
-        information: &Array2<f64>,
+        whitener: &Array2<f64>,
         unit_penalties: &[Array2<f64>],
         log_lambda: &[f64],
     ) -> Option<Self> {
         if unit_penalties.is_empty() || unit_penalties.len() != log_lambda.len() {
             return None;
         }
-        let (values, vectors) =
-            gam_linalg::faer_ndarray::strict_symmetric_eigh(information, faer::Side::Lower).ok()?;
-        let largest = values.iter().copied().fold(0.0_f64, f64::max);
-        if !(largest > 0.0) {
+        let dimension = whitener.ncols();
+        if dimension == 0 || whitener.nrows() == 0 {
             return None;
-        }
-        let floor = largest * 1e-12;
-        let kept: Vec<usize> = (0..values.len())
-            .filter(|&index| values[index] > floor)
-            .collect();
-        if kept.is_empty() {
-            return None;
-        }
-        let dimension = kept.len();
-        let mut whitener = Array2::<f64>::zeros((information.nrows(), dimension));
-        for (column, &index) in kept.iter().enumerate() {
-            let scale = values[index].sqrt();
-            for row in 0..information.nrows() {
-                whitener[[row, column]] = vectors[[row, index]] / scale;
-            }
         }
 
         let mut roots = Vec::with_capacity(unit_penalties.len());
         for penalty in unit_penalties {
-            if penalty.nrows() != information.nrows() || penalty.ncols() != information.ncols() {
+            if penalty.nrows() != whitener.nrows() || penalty.ncols() != whitener.nrows() {
                 return None;
             }
-            let whitened = whitener.t().dot(penalty).dot(&whitener);
+            // `Wᵀ S W` is symmetric as a mathematical object and its two
+            // triangles differ only by summation order — but
+            // `strict_symmetric_eigh` REFUSES the input rather than symmetrizing
+            // it for the caller, which is the right contract and the reason this
+            // is explicit here. Dropping it is a silent `GeometryRefused` on
+            // every real fit.
+            let whitened = symmetrized(whitener.t().dot(penalty).dot(whitener));
             if whitened.iter().any(|value| !value.is_finite()) {
                 return None;
             }
@@ -557,11 +546,106 @@ fn psd_root(matrix: &Array2<f64>) -> Option<Array2<f64>> {
     Some(root)
 }
 
+/// The symmetric part of a matrix that is symmetric as a mathematical object.
+///
+/// A congruence `WᵀSW` and an assembled Gram are symmetric by construction and
+/// asymmetric by summation order. `strict_symmetric_eigh` validates its input
+/// rather than symmetrizing it — a deliberate contract, since a caller handing
+/// it a genuinely non-symmetric matrix has a defect — so every congruence on
+/// this path passes through here first.
+fn symmetrized(mut matrix: Array2<f64>) -> Array2<f64> {
+    let dimension = matrix.nrows();
+    for row in 0..dimension {
+        for column in 0..row {
+            let mean = 0.5 * (matrix[[row, column]] + matrix[[column, row]]);
+            matrix[[row, column]] = mean;
+            matrix[[column, row]] = mean;
+        }
+    }
+    matrix
+}
+
 /// The published order of a generalized spectrum: ascending, as
 /// [`SmoothLrSelectionReplay::generalized`] documents.
 fn ascending(mut values: Vec<f64>) -> Vec<f64> {
     values.sort_by(|a, b| a.partial_cmp(b).expect("finite generalized spectrum"));
     values
+}
+
+/// Why a term's reference carries no selection replay, when it carries none.
+///
+/// A missing replay is not neutral — it is the difference between pricing `λ̂`
+/// as CHOSEN and pricing it as given, which this issue measured at
+/// `size@.05 = 0.0962` against nominal `0.05`. So the reference says which step
+/// declined and why, rather than publishing a `None` a reader has to attribute
+/// by elimination. Every one of these is a statement about the FIT, not about
+/// the arithmetic: a term with nothing to select legitimately has no replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothLrSelectionDecline {
+    /// No penalty component reached the driver for this term: it is unpenalized,
+    /// or every component's `λ̂` was zero or non-finite, or the components sit
+    /// outside the tested coefficient block. Nothing was selected, so the
+    /// conditional law IS the selection law.
+    NoPenaltyComponents,
+    /// The Schur-complemented information `Ĩ_jj` has no identified direction:
+    /// every direction of the tested block has a data share `1 − p` at the
+    /// decomposition's own noise floor, so there is no basis in which the block
+    /// is standard normal. A term the penalty has absorbed entirely.
+    NoInformation,
+    /// The whitening or a component's root refused: `Ĩ_jj` has no identified
+    /// direction, a decomposition failed, or the components span nothing.
+    GeometryRefused,
+    /// Every scale's window is closed — the fit is railed against both walls of
+    /// the solver's `ρ` box at once, so there was no `λ` it could have chosen
+    /// instead.
+    WindowClosed,
+    /// A grid point could not be evaluated, so the replay would have been taken
+    /// over a grid with a hole in it. Refused whole rather than sampled partial.
+    GridRefused,
+}
+
+impl SmoothLrSelectionDecline {
+    /// The serialized label surfaced in reports and failure messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            SmoothLrSelectionDecline::NoPenaltyComponents => "no_penalty_components",
+            SmoothLrSelectionDecline::NoInformation => "no_information",
+            SmoothLrSelectionDecline::GeometryRefused => "geometry_refused",
+            SmoothLrSelectionDecline::WindowClosed => "window_closed",
+            SmoothLrSelectionDecline::GridRefused => "grid_refused",
+        }
+    }
+}
+
+/// The λ̂-selection replay, or the named reason there is none.
+///
+/// This is an enum rather than an `Option` so that a consumer cannot read
+/// "no replay" without reading why — the two branches are different statements
+/// about the fit and the driver has always known which one it made.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SmoothLrSelection {
+    /// `λ̂` was replayed over the box the solver left it.
+    Replayed(SmoothLrSelectionReplay),
+    /// It was not, for this reason.
+    Declined(SmoothLrSelectionDecline),
+}
+
+impl SmoothLrSelection {
+    /// The replay, when there is one.
+    pub fn replay(&self) -> Option<&SmoothLrSelectionReplay> {
+        match self {
+            SmoothLrSelection::Replayed(replay) => Some(replay),
+            SmoothLrSelection::Declined(_) => None,
+        }
+    }
+
+    /// The decline reason, when there is no replay.
+    pub fn decline(&self) -> Option<SmoothLrSelectionDecline> {
+        match self {
+            SmoothLrSelection::Replayed(_) => None,
+            SmoothLrSelection::Declined(reason) => Some(*reason),
+        }
+    }
 }
 
 impl SmoothLrSelectionReplay {
@@ -570,17 +654,29 @@ impl SmoothLrSelectionReplay {
     /// point — ONE window per scale, because the outer search moved each `ρ_i`
     /// independently inside that box.
     ///
-    /// Returns `None` when the term has no penalized direction (nothing to
-    /// select), the geometry could not be whitened, or every window is empty
-    /// (the fit is railed against both walls), in which case the conditional law
-    /// IS the selection law and the caller should use it unmodified.
+    /// Declines — with a reason — when the term has no penalized direction
+    /// (nothing to select), the geometry could not be whitened, or every window
+    /// is empty (the fit is railed against both walls), in which case the
+    /// conditional law IS the selection law and the caller should use it
+    /// unmodified.
     fn generate(
-        information: &Array2<f64>,
+        whitener: &Array2<f64>,
         unit_penalties: &[Array2<f64>],
         log_lambda: &[f64],
         log_scale_windows: &[(f64, f64)],
-    ) -> Option<Self> {
-        let geometry = SelectionGeometry::whiten(information, unit_penalties, log_lambda)?;
+    ) -> SmoothLrSelection {
+        if unit_penalties.is_empty() || unit_penalties.len() != log_lambda.len() {
+            return SmoothLrSelection::Declined(
+                SmoothLrSelectionDecline::NoPenaltyComponents,
+            );
+        }
+        if whitener.ncols() == 0 {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::NoInformation);
+        }
+        let Some(geometry) = SelectionGeometry::whiten(whitener, unit_penalties, log_lambda)
+        else {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused);
+        };
         Self::from_geometry(
             &geometry,
             log_scale_windows,
@@ -596,16 +692,26 @@ impl SmoothLrSelectionReplay {
         log_scale_windows: &[(f64, f64)],
         diagonal_draws: usize,
         multiscale_draws: usize,
-    ) -> Option<Self> {
+    ) -> SmoothLrSelection {
         if log_scale_windows.len() != geometry.roots.len() {
-            return None;
+            return SmoothLrSelection::Declined(
+                SmoothLrSelectionDecline::NoPenaltyComponents,
+            );
         }
         let scales = geometry.roots.len();
-        if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales)
-            && let Some(replay) =
-                Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws)
-        {
-            return Some(replay);
+        if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales) {
+            return match Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws) {
+                Ok(replay) => SmoothLrSelection::Replayed(replay),
+                // A closed multi-scale window is not the end of the story: the
+                // common-scale slice intersects the same windows and declines
+                // for ITSELF if there is genuinely nothing to move. Any other
+                // refusal is about the geometry, which the slice shares, so it
+                // stands rather than being retried.
+                Err(SmoothLrSelectionDecline::WindowClosed) => {
+                    Self::generate_common_scale(geometry, log_scale_windows, diagonal_draws)
+                }
+                Err(reason) => SmoothLrSelection::Declined(reason),
+            };
         }
         Self::generate_common_scale(geometry, log_scale_windows, diagonal_draws)
     }
@@ -629,29 +735,31 @@ impl SmoothLrSelectionReplay {
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
-    ) -> Option<Self> {
+    ) -> SmoothLrSelection {
         // Moving every scale together, the reachable set is the INTERSECTION of
         // the per-scale windows: a common shift has to keep every `ρ̂_i + ln t`
         // inside the solver's box at once.
         let (mut low, mut high) = (f64::NEG_INFINITY, f64::INFINITY);
         for &(window_low, window_high) in log_scale_windows {
             if !(window_low.is_finite() && window_high.is_finite()) {
-                return None;
+                return SmoothLrSelection::Declined(SmoothLrSelectionDecline::WindowClosed);
             }
             low = low.max(window_low);
             high = high.min(window_high);
         }
         if !(low.is_finite() && high.is_finite()) || high <= low {
-            return None;
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::WindowClosed);
         }
         let zero = vec![0.0_f64; geometry.roots.len()];
-        let fitted = geometry.at(&zero)?;
+        let Some(fitted) = geometry.at(&zero) else {
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GridRefused);
+        };
         // `ν_j = eig T(1)`, descending, with the structural rank leading. Only
         // the leading `rank` of them are in `range(T)`; the rest are the term's
         // unpenalized directions and carry no log-determinant term at any `t`.
         let generalized = fitted.eigenvalues.clone();
         if !generalized.iter().take(geometry.rank).any(|&nu| nu > 0.0) {
-            return None;
+            return SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused);
         }
         let constant: f64 = generalized
             .iter()
@@ -672,71 +780,62 @@ impl SmoothLrSelectionReplay {
         let fitted_index = log_grid.len() - 1;
 
         let dimension = geometry.dimension;
-        let mut penalty_share = Vec::<Vec<f64>>::with_capacity(log_grid.len());
-        let mut null_weight = Vec::<Vec<f64>>::with_capacity(log_grid.len());
-        let mut determinant = Vec::<f64>::with_capacity(log_grid.len());
-        for &log_t in &log_grid {
+        // Draws first, then ONE pass per grid point carrying a running argmin,
+        // rather than one pass per draw over the whole grid: the grid's share
+        // and weight vectors are then read once each per point instead of once
+        // per (draw, point), and nothing but `draws` scalars is retained.
+        let mut squares = vec![0.0_f64; draws * dimension];
+        let mut row = vec![0.0_f64; dimension];
+        let mut stream = SelectionDrawStream::new(dimension, draws);
+        for draw in 0..draws {
+            stream.fill_chi_square_ones(&mut row);
+            squares[draw * dimension..(draw + 1) * dimension].copy_from_slice(&row);
+        }
+
+        let mut best_criterion = vec![f64::INFINITY; draws];
+        let mut selection_sample = vec![0.0_f64; draws];
+        let mut conditional_sample = vec![0.0_f64; draws];
+        let mut share = vec![0.0_f64; dimension];
+        let mut weight = vec![0.0_f64; dimension];
+        for (index, &log_t) in log_grid.iter().enumerate() {
             let t = log_t.exp();
-            let mut share = Vec::with_capacity(dimension);
-            let mut weight = Vec::with_capacity(dimension);
             // `log|I + tT(1)|`, over EVERY direction: an unpenalized one carries
             // `log(1 + 0) = 0` and is neither special-cased nor dropped.
             let mut log_det_hessian = 0.0_f64;
-            for &nu in &generalized {
+            for (column, &nu) in generalized.iter().enumerate() {
                 let scaled = t * nu;
                 let fraction = if scaled.is_finite() {
                     scaled / (1.0 + scaled)
                 } else {
                     1.0
                 };
-                share.push(fraction);
+                share[column] = fraction;
                 let shrinkage = 1.0 - fraction;
-                weight.push(2.0 * shrinkage - shrinkage * shrinkage);
+                weight[column] = 2.0 * shrinkage - shrinkage * shrinkage;
                 log_det_hessian += scaled.ln_1p();
             }
             // `log|T(t)|₊ = rank·ln t + Σ_{j < rank} ln ν_j`, over the STRUCTURAL
             // rank. Deciding that index set by `ν_j > 0` is what put a spurious
             // `−ln t` per roundoff-positive null direction into the criterion.
-            let log_det_penalty = geometry.rank as f64 * log_t + constant;
-            penalty_share.push(share);
-            null_weight.push(weight);
-            determinant.push(log_det_hessian - log_det_penalty);
-        }
-
-        let mut selection_sample = Vec::with_capacity(draws);
-        let mut conditional_sample = Vec::with_capacity(draws);
-        let fitted_weight = null_weight[fitted_index].clone();
-        let mut squares = vec![0.0_f64; dimension];
-        let mut stream = SelectionDrawStream::new(dimension, draws);
-        for _ in 0..draws {
-            stream.fill_chi_square_ones(&mut squares);
-            // argmin of the criterion over the window.
-            let mut best = f64::INFINITY;
-            let mut best_index = 0usize;
-            for index in 0..log_grid.len() {
-                let share = &penalty_share[index];
-                let mut value = determinant[index];
-                for (&square, &fraction) in squares.iter().zip(share.iter()) {
-                    value += square * fraction;
+            let determinant = log_det_hessian - (geometry.rank as f64 * log_t + constant);
+            for draw in 0..draws {
+                let coordinates = &squares[draw * dimension..(draw + 1) * dimension];
+                let mut criterion = determinant;
+                let mut statistic = 0.0_f64;
+                for column in 0..dimension {
+                    criterion += coordinates[column] * share[column];
+                    statistic += coordinates[column] * weight[column];
                 }
-                if value < best {
-                    best = value;
-                    best_index = index;
+                if criterion < best_criterion[draw] {
+                    best_criterion[draw] = criterion;
+                    selection_sample[draw] = statistic;
+                }
+                if index == fitted_index {
+                    conditional_sample[draw] = statistic;
                 }
             }
-            let selected = &null_weight[best_index];
-            let mut chosen = 0.0_f64;
-            let mut held = 0.0_f64;
-            for ((&square, &weight), &held_weight) in
-                squares.iter().zip(selected.iter()).zip(fitted_weight.iter())
-            {
-                chosen += square * weight;
-                held += square * held_weight;
-            }
-            selection_sample.push(chosen);
-            conditional_sample.push(held);
         }
-        Some(Self {
+        SmoothLrSelection::Replayed(Self {
             generalized: ascending(generalized),
             selection_sample,
             conditional_sample,
@@ -783,13 +882,13 @@ impl SmoothLrSelectionReplay {
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
-    ) -> Option<Self> {
+    ) -> Result<Self, SmoothLrSelectionDecline> {
         let scales = geometry.roots.len();
         if scales < 2 || scales > SMOOTH_LR_SELECTION_MAX_SCALES {
-            return None;
+            return Err(SmoothLrSelectionDecline::GeometryRefused);
         }
         if log_scale_windows.len() != scales {
-            return None;
+            return Err(SmoothLrSelectionDecline::NoPenaltyComponents);
         }
         // One axis per scale, budgeted so the total point count does not grow
         // with `m`. A scale whose own window is empty — its `λ̂` railed against
@@ -803,7 +902,7 @@ impl SmoothLrSelectionReplay {
         let mut movable = 0usize;
         for &(low, high) in log_scale_windows {
             if !(low.is_finite() && high.is_finite()) {
-                return None;
+                return Err(SmoothLrSelectionDecline::WindowClosed);
             }
             if high <= low {
                 axes.push(vec![0.0]);
@@ -817,7 +916,7 @@ impl SmoothLrSelectionReplay {
             );
         }
         if movable == 0 {
-            return None;
+            return Err(SmoothLrSelectionDecline::WindowClosed);
         }
 
         // The grid gets ONE extra point: the fitted `λ̂` itself, `ln t_i = 0` on
@@ -832,11 +931,33 @@ impl SmoothLrSelectionReplay {
         let points = axes.iter().map(|axis| axis.len()).product::<usize>() + 1;
         let fitted_index = points - 1;
 
+        // The grid is STREAMED rather than materialized, and every draw is
+        // projected through one grid point at a time with a single matrix
+        // product.
+        //
+        // The arithmetic is identical — `draws × points × q²` either way — but
+        // the shape is not. The per-draw loop it replaces read
+        // `basis[[row, column]]` with `row` innermost, i.e. a strided,
+        // bounds-checked walk down a column, `draws × q²` times per point; this
+        // is one `(draws × q)·(q × q)` `dot` per point followed by a contiguous
+        // row reduction. It also drops the `points × q × q` of stored bases,
+        // which at `441` points and `q = 11` was the bulk of the replay's
+        // footprint.
         let dimension = geometry.dimension;
-        let mut bases = Vec::<Array2<f64>>::with_capacity(points);
-        let mut shares = Vec::<Vec<f64>>::with_capacity(points);
-        let mut weights_grid = Vec::<Vec<f64>>::with_capacity(points);
-        let mut offsets = Vec::<f64>::with_capacity(points);
+        let mut normals = Array2::<f64>::zeros((draws, dimension));
+        let mut row = vec![0.0_f64; dimension];
+        let mut stream = SelectionDrawStream::new(dimension, draws);
+        for draw in 0..draws {
+            stream.fill_normals(&mut row);
+            for column in 0..dimension {
+                normals[[draw, column]] = row[column];
+            }
+        }
+
+        let mut best_criterion = vec![f64::INFINITY; draws];
+        let mut selection_sample = vec![0.0_f64; draws];
+        let mut conditional_sample = vec![0.0_f64; draws];
+        let mut generalized = Vec::new();
         let mut log_t = vec![0.0_f64; scales];
         for point in 0..points {
             let mut remainder = point;
@@ -849,65 +970,82 @@ impl SmoothLrSelectionReplay {
                     axis[step]
                 };
             }
-            let evaluated = geometry.at(&log_t)?;
-            bases.push(evaluated.basis);
-            shares.push(evaluated.shares);
-            weights_grid.push(evaluated.weights);
-            offsets.push(evaluated.offset);
-        }
-        let generalized = {
-            let fitted = geometry.at(&vec![0.0_f64; scales])?;
-            ascending(fitted.eigenvalues)
-        };
-
-        let mut selection_sample = Vec::with_capacity(draws);
-        let mut conditional_sample = Vec::with_capacity(draws);
-        let mut normals = vec![0.0_f64; dimension];
-        let mut projected = vec![0.0_f64; dimension];
-        let mut stream = SelectionDrawStream::new(dimension, draws);
-        for _ in 0..draws {
-            stream.fill_normals(&mut normals);
-            let mut best = f64::INFINITY;
-            let mut best_index = 0usize;
-            for point in 0..points {
-                let basis = &bases[point];
-                let share = &shares[point];
-                let mut value = offsets[point];
+            let evaluated = geometry
+                .at(&log_t)
+                .ok_or(SmoothLrSelectionDecline::GridRefused)?;
+            if point == fitted_index {
+                generalized = ascending(evaluated.eigenvalues.clone());
+            }
+            let projected = normals.dot(&evaluated.basis);
+            for draw in 0..draws {
+                let coordinates = projected.row(draw);
+                let mut criterion = evaluated.offset;
+                let mut statistic = 0.0_f64;
                 for column in 0..dimension {
-                    let mut coordinate = 0.0_f64;
-                    for row in 0..dimension {
-                        coordinate += basis[[row, column]] * normals[row];
-                    }
-                    value += coordinate * coordinate * share[column];
+                    let square = coordinates[column] * coordinates[column];
+                    criterion += square * evaluated.shares[column];
+                    statistic += square * evaluated.weights[column];
                 }
-                if value < best {
-                    best = value;
-                    best_index = point;
+                if criterion < best_criterion[draw] {
+                    best_criterion[draw] = criterion;
+                    selection_sample[draw] = statistic;
+                }
+                if point == fitted_index {
+                    conditional_sample[draw] = statistic;
                 }
             }
-            let quadratic = |point: usize, out: &mut [f64]| -> f64 {
-                let basis = &bases[point];
-                let weight = &weights_grid[point];
-                let mut total = 0.0_f64;
-                for column in 0..dimension {
-                    let mut coordinate = 0.0_f64;
-                    for row in 0..dimension {
-                        coordinate += basis[[row, column]] * normals[row];
-                    }
-                    out[column] = coordinate;
-                    total += coordinate * coordinate * weight[column];
-                }
-                total
-            };
-            selection_sample.push(quadratic(best_index, &mut projected));
-            conditional_sample.push(quadratic(fitted_index, &mut projected));
         }
-        Some(Self {
+        Ok(Self {
             generalized,
             selection_sample,
             conditional_sample,
         })
     }
+    /// `E[W(λ̂)]` under the replayed SELECTION law — the mean of the reference
+    /// this term's p-value is actually read from.
+    ///
+    /// It is published because it is the only quantity that makes the
+    /// construction checkable at the level of a moment. `ref_df = Σ_j w_j` is
+    /// the CONDITIONAL mean `E[W | λ̂]`, and under a null DGP the empirical mean
+    /// of `W` does NOT converge to it: `λ̂` is picked from the same data, so the
+    /// pairing is per-replicate and the unconditional means need not agree —
+    /// measured on this issue's own fixture at a ratio of `2.34`. Reading that
+    /// ratio as a defect is the mistake this thread made twice. What the
+    /// empirical mean IS comparable to is this number.
+    pub fn selection_mean(&self) -> f64 {
+        Self::mean(&self.selection_sample)
+    }
+
+    /// `E[W | λ̂]` on the SAME draws — the conditional law's mean, for the
+    /// paired comparison that shows what the selection did.
+    pub fn conditional_mean(&self) -> f64 {
+        Self::mean(&self.conditional_sample)
+    }
+
+    /// The Monte-Carlo standard error of [`Self::selection_mean`], from the
+    /// sample's own spread rather than from an assumed shape.
+    pub fn selection_mean_standard_error(&self) -> f64 {
+        let draws = self.selection_sample.len();
+        if draws < 2 {
+            return f64::NAN;
+        }
+        let mean = self.selection_mean();
+        let variance = self
+            .selection_sample
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / draws as f64;
+        (variance / draws as f64).sqrt()
+    }
+
+    fn mean(sample: &[f64]) -> f64 {
+        if sample.is_empty() {
+            return f64::NAN;
+        }
+        sample.iter().sum::<f64>() / sample.len() as f64
+    }
+
     /// `(shift, standard_error)`: how much the selection moves the tail at
     /// `statistic`, and the Monte-Carlo standard error of that shift.
     ///
@@ -1178,11 +1316,14 @@ pub struct SmoothLrReferenceDf {
     pub null_dim: usize,
     /// Which lane supplied the reference.
     pub source: SmoothLrReferenceSource,
-    /// The λ̂-selection replay, when the term has a penalized direction and the
-    /// fit left the outer criterion room to choose (#2672). `None` means the
-    /// conditional law IS the selection law here — nothing was selected — and
-    /// the tail is read from [`Self::weights`] alone.
-    pub selection: Option<SmoothLrSelectionReplay>,
+    /// The λ̂-selection replay, or the NAMED reason there is none (#2672).
+    ///
+    /// A decline means the conditional law IS the selection law here — nothing
+    /// was selected — and the tail is read from [`Self::weights`] alone. It is
+    /// an enum rather than an `Option` because a missing replay is a statement
+    /// about the fit, and a reader who does not have to look at which statement
+    /// will not.
+    pub selection: SmoothLrSelection,
     /// The relative resolution of the statistic this reference will be asked
     /// about — the fit's own outer convergence tolerance (`FitOptions::tol`).
     ///
@@ -1264,7 +1405,7 @@ impl SmoothLrReferenceDf {
     /// assumed, so a consumer can see the accuracy instead of inheriting it.
     pub fn tail_probability_with_bound(&self, statistic: f64) -> (f64, f64) {
         let (conditional, bound) = self.conditional_tail_with_bound(statistic);
-        let Some(replay) = self.selection.as_ref() else {
+        let Some(replay) = self.selection.replay() else {
             return (conditional, bound);
         };
         if !conditional.is_finite() {
@@ -1275,6 +1416,17 @@ impl SmoothLrReferenceDf {
             (conditional + shift).clamp(0.0, 1.0),
             bound + 2.0 * standard_error,
         )
+    }
+
+    /// The Monte-Carlo standard error the selection replay contributes at this
+    /// statistic, or zero when nothing was replayed.
+    ///
+    /// This is a `O(draws)` pass over two samples, four orders cheaper than the
+    /// quadrature it is used to budget.
+    fn selection_standard_error(&self, statistic: f64) -> f64 {
+        self.selection
+            .replay()
+            .map_or(0.0, |replay| replay.tail_shift(statistic).1)
     }
 
     fn conditional_tail_with_bound(&self, statistic: f64) -> (f64, f64) {
@@ -1288,17 +1440,35 @@ impl SmoothLrReferenceDf {
             // a closed form: no truncation, so no bound to report.
             return (summary(statistic), 0.0);
         }
-        let tolerance = if self.statistic_resolution.is_finite() && self.statistic_resolution > 0.0 {
+        let derived = if self.statistic_resolution.is_finite() && self.statistic_resolution > 0.0 {
             let delta = self.statistic_resolution * (statistic.abs() + self.mean.abs());
-            (summary(statistic) - summary(statistic + delta))
-                .abs()
-                .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST)
+            (summary(statistic) - summary(statistic + delta)).abs()
         } else {
             // A reference built without a fit behind it (a unit test, a
             // hand-assembled spectrum) has no statistic resolution to derive
             // from, so it gets `gam-math`'s own default rather than a guess.
             gam_math::probability::WEIGHTED_CHI_SQUARE_TOLERANCE
         };
+        // AND NO FINER THAN THE ANSWER'S OWN NOISE. The published accuracy of a
+        // replayed p-value is `quadrature + 2·se`, where `se` is the selection
+        // shift's Monte-Carlo standard error. Resolving the conditional half
+        // below `se` cannot improve that sum — it is arithmetic on a number the
+        // other term has already blurred — while Imhof's truncation point grows
+        // like `ε^{-2/3}`, so the request is what the cost is made of. Asking
+        // for exactly `se` caps the published bound at `3·se` against an
+        // irreducible `2·se`, i.e. within 1.5x of an infinitely accurate
+        // quadrature, and it is a DERIVED request rather than a budget: with no
+        // replay the floor is zero and the statistic's own resolution stands.
+        //
+        // Measured: with `FitOptions::tol = 1e-10` the derived request is ~1e-10
+        // — essentially `gam-math`'s strict default — and the module's own table
+        // puts that at 0.13-3.3 s PER P-VALUE. The driver evaluates three or
+        // four per term, and `null_simulation_size_is_calibrated_small_n` runs
+        // 960 of them: it did not finish in 4000 s at the commit this repair
+        // was measured against, against nextest's 600 s kill.
+        let tolerance = derived
+            .max(self.selection_standard_error(statistic))
+            .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST);
         gam_math::probability::weighted_chi_square_sf_to_tolerance(
             &self.weights,
             statistic,
@@ -1899,7 +2069,7 @@ fn lawley_dispersion_for_family(
 /// that each rung is a strictly weaker instrument on the SAME quantity rather
 /// than a different claim:
 ///
-/// 1. **The spectrum** ([`lr_penalty_shares`]) — needs `[H⁻¹]_jj`
+/// 1. **The spectrum** ([`lr_tested_block`]) — needs `[H⁻¹]_jj`
 ///    and the term's λ-weighted penalty block. Exact.
 /// 2. **Its first two moments** ([`lr_null_spectral_moments`]) — needs only the
 ///    coefficient-influence block, because with `A = 2F − F²`
@@ -1948,7 +2118,9 @@ fn lr_null_reference(
         edf,
         null_dim,
         source,
-        selection: None,
+        // The degraded lanes do not have the spectrum, so they cannot have the
+        // geometry the replay is built from either.
+        selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
         statistic_resolution,
     };
     let unit_weight = || {
@@ -1958,8 +2130,8 @@ fn lr_null_reference(
     let influence_moments = lr_null_spectral_moments(influence, coeff_range);
 
     // Rung 1 — the spectrum itself.
-    if let Some(shares) = lr_penalty_shares(hessian_inverse, penalty, coeff_range) {
-        let mut weights: Vec<f64> = shares.iter().map(|&p| 1.0 - p * p).collect();
+    if let Some(block) = lr_tested_block(hessian_inverse, penalty, coeff_range) {
+        let mut weights: Vec<f64> = block.shares.iter().map(|&p| 1.0 - p * p).collect();
         weights.sort_by(|a, b| b.partial_cmp(a).expect("finite weights"));
         let mean: f64 = weights.iter().sum();
         let second_moment: f64 = weights.iter().map(|w| w * w).sum();
@@ -1992,15 +2164,11 @@ fn lr_null_reference(
                 // one machine epsilon apart there, and the criterion's
                 // log-determinant is the one place that difference is worth
                 // `log(1 + 1e17)`.
-                selection: lr_schur_information(hessian_inverse, penalty, coeff_range).and_then(
-                    |information| {
-                        SmoothLrSelectionReplay::generate(
-                            &information,
-                            term_penalties,
-                            term_log_lambda,
-                            log_scale_windows,
-                        )
-                    },
+                selection: SmoothLrSelectionReplay::generate(
+                    &block.whitener,
+                    term_penalties,
+                    term_log_lambda,
+                    log_scale_windows,
                 ),
                 statistic_resolution,
             };
@@ -2019,76 +2187,6 @@ fn lr_null_reference(
         second_moment,
         SmoothLrReferenceSource::SpectralMomentMatch,
     )
-}
-
-/// The Schur-complemented information on the tested block,
-/// `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj`.
-///
-/// This is the object the whole derivation is stated against, and it is
-/// available without ever forming a Schur complement: `[H⁻¹]_jj` IS
-/// `(Ĩ_jj + S_jj)⁻¹` (the block of an inverse is the inverse of the Schur
-/// complement of the OTHER block), so one inversion of a `q × q` symmetric
-/// matrix and one subtraction recover it. The retained block's own penalties are
-/// already inside it, which is correct: the null model keeps them.
-fn lr_schur_information(
-    hessian_inverse: Option<&Array2<f64>>,
-    penalty: Option<&Array2<f64>>,
-    coeff_range: &Range<usize>,
-) -> Option<Array2<f64>> {
-    let (h_inv, s_lambda) = (hessian_inverse?, penalty?);
-    let (start, end) = (coeff_range.start, coeff_range.end);
-    if start >= end
-        || end > h_inv.nrows()
-        || end > h_inv.ncols()
-        || end > s_lambda.nrows()
-        || end > s_lambda.ncols()
-    {
-        return None;
-    }
-    let block = h_inv.slice(s![start..end, start..end]).to_owned();
-    let mut symmetric = block.clone();
-    let q = symmetric.nrows();
-    for row in 0..q {
-        for column in 0..row {
-            let mean = 0.5 * (symmetric[[row, column]] + symmetric[[column, row]]);
-            symmetric[[row, column]] = mean;
-            symmetric[[column, row]] = mean;
-        }
-    }
-    let (values, vectors) =
-        gam_linalg::faer_ndarray::strict_symmetric_eigh(&symmetric, faer::Side::Lower).ok()?;
-    let largest = values.iter().copied().fold(0.0_f64, f64::max);
-    if !(largest > 0.0) {
-        return None;
-    }
-    // `[H⁻¹]_jj` is positive definite; a direction at the reciprocal-condition
-    // floor carries no identified information and is dropped rather than
-    // inverted into a huge eigenvalue that would dominate the whitening.
-    let floor = largest * 1e-12;
-    let mut inverse = Array2::<f64>::zeros((q, q));
-    for (index, &value) in values.iter().enumerate() {
-        if value <= floor {
-            continue;
-        }
-        for row in 0..q {
-            for column in 0..q {
-                inverse[[row, column]] +=
-                    vectors[[row, index]] * vectors[[column, index]] / value;
-            }
-        }
-    }
-    let mut information = inverse - s_lambda.slice(s![start..end, start..end]);
-    for row in 0..q {
-        for column in 0..row {
-            let mean = 0.5 * (information[[row, column]] + information[[column, row]]);
-            information[[row, column]] = mean;
-            information[[column, row]] = mean;
-        }
-    }
-    if information.iter().any(|value| !value.is_finite()) {
-        return None;
-    }
-    Some(information)
 }
 
 /// The term's PENALTY SHARES `p = eig([H⁻¹]_jj · S_jj) ∈ [0, 1]`, sorted
@@ -2134,11 +2232,60 @@ fn lr_schur_information(
 /// them, or the self-adjoint decomposition refuses — the caller then drops to
 /// the two-moment rung rather than scoring against a spectrum it could not
 /// compute.
-fn lr_penalty_shares(
+/// The tested block's penalty shares AND the whitener the replay needs, from
+/// ONE self-adjoint decomposition and with no matrix cancellation anywhere.
+pub(crate) struct LrTestedBlock {
+    /// `p = eig(B^{1/2} S_jj B^{1/2}) ∈ [0, 1]`, ascending.
+    shares: Vec<f64>,
+    /// `W` (`q × dimension`) with `W Wᵀ = Ĩ_jj⁻¹` on the directions the
+    /// Schur-complemented information can see, i.e. those with `1 − p > 0`.
+    ///
+    /// # Why this is not `Ĩ^{-1/2}` computed from `Ĩ`
+    ///
+    /// `Ĩ_jj = ([H⁻¹]_jj)⁻¹ − S_jj` is the object the derivation is stated
+    /// against, and forming it that way is a CANCELLATION of two matrices whose
+    /// ratio is `1/(1 − p)`: at `p = 1 − 1e-12` — an ordinary heavily-shrunk
+    /// direction of a null-true smooth — the difference is roundoff amplified
+    /// twelve orders, and the explicit inverse that produces the first term has
+    /// already amplified it once more. Measured on this issue's own `n = 60`
+    /// fixture, that route handed the whitening a spectrum whose largest
+    /// eigenvalue was spurious, and the relative floor then discarded EVERY
+    /// direction the data could see: `q` went `11 → 9` and the replayed law's
+    /// mean went `0.96 → 0.0000` while the reference's stayed at `0.96`. The
+    /// control variate was then a difference of two different laws.
+    ///
+    /// The same object is available with no cancellation at all. With
+    /// `A = B^{1/2} S B^{1/2} = QΛQᵀ` and `Λ = diag(p)`,
+    ///
+    /// ```text
+    /// B^{1/2} Ĩ B^{1/2} = B^{1/2}(B⁻¹ − S)B^{1/2} = I − A = Q(I − Λ)Qᵀ,
+    /// ```
+    ///
+    /// so `Ĩ⁻¹ = B^{1/2}Q(I − Λ)⁻¹QᵀB^{1/2}` and `W = B^{1/2}Q(I − Λ)^{-1/2}`.
+    /// The only subtraction left is the SCALAR `1 − p`, which loses digits
+    /// exactly when the direction is genuinely unidentified — and that is then a
+    /// statement about the fit rather than an artifact. As a check on the whole
+    /// construction, the whitened total penalty at `λ̂` comes out
+    /// `(I − Λ)^{-1/2}Λ(I − Λ)^{-1/2} = diag(p/(1 − p))`, i.e. exactly the
+    /// generalized spectrum, diagonal, for free.
+    whitener: Array2<f64>,
+}
+
+/// Directions the Schur-complemented information cannot separate from the
+/// penalty at all.
+///
+/// `1 − p` is the share of a direction the DATA holds, on a scale where one is
+/// unpenalized and zero is fully absorbed by the penalty. It is an eigenvalue of
+/// `I − A` with `‖A‖ ≤ 1`, so its own noise floor is absolute rather than
+/// relative: `p·ε` for the decomposition, with the same safety factor
+/// `positive_eigenvalue_threshold` uses.
+const SMOOTH_LR_IDENTIFIED_SHARE_FLOOR_FACTOR: f64 = 100.0;
+
+fn lr_tested_block(
     hessian_inverse: Option<&Array2<f64>>,
     penalty: Option<&Array2<f64>>,
     coeff_range: &Range<usize>,
-) -> Option<Vec<f64>> {
+) -> Option<LrTestedBlock> {
     let (h_inv, s_lambda) = (hessian_inverse?, penalty?);
     let (start, end) = (coeff_range.start, coeff_range.end);
     if start >= end
@@ -2153,23 +2300,12 @@ fn lr_penalty_shares(
     // assembled Gram/inverse differ only by summation order. Symmetrize
     // explicitly so the self-adjoint entry point receives the matrix it is being
     // asked about rather than one triangle's rounding of it.
-    let symmetrize = |m: ndarray::ArrayView2<'_, f64>| -> Array2<f64> {
-        let mut out = m.to_owned();
-        let q = out.nrows();
-        for row in 0..q {
-            for col in 0..row {
-                let mean = 0.5 * (out[[row, col]] + out[[col, row]]);
-                out[[row, col]] = mean;
-                out[[col, row]] = mean;
-            }
-        }
-        out
-    };
-    let b = symmetrize(h_inv.slice(s![start..end, start..end]));
-    let s = symmetrize(s_lambda.slice(s![start..end, start..end]));
+    let b = symmetrized(h_inv.slice(s![start..end, start..end]).to_owned());
+    let s = symmetrized(s_lambda.slice(s![start..end, start..end]).to_owned());
     if b.iter().chain(s.iter()).any(|value| !value.is_finite()) {
         return None;
     }
+    let dimension = end - start;
 
     let (b_eigenvalues, b_vectors) =
         gam_linalg::faer_ndarray::strict_symmetric_eigh(&b, faer::Side::Lower).ok()?;
@@ -2182,16 +2318,35 @@ fn lr_penalty_shares(
         column.mapv_inplace(|value| value * root);
     }
     let b_root = root_scaled.dot(&b_vectors.t());
-    let similar = symmetrize(b_root.dot(&s).dot(&b_root).view());
-    let (shrinkage, _) =
+    let similar = symmetrized(b_root.dot(&s).dot(&b_root));
+    let (shrinkage, shrinkage_vectors) =
         gam_linalg::faer_ndarray::strict_symmetric_eigh(&similar, faer::Side::Lower).ok()?;
 
-    let mut spectrum: Vec<f64> = shrinkage.iter().map(|&p| p.clamp(0.0, 1.0)).collect();
-    if spectrum.iter().any(|p| !p.is_finite()) {
+    let shares: Vec<f64> = shrinkage.iter().map(|&p| p.clamp(0.0, 1.0)).collect();
+    if shares.iter().any(|p| !p.is_finite()) {
         return None;
     }
-    spectrum.sort_by(|a, b| a.partial_cmp(b).expect("finite shrinkage"));
-    Some(spectrum)
+    // `W = B^{1/2} Q (I − Λ)^{-1/2}` over the identified directions. `A`'s
+    // spectrum lives in `[0, 1]`, so the floor on `1 − p` is absolute.
+    let floor = SMOOTH_LR_IDENTIFIED_SHARE_FLOOR_FACTOR * (dimension as f64) * f64::EPSILON;
+    let kept: Vec<usize> = (0..shares.len())
+        .filter(|&index| 1.0 - shares[index] > floor)
+        .collect();
+    let mut whitener = Array2::<f64>::zeros((dimension, kept.len()));
+    for (column, &index) in kept.iter().enumerate() {
+        let scale = (1.0 - shares[index]).sqrt();
+        for row in 0..dimension {
+            whitener[[row, column]] = shrinkage_vectors[[row, index]] / scale;
+        }
+    }
+    let whitener = b_root.dot(&whitener);
+    if whitener.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    let mut shares = shares;
+    shares.sort_by(|a, b| a.partial_cmp(b).expect("finite shrinkage"));
+    Some(LrTestedBlock { shares, whitener })
 }
 
 /// `[tr A, tr A²]` for `A = 2·F_jj − F_jj²` on the tested coefficient block.
@@ -2228,7 +2383,7 @@ fn lr_null_spectral_moments(
 mod lr_null_reference_tests {
     use super::{
         SmoothLrReferenceSource, lr_null_reference, lr_null_spectral_moments,
-        lr_penalty_shares,
+        lr_tested_block,
     };
     use ndarray::Array2;
 
@@ -2324,7 +2479,8 @@ mod lr_null_reference_tests {
             let influence = hessian_inverse.dot(&gram);
 
             let weights =
-                lr_penalty_shares(Some(&hessian_inverse), Some(&penalty), &(retained..p))
+                lr_tested_block(Some(&hessian_inverse), Some(&penalty), &(retained..p))
+                    .map(|block| block.shares)
                     .map(|shares| shares.iter().map(|&q| 1.0 - q * q).collect::<Vec<f64>>())
                     .expect("spectrum available");
             let [mean, second] = lr_null_spectral_moments(Some(&influence), &(retained..p))
@@ -2631,7 +2787,7 @@ mod lr_null_reference_tests {
 mod selection_replay_tests {
     use super::{
         SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_MAX_SCALES, SelectionGeometry,
-        SmoothLrSelectionReplay,
+        SmoothLrSelection, SmoothLrSelectionDecline, SmoothLrSelectionReplay,
     };
     use ndarray::Array2;
 
@@ -2657,8 +2813,12 @@ mod selection_replay_tests {
     }
 
     fn replay_from(spectrum: &[f64], window: (f64, f64), draws: usize) -> SmoothLrSelectionReplay {
-        SmoothLrSelectionReplay::from_geometry(&diagonal(spectrum), &[window], draws, draws)
-            .expect("replay")
+        match SmoothLrSelectionReplay::from_geometry(&diagonal(spectrum), &[window], draws, draws) {
+            SmoothLrSelection::Replayed(replay) => replay,
+            SmoothLrSelection::Declined(reason) => {
+                panic!("expected a replay, declined: {}", reason.label())
+            }
+        }
     }
 
     /// The replay is a p-value input, so it must not depend on a thread, a
@@ -2872,7 +3032,7 @@ mod selection_replay_tests {
         )
         .expect("single geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_none()
+            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_err()
         );
         // More scales than the grid budget can resolve: declines rather than
         // gridding five axes at four points each — and the dispatcher then hands
@@ -2885,9 +3045,11 @@ mod selection_replay_tests {
             &vec![0.0; SMOOTH_LR_SELECTION_MAX_SCALES + 1],
         )
         .expect("crowded geometry");
-        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_none());
+        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_err());
         assert!(
-            SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256).is_some(),
+            SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256)
+                .replay()
+                .is_some(),
             "a term with more scales than the grid budget still gets the common-scale slice"
         );
         // Every window closed: nothing to select on any axis.
@@ -2899,13 +3061,13 @@ mod selection_replay_tests {
         .expect("pair geometry");
         assert!(
             SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (2.0, 2.0)], 256)
-                .is_none()
+                == Err(SmoothLrSelectionDecline::WindowClosed)
         );
         // But ONE open axis is still a selection, and used to be discarded with
         // the closed one — the intersection of the two windows is empty.
         assert!(
             SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (-6.0, 6.0)], 256)
-                .is_some(),
+                .is_ok(),
             "a scale whose own window is open must still be replayed when a \
              SIBLING scale's window is closed"
         );
@@ -2931,11 +3093,13 @@ mod selection_replay_tests {
             SelectionGeometry::whiten(&Array2::eye(2), &[Array2::zeros((2, 2))], &[0.0]).is_none()
         );
         let geometry = diagonal(&spectrum());
-        assert!(SmoothLrSelectionReplay::from_geometry(&geometry, &[(4.0, -4.0)], 256, 256).is_none());
-        assert!(
-            SmoothLrSelectionReplay::from_geometry(&geometry, &[(f64::NAN, 1.0)], 256, 256)
-                .is_none()
-        );
+        for window in [(4.0_f64, -4.0_f64), (f64::NAN, 1.0)] {
+            assert_eq!(
+                SmoothLrSelectionReplay::from_geometry(&geometry, &[window], 256, 256).decline(),
+                Some(SmoothLrSelectionDecline::WindowClosed),
+                "a closed window must decline with a NAMED reason"
+            );
+        }
     }
 
     /// #2672: the criterion's log-determinant is priced from the stacked scaled
@@ -3000,6 +3164,84 @@ mod selection_replay_tests {
                     moved.offset - base.offset
                 );
             }
+        }
+    }
+
+    /// The geometry has to survive a DENSE information and a DENSE penalty,
+    /// which is the only shape a real fit ever presents.
+    ///
+    /// Every other fixture in this module hands `SelectionGeometry::whiten` an
+    /// identity information and a diagonal penalty, so the congruence
+    /// `Wᵀ S W` comes out EXACTLY symmetric and the self-adjoint entry point's
+    /// input validation never fires. On a real fit it is a product of three
+    /// dense matrices, its two triangles differ by summation order, and
+    /// `strict_symmetric_eigh` — correctly — refuses rather than symmetrizing
+    /// for the caller. That refusal is silent: it becomes
+    /// `SmoothLrSelectionDecline::GeometryRefused`, i.e. no replay at all, on
+    /// EVERY fit. Measured that way before the symmetrization was restored:
+    /// `y ~ s(z) [poisson]` declined with `geometry_refused` on the first cell
+    /// of the integration sweep.
+    #[test]
+    fn the_geometry_survives_a_dense_information_and_a_dense_penalty() {
+        let q = 7;
+        // A deterministic dense SPD information and two dense PSD penalties
+        // with complementary-ish ranges, all built by congruence so nothing is
+        // diagonal and nothing is exactly symmetric in floating point.
+        let mixing = Array2::from_shape_fn((q, q), |(row, column)| {
+            let a = row as f64 + 1.0;
+            let b = column as f64 + 1.0;
+            ((a * 0.7 + b * 1.3).sin() + 0.25 * (a * b).cos()) / (1.0 + 0.1 * a * b)
+        });
+        let information = mixing.dot(&mixing.t()) + Array2::<f64>::eye(q) * 0.5;
+        let mut bending = Array2::<f64>::zeros((q, q));
+        for index in 0..q - 2 {
+            bending[[index, index]] = 1.0;
+            bending[[index, index + 1]] = -0.5;
+            bending[[index + 1, index]] = -0.5;
+        }
+        let bending = mixing.dot(&bending.dot(&mixing.t()));
+        let bending = bending.dot(&bending.t());
+        let ridge = mixing.dot(&mixing.t());
+        for separation in [0.0_f64, 30.0, 55.0] {
+            let geometry = SelectionGeometry::whiten(
+                &information,
+                &[bending.clone(), ridge.clone()],
+                &[0.5 * separation, -0.5 * separation],
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "the geometry refused a dense fit at separation {separation} —                      that is a silent `no replay` on every real model"
+                )
+            });
+            let replay = SmoothLrSelectionReplay::from_geometry(
+                &geometry,
+                &[(-6.0, 6.0), (-6.0, 6.0)],
+                512,
+                512,
+            );
+            let replay = replay.replay().unwrap_or_else(|| {
+                panic!(
+                    "declined at separation {separation}: {:?}",
+                    SmoothLrSelectionReplay::from_geometry(
+                        &geometry,
+                        &[(-6.0, 6.0), (-6.0, 6.0)],
+                        512,
+                        512,
+                    )
+                    .decline()
+                )
+            });
+            assert_eq!(
+                replay.generalized.len(),
+                geometry.dimension,
+                "the published spectrum must cover the block"
+            );
+            assert!(
+                replay
+                    .generalized
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+            );
         }
     }
 

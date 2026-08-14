@@ -4330,6 +4330,7 @@ pub(crate) fn simple_matern_term_collection(
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "spatial".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: feature_cols.to_vec(),

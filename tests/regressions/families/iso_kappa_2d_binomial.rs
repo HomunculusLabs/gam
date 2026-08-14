@@ -67,6 +67,7 @@ fn matern_2d_spec(num_centers: usize) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "geo".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

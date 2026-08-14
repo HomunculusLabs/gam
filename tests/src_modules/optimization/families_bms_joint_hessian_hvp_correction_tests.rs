@@ -1965,6 +1965,7 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "spatial_logslope".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -2198,6 +2199,7 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "spatial_logslope".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

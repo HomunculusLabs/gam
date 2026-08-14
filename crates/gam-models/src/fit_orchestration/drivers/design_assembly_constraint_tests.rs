@@ -84,6 +84,7 @@ fn smooth_only_collection(basis: SmoothBasisSpec) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s".to_string(),
             basis,
             shape: ShapeConstraint::None,
@@ -177,12 +178,14 @@ fn remap_feature_columns_rewrites_every_index_bearing_field() {
         }],
         smooth_terms: vec![
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "bspline".to_string(),
                 basis: remap_test_bspline(3),
                 shape: ShapeConstraint::None,
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "by_variable".to_string(),
                 basis: SmoothBasisSpec::ByVariable {
                     inner: Box::new(remap_test_bspline(4)),
@@ -194,6 +197,7 @@ fn remap_feature_columns_rewrites_every_index_bearing_field() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "by_smooth".to_string(),
                 basis: SmoothBasisSpec::BySmooth {
                     smooth: Box::new(remap_test_bspline(6)),
@@ -203,6 +207,7 @@ fn remap_feature_columns_rewrites_every_index_bearing_field() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "factor_smooth".to_string(),
                 basis: SmoothBasisSpec::FactorSmooth {
                     spec: FactorSmoothSpec {
@@ -221,6 +226,7 @@ fn remap_feature_columns_rewrites_every_index_bearing_field() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "thin_plate".to_string(),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![10, 11],
@@ -320,6 +326,7 @@ fn bspline_nonzero_anchor_has_fixed_affine_lift_and_homogeneous_chart() {
     let x = Array1::linspace(0.0, 1.0, 25);
     let data = x.clone().insert_axis(Axis(1));
     let mk = |left, right| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "s(x, anchored_left, clamped_right)".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,
@@ -487,6 +494,7 @@ fn bspline_boundary_conditions_follow_frozen_identifiability_transform() {
         z[[raw_cols - 1, j]] = -1.0;
     }
     let spec = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "half-open anchored smooth".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,
@@ -1117,6 +1125,7 @@ fn smooth_design_assembles_terms_and_penalties() {
 
     let terms = vec![
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x0".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -1137,6 +1146,7 @@ fn smooth_design_assembles_terms_and_penalties() {
             joint_null_rotation: None,
         },
         SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_x1x2".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![1, 2],
@@ -1196,6 +1206,7 @@ fn shape_mapping_monotone_increasing_is_non_decreasing() {
 fn build_smooth_design_rejectsmultiaxis_spatial_shape_constraints() {
     let data = array![[0.0, 0.0], [0.5, 0.2], [1.0, 0.4], [1.5, 0.6],];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "tps_shape".to_string(),
         basis: SmoothBasisSpec::ThinPlate {
             feature_cols: vec![0, 1],
@@ -1230,6 +1241,7 @@ fn build_smooth_design_rejects_uncertified_monotone_thin_plate_1d() {
     // hidden extra knots.
     let data = array![[0.0], [0.15], [0.35], [0.5], [0.65], [0.85], [1.0]];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "mono_tps".to_string(),
         basis: SmoothBasisSpec::ThinPlate {
             feature_cols: vec![0],
@@ -1271,6 +1283,7 @@ fn build_smooth_design_auto_promotes_thin_plate_below_canonical_polynomial_dimen
         [0.7, 0.6, 0.8],
     ];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "thinplate(pc1, pc2, pc3)".to_string(),
         basis: SmoothBasisSpec::ThinPlate {
             feature_cols: vec![0, 1, 2],
@@ -1325,6 +1338,7 @@ fn freeze_term_collection_handles_thin_plate_auto_promotion_to_duchon() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "thinplate(pc1, pc2, pc3, pc4, pc5)".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1, 2, 3, 4],
@@ -1385,6 +1399,7 @@ fn freeze_term_collection_handles_thin_plate_auto_promotion_to_duchon() {
 fn build_smooth_design_rejects_uncertified_monotone_matern_1d() {
     let data = array![[0.0], [0.2], [0.4], [0.6], [0.8], [1.0]];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "mono_matern".to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0],
@@ -1418,6 +1433,7 @@ fn build_smooth_design_rejects_uncertified_monotone_matern_1d() {
 fn build_smooth_design_rejects_uncertified_monotone_duchon_1d() {
     let data = array![[0.0], [0.2], [0.4], [0.6], [0.8], [1.0]];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "mono_duchon".to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: vec![0],
@@ -1453,6 +1469,7 @@ fn build_smooth_design_rejects_uncertified_monotone_duchon_1d() {
 fn build_smooth_design_accepts_monotone_bsplinewith_bounds() {
     let data = array![[0.0], [0.25], [0.5], [0.75], [1.0]];
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "mono_bs".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,
@@ -1557,6 +1574,7 @@ fn build_smooth_design_rejects_bspline_charts_without_raw_open_controls() {
 
     for (label, spec) in cases {
         let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: label.to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -1601,6 +1619,7 @@ fn term_collection_design_combines_linear_and_smooth() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_x1x2".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![1, 2],
@@ -1649,6 +1668,7 @@ fn spatial_smooth_columns_do_not_duplicate_global_intercept() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -1709,6 +1729,7 @@ fn spatial_smooth_drops_matching_linear_trend_columns() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -1774,6 +1795,7 @@ fn spatial_option5_is_orthogonal_to_parametric_block() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -1850,6 +1872,7 @@ fn thin_plate_default_identifiability_centers_against_intercept_only_without_lin
         random_effect_terms: vec![],
         smooth_terms: (0..2)
             .map(|feature| SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: format!("tps_x{feature}"),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![feature],
@@ -1921,6 +1944,7 @@ fn spatial_option5_does_not_overconstrain_on_nonoverlapping_linear_terms() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "tps_pc1".to_string(),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![1],
@@ -1938,6 +1962,7 @@ fn spatial_option5_does_not_overconstrain_on_nonoverlapping_linear_terms() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "tps_pc2".to_string(),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![2],
@@ -1994,6 +2019,7 @@ fn overlapping_linear_term_residualizes_bspline_smooth() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -2032,6 +2058,7 @@ fn standalone_tps_keeps_centered_linear_nullspace() {
     let data = array![[-1.5], [-0.7], [0.2], [0.8], [1.6]];
     let centers = array![[-1.5], [0.2], [1.6]];
     let smooth = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "s_x".to_string(),
         basis: SmoothBasisSpec::ThinPlate {
             feature_cols: vec![0],
@@ -2073,6 +2100,7 @@ fn standalone_tps_keeps_centered_linear_nullspace() {
 #[test]
 fn spatial_parametric_ownership_projects_only_explicit_linear_axes() {
     let term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "s_xy".to_string(),
         basis: SmoothBasisSpec::ThinPlate {
             feature_cols: vec![0, 1],
@@ -2126,6 +2154,7 @@ fn hierarchical_smooth_ownership_is_order_independent_for_bspline_and_duchon() {
     ];
 
     let bspline_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "s_x".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,
@@ -2146,6 +2175,7 @@ fn hierarchical_smooth_ownership_is_order_independent_for_bspline_and_duchon() {
         joint_null_rotation: None,
     };
     let duchon_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "duchon_xy".to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: vec![0, 1],
@@ -2263,6 +2293,7 @@ fn freeze_roundtrip_preserves_hierarchical_smooth_transforms() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "duchon_xy".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0, 1],
@@ -2284,6 +2315,7 @@ fn freeze_roundtrip_preserves_hierarchical_smooth_transforms() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "s_x".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 0,
@@ -2365,6 +2397,7 @@ fn spatial_option5_preserves_lazy_thin_plate_terms_at_large_scale() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_x".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0],
@@ -2420,6 +2453,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -2480,6 +2514,7 @@ fn spatial_frozen_transform_rebuild_is_exact_on_trainingrows() {
         linear_terms: fitspec.linear_terms.clone(),
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -2540,6 +2575,7 @@ fn frozen_spatial_replay_preserves_standardized_length_scale_compensation() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tps_xy".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -2563,6 +2599,7 @@ fn frozen_spatial_replay_preserves_standardized_length_scale_compensation() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_xy".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -2588,6 +2625,7 @@ fn frozen_spatial_replay_preserves_standardized_length_scale_compensation() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_xy".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -2661,6 +2699,7 @@ fn matern_smooth_buildswith_double_penalty_in_high_dim() {
     }
 
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "matern_x".to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: (0..d).collect(),
@@ -2716,6 +2755,7 @@ fn duchon_linear_nullspace_builds_and_reports_nullspace_dim() {
     }
 
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "duchon_x".to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (0..d).collect(),
@@ -2756,6 +2796,7 @@ fn joint_duchon_orderzero_raw_smooth_build_preserves_unconstrained_basis() {
     }
 
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "duchon_joint".to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (0..d).collect(),
@@ -2808,6 +2849,7 @@ fn term_collection_joint_duchon_carries_frozen_transform_into_metadata() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_joint".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: (0..d).collect(),
@@ -2862,6 +2904,7 @@ fn frozen_joint_maternspec_rebuild_keeps_adaptive_cache_in_sync() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_joint".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: (0..d).collect(),
@@ -2928,6 +2971,7 @@ fn tensor_bspline_term_builds_te_style_design_and_penalties() {
     };
 
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_xy".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -2995,6 +3039,7 @@ fn tensor_binary_margin_is_penalized_factor_smooth_not_unidentified_raw_tensor()
         boundary_conditions: BSplineBoundaryConditions::default(),
     };
     let terms = vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_age_binary".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -3046,6 +3091,7 @@ fn centered_tensor_penalties_canonicalize_in_transformed_basis_width() {
     }
 
     let tensor_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_centered".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -3179,6 +3225,7 @@ fn tensor_bspline_supports_two_periodic_margins_as_torus() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "te_day_hour".to_string(),
             basis: SmoothBasisSpec::TensorBSpline {
                 feature_cols: vec![0, 1],
@@ -3264,6 +3311,7 @@ fn tensor_bspline_design_matches_extended_marginal_kronecker_product() {
     let expected = tensor_product_design_from_marginals(&[mx.clone(), my.clone()]).unwrap();
 
     let term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_xy".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -3327,6 +3375,7 @@ fn tensor_bspline_periodic_margins_wrap_as_torus() {
         },
     };
     let term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_day_hour".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -3366,6 +3415,7 @@ fn tensor_bspline_design_is_identifiable_against_global_intercept() {
     }
 
     let tensor_term = SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: "te_xy".to_string(),
         basis: SmoothBasisSpec::TensorBSpline {
             feature_cols: vec![0, 1],
@@ -3552,6 +3602,7 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
     }
 
     let matern_term = |name: &str| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -3773,6 +3824,7 @@ fn exact_joint_two_block_spatial_length_scale_freezes_matern_centers() {
     // the joint-optimizer center-freezing path, so it must carry per-axis
     // anisotropy scales to produce the κ/η hyper axes it is asserting on.
     let matern_term = |name: &str, length_scale: f64| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -3884,6 +3936,7 @@ fn spatial_aniso_joint_exact_hessian_materializes_small_case() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -4048,6 +4101,7 @@ fn exact_spatial_joint_engine_aniso_iso_parity_1d() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "parity_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -4222,6 +4276,7 @@ fn psi_gram_tensor_lane_matches_streamed_reml_cost_and_gradient() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "psi_tensor_invariance".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -4575,6 +4630,7 @@ fn psi_gram_tensor_e2e_kappa_optimum_matches_streamed() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "e2e_kappa_optimum".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -4978,6 +5034,7 @@ fn build_duchon_probit_setup() -> DuchonProbitSetup {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_1d".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],
@@ -5230,6 +5287,7 @@ fn exact_joint_spatial_outer_hessian_available_for_sparse_designs() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -5269,6 +5327,7 @@ fn joint_build_and_freeze_shares_auto_spatial_centers_across_blocks() {
     }
 
     let matern_term = |name: &str| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -5343,6 +5402,7 @@ fn exact_joint_two_block_no_spatial_fast_path_returns_fully_frozen_specs() {
     }
 
     let pspline_term = |name: &str| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,
@@ -5520,6 +5580,7 @@ fn incremental_frozen_realizer_matches_unified_full_rebuild() {
         }],
         smooth_terms: vec![
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "spatial".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -5539,6 +5600,7 @@ fn incremental_frozen_realizer_matches_unified_full_rebuild() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "mono".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 3,
@@ -5660,6 +5722,7 @@ fn two_block_exact_joint_design_cache_clears_memo_on_theta_change() {
     // its data-seeded κ and contributes no κ axis. Per-axis scales give
     // each block the log-κ/η hyper axes this cache test drives.
     let matern_term = |name: &str, length_scale: f64| SmoothTermSpec {
+            frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -5800,6 +5863,7 @@ fn single_block_exact_joint_design_cache_clears_memo_on_theta_change() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_hybrid".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -5907,6 +5971,7 @@ fn external_joint_evaluator_reuse_matches_fresh_state_after_theta_update() {
         }],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -6117,6 +6182,7 @@ fn exact_matern_log_kappa_derivative_uses_feature_columns_only() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0],
@@ -6185,6 +6251,7 @@ fn exact_thin_plate_log_kappa_derivative_uses_feature_columns_only() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "thinplate".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -6293,6 +6360,7 @@ fn exact_duchon_log_kappa_derivative_uses_feature_columns_only() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -6411,6 +6479,7 @@ fn spatial_length_scale_optimization_runs_binomial_logit_matern_with_exact_laml_
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -6505,6 +6574,7 @@ fn duchon_terms_participate_in_kappa_optimization() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -6588,6 +6658,7 @@ fn pure_duchon_scale_dimensions_seed_geometry_but_enroll_no_hyper_axis() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "pure_duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -6635,6 +6706,7 @@ fn thin_plate_terms_anchor_length_scale_and_enroll_no_kappa_axis() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "thin_plate".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: vec![0, 1],
@@ -6669,6 +6741,7 @@ fn pure_duchon_from_length_scales_aniso_is_isotropic_single_psi() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "pure_duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1, 2],
@@ -6718,6 +6791,7 @@ fn explicit_duchon_aniso_length_scale_is_locked_kappa() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_fixed_geometry".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1, 2],
@@ -6762,6 +6836,7 @@ fn from_length_scales_aniso_keeps_nonaniso_spatial_terms_scalar() {
         random_effect_terms: vec![],
         smooth_terms: vec![
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern_aniso".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -6785,6 +6860,7 @@ fn from_length_scales_aniso_keeps_nonaniso_spatial_terms_scalar() {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern_iso".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -6832,6 +6908,7 @@ fn aniso_bounds_clamp_preserves_in_range_global_length_scale_and_eta() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -6918,6 +6995,7 @@ fn pure_duchon_aniso_fit_optimizes_without_introducing_hybrid_scale() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "pure_duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1, 2],
@@ -6982,6 +7060,7 @@ fn spatial_anisotropy_pilot_initializer_seeds_geometry_without_fit() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "pc_matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
