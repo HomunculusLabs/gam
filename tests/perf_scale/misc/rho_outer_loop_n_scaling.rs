@@ -95,6 +95,7 @@ fn simulate_2d_gaussian(n: usize) -> (Array2<f64>, Array1<f64>) {
 
 fn bspline_smooth(name: &str, col: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: col,
@@ -283,14 +284,20 @@ fn rho_outer_loop_is_n_independent() {
     // reaching for -- did the machine stay still while we swept? -- without
     // any assumption about how cost varies with n. A cell that disagrees with
     // ITSELF is contention; that is a direct observation, not an inference.
-    let replicate = run_rho_trials(ns[0])
-        .unwrap_or_else(|reason| {
-            panic!("[rho-n-scaling] replicate n={}: instrumentation failed — {reason}", ns[0])
-        });
+    let replicate = run_rho_trials(ns[0]).unwrap_or_else(|reason| {
+        panic!(
+            "[rho-n-scaling] replicate n={}: instrumentation failed — {reason}",
+            ns[0]
+        )
+    });
     let replicate_per_trial = replicate.trial_s / replicate.calls as f64;
     eprintln!(
         "[rho-n-scaling] replicate {:>9}  {:>11.4}  {:>11.4}  {:>12.3}  {:>14.6e}",
-        ns[0], replicate.prime_s, replicate.trial_s, 1e3 * replicate_per_trial, replicate.checksum,
+        ns[0],
+        replicate.prime_s,
+        replicate.trial_s,
+        1e3 * replicate_per_trial,
+        replicate.checksum,
     );
 
     let first = per_trial.first().copied().unwrap_or(0.0).max(1e-6);
@@ -299,8 +306,8 @@ fn rho_outer_loop_is_n_independent() {
     let trial_ratio = last / first;
 
     // How far the box moved under us, read off one cell measured twice.
-    let replicate_spread = (first / replicate_per_trial.max(1e-6))
-        .max(replicate_per_trial.max(1e-6) / first);
+    let replicate_spread =
+        (first / replicate_per_trial.max(1e-6)).max(replicate_per_trial.max(1e-6) / first);
     // `trial_ratio` divides one noisy reading by another, so each end of it can
     // be wrong by up to `replicate_spread` and the quotient by its square. The
     // refusal threshold is the gate's own, so no new tolerance is introduced:

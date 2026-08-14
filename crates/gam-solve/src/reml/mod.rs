@@ -5914,6 +5914,35 @@ pub(crate) struct RemlState<'a> {
     pub(crate) warm_start_rho: RwLock<Option<Array1<f64>>>,
     pub(crate) prev_warm_start_beta: RwLock<Option<Coefficients>>,
     pub(crate) prev_warm_start_rho: RwLock<Option<Array1<f64>>>,
+    /// The #784 block-local correction's ADMISSION, frozen for the fit: `0` is
+    /// "not yet admitted anywhere", `m + 1` is "admitted, with a block of `m`
+    /// curvature-heavy directions" (#2748).
+    ///
+    /// The correction used to be admitted or declined by predicates evaluated
+    /// at ρ — a skewness threshold `τ(n_eff)`, a quadrature-resolution test,
+    /// and a block-dimension cap. A criterion term switched on and off by a
+    /// function of ρ is not a function of ρ: it has a jump of the FULL `|Δ_b|`
+    /// across every switching surface, and the outer search descends onto one,
+    /// because the ON region's minimum is on its boundary. Measured on
+    /// `haberman_5yr` (#2748): `max|γ| = 0.125` against `τ = 0.125` at the
+    /// refused checkpoint, `V` jumping `1.744282e2 → 1.744593e2` — exactly
+    /// `Δ_b = 3.1144e-2` — between two adjacent line-search trial points while
+    /// `|g| = 2.045e-2`. No sufficient-decrease test can pass across a jump
+    /// larger than `c₁·α·|gᵀd|` for any `α`, so `StepSizeTooSmall after 50
+    /// attempt(s)` is the only reachable outcome.
+    ///
+    /// Freezing the admission is what makes the spliced objective a function.
+    /// It also keeps the spliced GRADIENT exact: the four channels differentiate
+    /// `Δ_b` at a FIXED block, and any admission that depends on ρ contributes
+    /// a `∂Δ_b/∂(admission)·∂(admission)/∂ρ` term the channels do not carry —
+    /// the same objective↔gradient desync this site already declines the splice
+    /// over for ψ coordinates and for the Beta family.
+    ///
+    /// Latched on FIRST admission rather than at the first evaluation, so a fit
+    /// whose correction never engages is bit-identical to the pre-#2748 fit and
+    /// a fit that engaged consistently keeps the same block it always had; only
+    /// the fits that were toggling change.
+    pub(crate) block_correction_admission: AtomicUsize,
     /// Adaptive IFT step-cap controller, the hypergradient budget controller,
     /// and the two mode-response caches.
     ///

@@ -360,8 +360,22 @@ pub(crate) struct InvertedRhoHessian {
     /// Directions dropped because their curvature sits under the outer loop's
     /// own gradient noise floor (#2428). Distinct from `structural_zero`.
     pub below_gradient_floor: usize,
+    /// Directions dropped because their curvature is smaller than the MEASURED
+    /// `‖δH‖₂` of the matrix that reported it (#2748). Distinct from both of
+    /// the above: not certified flat, not a chain-rule term — just not
+    /// resolved.
+    pub unresolvable_curvature: usize,
     pub used_structural_pseudoinverse: bool,
-    pub eigenvalue_backward_error_bound: f64,
+    /// The MEASURED curvature resolution the classification above was taken
+    /// at: `‖δH‖₂` under Weyl, as the largest of this site's measured
+    /// components (#2690, #2748).
+    ///
+    /// It was called `eigenvalue_backward_error_bound` while the eigensolver's
+    /// residual was the only component there. It is not that any more — a
+    /// caller-supplied assembly measurement can exceed it by eleven orders —
+    /// and a field named for one component while carrying the maximum over
+    /// several is a claim the code does not enforce.
+    pub curvature_resolution: f64,
     pub eigenvalues: Array1<f64>,
     pub eigenvectors: Array2<f64>,
     pub classifications: Vec<EigenClassification>,
@@ -380,6 +394,22 @@ pub(crate) enum EigenClassification {
     /// flat in that coordinate. The count is therefore NOT knowable a priori
     /// and is excluded from the structural-nullity identity below.
     BelowGradientFloor,
+    /// Curvature indistinguishable from zero at the MEASURED accuracy of the
+    /// Hessian itself, `‖δH‖₂` under Weyl (#2748).
+    ///
+    /// Distinct from both siblings, and the distinction is the whole point of
+    /// having three names. `StructuralZero` is excused by STRUCTURE — the
+    /// penalty map certifies the criterion is exactly flat there, and no
+    /// measurement can change that. `BelowGradientFloor` is excused by the
+    /// chain rule — the ρ-curvature there is `Σ_k g_k v_k²` and carries no
+    /// second-order content. This one is excused by RESOLUTION: the curvature
+    /// may be perfectly real, but the matrix that reports it is not known
+    /// accurately enough for its magnitude — or its sign — to be a
+    /// measurement. Merging it into `StructuralZero`, as this site did while
+    /// `zero_bound` was only ever an eigensolver backward error, made the name
+    /// assert a certificate from the penalty map that the penalty map had not
+    /// issued.
+    UnresolvableCurvature,
 }
 
 /// Assemble `Q J Vρ Jᵀ Qᵀ` through a rectangular square-root factor.
@@ -810,6 +840,7 @@ pub(crate) fn invert_identified_rho_hessian(
     let mut active_rank = 0usize;
     let mut structural_zero = 0usize;
     let mut below_gradient_floor = 0usize;
+    let mut unresolvable_curvature = 0usize;
 
     for i in 0..n {
         let sigma = eigenvalues[i];
@@ -824,9 +855,14 @@ pub(crate) fn invert_identified_rho_hessian(
         } else if sigma > floor {
             EigenClassification::Active
         } else if sigma.abs() <= zero_bound {
-            // Zero to the eigensolver's own backward error: this is the
-            // structural kind the penalty map counts.
-            EigenClassification::StructuralZero
+            // Under the MEASURED resolution of this matrix. That used to be the
+            // eigensolver's backward error and nothing else, which is why this
+            // branch could be called a structural zero without anyone
+            // noticing: at `1e-16` the two are the same population. Now that
+            // `zero_bound` can carry a measured assembly error (#2748) they are
+            // not, and a direction excused by resolution must not be reported
+            // as one the penalty map certified.
+            EigenClassification::UnresolvableCurvature
         } else {
             EigenClassification::BelowGradientFloor
         };
@@ -850,6 +886,7 @@ pub(crate) fn invert_identified_rho_hessian(
             }
             EigenClassification::StructuralZero => structural_zero += 1,
             EigenClassification::BelowGradientFloor => below_gradient_floor += 1,
+            EigenClassification::UnresolvableCurvature => unresolvable_curvature += 1,
         }
     }
     // The penalty map certifies HOW MANY directions must be null; it cannot say
@@ -860,10 +897,16 @@ pub(crate) fn invert_identified_rho_hessian(
     // certified number of null directions — finding fewer contradicts the
     // penalty map and is a real defect. Finding more is a saturated rail, which
     // is a property of this ρ̂, not of the penalty map, and is expected.
-    let identified_null = structural_zero + below_gradient_floor;
+    // Every non-active direction is a candidate for the penalty map's certified
+    // null: the map says HOW MANY must be null, never which eigenpair each
+    // lands on, and a direction can fail to be active for any of the three
+    // reasons above. Excluding the resolution-excused ones would make the
+    // identity refuse a fit for having MORE evidence about its own Hessian,
+    // which is backwards.
+    let identified_null = structural_zero + below_gradient_floor + unresolvable_curvature;
     if identified_null < expected_structural_nullity {
         return Err(format!(
-            "rho Hessian has only {identified_null} null direction(s) ({structural_zero} within eigensolver backward error, {below_gradient_floor} under the outer gradient floor), but the penalty map certifies {expected_structural_nullity}"
+            "rho Hessian has only {identified_null} null direction(s) ({structural_zero} certified by the penalty map, {unresolvable_curvature} under the measured curvature resolution {curvature_resolution}, {below_gradient_floor} under the outer gradient floor), but the penalty map certifies {expected_structural_nullity}"
         ));
     }
 
@@ -881,8 +924,9 @@ pub(crate) fn invert_identified_rho_hessian(
             active_rank: n,
             structural_zero: 0,
             below_gradient_floor: 0,
+            unresolvable_curvature: 0,
             used_structural_pseudoinverse: false,
-            eigenvalue_backward_error_bound: zero_bound,
+            curvature_resolution: zero_bound,
             eigenvalues,
             eigenvectors,
             classifications,
@@ -927,8 +971,9 @@ pub(crate) fn invert_identified_rho_hessian(
         active_rank,
         structural_zero,
         below_gradient_floor,
+        unresolvable_curvature,
         used_structural_pseudoinverse: true,
-        eigenvalue_backward_error_bound: zero_bound,
+        curvature_resolution: zero_bound,
         eigenvalues,
         eigenvectors,
         classifications,
@@ -1049,12 +1094,13 @@ fn dump_indefinite_rho_hessian_diagnostic(
     );
     if let Some(inv) = inverted {
         log::warn!(
-            "[INDEF-HESS] active_rank={}/{} structural_zero={} below_gradient_floor={} eigenvalue_backward_error_bound={:.3e}",
+            "[INDEF-HESS] active_rank={}/{} structural_zero={} unresolvable_curvature={} below_gradient_floor={} curvature_resolution={:.3e}",
             inv.active_rank,
             k,
             inv.structural_zero,
+            inv.unresolvable_curvature,
             inv.below_gradient_floor,
-            inv.eigenvalue_backward_error_bound,
+            inv.curvature_resolution,
         );
         if !inv.classifications.is_empty() {
             let labels: Vec<&'static str> = inv
@@ -1062,13 +1108,16 @@ fn dump_indefinite_rho_hessian_diagnostic(
                 .iter()
                 .map(|c| match c {
                     EigenClassification::Active => "A",
+                    EigenClassification::UnresolvableCurvature => "R",
                     EigenClassification::StructuralZero => "Z",
                     EigenClassification::BelowGradientFloor => "G",
                 })
                 .collect();
             log::warn!(
-                "[INDEF-HESS] classifications={:?} (A=active Z=structurally certified zero \
-                 G=under the outer loop's own gradient floor, i.e. a saturation null)",
+                "[INDEF-HESS] classifications={:?} (A=active; Z=certified null of the penalty \
+                 map, excused by STRUCTURE; R=under the measured curvature resolution ||dH||_2, \
+                 excused by RESOLUTION; G=under the outer loop's own gradient floor, i.e. a \
+                 saturation null, excused by the CHAIN RULE)",
                 labels,
             );
         }
@@ -1294,6 +1343,7 @@ pub(crate) fn compute_smoothing_correction(
     lambdas: &Array1<f64>,
     final_fit: &pirls::PirlsResult,
     outer_gradient: &Array1<f64>,
+    caller_measured_hessian_error: &[gam_linalg::curvature_resolution::MeasuredHessianError],
 ) -> SmoothingCorrectionComputation {
     use gam_linalg::faer_ndarray::FaerCholesky;
 
@@ -1576,6 +1626,13 @@ pub(crate) fn compute_smoothing_correction(
                     ),
                 );
             }
+            // #2748: whatever the OUTER certificate measured about this same
+            // matrix at this same point, by evaluating the criterion along the
+            // direction it disputed. It is the only component here that answers
+            // "how wrong is this matrix?"; the two above are exactly-zero
+            // identities of the assembly's bookkeeping and the eigensolver's
+            // component answers a different question entirely.
+            components.extend_from_slice(caller_measured_hessian_error);
             components
         },
     ) {
@@ -1606,10 +1663,10 @@ pub(crate) fn compute_smoothing_correction(
         // Every direction is independently certified as a structural zero of
         // the penalty map, so J·V_ρ·Jᵀ is mathematically zero.
         log::info!(
-            "LAML rho Hessian has no identified directions (active_rank=0/{}, structural_zero={}, eigenvalue_backward_error_bound={:.3e}); smoothing correction is exactly zero.",
+            "LAML rho Hessian has no identified directions (active_rank=0/{}, structural_zero={}, curvature_resolution={:.3e}); smoothing correction is exactly zero.",
             n_rho_total,
             inverted.structural_zero,
-            inverted.eigenvalue_backward_error_bound,
+            inverted.curvature_resolution,
         );
         dump_indefinite_rho_hessian_diagnostic(
             &hessian_rho,
@@ -1629,12 +1686,13 @@ pub(crate) fn compute_smoothing_correction(
 
     if inverted.active_rank < n_rho_total {
         log::info!(
-            "LAML rho Hessian is not fully identified (active_rank={}/{}, structural_zero={}, below_gradient_floor={}, eigenvalue_backward_error_bound={:.3e}); using its certified structural pseudoinverse. `below_gradient_floor` counts saturation nulls: directions whose curvature is under the outer loop\'s own residual gradient, so they carry no resolvable rho-variance (#2428).",
+            "LAML rho Hessian is not fully identified (active_rank={}/{}, structural_zero={}, below_gradient_floor={}, unresolvable_curvature={}, curvature_resolution={:.3e}); using its certified structural pseudoinverse. `below_gradient_floor` counts saturation nulls: directions whose curvature is under the outer loop\'s own residual gradient, so they carry no resolvable rho-variance (#2428).",
             inverted.active_rank,
             n_rho_total,
             inverted.structural_zero,
             inverted.below_gradient_floor,
-            inverted.eigenvalue_backward_error_bound,
+            inverted.unresolvable_curvature,
+            inverted.curvature_resolution,
         );
         dump_indefinite_rho_hessian_diagnostic(
             &hessian_rho,

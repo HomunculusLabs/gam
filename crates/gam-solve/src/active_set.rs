@@ -52,7 +52,7 @@ const ACTIVE_SET_KKT_STATIONARITY_TOL: f64 = 2e-6;
 /// Complementarity-slackness tolerance for the KKT acceptance gate:
 /// `max_i |λ_i · slack_i|` must fall below this for the
 /// active-inactive partition to be consistent.
-const ACTIVE_SET_KKT_COMPLEMENTARITY_TOL: f64 = 1e-6;
+pub(crate) const ACTIVE_SET_KKT_COMPLEMENTARITY_TOL: f64 = 1e-6;
 
 /// Dual-feasibility tolerance for the KKT acceptance gate: every working-set
 /// multiplier must satisfy `λ_i ≥ −ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL` (a

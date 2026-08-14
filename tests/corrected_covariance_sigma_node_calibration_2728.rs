@@ -48,8 +48,8 @@ use gam::smooth::{
     ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
     build_term_collection_design, fit_term_collection_forspec, freeze_term_collection_from_design,
 };
-use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::solver::model_types::SmoothingCorrectionMethod;
+use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -179,6 +179,7 @@ fn duchon_aniso_pc_spec() -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon_pc_2728".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: (0..PC_DIM).collect(),

@@ -22,11 +22,11 @@
 //! `input_scale == 1` arm below is kept precisely so a future reader can see
 //! that the sensitivity is to σ and to nothing else.
 
+use gam_terms::basis::BasisMetadata;
 use gam_terms::basis::{
     CenterStrategy, LatentCoordDesignDerivative, LocalDesignJacobianProvider, MaternBasisSpec,
     MaternIdentifiability, MaternLengthScale, MaternNu,
 };
-use gam_terms::basis::BasisMetadata;
 use gam_terms::latent::{LatentCoordValues, LatentIdMode};
 use gam_terms::smooth::input_standardization::estimate_isotropic_scale;
 use gam_terms::smooth::{
@@ -74,6 +74,7 @@ fn fresh_spec() -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "latent_matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

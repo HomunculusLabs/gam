@@ -4788,6 +4788,7 @@ fn wrap_local_build_as_realization(
     };
 
     let smooth_term = SmoothTerm {
+            parametric_residualization: None,
         name: termspec.name.clone(),
         coeff_range: 0..p_local,
         shape: termspec.shape,

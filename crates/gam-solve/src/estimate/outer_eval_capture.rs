@@ -74,6 +74,62 @@ pub struct OuterGradientFdRecord {
     /// The per-atom breakdown of the same comparison, when the objective's
     /// criterion is assembled from atoms at all.
     pub decomposition: OuterGradientFdDecomposition,
+    /// The SAME comparison for the ρ (log-smoothing) block, when the caller
+    /// armed [`enable_outer_gradient_fd_capture_over_theta`].
+    ///
+    /// `None` is the default and means the ρ coordinates were not differenced —
+    /// NOT that they agreed. The two blocks are separate fields rather than one
+    /// θ-indexed array because grading ρ is a deliberate, expensive opt-in: each
+    /// coordinate costs a full Ridders ladder of inner profiles, and the shipped
+    /// κ/geometry gates that consume the ψ block do not grade ρ.
+    pub rho: Option<OuterGradientFdRhoBlock>,
+}
+
+/// Analytic-vs-finite-difference evidence for the ρ (log-smoothing) block at the
+/// same seed, in ρ-local order (#2765).
+///
+/// The ψ block above and this one are graded by the SAME Ridders ladder against
+/// the SAME criterion, which is the point: the two blocks share the criterion's
+/// moving-Hessian machinery (the trace kernel `K` and the mode-response drift
+/// `D_β H[v]`) but have structurally different frozen drifts — `λ_k S_k`, a
+/// known exact matrix, for ρ, and the family's own `∂_ψ H|_β` for ψ. So a
+/// defect that shows in BOTH blocks lives in the shared machinery and a defect
+/// that shows in only one lives in that block's own drift. Without this the
+/// bisection could not be made, and a ψ-only audit could only report that
+/// *something* in the chain was wrong.
+///
+/// The analytic parts come from the ρ-block audit channel
+/// ([`RhoGradientParts`]), which the capture arms for itself; the
+/// finite-difference parts come from the same criterion-component stencils the
+/// ψ block uses.
+#[derive(Clone, Debug)]
+pub struct OuterGradientFdRhoBlock {
+    pub analytic_gradient: Array1<f64>,
+    pub finite_difference_gradient: Array1<f64>,
+    pub steps: Array1<f64>,
+    pub fd_uncertainty: Array1<f64>,
+    pub fd_orders: Vec<usize>,
+    /// The analytic entry as the ρ-block audit reports it, before the prior
+    /// gradient and the canonical-face KKT projection the assembly applies
+    /// afterwards. Equal to `analytic_gradient` on every model that carries
+    /// neither; recorded separately so a gap between them is visible rather
+    /// than charged to the derivative.
+    pub analytic_audit_total: Array1<f64>,
+    pub analytic_fixed_beta: Array1<f64>,
+    pub analytic_logdet_h: Array1<f64>,
+    /// `analytic_logdet_h` split at the drift: the half that does not read the
+    /// coefficient mode response, `½ tr(K · λ_k S_k)`, and the half that does,
+    /// `½ tr(K · D_β H[v_k])`. The first is PSD-by-construction, so a negative
+    /// entry is a defect that needs no oracle at all.
+    pub analytic_frozen_logdet_h: Array1<f64>,
+    pub analytic_mode_response_logdet_h: Array1<f64>,
+    pub analytic_logdet_s: Array1<f64>,
+    /// `audit_total − (fixed_beta + logdet_h + logdet_s)`: the IFT/KKT fold.
+    pub analytic_kkt: Array1<f64>,
+    pub finite_difference_fixed_beta: Array1<f64>,
+    pub finite_difference_logdet_h: Array1<f64>,
+    pub finite_difference_logdet_s: Array1<f64>,
+    pub finite_difference_kkt: Array1<f64>,
 }
 
 /// Whether the audited criterion decomposes into REML atoms, and the evidence
@@ -148,6 +204,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct OuterGradientFdCapture {
     min_psi_dim: usize,
+    grade_rho: bool,
     record: Option<OuterGradientFdRecord>,
     components: Vec<(f64, f64, f64, f64, f64, f64)>,
     criterion_components: Option<(f64, [f64; 4])>,
@@ -177,10 +234,32 @@ pub fn take_outer_eval_capture() -> Vec<OuterEvalRecord> {
 }
 
 /// Request one structured audit at the next outer seed with enough ψ axes.
+///
+/// Grades the ψ block only. Use [`enable_outer_gradient_fd_capture_over_theta`]
+/// to grade the ρ (log-smoothing) coordinates in the same record.
 pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
+    arm_outer_gradient_fd_capture(min_psi_dim, false);
+}
+
+/// Request one structured audit over the WHOLE θ vector — the ψ block and the
+/// ρ (log-smoothing) block — at the next outer seed with enough ψ axes.
+///
+/// Opt-in rather than the default because grading ρ costs a full Ridders ladder
+/// of inner profiles per coordinate, which is the same price the ψ block pays
+/// and which the shipped κ/geometry gates have no use for. What it buys is the
+/// bisection described on [`OuterGradientFdRhoBlock`]: the two blocks share the
+/// criterion's moving-Hessian machinery and differ in their frozen drift, so a
+/// disagreement present in one and absent in the other localizes the defect
+/// without any new instrumentation inside the evaluator.
+pub fn enable_outer_gradient_fd_capture_over_theta(min_psi_dim: usize) {
+    arm_outer_gradient_fd_capture(min_psi_dim, true);
+}
+
+fn arm_outer_gradient_fd_capture(min_psi_dim: usize, grade_rho: bool) {
     FD_CAPTURE.with(|capture| {
         *capture.borrow_mut() = Some(OuterGradientFdCapture {
             min_psi_dim,
+            grade_rho,
             record: None,
             components: Vec::new(),
             criterion_components: None,
@@ -188,6 +267,16 @@ pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
             selected_mode: None,
         });
     });
+}
+
+/// Whether the armed audit was asked to difference the ρ block too.
+pub(crate) fn outer_gradient_fd_capture_grades_rho() -> bool {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.record.is_none() && state.grade_rho)
+    })
 }
 
 pub(crate) fn begin_outer_gradient_component_capture() {
@@ -406,6 +495,12 @@ pub struct RhoGradientParts {
     pub dim: usize,
     pub fixed_beta: f64,
     pub logdet_h: f64,
+    /// `logdet_h` split at the drift: `½ tr(K · λ_k S_k)`, the half that does
+    /// not read the coefficient mode response. Both `K` and `S_k` are PSD, so a
+    /// NEGATIVE value here is a defect with no oracle required.
+    pub frozen_logdet_h: f64,
+    /// The other half, `½ tr(K · D_β H[v_k])`.
+    pub mode_response_logdet_h: f64,
     pub logdet_s: f64,
     pub total: f64,
 }
@@ -576,6 +671,15 @@ pub fn enable_rho_outer_audit() {
 /// Disarm the ρ-block audit and take the last evaluation's window.
 pub fn take_rho_outer_audit() -> Option<RhoOuterAudit> {
     RHO_AUDIT.with(|audit| audit.borrow_mut().take())
+}
+
+/// Re-arm the ρ-block audit with a window taken earlier.
+///
+/// Exists so a nested consumer — the outer-gradient FD capture, which arms this
+/// channel for itself to read the analytic ρ atoms — can hand a caller's window
+/// back untouched instead of silently disarming an audit it did not open.
+pub fn restore_rho_outer_audit(window: RhoOuterAudit) {
+    RHO_AUDIT.with(|audit| *audit.borrow_mut() = Some(window));
 }
 
 pub(crate) fn rho_outer_audit_enabled() -> bool {

@@ -34,6 +34,26 @@
 //! Demmler--Reinsch eigensystem (`g_i = 1`) and a reference-Hessian pencil
 //! (`g_i = 1 - lambda_0 mu_i`, `s_i = mu_i`) without any matrix dependency in
 //! this crate.
+//!
+//! # The enclosure has to COLLAPSE, not merely be correct
+//!
+//! Everything above is a statement about what the search does with an
+//! enclosure; none of it says how tight one has to be, and the difference
+//! decides whether a domain can be decomposed at all. Every terminal verdict —
+//! derivative exclusion, stationary isolation, score-value flatness, exact
+//! dominance — is a comparison between an enclosure and a fixed quantity, so an
+//! enclosure whose overestimation is FIRST ORDER in the cell width buys a
+//! constant factor of resolution per subdivision, and the search enumerates
+//! cells until its budget is gone.
+//!
+//! That is not hypothetical: [`AffineRemlProfile::enclose`] was a natural
+//! interval extension, and on a REML score — whose log-determinant and deviance
+//! blocks each move by `O(rank)` per unit of `log lambda` while their sum does
+//! not — it returned a value range of exactly `rank * width`, up to `7.4e5`
+//! times wider than the cell's own derivative enclosure permitted, and refused
+//! designs it could certify. It is now a centred (mean value) form intersected
+//! with the natural one, in all three channels; see that method for the
+//! identity, the measurements, and what the centring is anchored on.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -2607,6 +2627,25 @@ impl<'a> AffineRemlProfile<'a> {
     /// cell, not of which enclosure form was tighter, so it is carried across
     /// unchanged from the whole-cell reading (the conservative one — the
     /// midpoint reading is taken over a degenerate interval and is never wider).
+    ///
+    /// # One consequence worth naming, because it points the other way
+    ///
+    /// `resolution_flat_region` retires a cell when its score range fits inside
+    /// `2 * evaluation_error`, so a TIGHTER value range makes that verdict
+    /// easier to reach — and a caller whose optimum lands in such a region gets
+    /// a refusal (`ResidualCascadeError::RemlOptimumResolutionFlat`) rather than
+    /// a fit. Tightening could in principle trade a subdivision-budget refusal
+    /// for a resolution-flat one.
+    ///
+    /// It does not, because the flat test is the LAST thing a cell is offered:
+    /// dominance, derivative exclusion and stationary isolation are all tried
+    /// first, and centring strengthens each of them by more than it strengthens
+    /// the flat test — the derivative and curvature ranges are what decide those
+    /// three, and both are now centred too. Measured on the cascade design this
+    /// was built for: the search returns `Stationary(0)` at every requested
+    /// resolution from `1.49e-8` to `1e-3`, never `ResolutionFlat`, and
+    /// `auto_reml_certifies_a_design_the_data_cannot_identify` asserts exactly
+    /// that so the trade cannot creep in unnoticed.
     pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
         let (direct, direct_third) = self.enclose_direct(lo, hi)?;
         if lo == hi {
@@ -2636,27 +2675,9 @@ impl<'a> AffineRemlProfile<'a> {
         // value alone — and it is this cascade that makes
         // `width(F) <= width(F({m})) + max|F'| * w` hold BY CONSTRUCTION against
         // the ranges this function actually returns.
-        let centred_curvature = centre.curvature.add(direct_third.mul(offset));
-        // Two rigorous outer enclosures of the same nonempty exact range cannot
-        // be disjoint, so the fallbacks below are unreachable; they are written
-        // in the sound direction (keep the natural extension) rather than as a
-        // panic, because a refusal here would convert a tightening into a
-        // failure.
-        let curvature = direct
-            .curvature
-            .intersection(centred_curvature)
-            .unwrap_or(direct.curvature);
-        let centred_derivative = centre.derivative.add(curvature.mul(offset));
-        let derivative = direct
-            .derivative
-            .intersection(centred_derivative)
-            .unwrap_or(direct.derivative);
-        let centred_value = centre.score.value.add(derivative.mul(offset));
-        let value = direct
-            .score
-            .value
-            .intersection(centred_value)
-            .unwrap_or(direct.score.value);
+        let curvature = centred_or(direct.curvature, centre.curvature, direct_third, offset);
+        let derivative = centred_or(direct.derivative, centre.derivative, curvature, offset);
+        let value = centred_or(direct.score.value, centre.score.value, derivative, offset);
         Ok(DerivativeEnclosure {
             score: ScoreValueEnclosure {
                 value,
@@ -3196,6 +3217,61 @@ fn finite_nonnegative_quotient(
         });
     }
     Ok(quotient.nonnegative())
+}
+
+/// One channel of the centred (mean value) enclosure, intersected with the
+/// natural extension — and never trusted over it when the remainder is not a
+/// finite interval.
+///
+/// `f(x) in point + slope * offset` for every `x` in the cell, by the mean value
+/// theorem, when `point` encloses `f` (or `f'`, or `f''`) at the expansion
+/// centre and `slope` encloses the NEXT derivative over the whole cell. Both
+/// forms are outer enclosures of one exact range, so the intersection is an
+/// outer enclosure too: this can only tighten.
+///
+/// # What the finiteness guard is for, measured
+///
+/// `ClosedInterval::mul` reduces four endpoint products with `f64::min` and
+/// `f64::max`, which IGNORE a NaN operand, so a NaN product drops out of the
+/// reduction and the surviving endpoints describe a range strictly INSIDE the
+/// true one — an unsound certificate, in the one direction that matters, with no
+/// signal at all.
+///
+/// The obvious way in is `inf * 0`, and that way is already shut:
+/// `product_down`/`product_up` treat a zero operand as exact and map the NaN to
+/// `0.0`, and a sweep over every endpoint shape finds no narrowing from a
+/// singly-infinite slope. The way that is NOT shut is a NaN arriving from
+/// anywhere else — `[NaN, 1.0] * [-0.5, 0.5]` reduces to `[-0.5, 0.5]`, two
+/// corners silently gone — because `enclose_direct` does not prove every
+/// accumulator finite and `checked_enclosure` validates only the enclosure the
+/// search receives, after this narrowing would already have happened.
+///
+/// So the guard excludes a non-finite slope and a non-finite remainder, and
+/// keeps the natural extension, which is rigorous unconditionally. See
+/// `the_centred_form_keeps_the_natural_extension_when_the_remainder_is_not_finite`
+/// for both halves as assertions.
+fn centred_or(
+    direct: ClosedInterval,
+    point: ClosedInterval,
+    slope: ClosedInterval,
+    offset: ClosedInterval,
+) -> ClosedInterval {
+    if !(slope.is_valid() && slope.lo.is_finite() && slope.hi.is_finite()) {
+        return direct;
+    }
+    let remainder = slope.mul(offset);
+    if !(remainder.is_valid() && remainder.lo.is_finite() && remainder.hi.is_finite()) {
+        return direct;
+    }
+    let centred = point.add(remainder);
+    if !centred.is_valid() {
+        return direct;
+    }
+    // Two rigorous outer enclosures of the same nonempty exact range cannot be
+    // disjoint, so this fallback is unreachable; it is written in the sound
+    // direction rather than as a panic, because a refusal here would convert a
+    // tightening into a failure.
+    direct.intersection(centred).unwrap_or(direct)
 }
 
 fn mode_ranges(
@@ -5263,6 +5339,91 @@ mod tests {
         (grams, penalties, projected, energies)
     }
 
+    /// The centred form's guard, and an honest account of what it is for.
+    ///
+    /// I wrote this guard for a hazard that turned out not to exist on the live
+    /// path, so here is what is actually true, measured rather than argued.
+    ///
+    /// **The `inf * 0` story is closed already.** `ClosedInterval::mul` reduces
+    /// four endpoint products with `f64::min`/`f64::max`, which IGNORE a NaN
+    /// operand — so an `inf * 0` product would drop out of the reduction
+    /// silently and leave a range strictly INSIDE the true one. But
+    /// `product_down`/`product_up` treat a zero operand as exact and map the
+    /// resulting NaN to `0.0`, so no NaN is ever produced that way, and
+    /// `[-inf, -inf] * [-1, 0]` reduces to `[0, inf]` — correct. Enumerating
+    /// every endpoint shape over `{-inf, -3, -1, 0, 1, 3, inf}` against a
+    /// sampled product set finds no narrowing from any singly-infinite slope.
+    ///
+    /// **What is still open is a NaN arriving from elsewhere.** `product_is_exact`
+    /// is false for a NaN against a non-unit, non-zero operand, so
+    /// `[NaN, 1.0] * [-0.5, 0.5]` reduces to `[-0.5, 0.5]`: two of the four
+    /// corners are dropped and a finite-looking, too-narrow range comes back with
+    /// no signal at all. `enclose_direct` does not prove every accumulator finite,
+    /// and `checked_enclosure` only validates the enclosure the search RECEIVES —
+    /// by which point a NaN slope has already been used to narrow the value.
+    ///
+    /// So the guard excludes a non-finite slope and a non-finite remainder and
+    /// keeps the natural extension, which is rigorous unconditionally. It is
+    /// cheap, and it means a certified range does not rest on a case analysis of
+    /// a rounding primitive three modules away that the next person to touch
+    /// `mode_ranges` will not re-derive.
+    #[test]
+    fn the_centred_form_keeps_the_natural_extension_when_the_remainder_is_not_finite() {
+        let direct = ClosedInterval::new(-10.0, 10.0);
+        let point = ClosedInterval::new(-1.0, 1.0);
+        let touching_zero = ClosedInterval::new(-0.5, 0.0);
+        let straddling_zero = ClosedInterval::new(-0.5, 0.5);
+
+        // The hazard, on the record as a fact rather than as a worry: a NaN
+        // endpoint reduces to a finite-looking range narrower than the truth.
+        let narrowed = ClosedInterval::new(f64::NAN, 1.0).mul(straddling_zero);
+        assert!(
+            narrowed.lo.is_finite() && narrowed.hi.is_finite(),
+            "premise: a NaN endpoint must reduce to a finite-LOOKING range ({narrowed:?}); if \
+             `mul` stops dropping it this gate is about nothing"
+        );
+        // And the `inf * 0` path, which is NOT a hazard, asserted so a change to
+        // `product_down`'s zero handling shows up here rather than silently.
+        let infinite = ClosedInterval::new(f64::NEG_INFINITY, f64::NEG_INFINITY)
+            .mul(ClosedInterval::new(-1.0, 0.0));
+        assert!(
+            infinite.lo <= 0.0 && infinite.hi.is_infinite(),
+            "`inf * 0` must stay sound through `product_down`'s exact-zero mapping, got \
+             {infinite:?}"
+        );
+
+        for slope in [
+            ClosedInterval::new(f64::NEG_INFINITY, 3.0),
+            ClosedInterval::new(-3.0, f64::INFINITY),
+            ClosedInterval::new(f64::NEG_INFINITY, f64::INFINITY),
+            ClosedInterval::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ClosedInterval::new(f64::NAN, 1.0),
+            ClosedInterval::new(1.0, f64::NAN),
+        ] {
+            for offset in [touching_zero, straddling_zero, ClosedInterval::new(0.0, 0.5)] {
+                assert_eq!(
+                    centred_or(direct, point, slope, offset),
+                    direct,
+                    "a non-finite slope {slope:?} over offset {offset:?} must leave the natural \
+                     extension in place"
+                );
+            }
+        }
+
+        // And it still tightens when the remainder IS finite, so the guard has
+        // not simply disabled the centred form.
+        let tightened = centred_or(
+            direct,
+            point,
+            ClosedInterval::new(-2.0, 2.0),
+            straddling_zero,
+        );
+        assert!(
+            tightened.lo > direct.lo && tightened.hi < direct.hi,
+            "a finite remainder must still tighten: {tightened:?} against {direct:?}"
+        );
+    }
+
     /// The centred ranges contain the function at EVERY interior point, not just
     /// at the centre they were expanded about.
     ///
@@ -5358,6 +5519,182 @@ mod tests {
              sweep, so the containment checks above would pass for a WRONG third-derivative \
              kernel too — this gate has gone vacuous"
         );
+    }
+
+    /// The located optimum is the SAME under both enclosure forms, and it is
+    /// accurate to the search's location contract and no better.
+    ///
+    /// Two claims, and the second is the one that catches misuse.
+    ///
+    /// Tightening an enclosure changes which cells the search visits, so it
+    /// could in principle move the point it returns. On the profile
+    /// `gam_sae::identifiability::ridge_reml_select_weight` builds for its
+    /// one-eigendirection closed-form fixture it does not: both oracles return
+    /// the same abscissa to the last bit, from the same stationary bracket. That
+    /// is worth pinning, because a caller comparing the returned `lambda` to a
+    /// closed form cannot tell "the enclosure moved the answer" from "the
+    /// enclosure was always allowed to".
+    ///
+    /// And it was always allowed to. The search certifies a stationary point's
+    /// LOCATION to the requested resolution in `rho`, and returns an evaluated
+    /// SAMPLE from that bracket rather than the bracket's midpoint or a
+    /// polished root. So `|rho_hat - rho*|` is bounded by the resolution and by
+    /// nothing smaller — measured here at `4.17e-9` against a requested
+    /// `1.49e-8`, from a bracket `1.13e-8` wide. A caller wanting more than that
+    /// has to polish the root itself; the fixture's exact `lambda = 1.2` is
+    /// reproduced to `2.5e-9`, which is inside the contract and outside a `1e-9`
+    /// tolerance that no version of this search has ever guaranteed.
+    #[test]
+    fn the_located_optimum_is_enclosure_independent_and_accurate_to_the_contract() {
+        // eigvals=[2.0], signal=[8.0], aux_norm_sq=10.0, n_obs=5, n_responses=3
+        // => pairs = [(1.0, 4.0)] in u = lambda/gamma_max, repeated once per
+        // response, with residual_dof = n_obs*n_responses = 15.
+        let grams = [1.0_f64; 3];
+        let penalties = [1.0_f64; 3];
+        let projected = [4.0 / 3.0; 3];
+        let energies = [10.0_f64];
+        let profile =
+            AffineRemlProfile::new(&grams, &penalties, &projected, &energies, 15.0, 3, 0.0)
+                .expect("valid ridge profile");
+        let lo = certified_ln_positive(f64::MIN_POSITIVE).expect("lo").lo;
+        let hi = certified_ln_positive(f64::MAX / 2.0).expect("hi").hi;
+        let resolution = f64::EPSILON.sqrt();
+        // The closed-form stationary point: lambda_hat = 1.2, and the profile is
+        // built in u = lambda/gamma_max with gamma_max = 2.
+        let truth = 0.6_f64;
+
+        let natural = maximize_score_1d(
+            lo,
+            hi,
+            resolution,
+            |x| profile.evaluate(x),
+            |a, b| profile.enclose_direct(a.x, b.x).map(|(e, _)| e),
+        )
+        .expect("the natural extension decomposes this domain");
+        let centred = maximize_score_1d(lo, hi, resolution, |x| profile.evaluate(x), |a, b| {
+            profile.enclose(a.x, b.x)
+        })
+        .expect("the centred form decomposes this domain");
+
+        assert_eq!(
+            natural.optimum.x, centred.optimum.x,
+            "the two enclosure forms located different optima ({} against {}); tightening may \
+             change which cells are visited but must not move the certified root",
+            natural.optimum.x, centred.optimum.x
+        );
+        for (label, search) in [("natural", &natural), ("centred", &centred)] {
+            assert!(
+                matches!(search.location, ScoreOptimumLocation::Stationary(_)),
+                "{label}: this fixture has an interior stationary optimum, got {:?}",
+                search.location
+            );
+            let offset = (search.optimum.x - truth.ln()).abs();
+            assert!(
+                offset <= resolution,
+                "{label}: the located root is {offset:e} from the closed form in rho, outside \
+                 the requested resolution {resolution:e} — that is a location-contract failure"
+            );
+            // And no better, which is the half a caller must not assume: the
+            // returned point is a sample from the bracket, not a polished root.
+            assert!(
+                offset > 0.0,
+                "{label}: an exactly-attained root would mean this gate has stopped measuring \
+                 what it claims"
+            );
+        }
+    }
+
+    /// COST. Centring doubles the per-cell work (one extra degenerate-cell
+    /// evaluation), so the net is only a win if it removes more cells than that.
+    /// This measures both oracles on the same searches and prints the ratio.
+    ///
+    /// Two shapes, because they pull in opposite directions: the cascade profile
+    /// on its own 40.6-wide domain, where the natural extension cannot finish at
+    /// all, and a well-conditioned profile on the FULL representable log-lambda
+    /// domain (`ln(MIN_POSITIVE)` to `ln(MAX/2)`, 1417 wide) — which is what
+    /// `gam_sae::identifiability::ridge_reml_select_weight` searches, and the
+    /// case where a search that already succeeded cheaply could only get slower.
+    #[test]
+    fn zz_measure_centred_enclosure_search_cost() {
+        let (grams, penalties, projected, energies) = cascade_profile_parts();
+        let cascade = AffineRemlProfile::new(
+            &grams,
+            &penalties,
+            &projected,
+            &energies,
+            33.0,
+            33,
+            9.226276711274537,
+        )
+        .expect("valid cascade profile");
+
+        let full_lo = certified_ln_positive(f64::MIN_POSITIVE).expect("domain lo").lo;
+        let full_hi = certified_ln_positive(f64::MAX / 2.0).expect("domain hi").hi;
+        let cases: [(&str, f64, f64); 3] = [
+            // The domain the design declares, where the natural extension
+            // cannot finish at all.
+            ("cascade/40.6-wide", -21.860900258111, 18.75853229939662),
+            // A narrow window around the optimum (-1.679), where the natural
+            // extension already succeeds in a handful of cells. This is the
+            // case centring could only make SLOWER, since there are no cells
+            // left for it to remove.
+            ("cascade/narrow-around-the-optimum", -3.0, 0.0),
+            // The full representable log-lambda domain, 1417 wide, which is what
+            // `gam_sae::identifiability::ridge_reml_select_weight` searches.
+            ("cascade/full-representable-domain", full_lo, full_hi),
+        ];
+
+        for (label, lo, hi) in cases {
+            let profile = &cascade;
+            let resolution = f64::EPSILON.sqrt();
+            let started = std::time::Instant::now();
+            let natural = maximize_score_1d(
+                lo,
+                hi,
+                resolution,
+                |x| profile.evaluate(x),
+                |a, b| profile.enclose_direct(a.x, b.x).map(|(e, _)| e),
+            );
+            let natural_seconds = started.elapsed().as_secs_f64();
+            let started = std::time::Instant::now();
+            let centred = maximize_score_1d(
+                lo,
+                hi,
+                resolution,
+                |x| profile.evaluate(x),
+                |a, b| profile.enclose(a.x, b.x),
+            );
+            let centred_seconds = started.elapsed().as_secs_f64();
+            println!(
+                "#COST {label}: natural {:.4}s ({}) centred {:.4}s ({}) speedup {:.2}x",
+                natural_seconds,
+                natural.as_ref().map_or("REFUSED", |_| "ok"),
+                centred_seconds,
+                centred.as_ref().map_or("REFUSED", |_| "ok"),
+                natural_seconds / centred_seconds.max(f64::MIN_POSITIVE),
+            );
+            // A refusal is a legitimate outcome for some domains (the full
+            // representable one reaches lambda values where the profiled
+            // residual is not evaluable at all); what must never happen is the
+            // centred oracle refusing where the natural one succeeds.
+            assert!(
+                centred.is_ok() || natural.is_err(),
+                "{label}: the centred oracle refused ({centred:?}) where the natural extension \
+                 succeeded — an intersection can only tighten, so this is impossible unless the \
+                 centred form is unsound"
+            );
+            // The per-cell cost is at most 2x, so a search that certifies under
+            // BOTH oracles must not lose more than that. A wider loss means the
+            // centred form is provoking work rather than removing it.
+            if natural.is_ok() {
+                assert!(
+                    centred_seconds <= natural_seconds * 2.5 + 1.0e-3,
+                    "{label}: centring cost {centred_seconds:.4}s against the natural \
+                     extension's {natural_seconds:.4}s — more than the doubled per-cell work \
+                     can explain"
+                );
+            }
+        }
     }
 
     /// The capability the centred form buys, pinned by running the SAME search

@@ -74,6 +74,7 @@ fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "curvature".to_string(),
             basis: SmoothBasisSpec::ConstantCurvature {
                 feature_cols: vec![0, 1],

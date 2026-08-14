@@ -1485,7 +1485,7 @@ impl<'a> RemlState<'a> {
         let (hessian_logdet_correction, penalty_subspace_trace) =
             if matches!(hessian_mode, PseudoLogdetMode::Smooth) && c_nontrivial {
                 let (log_det_h_plus, kernel) =
-                    Self::intrinsic_hessian_pseudo_logdet_parts(h_for_operator.as_ref())?;
+                    Self::intrinsic_hessian_pseudo_logdet_parts(h_for_operator.as_ref(), penalty_rank)?;
                 (
                     log_det_h_plus - hessian_op.logdet(),
                     kernel.map(std::sync::Arc::new),
@@ -1937,7 +1937,7 @@ impl<'a> RemlState<'a> {
         let (hessian_logdet_correction, penalty_subspace_trace) =
             if matches!(hessian_mode, PseudoLogdetMode::Smooth) && c_nontrivial {
                 let (log_det_h_plus, kernel) =
-                    Self::intrinsic_hessian_pseudo_logdet_parts(&h_total_original)?;
+                    Self::intrinsic_hessian_pseudo_logdet_parts(&h_total_original, penalty_rank)?;
                 (
                     log_det_h_plus - hessian_op.logdet(),
                     kernel.map(std::sync::Arc::new),
@@ -2831,8 +2831,21 @@ impl<'a> RemlState<'a> {
             };
             let cost = result.cost;
             log::debug!(
-                "[REML] outer-eval value-only done | cost {:.6e} | assemble {:.1}ms | total {:.1}ms",
+                // The four atoms, not just their sum. `cost` alone cannot say
+                // WHICH term moved, and #2748 spent a measurement cycle
+                // discovering that a 0.865 jump between two adjacent
+                // line-search trial points was invisible in every atom the
+                // `[#1271-diag]` line publishes — because that line publishes
+                // the inner solve's quantities, and the criterion's own
+                // decomposition was never printed anywhere.
+                "[REML] outer-eval value-only done | cost {:.12e} | \
+                 fixed_beta {:.12e} logdet_h {:.12e} logdet_s {:.12e} kkt {:.12e} | \
+                 assemble {:.1}ms | total {:.1}ms",
                 cost,
+                result.criterion_components.fixed_beta,
+                result.criterion_components.logdet_h,
+                result.criterion_components.logdet_s,
+                result.criterion_components.kkt,
                 t_assemble.elapsed().as_secs_f64() * 1000.0,
                 t_eval_start.elapsed().as_secs_f64() * 1000.0
             );
@@ -2901,6 +2914,7 @@ impl<'a> RemlState<'a> {
         // Cost, gradient, and optional Hessian are projections of the same
         // certified-mode evaluator result.
         let cost = result.cost;
+        let components = result.criterion_components;
         let eval = OuterEval {
             cost,
             gradient,
@@ -2910,9 +2924,15 @@ impl<'a> RemlState<'a> {
         {
             let gnorm = eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
             log::debug!(
-                "[REML] outer-eval done | cost {:.6e} | |g| {:.3e} | assemble {:.1}ms | total {:.1}ms",
+                "[REML] outer-eval done | cost {:.12e} | |g| {:.3e} | \
+                 fixed_beta {:.12e} logdet_h {:.12e} logdet_s {:.12e} kkt {:.12e} | \
+                 assemble {:.1}ms | total {:.1}ms",
                 eval.cost,
                 gnorm,
+                components.fixed_beta,
+                components.logdet_h,
+                components.logdet_s,
+                components.kkt,
                 assemble_ms,
                 t_eval_start.elapsed().as_secs_f64() * 1000.0
             );

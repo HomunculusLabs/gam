@@ -75,6 +75,7 @@ mod zz_measure_2450_rho_prior_criterion_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "s".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 0,
@@ -106,6 +107,7 @@ mod zz_measure_2450_rho_prior_criterion_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "m".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0],

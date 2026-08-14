@@ -459,6 +459,10 @@ path = "examples/probe_2750_lambda_path.rs"
 name = "probe_2714_frailty_trust_ladder"
 path = "examples/probe_2714_frailty_trust_ladder.rs"
 
+[[example]]
+name = "probe_2735_aniso_axis"
+path = "examples/probe_2735_aniso_axis.rs"
+
 
 [[example]]
 name = "probe_2747_range_normalization"

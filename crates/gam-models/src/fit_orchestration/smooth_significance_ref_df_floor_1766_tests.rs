@@ -13,11 +13,26 @@
 //! `χ²_{~0}` then reported a shrunk-to-flat term as MAXIMALLY significant
 //! (`p ~ 1e-12`) — a Type-I error decided by the reference d.f., not the data.
 //!
-//! The fix floors `ref_df` at `max(edf, null_dim, 1)`, which binds only on the
-//! degenerate collapse. These guards assert the post-fix contract directly on
-//! the report: a planted-null flat smooth gets `ref_df >= 1` and a p-value that
-//! is not pathologically small, while a genuinely wiggly smooth is still flagged
-//! and the floor never inflates its reference d.f.
+//! The original fix FLOORED `ref_df` at `max(edf, null_dim, 1)`. #2672 removed
+//! that floor, on the ground that it was a patch on the wrong shape rather than
+//! on a missing quantity: the reference is now the statistic's own null spectrum
+//! `w = eig(2F_jj − F_jj²)` and `ref_df = Σ_j w_j` is its first moment, so as
+//! REML shrinks a term the weights and the statistic collapse TOGETHER and the
+//! `χ²_{d→0}` degeneracy cannot arise. Measured on this fixture: `ref_df = 0.096`
+//! with `W = 2.5e-3` gives `p = 0.544`, not `1e-12`.
+//!
+//! So the `ref_df >= 1` clause here is gone — it required the floor, and would
+//! have rejected its removal — and what replaces it is the ANALYTIC bound the
+//! floor was standing in for, which catches #1766 by eleven orders rather than
+//! by one:
+//!
+//! ```text
+//!     edf  <=  ref_df  <=  2 * edf        (Wood's band, since w_j = λ_j(2 − λ_j))
+//!     nu = (Sum w)^2 / Sum w^2  >=  1     (Cauchy-Schwarz on non-negative w)
+//! ```
+//!
+//! The #1766 assembly reported `ref_df ~ 1e-12` against `edf ~ 0.09` — it fails
+//! `ref_df >= edf` outright. The p-value clause stays exactly as it was.
 
 //! Declared only as `#[cfg(test)] mod smooth_significance_ref_df_floor_1766_tests;`
 //! in `fit_orchestration.rs`; the inner attribute states that scope in the file
@@ -33,8 +48,8 @@ use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 
 /// Fit `y ~ s(x)` from raw `(x, y)` columns and return the single smooth term's
-/// LR report `(ref_df, statistic_lr, p_value_corrected)`.
-fn smooth_lr_report(x: &[f64], y: &[f64]) -> (f64, f64, f64) {
+/// LR report.
+fn smooth_lr_report(x: &[f64], y: &[f64]) -> super::drivers::SmoothTermLrInference {
     let headers: Vec<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
     let rows: Vec<StringRecord> = x
         .iter()
@@ -62,8 +77,7 @@ fn smooth_lr_report(x: &[f64], y: &[f64]) -> (f64, f64, f64) {
     )
     .expect("smooth-term LR inference");
     assert_eq!(reports.len(), 1, "exactly one smooth term expected");
-    let r = &reports[0];
-    (r.ref_df, r.statistic_lr, r.p_value_corrected)
+    reports.into_iter().next().expect("one smooth term")
 }
 
 #[test]
@@ -78,9 +92,22 @@ fn flat_null_smooth_ref_df_floored_and_not_significant_1766() {
         let mut rng = StdRng::seed_from_u64(seed);
         let noise = Normal::new(0.0, 0.01).unwrap();
         let y: Vec<f64> = (0..n).map(|_| noise.sample(&mut rng)).collect();
-        let (ref_df, w, p) = smooth_lr_report(&x, &y);
-        // ref_df must be at least 1 (the whole-term test spans >= its
-        // null-space dimension).
+        let report = smooth_lr_report(&x, &y);
+        let (ref_df, w, p) = (
+            report.ref_df,
+            report.statistic_lr,
+            report.p_value_corrected,
+        );
+        let provenance = &report.ref_df_provenance;
+        // `ref_df` must sit inside Wood's analytic band `[edf, 2·edf]` and the
+        // reference's shape must not degenerate. Both are identities of the
+        // spectral assembly rather than floors, and the #1766 collapse
+        // (`ref_df ~ 1e-12` against `edf ~ 0.09`) violates the first by eleven
+        // orders. A slack of one part in `1e6` of `edf` covers the assembly's
+        // own roundoff and nothing else.
+        let slack = 1e-6 * provenance.edf.abs().max(1.0);
+        let banded = ref_df >= provenance.edf - slack && ref_df <= 2.0 * provenance.edf + slack;
+        let shaped = provenance.chi_square_df >= 1.0 - 1e-9;
         //
         // The p-value bar is a COLLAPSE floor, not a largeness requirement.
         // `y` here carries no x-signal at all, so a correctly calibrated test
@@ -90,18 +117,23 @@ fn flat_null_smooth_ref_df_floored_and_not_significant_1766() {
         // reported p ~ 4e-12 on every seed, so 1e-4 separates the defect from a
         // calibrated null by eight orders of magnitude while a true uniform
         // clears all eight seeds with probability ~99.9%.
-        if ref_df < 1.0 - 1e-6 || !(p > 1e-4) {
+        if !banded || !shaped || !(p > 1e-4) {
             offenders.push(format!(
-                "(seed={seed}, ref_df={ref_df:.3e}, W={w:.3e}, p={p:.3e})"
+                "(seed={seed}, ref_df={ref_df:.3e}, edf={:.3e}, nu={:.3e}, \
+                 W={w:.3e}, p={p:.3e})",
+                provenance.edf, provenance.chi_square_df
             ));
         }
     }
     assert!(
         offenders.is_empty(),
-        "flat-null smooth mis-scaled: a shrunk-to-flat s(x) reported a collapsed \
-         reference d.f. (< 1) or a collapsed p-value (<= 1e-4) — the #1766 \
-         ref_df -> ~0 collapse is back. A p-value merely on the small side of \
-         uniform is NOT this defect and must not be read as one. Offenders: {}",
+        "flat-null smooth mis-scaled: a shrunk-to-flat s(x) reported a reference \
+         d.f. outside Wood's analytic band [edf, 2·edf], a degenerate shape \
+         (nu < 1), or a collapsed p-value (<= 1e-4) — the #1766 ref_df -> ~0 \
+         collapse is back. A p-value merely on the small side of uniform is NOT \
+         this defect and must not be read as one, and `ref_df < 1` is not it \
+         either: #2672 removed that floor and the spectral reference is a \
+         first moment, free to be small when the term is. Offenders: {}",
         offenders.join("; ")
     );
 }
@@ -118,7 +150,12 @@ fn strong_signal_smooth_still_flagged_1766() {
         .iter()
         .map(|&xi| (8.0 * xi).sin() + noise.sample(&mut rng))
         .collect();
-    let (ref_df, w, p) = smooth_lr_report(&x, &y);
+    let report = smooth_lr_report(&x, &y);
+    let (ref_df, w, p) = (
+        report.ref_df,
+        report.statistic_lr,
+        report.p_value_corrected,
+    );
     assert!(
         ref_df > 1.0,
         "a wiggly s(x) should carry reference d.f. well above 1 (got {ref_df:.3}); \

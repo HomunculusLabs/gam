@@ -70,6 +70,7 @@ fn erf_approx(x: f64) -> f64 {
 
 fn age_smooth(feature_col: usize, name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col,
@@ -93,6 +94,7 @@ fn age_smooth(feature_col: usize, name: &str) -> SmoothTermSpec {
 
 fn pc16_duchon_smooth(name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (0..LARGE_SCALE_SHAPE_PC_DIM).collect(),

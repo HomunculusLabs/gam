@@ -45,6 +45,8 @@ pub(crate) use std::collections::VecDeque;
 pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub(crate) use std::sync::{Arc, Mutex};
 
+#[path = "block_quadrature_correction.rs"]
+mod block_quadrature_correction;
 #[path = "gradient_hessian.rs"]
 mod gradient_hessian;
 #[path = "objective.rs"]

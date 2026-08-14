@@ -1,6 +1,6 @@
 Running 100 trials
-  Seed start:        869147042 [auto]
-  Replay this run:   --seed-start 869147042
+  Seed start:        839290055 [auto]
+  Replay this run:   --seed-start 839290055
   Scenario source:   /home/runner/work/gam/gam/bench/scenarios.json
   Filters: family=all model=all basis=all
   Gamfit timeout:    60s
@@ -11,35 +11,16 @@ Running 100 trials
   Metadata: /home/runner/work/gam/gam/bench/fuzz_results.meta.json
 
 Skipped 2 trial(s) above scenario cost cap 200000; max skipped cost=3950000
-  [  1/100] geo_disease_eas3_tp_k6         bino/gam/tps   auc:gamfit=0.8319 auc:mgcv=0.8338 gap=+0.0019 n=  6000 p=  3 [ok]  gamfit=2.1s mgcv=0.9s
-  [  2/100] geo_disease_eas3_tp_k12        bino/gam/tps   auc:gamfit=0.8167 auc:mgcv=0.8287 gap=+0.0120 n=  6000 p=  3 [ok]  gamfit=9.5s mgcv=0.7s
-  [  3/100] geo_disease_eas3_tp_k24        bino/gam/tps   auc:gamfit=0.8183 auc:mgcv=0.8242 gap=+0.0059 n=  6000 p=  3 [ok]  gamfit=5.2s mgcv=0.9s
-  [  4/100] geo_disease_eas3_duchon_k6     bino/gam/ducho auc:gamfit=0.8275 auc:mgcv=0.8275 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=2.2s mgcv=1.9s
-  [  5/100] geo_disease_eas3_duchon_k12    bino/gam/ducho auc:gamfit=0.8315 auc:mgcv=0.8315 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=51.3s mgcv=1.9s
-  [  6/100] geo_disease_eas3_duchon_k24    bino/gam/ducho auc:gamfit=0.8262 auc:mgcv=0.8262 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=19.8s mgcv=2.0s
-  [  7/100] geo_disease_eas3_matern_k6     bino/gam/mater auc:gamfit=0.8333 auc:mgcv=0.8293 gap=-0.0040 n=  6000 p=  3 [ok]  gamfit=9.0s mgcv=2.0s
-  [  8/100] geo_disease_eas3_matern_k12    bino/gam/mater auc:gamfit=0.8168 auc:mgcv=0.8234 gap=+0.0066 n=  6000 p=  3 [ok]  gamfit=13.4s mgcv=1.8s
-  [  9/100] geo_disease_eas3_matern_k24    bino/gam/mater auc:gamfit=  ERR auc:mgcv=0.8244 gap=+1.8244 n=  6000 p=  3 [no-verdict:gamfit_error] !!!  gamfit=1.0s(to-failure) mgcv=1.8s
-    -- GAMFIT FAILURE --
-    error: Invalid input: exact smoothing-corrected covariance unavailable: OuterHessianInverse { error: "rho Hessian has negative curvature -2.842e-5 below the outer certificate's own bar 2.832e-5 on that direction -- the sum of the EXACT chain-rule term 2.823e-5 of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)` (not a resolution: one of the two exact terms) and the curvature resolution of an analytically-formed eigenvalue, which is Weyl's ||dH||_2, measured here as 8.858547e-8 [analytic (Weyl, ||dH||_2); set by penalty-map invariance residual |T'(H_rho - diag(g_rho))T|_2] from [eigensolver backward error=7.772313e-19, rho-Hessian symmetrization defect |(H - H')/2|_2=0.000000e0, outer-gradient re-evaluation defect max_k |g_fresh - g_outer|=0.000000e0, penalty-map invariance residual |T'(H_rho - diag(g_rho))T|_2=8.858547e-8] -- #2690, #2748); the penalty map certified 1 null direction(s) and 1 were deflated before judging, so the direction above was judged; the outer loop certified this point as a minimum, and the curvature is larger than everything this assembly's own exactly-zero identities say it could have got wrong, so this is a genuine contradiction rather than an unresolvable direction" }
-    traceback: Traceback (most recent call last):
-  File "/home/runner/work/gam/gam/bench/fuzz_vs_mgcv.py", line 536, in run_gamfit
-    model = gamfit.fit(train_df, formula, family=family_arg, config=config)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 691, in wrapper
-    return fn(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1280, in fit
-    raise map_exception(exc) from exc
-  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/gamfit/_api.py", line 1277, in fit
-    rust_module().fit_table(headers, rows, formula, json.dumps(payload), fisher_w)
-gamfit._rust.IntegrationError: Invalid input: exact smoothing-corrected covariance unavailable: OuterHessianInverse { error: "rho Hessian has negative curvature -2.842e-5 below the outer certificate's own bar 2.832e-5 on that direction -- the sum of the EXACT chain-rule term 2.823e-5 of `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)` (not a resolution: one of the two exact terms) and the curvature resolution of an analytically-formed eigenvalue, which is Weyl's ||dH||_2, measured here as 8.858547e-8 [analytic (Weyl, ||dH||_2); set by penalty-map invariance residual |T'(H_rho - diag(g_rho))T|_2] from [eigensolver backward error=7.772313e-19, rho-Hessian symmetrization defect |(H - H')/2|_2=0.000000e0, outer-gradient re-evaluation defect max_k |g_fresh - g_outer|=0.000000e0, penalty-map invariance residual |T'(H_rho - diag(g_rho))T|_2=8.858547e-8] -- #2690, #2748); the penalty map certified 1 null direction(s) and 1 were deflated before judging, so the direction above was judged; the outer loop certified this point as a minimum, and the curvature is larger than everything this assembly's own exactly-zero identities say it could have got wrong, so this is a genuine contradiction rather than an unresolvable direction" }
-
-  [ 10/100] geo_disease_eas3_psperpc_k6    bino/gam/ps    auc:gamfit=0.8279 auc:mgcv=0.8279 gap=-0.0000 n=  6000 p=  3 [ok]  gamfit=75.9s mgcv=0.9s
-  [ 11/100] geo_disease_eas3_psperpc_k12   bino/gam/ps    auc:gamfit=0.8269 auc:mgcv=0.8271 gap=+0.0002 n=  6000 p=  3 [ok]  gamfit=56.7s mgcv=1.0s
-  [ 12/100] geo_disease_eas3_psperpc_k24   bino/gam/ps    auc:gamfit=0.8274 auc:mgcv=0.8272 gap=-0.0003 n=  6000 p=  3 [ok]  gamfit=80.3s mgcv=2.0s
-  [ 13/100] papuan_oce_tp_k12              bino/gam/tps   auc:gamfit=0.8131 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=18.4s mgcv=0.0s(to-failure)
+  [  1/100] geo_disease_eas3_duchon_k6     bino/gam/ducho auc:gamfit=0.8275 auc:mgcv=0.8275 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=2.3s mgcv=2.0s
+  [  2/100] geo_disease_eas3_duchon_k12    bino/gam/ducho auc:gamfit=0.8315 auc:mgcv=0.8315 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=50.4s mgcv=2.0s
+  [  3/100] geo_disease_eas3_duchon_k24    bino/gam/ducho auc:gamfit=0.8262 auc:mgcv=0.8262 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=19.6s mgcv=2.0s
+  [  4/100] geo_disease_eas3_matern_k6     bino/gam/mater auc:gamfit=0.8221 auc:mgcv=0.8293 gap=+0.0071 n=  6000 p=  3 [ok]  gamfit=7.1s mgcv=2.1s
+  [  5/100] geo_disease_eas3_matern_k12    bino/gam/mater auc:gamfit=0.8201 auc:mgcv=0.8234 gap=+0.0033 n=  6000 p=  3 [ok]  gamfit=28.1s mgcv=1.9s
+  [  6/100] geo_disease_eas3_matern_k24    bino/gam/mater auc:gamfit=0.8208 auc:mgcv=0.8244 gap=+0.0036 n=  6000 p=  3 [ok]  gamfit=21.5s mgcv=1.9s
+  [  7/100] geo_disease_eas3_psperpc_k6    bino/gam/ps    auc:gamfit=0.8279 auc:mgcv=0.8279 gap=-0.0000 n=  6000 p=  3 [ok]  gamfit=75.4s mgcv=1.0s
+  [  8/100] geo_disease_eas3_psperpc_k12   bino/gam/ps    auc:gamfit=0.8269 auc:mgcv=0.8271 gap=+0.0002 n=  6000 p=  3 [ok]  gamfit=56.1s mgcv=1.0s
+  [  9/100] geo_disease_eas3_psperpc_k24   bino/gam/ps    auc:gamfit=0.8274 auc:mgcv=0.8272 gap=-0.0003 n=  6000 p=  3 [ok]  gamfit=80.1s mgcv=2.1s
+  [ 10/100] papuan_oce_tp_k12              bino/gam/tps   auc:gamfit=0.8131 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=18.2s mgcv=0.0s(to-failure)
     -- MGCV FAILURE --
     error: r_mgcv fit failed: negative length vectors are not allowed
-  [ 14/100] papuan_oce_duchon_k12          bino/gam/ducho auc:gamfit=0.8136 auc:mgcv=0.8134 gap=-0.0002 n=  6000 p= 16 [ok]  gamfit=34.3s mgcv=3.5s
-  [ 15/100] papuan_oce_matern_k12          bino/gam/mater auc:gamfit=0.8116 auc:mgcv=0.8144 gap=+0.0029 n=  6000 p= 16 [ok]  gamfit=12.5s mgcv=3.4s
+  [ 11/100] papuan_oce_duchon_k12          bino/gam/ducho auc:gamfit=0.8136 auc:mgcv=0.8134 gap=-0.0002 n=  6000 p= 16 [ok]  gamfit=33.8s mgcv=3.6s

@@ -120,7 +120,11 @@ fn geo_disease_eas_columns(n: usize, seed: u64, n_pcs: usize) -> (Array2<f64>, A
         } else {
             eta += rng.normal(0.0, 0.08);
         }
-        y[i] = if rng.bernoulli(sigmoid(eta)) { 1.0 } else { 0.0 };
+        y[i] = if rng.bernoulli(sigmoid(eta)) {
+            1.0
+        } else {
+            0.0
+        };
         let lat_s = lat / 90.0;
         let lon_s = lon / 180.0;
         for j in 0..n_pcs {
@@ -155,7 +159,11 @@ fn geo_disease_columns(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
             + 0.30 * (2.0 * std::f64::consts::PI * equator * lon).sin();
         let southness = (-lat).clamp(0.0, 1.0);
         let eta = geo_signal + rng.normal(0.0, 0.20 + 0.85 * southness.powf(1.35));
-        y[i] = if rng.bernoulli(sigmoid(eta)) { 1.0 } else { 0.0 };
+        y[i] = if rng.bernoulli(sigmoid(eta)) {
+            1.0
+        } else {
+            0.0
+        };
         for j in 0..16 {
             let jf = j as f64;
             let a = 0.95 - 0.045 * jf;
@@ -170,6 +178,7 @@ fn geo_disease_columns(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
 
 fn smooth_term(n_pcs: usize, centers: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "geo".to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: (0..n_pcs).collect(),

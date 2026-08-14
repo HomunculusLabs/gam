@@ -57,6 +57,7 @@ use std::time::Instant;
 /// exactly the basis `duchon(x1, x2, centers=10)` lowers to in the formula DSL.
 fn duchon2_smooth(name: &str, centers: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: vec![0, 1],

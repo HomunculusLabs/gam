@@ -160,3 +160,6 @@ mod zz_measure_polar_harmonic_jet_tests;
 
 #[cfg(test)]
 mod zz_basis_is_capacity_determined_2684_tests;
+
+#[cfg(test)]
+mod zz_duchon_axis_psi_2735_tests;

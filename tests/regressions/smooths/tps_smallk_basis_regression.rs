@@ -241,6 +241,7 @@ fn marginal_tps_spec(num_centers: usize) -> TermCollectionSpec {
         random_effect_terms: vec![],
         smooth_terms: (0..2)
             .map(|feature| SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: format!("x{feature}_tps"),
                 basis: SmoothBasisSpec::ThinPlate {
                     feature_cols: vec![feature],
@@ -494,7 +495,10 @@ fn tps_reml_fit_must_not_oversmooth_seed118_style_additive_signal() {
         oracle_r2,
         oracle_r2 - r2,
         fitted.fit.log_lambdas.to_vec(),
-        fitted.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
+        fitted
+            .fit
+            .reml_score()
+            .expect("the fit reports a REML/LAML criterion"),
         fitted.fit.outer_gradient_norm
     );
     assert!(

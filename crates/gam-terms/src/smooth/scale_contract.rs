@@ -1359,6 +1359,7 @@ mod tests {
         build_single_local_smooth_term(
             data.view(),
             &SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "scale-contract-wrapper".to_string(),
                 basis,
                 shape: ShapeConstraint::None,
@@ -1678,9 +1679,9 @@ mod tests {
                         let (observed, target) =
                             (observed.standardized_value(), target.standardized_value());
                         assert!(
-                        (observed - target).abs() <= 3e-12 * (1.0 + target.abs()),
-                        "{family:?} effective range changed at factor {factor}: {observed} vs {target}"
-                    );
+                            (observed - target).abs() <= 3e-12 * (1.0 + target.abs()),
+                            "{family:?} effective range changed at factor {factor}: {observed} vs {target}"
+                        );
                     }
                     (None, None) => {}
                     pair => panic!("{family:?} changed optional range shape: {pair:?}"),
@@ -1691,12 +1692,7 @@ mod tests {
 
     #[test]
     fn euclidean_frame_scales_nested_resolved_centers_once_2623() {
-        let coordinates = array![
-            [-1.2, 0.4],
-            [-0.3, 1.1],
-            [0.6, -0.8],
-            [1.7, 0.2]
-        ];
+        let coordinates = array![[-1.2, 0.4], [-0.3, 1.1], [0.6, -0.8], [1.7, 0.2]];
         let original_centers = array![[-1.2, 0.4], [0.6, -0.8], [1.7, 0.2]];
         let mut strategy = CenterStrategy::DuchonSpectral {
             knots: Box::new(CenterStrategy::UserProvided(original_centers.clone())),
@@ -1706,8 +1702,7 @@ mod tests {
         let fresh = contract
             .normalize_euclidean_frame(coordinates.clone(), None, None, &mut strategy)
             .expect("fresh Euclidean frame");
-        let expected_centers =
-            original_centers.mapv(|value| value / fresh.input_scale.get());
+        let expected_centers = original_centers.mapv(|value| value / fresh.input_scale.get());
         let CenterStrategy::DuchonSpectral { knots, .. } = &strategy else {
             panic!("Duchon spectral strategy changed shape");
         };
@@ -1718,12 +1713,7 @@ mod tests {
 
         let frozen_centers = fresh_centers.clone();
         let replay = contract
-            .normalize_euclidean_frame(
-                coordinates,
-                Some(fresh.input_scale),
-                None,
-                &mut strategy,
-            )
+            .normalize_euclidean_frame(coordinates, Some(fresh.input_scale), None, &mut strategy)
             .expect("frozen Euclidean replay frame");
         assert_matrix_close(&replay.coordinates, &fresh.coordinates, 0.0);
         let CenterStrategy::DuchonSpectral { knots, .. } = &strategy else {
@@ -1893,6 +1883,7 @@ mod tests {
             linear_terms: Vec::new(),
             random_effect_terms: Vec::new(),
             smooth_terms: vec![SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: zoo_basis(BasisScaleFamily::Matern),
                 shape: ShapeConstraint::None,

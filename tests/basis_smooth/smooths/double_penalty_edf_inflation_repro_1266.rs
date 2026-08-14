@@ -82,6 +82,7 @@ fn bspline_spec(double_penalty: bool) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "s_x".to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col: 0,
@@ -187,7 +188,10 @@ fn double_penalty_edf_inflation_localization_1266() {
         eprintln!(
             "[1266-repro] {seed:>4}  {edf_on:>10.4}  {edf_off:>10.4}  {lambda_bend:>14.4e}  \
              {lambda_null:>14.4e}  {:>12.4}  edf_by_block=[{edf_block_str}]",
-            fit_on.fit.reml_score().expect("the fit reports a REML/LAML criterion")
+            fit_on
+                .fit
+                .reml_score()
+                .expect("the fit reports a REML/LAML criterion")
         );
         on_vals.push(edf_on);
         off_vals.push(edf_off);

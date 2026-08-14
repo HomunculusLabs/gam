@@ -1609,26 +1609,98 @@ pub(super) fn pirls_soft_acceptance(
     None
 }
 
+/// The GRADIENT-SPACE stationarity residual of a constrained iterate.
+///
+/// `gradient`, `beta`, and `linear_constraints` are all represented in the
+/// current PIRLS coefficient basis (raw sparse-native or Qs-transformed). At an
+/// active inequality the raw gradient can carry a valid KKT multiplier, so
+/// convergence must use `‖∇L − Aᵀλ‖∞` in that same frame rather than the
+/// unprojected gradient norm.
+///
+/// # Why this is not the max over all four KKT channels (#2705 group B)
+///
+/// It used to be
+/// `max(primal_feasibility, dual_feasibility, complementarity, stationarity)`,
+/// and that scalar was handed to [`WorkingState::certifies_kkt`], whose two
+/// bounds — `τ·√n·√p` and `τ·(1 + ‖score‖ + ‖Sβ‖)` — are both derived FOR A
+/// GRADIENT: the first from "score components are `O(√n)`", the second from the
+/// penalized gradient's own natural magnitude. Only two of the four channels are
+/// gradient-space quantities:
+///
+/// * `stationarity = ‖∇L − Aᵀλ‖∞` and `dual_feasibility = max_i max(0, −λ_i)`
+///   both live in gradient units — `λ` is the NNLS projection of the gradient
+///   onto the unit-normalized active rows;
+/// * `primal_feasibility = max_i max(0, b_i − a_iᵀβ)` is a EUCLIDEAN DISTANCE in
+///   COEFFICIENT space (the rows are unit-normalized before it is measured);
+/// * `complementarity = max_i |λ_i·s_i|` is a gradient TIMES a distance.
+///
+/// Measured on `y ~ s(x, shape=convex)`, 300 rows of clean linear data, at the
+/// point the fit was refused: `stationarity = 3.148471e-10` against a dimension
+/// bound of `6.244998e-9` — twenty times INSIDE the certificate — while
+/// `primal_feasibility = 6.301146e-9` pushed the max just past it, by a factor
+/// of `1.009`. That feasibility number is itself inside
+/// [`crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`], the tolerance the
+/// active-set solver's own docs publish as the one it GUARANTEES on the iterate
+/// it returns. The certificate was demanding better feasibility than the solver
+/// ever promised, in units the bound was not built for, and refusing a fit whose
+/// gradient-space stationarity had already converged.
+///
+/// The geometric channels keep their obligations — they are certified against
+/// their own contracts by [`constraint_geometry_is_certified`], which every
+/// acceptance path now requires. This function returns what the gradient
+/// certificate is entitled to read.
 pub(super) fn constrained_stationarity_norm(
     gradient: &Array1<f64>,
     beta: &Array1<f64>,
     lower_bounds: Option<&Array1<f64>>,
     linear_constraints: Option<&LinearInequalityConstraints>,
 ) -> f64 {
-    // `gradient`, `beta`, and `linear_constraints` are all represented in the
-    // current PIRLS coefficient basis (raw sparse-native or Qs-transformed).
-    // At an active inequality, the raw gradient can carry a valid KKT
-    // multiplier, so convergence must use the full KKT residual in that same
-    // frame rather than the unprojected gradient norm.
     if let Some(constraints) = linear_constraints {
         let kkt = compute_constraint_kkt_diagnostics(beta, gradient, constraints);
-        return kkt
-            .primal_feasibility
-            .max(kkt.dual_feasibility)
-            .max(kkt.complementarity)
-            .max(kkt.stationarity);
+        return kkt.dual_feasibility.max(kkt.stationarity);
     }
     projected_gradient_norm(gradient, beta, lower_bounds)
+}
+
+/// Whether the GEOMETRIC constraint-KKT channels — the two that are not
+/// gradient-space quantities — meet the contracts that define them.
+///
+/// * Primal feasibility is a distance in coefficient space, and the standard it
+///   answers to is [`crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`]:
+///   the tolerance the inequality-constrained active-set Newton solver
+///   guarantees on the iterate it returns, in the same unit-normalized row
+///   metric this residual is measured in. One number, one owner. It is also
+///   tighter than the outer startup gate's `KKT_TOL_PRIMAL = 1e-7`, so
+///   certifying against it can never hand the outer gate something it rejects.
+/// * Complementarity is `|λ_i·s_i|` — a gradient times a distance — and is held
+///   to `KKT_TOL_COMP`, the OUTER startup gate's own bound.
+///
+/// # Why complementarity's bound is inherited rather than derived
+///
+/// The dimensionally natural bound for `|λ_i·s_i|` scales with the gradient
+/// magnitude its multipliers live at; a fixed absolute number makes the same fit
+/// pass or fail under a response rescale `y → c·y`, since `λ ∝ c`. But the
+/// binding requirement HERE is lockstep: `enforce_constraint_kkt` refuses any
+/// iterate whose complementarity exceeds `KKT_TOL_COMP` absolutely, so an inner
+/// certificate that admitted the scaled form would certify geometries the outer
+/// gate then rejects — and a fit's success would again depend on which ρ the
+/// seed loop started from, which is #873. Adopting the natural form is a change
+/// to BOTH gates or to neither. This one is recorded as inherited, not endorsed.
+///
+/// Returns `true` for an unconstrained fit and for a constrained one whose
+/// bounds yield no representable constraint rows: there is no geometry to
+/// certify, and the gradient certificate carries the whole obligation.
+pub(super) fn constraint_geometry_is_certified(
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+    linear_constraints: Option<&LinearInequalityConstraints>,
+) -> bool {
+    let Some(constraints) = linear_constraints else {
+        return true;
+    };
+    let kkt = compute_constraint_kkt_diagnostics(beta, gradient, constraints);
+    kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
+        && kkt.complementarity <= crate::estimate::reml::outer_eval::KKT_TOL_COMP
 }
 
 pub(crate) fn count_dense_upper_nnz(matrix: &Array2<f64>, tol: f64) -> usize {

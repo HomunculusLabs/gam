@@ -99,19 +99,40 @@ fn structurally_certified_zero_direction_uses_pseudoinverse() {
     let (a, q) = build_with_spectrum(&evals);
     let inv = invert_identified_rho_hessian(&a, 1, &no_gradient(), None, &[]).expect("invert");
     assert_eq!(inv.active_rank, 3, "expected three identified directions");
-    assert_eq!(inv.structural_zero, 1);
     assert!(inv.used_structural_pseudoinverse);
-    // Exactly one eigenpair classifies as the certified structural zero; its
-    // POSITION in the classification list is an eigensolver ordering detail,
-    // not part of the contract.
+    // The count identity is satisfied, and the direction is excused by
+    // RESOLUTION, not by structure (#2748). No invariance basis was passed, so
+    // this call cannot know WHICH direction the penalty map's null is — only
+    // that there must be one — and reporting a resolution-excused direction as
+    // a penalty-map-certified one would be a claim the input never made.
+    assert_eq!(inv.structural_zero, 0, "no invariance basis was supplied to certify one");
+    assert_eq!(inv.unresolvable_curvature, 1);
     assert_eq!(
         inv.classifications
             .iter()
-            .filter(|class| matches!(class, EigenClassification::StructuralZero))
+            .filter(|class| matches!(class, EigenClassification::UnresolvableCurvature))
             .count(),
         1,
-        "exactly one structural-zero classification expected"
+        "exactly one resolution-excused classification expected"
     );
+    // POSITIVE CONTROL for the other name: hand in the invariance basis the
+    // penalty map would have produced for that same direction, and the SAME
+    // matrix classifies it as the structural zero it is.
+    let deflation = {
+        let mut basis = Array2::<f64>::zeros((4, 1));
+        for row in 0..4 {
+            basis[[row, 0]] = q[[row, 3]];
+        }
+        basis
+    };
+    let deflated = invert_identified_rho_hessian(&a, 1, &no_gradient(), Some(&deflation), &[])
+        .expect("invert with the invariance deflated");
+    assert_eq!(
+        deflated.structural_zero, 1,
+        "with the basis supplied the direction is excused by STRUCTURE"
+    );
+    assert_eq!(deflated.unresolvable_curvature, 0);
+    assert_eq!(deflated.active_rank, 3);
 
     let v_flat = q.column(3).to_owned();
     let inv_vflat = inv.inverse.dot(&v_flat);
@@ -240,7 +261,17 @@ fn a_fully_saturated_rail_does_not_violate_the_structural_count() {
     let inv = invert_identified_rho_hessian(&a, 0, &gradient, None, &[])
         .expect("an extra null direction is a saturated rail, not a penalty-map contradiction");
     assert_eq!(inv.active_rank, 3);
-    assert_eq!(inv.structural_zero + inv.below_gradient_floor, 1);
+    // The identity is over EVERY non-active direction (#2748): a direction can
+    // fail to be active by structure, by resolution or by the chain rule, and
+    // the penalty map's count does not say which.
+    assert_eq!(
+        inv.structural_zero + inv.unresolvable_curvature + inv.below_gradient_floor,
+        1
+    );
+    assert_eq!(
+        inv.unresolvable_curvature, 1,
+        "an exactly-zero eigenvalue is excused by resolution, not by the penalty map"
+    );
 
     // Fewer nulls than certified is still a contradiction and still fails.
     let error = invert_identified_rho_hessian(&a, 2, &gradient, None, &[])

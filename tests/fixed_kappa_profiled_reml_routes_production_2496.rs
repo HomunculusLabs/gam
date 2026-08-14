@@ -49,6 +49,7 @@ fn collection_spec() -> TermCollectionSpec {
         random_effect_terms: Vec::new(),
         smooth_terms: vec![
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "curvature".to_string(),
                 basis: SmoothBasisSpec::ConstantCurvature {
                     feature_cols: vec![0, 1],
@@ -66,6 +67,7 @@ fn collection_spec() -> TermCollectionSpec {
                 joint_null_rotation: None,
             },
             SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: "independent_spline".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 2,

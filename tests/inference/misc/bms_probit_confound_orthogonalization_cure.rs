@@ -115,6 +115,7 @@ fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTerm
     let logslope_offset = Array1::<f64>::zeros(n);
 
     let make_bspline = |name: &str, internal_knots: usize| SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,

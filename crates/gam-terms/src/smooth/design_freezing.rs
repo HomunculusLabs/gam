@@ -662,6 +662,13 @@ pub fn freeze_term_collection_from_design(
         // rotation). Without this propagation, models reloaded from disk
         // produce wrong η at predict-time for any smooth with `Some(Q)`.
         term.joint_null_rotation = fitted.joint_null_rotation.clone();
+        // Persist the row-space correction of the span-preserving parametric
+        // orthogonalization (#2747). The coefficient transform beside it is
+        // absorbed into the basis metadata below; this half cannot be, because
+        // it multiplies the CONSTRAINT block rather than the basis, and without
+        // it a reloaded model rebuilds an unresidualized design its own
+        // coefficients no longer match.
+        term.frozen_parametric_residualization = fitted.parametric_residualization.clone();
         freeze_smooth_basis_from_metadata(&mut term.basis, &fitted.metadata, &term.name)?;
         // Persist the global-orthogonality chart the metadata could not absorb
         // (factor-smooth kinds residualized against an overlapping owner

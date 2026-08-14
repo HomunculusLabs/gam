@@ -36,6 +36,7 @@ use rand::{RngExt, SeedableRng};
 
 fn matern_smooth(name: &str, centers: usize) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -151,7 +152,10 @@ fn fit_once(data: &Array2<f64>, spec: &BernoulliMarginalSlopeTermSpec) -> FitDig
         Ok(FitResult::BernoulliMarginalSlope(out)) => FitDigest {
             log_lambdas: out.fit.log_lambdas.clone(),
             beta: out.fit.beta.clone(),
-            reml_score: out.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
+            reml_score: out
+                .fit
+                .reml_score()
+                .expect("the fit reports a REML/LAML criterion"),
             outer_iterations: out.fit.outer_iterations,
         },
         Ok(_) => panic!("wrong FitResult variant"),

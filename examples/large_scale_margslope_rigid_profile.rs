@@ -89,6 +89,7 @@ fn linear(name: &str, feature_col: usize) -> LinearTermSpec {
 
 fn age_smooth(feature_col: usize, name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col,
@@ -113,6 +114,7 @@ fn age_smooth(feature_col: usize, name: &str) -> SmoothTermSpec {
 /// Rigid duchon: order=0 (Zero nullspace), power=9.
 fn duchon_pc_smooth_rigid(name: &str) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: (2..18).collect(),
