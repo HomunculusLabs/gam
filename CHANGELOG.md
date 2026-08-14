@@ -1,5 +1,39 @@
 ## Unreleased
 
+- **An escape that RETIRES a coordinate onto a rail is not the pathology the
+  small cap exists for (#2612).** `OUTER_SADDLE_ESCAPE_BUDGET = 3` carried the
+  premise *"a genuine saddle is cleared in one escape"*, which this lane measured
+  false twice: the banded multinomial fixture descends monotonically for six
+  e-folds to the wall, and penguins takes four successive escapes that each run
+  to a face (`α_box = 9.39, 4.77, 9.14, 6.11`) while the criterion falls
+  `2.158034 → 2.156725`.
+
+  The distinction the count could not make: the escape direction is exactly zero
+  on every railed coordinate (`judged_subspace_basis`), so the ray's box
+  intersection can only be set by a FREE one, and a reseed that lands ON the face
+  has therefore retired a previously-free coordinate onto a rail. There are only
+  `n` coordinates to retire and the criterion strictly decreased on the way, so
+  such an escape cannot be the repeating pathology; it is bounded by
+  `OUTER_CERTIFY_RESUME_BUDGET` like every other reseed kind and by
+  `certify_resume_made_progress`, which stops the loop the moment a resume fails
+  to strictly improve. An INTERIOR escape retires nothing and can in principle
+  repeat forever — and the pathology #2155/#2363 names, a bimodal inner solve
+  whose warm re-descent reports a phantom improvement the cold certificate cannot
+  reproduce, is exactly the case that fools the descent gate — so the small cap
+  stays and now applies only to the escapes it was written for.
+
+  The fixture is the premise itself:
+  `f(ρ) = ½ρ₀² − ½Σ_{j=1..5} ε_j ρ_j²`, `ε = (5,4,3,2,1)·10⁻³`, stationary at the
+  origin and indefinite in every `ρ_j`, whose `argmin` over the box is the CORNER.
+  A concave quadratic on a box attains its minimum at a vertex; refusing that
+  point is refusing the answer. It needs five escapes because the
+  minimum-curvature eigenvector is a single axis and each expanded step retires
+  one coordinate. The `#2357`/`#2155` double wells sit exactly one unit from
+  their minima and the ridge fixture has one indefinite coordinate, so neither can
+  see a cap of any size — this is the first fixture in that file outside the
+  premise. Measured on one binary, changing only this: `12 passed; 1 failed` →
+  `13 passed; 0 failed`; `gam-solve --lib -- rho_optimizer::` 363/363.
+
 - **A negative-curvature direction has no interior minimiser, so its escape step
   could not come from the falsifiability ladder (#2612).**
   `adjudicate_negative_curvature` built ONE step ladder — `α = 1, ½, ¼, …` down to
