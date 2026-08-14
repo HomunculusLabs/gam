@@ -1,5 +1,56 @@
 ## Unreleased
 
+- **`D_β H` pulled the row Hessian back through ONE slope channel, so the outer
+  criterion's whole mode-response term was the derivative of a different model
+  (#2765 / #2767).** `add_pullback_primary_hessian` — the pullback that
+  `RowKernel::add_pullback_hessian` routes through — was still written for the
+  four-primary static frame: `h[[3,3]]` against a single `coefficient_design()`
+  for the g–g block, `h[[0,3]]+h[[1,3]]` for m–g, `h[[a,3]]` for t–g. On a
+  follow-up-varying slope the row Hessian carries `g₀, g₁, ġ₁` at primaries 3/4/5
+  against three *different* designs (`X_cov ⊗ B_entry`, `X_cov ⊗ B_exit`,
+  `X_cov ⊗ B′_exit`), so all three blocks were wrong.
+
+  **Why every existing gate passed.** The joint Hessian itself is assembled by
+  `hessian_dense_override`, which does loop the channels — so `H`, the score, and
+  the ψ triple were all right and all gated. This pullback has exactly one
+  consumer, `row_kernel_directional_derivative` (`D_β H[δ]`), and `D_β H` has
+  exactly one consumer, the outer criterion's `½ tr(K · D_β H[dβ̂/dθ])`. The
+  defect was invisible to everything except the outer gradient.
+
+  The attribution chain, because each step needed an instrument that did not
+  exist:
+
+  1. The outer-gradient FD audit graded **ψ only** — its own doc said
+     "smoothing-parameter ρ coordinates are deliberately excluded". It now grades
+     the whole θ vector on request (`enable_outer_gradient_fd_capture_over_theta`),
+     through one extracted ladder (`difference_theta_coordinate`) so the two
+     blocks cannot drift apart. That showed `fixed_beta` right to six digits and
+     `logdet_s` right to seven on **every** coordinate, with `logdet_h` wrong on
+     all five — twice with the wrong sign.
+  2. `logdet_h` is the only atom that reads `dβ̂/dθ`. Splitting it into its
+     frozen and mode-response halves for the ρ block gave a bound with no oracle
+     in it: `½ tr(K·λ_k S_k)` has both factors PSD, so it lies in
+     `[0, rank(S_k)/2]`. At ρ₂ the frozen half was `+0.4976` and the finite
+     difference of the total was `+0.7671`; a correct mode-response half would
+     have forced the frozen half to `+1.528`, outside that interval. So the
+     mode-response half was the wrong one — proved, not inferred.
+  3. A binomial `matern(x1,x2)` control through the shipped GLM assembly — `c`
+     nontrivial, so the same mode-response term is live — agreed to `1e-6…1e-11`
+     on every coordinate, which put the defect in the survival lane rather than
+     in machinery every penalized non-Gaussian fit uses. (The Gaussian sibling
+     gate cannot say this: under the identity link `D_β H ≡ 0`.)
+  4. Four new gates difference `D_β H[δ]` against the family's own joint Hessian
+     in both slope frames and along block-confined directions. The follow-up
+     frame failed at the marginal↔log-slope cross entry
+     (`analytic −3.740e-1` vs `fd +5.438e-1`, oracle `2.6e-9`) and the static
+     frame passed, which named the frame rather than the algebra.
+
+  Also routed rather than patched: the sparse/mixed `evaluate_blockwise_exact_newton_*`
+  paths (`p ≥ 512`) scatter the log-slope block as one `f_pipi[[3,3]]` rank-1 over
+  one CSR — a shape that cannot express three channel designs at all. They are a
+  storage optimisation for sparse designs, not a different model, so a
+  follow-up-varying slope now takes the exact dense blockwise route at every `p`.
+
 - **The repair, measured end to end: `rel_l2` 0.3395 → 0.1042, and the optimizer
   finds the signal axis by itself (#2735).** Same data, same seed, the fixture's
   own generator at `n=3000, K=60, pc_dim=6` — a shape 17× smaller in `n` and 8×
