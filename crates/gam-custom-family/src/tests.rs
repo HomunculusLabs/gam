@@ -6236,8 +6236,9 @@ impl CustomFamily for BetaDependentJeffreysInformationFamily {
     fn joint_jeffreys_information_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array2<f64>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys information");
         let (b0, b1) = Self::beta_of(block_states);
         Ok(Some(Self::information(b0, b1)))
     }
@@ -6245,9 +6246,10 @@ impl CustomFamily for BetaDependentJeffreysInformationFamily {
     fn joint_jeffreys_information_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys drift");
         let (b0, b1) = Self::beta_of(block_states);
         let [axis0, axis1] = Self::information_axes(b0, b1);
         Ok(Some(&axis0 * d_beta_flat[0] + &axis1 * d_beta_flat[1]))
@@ -6256,18 +6258,25 @@ impl CustomFamily for BetaDependentJeffreysInformationFamily {
     fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys all-axes drift");
         let (b0, b1) = Self::beta_of(block_states);
         Ok(Some(Self::information_axes(b0, b1).to_vec()))
     }
 
     fn joint_jeffreys_information_second_directional_all_axes_with_specs(
         &self,
-        _block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
         d_beta_u_flat: &Array1<f64>,
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "beta-dependent Jeffreys second drift");
+        assert_specs_consistent(specs, "beta-dependent Jeffreys second drift");
+        // `H` is quadratic in beta, so its SECOND directional derivative is
+        // constant in beta -- which is a statement about this fixture, not a
+        // licence to ignore the state: the assertion above is what says the
+        // caller handed a well-formed one.
         Ok(Some(Self::information_second_axes(d_beta_u_flat).to_vec()))
     }
 }
