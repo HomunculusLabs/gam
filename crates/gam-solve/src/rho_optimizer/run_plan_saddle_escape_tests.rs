@@ -1115,3 +1115,126 @@ fn outer_search_clears_a_monotone_ridge_on_the_gradient_only_plan_2612() {
         "the face is a constrained minimum: with ρ₁ railed the reduced Hessian is [1], PSD",
     );
 }
+
+// ─── #2612 a criterion whose minimum over the box is a CORNER ────────
+//
+// The ridge fixture above has ONE indefinite coordinate, so one escape clears
+// it. That is still inside the premise `OUTER_SADDLE_ESCAPE_BUDGET = 3` rests
+// on — *"a genuine saddle is cleared in one escape"* — and so it cannot test
+// that premise.
+//
+// This one is outside it, and it is the shape the multinomial fit has:
+//
+//   f(ρ) = ½·ρ₀²  −  ½·Σ_{j=1..K} ε_j·ρ_j²,     ε = (5, 4, 3, 2, 1)·1e-3
+//
+// stationary at the origin, `H = diag(1, −ε₁, …, −ε_K)` indefinite in EVERY
+// ρ_j, and `argmin` over the box is the CORNER `ρ₀ = 0, ρ_j = ±30`. There is
+// nothing pathological here — a concave quadratic on a box attains its minimum
+// at a vertex, and refusing that point is refusing the answer.
+//
+// The escape can only retire the coordinates one at a time: the eigenvector of
+// the most negative curvature is a single axis, the expanded step runs to the
+// face along it, and that coordinate rails. `judged_subspace_basis` then makes
+// the next escape's direction exactly zero there, so the free block shrinks by
+// one per escape and the sequence is monotone in TWO quantities at once — the
+// criterion strictly decreases and the free dimension strictly shrinks. It is
+// finite by construction and needs `K` escapes.
+//
+// With `K = 5` against a budget of 3 the fit is refused with two coordinates
+// still un-retired. That is the measurement the premise cannot survive, and it
+// is here as a fixture rather than as an argument.
+const CORNER_CURVATURES: [f64; 5] = [5.0e-3, 4.0e-3, 3.0e-3, 2.0e-3, 1.0e-3];
+const CORNER_BOX_FACE: f64 = 30.0;
+
+fn corner_cost(rho: &Array1<f64>) -> f64 {
+    let mut cost = 0.5 * rho[0] * rho[0];
+    for (j, &curvature) in CORNER_CURVATURES.iter().enumerate() {
+        cost -= 0.5 * curvature * rho[j + 1] * rho[j + 1];
+    }
+    cost
+}
+
+fn corner_eval(rho: &Array1<f64>) -> OuterEval {
+    let dim = CORNER_CURVATURES.len() + 1;
+    let mut gradient = Array1::<f64>::zeros(dim);
+    let mut hessian = Array2::<f64>::zeros((dim, dim));
+    gradient[0] = rho[0];
+    hessian[[0, 0]] = 1.0;
+    for (j, &curvature) in CORNER_CURVATURES.iter().enumerate() {
+        gradient[j + 1] = -curvature * rho[j + 1];
+        hessian[[j + 1, j + 1]] = -curvature;
+    }
+    OuterEval {
+        cost: corner_cost(rho),
+        gradient,
+        hessian: HessianValue::Dense(hessian),
+        inner_beta_hint: None,
+    }
+}
+
+fn corner_problem() -> OuterProblem {
+    let dim = CORNER_CURVATURES.len() + 1;
+    OuterProblem::new(dim)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(true)
+        .with_bounds(
+            Array1::from_elem(dim, -CORNER_BOX_FACE),
+            Array1::from_elem(dim, CORNER_BOX_FACE),
+        )
+        .with_initial_rho(Array1::<f64>::zeros(dim))
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        })
+}
+
+#[test]
+fn outer_search_reaches_a_corner_minimum_that_needs_more_than_one_escape_2612() {
+    // The premise `OUTER_SADDLE_ESCAPE_BUDGET` rests on, as a fixture. Every
+    // escape here is a strict descent AND retires one coordinate onto a rail, so
+    // the sequence is finite by construction; capping it by a count refuses a
+    // point the criterion is still descending toward.
+    let problem = corner_problem();
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), rho: &Array1<f64>| Ok(corner_cost(rho)),
+        |_: &mut (), rho: &Array1<f64>| Ok(corner_eval(rho)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = problem
+        .run(&mut obj, "corner-minimum pipeline #2612")
+        .expect(
+            "a concave quadratic on a box attains its minimum at a VERTEX; refusing that point \
+             is refusing the answer",
+        );
+    assert!(
+        result.converged(),
+        "must converge at the corner: rho={:?}",
+        result.rho
+    );
+    assert!(
+        result.rho[0].abs() < 1e-4,
+        "the convex coordinate must sit at its optimum ρ₀ = 0: {:?}",
+        result.rho
+    );
+    for j in 1..=CORNER_CURVATURES.len() {
+        assert!(
+            (result.rho[j].abs() - CORNER_BOX_FACE).abs() < 1e-4,
+            "every concave coordinate must be retired onto a face: coordinate {j} sits at {} in \
+             {:?}",
+            result.rho[j],
+            result.rho
+        );
+    }
+    assert!(
+        result
+            .criterion_certificate
+            .as_ref()
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
+        "with every concave coordinate railed the reduced Hessian is [1], PSD",
+    );
+}

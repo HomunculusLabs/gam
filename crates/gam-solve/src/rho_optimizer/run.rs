@@ -7985,10 +7985,33 @@ pub enum OperatorTrustRegionStopReason {
 /// remaining budget.
 const OUTER_CERTIFY_RESUME_BUDGET: usize = 16;
 
-/// Max interior strict-saddle escape resumes (#2357/#2155). A genuine saddle is
-/// cleared in one escape; the small cap keeps a pathological non-convergent
-/// objective (e.g. a bimodal inner solve, #2363) from re-escaping a family of
-/// shallow saddles until the general resume budget is spent.
+/// Max **interior** strict-saddle escape resumes (#2357/#2155/#2612).
+///
+/// The pathology this guards is named in #2155/#2363: a bimodal inner solve
+/// whose warm re-descent keeps reporting a phantom improvement the cold
+/// certificate cannot reproduce. `certify_resume_made_progress` is the loop's
+/// own descent gate and it can be fooled by exactly that hysteresis — the warm
+/// value looks improved — so a small cap is the backstop, and it stays.
+///
+/// It applies only to an escape whose reseed lands in the **interior** of the
+/// box. Such an escape retires nothing and can in principle repeat forever, so a
+/// count is the only bound available for it.
+///
+/// It does NOT apply to an escape whose reseed lands ON the box face, and that
+/// distinction is the whole of #2612. The escape direction is exactly zero on
+/// every railed coordinate (`judged_subspace_basis`), so the ray's box
+/// intersection is set by a FREE coordinate: a reseed on the face has retired a
+/// previously-free coordinate onto a rail. There are only `n` coordinates to
+/// retire, so that escape cannot be the repeating pathology, and it is bounded
+/// by [`OUTER_CERTIFY_RESUME_BUDGET`] like every other reseed kind.
+///
+/// The old value carried the premise *"a genuine saddle is cleared in one
+/// escape"*, and #2612 measured that false: on the multinomial banded fixture
+/// the criterion descends monotonically for six e-folds to the wall, and on
+/// penguins four successive escapes each ran to a face
+/// (`α_box = 9.39, 4.77, 9.14, 6.11`) while the criterion fell
+/// `2.158034 → 2.156725`. Capping THAT by a count refuses a point the criterion
+/// is still descending toward, one coordinate short of the corner.
 pub(crate) const OUTER_SADDLE_ESCAPE_BUDGET: usize = 3;
 
 /// Roundoff-relative scale below which a certify-last reseed's objective
@@ -8170,11 +8193,14 @@ pub(crate) fn run_outer(
     // convergence (e.g. a budget-exhausted `MaxIterationsReached`) is refused
     // immediately with no reseed: its non-convergence is genuine.
     let mut resumes_remaining = OUTER_CERTIFY_RESUME_BUDGET;
-    // Interior strict-saddle escapes are bounded separately and tightly: a real
-    // saddle is cleared in one hop, so a handful of attempts is ample, while a
-    // non-convergent bimodal-inner grind (#2155/#2363) is cut off well before it
-    // exhausts the general resume budget (#2357).
-    let mut saddle_escapes_remaining: usize = OUTER_SADDLE_ESCAPE_BUDGET;
+    // INTERIOR strict-saddle escapes are bounded separately and tightly: one that
+    // lands inside the box retires nothing, so a count is the only bound there is
+    // for it, and a non-convergent bimodal-inner grind (#2155/#2363) is cut off
+    // well before it exhausts the general resume budget (#2357). An escape that
+    // lands on the box FACE has retired a free coordinate onto a rail and is
+    // bounded by the general budget instead — see [`OUTER_SADDLE_ESCAPE_BUDGET`]
+    // (#2612).
+    let mut interior_saddle_escapes_remaining: usize = OUTER_SADDLE_ESCAPE_BUDGET;
     // #2569 — seed points this loop has already started and already had refused.
     // A resume changes `initial_rho` and nothing else the cascade reads, and it
     // runs from a reset objective, so a NON-initial seed re-entered on a later
@@ -8208,6 +8234,29 @@ pub(crate) fn run_outer(
                 // then dropped.
                 let saddle_escape_reseed = result.saddle_escape_reseed.take();
                 let resume_from_saddle_escape = saddle_escape_reseed.is_some();
+                // Did this escape RETIRE a free coordinate onto a rail (#2612)?
+                //
+                // Read off the reseed rather than plumbed down from the
+                // adjudication, because it is a property of the two points and
+                // the box and nothing else: a coordinate the refused checkpoint
+                // held strictly inside the box now sits on a bound. The escape
+                // direction is exactly zero on every already-railed coordinate,
+                // so the ray's box intersection can only be set by a free one —
+                // which is why "landed on the face" and "retired a free
+                // coordinate" are the same event.
+                let saddle_escape_retires_a_coordinate =
+                    saddle_escape_reseed.as_ref().is_some_and(|reseed| {
+                        let (lower, upper) =
+                            outer_model_domain_bounds_template(config, reseed.len());
+                        (0..reseed.len()).any(|i| {
+                            let on_bound = reseed[i] <= lower[i] || reseed[i] >= upper[i];
+                            let was_interior = result
+                                .rho
+                                .get(i)
+                                .is_some_and(|held| *held > lower[i] && *held < upper[i]);
+                            on_bound && was_interior
+                        })
+                    });
                 // #2348 Inc 2b, completed (#2349 round 8): a confirmed-tail
                 // snap that needs a re-descent publishes the snapped face as
                 // `tail_snap_reseed` — previously minted and then DROPPED
@@ -8267,21 +8316,32 @@ pub(crate) fn run_outer(
                     && !resume_from_wrong_rail
                     && !resume_from_active_set)
                     || resumes_remaining == 0
-                    || (resume_from_saddle_escape && saddle_escapes_remaining == 0)
+                    || (resume_from_saddle_escape
+                        && !saddle_escape_retires_a_coordinate
+                        && interior_saddle_escapes_remaining == 0)
                 {
                     return Err(refusal);
                 }
                 resumes_remaining -= 1;
-                if resume_from_saddle_escape {
-                    // Genuine strict saddles are cleared in one escape (the fresh
-                    // ARC step off the ridge descends straight to the PSD
-                    // minimum). A SMALL cap stops a pathological objective — e.g. a
-                    // bimodal inner solve whose warm re-descent keeps reporting a
-                    // phantom improvement that the cold certificate cannot
-                    // reproduce (#2155 / #2363) — from burning the whole resume
-                    // budget re-escaping a family of shallow saddles that never
-                    // certifies. Past the cap the honest refusal is taken.
-                    saddle_escapes_remaining -= 1;
+                if resume_from_saddle_escape && !saddle_escape_retires_a_coordinate {
+                    // An INTERIOR escape retires nothing, so it can in principle
+                    // repeat forever — a pathological objective (a bimodal inner
+                    // solve whose warm re-descent keeps reporting a phantom
+                    // improvement the cold certificate cannot reproduce, #2155 /
+                    // #2363) would otherwise burn the whole resume budget
+                    // re-escaping a family of shallow saddles that never
+                    // certifies. A count is the only bound available for that, so
+                    // the small cap stands and past it the honest refusal is
+                    // taken.
+                    //
+                    // An escape that landed on the box FACE is a different event
+                    // (#2612): it retired a previously-free coordinate onto a
+                    // rail, there are only `n` coordinates to retire, and the
+                    // criterion strictly decreased on the way. It is bounded by
+                    // `resumes_remaining` above, like every other reseed kind, and
+                    // by the descent gate below, which stops the loop the moment a
+                    // resume fails to strictly improve.
+                    interior_saddle_escapes_remaining -= 1;
                 }
                 let prior_iterations = result.iterations;
                 let prior_value = result.final_value;
