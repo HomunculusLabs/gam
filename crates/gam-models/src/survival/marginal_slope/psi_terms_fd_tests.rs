@@ -1063,3 +1063,73 @@ fn beta_hessian_drift_matches_finite_difference_time_direction_2765() {
         );
     }
 }
+
+/// The oracle-free companion to the four `D_β H` gates: on a CONSTANT time
+/// margin the follow-up frame IS the static one, so its drift must agree
+/// entry-for-entry.
+///
+/// `B_entry = B_exit` and `B′_exit = 0` make `g₀ = g₁` and `ġ₁ = 0` identically,
+/// which is the same reduction `a_constant_follow_up_margin_reproduces_the_static_frame_2765`
+/// applies to the ψ terms. It is the sharpest check available on a pullback that
+/// reads the slope through one channel index: with the two channel designs
+/// EQUAL, a site that keeps only `g₀`'s design is short by exactly the dropped
+/// channels' contribution rather than by something that could be argued small.
+/// Before the pullback was converted this failed by `1.7e0` relative on the
+/// marginal↔log-slope cross block.
+#[test]
+fn a_constant_follow_up_margin_reproduces_the_static_beta_drift_2765() {
+    let (static_family, beta) = drift_family_and_states(SlopeFrame::Static);
+    let mut degenerate = static_family.clone();
+    let exit = degenerate
+        .logslope_layout
+        .coefficient_design()
+        .to_dense()
+        .to_owned();
+    let width = exit.ncols();
+    degenerate.logslope_layout = degenerate
+        .logslope_layout
+        .clone()
+        .with_follow_up(
+            DesignMatrix::from(exit),
+            DesignMatrix::from(Array2::zeros((N_ROWS, width))),
+        )
+        .expect("a constant margin is a valid follow-up layout");
+    assert!(
+        degenerate.logslope_layout.is_follow_up_varying(),
+        "the degenerate layout must still take the six-primary frame, or this \
+         test compares the static path with itself"
+    );
+
+    for direction in [
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
+        ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
+        ndarray::array![0.29, -0.21, 0.0, 0.0, 0.0, 0.0],
+    ] {
+        let want = static_family
+            .exact_newton_joint_hessian_directional_derivative(
+                &states_at_beta(&static_family, &beta),
+                &direction,
+            )
+            .expect("static D_beta H")
+            .expect("terms");
+        let got = degenerate
+            .exact_newton_joint_hessian_directional_derivative(
+                &states_at_beta(&degenerate, &beta),
+                &direction,
+            )
+            .expect("degenerate follow-up D_beta H")
+            .expect("terms");
+        let scale = max_abs(want.iter()).max(1e-12);
+        for row in 0..beta.len() {
+            for column in 0..beta.len() {
+                assert!(
+                    (want[[row, column]] - got[[row, column]]).abs() <= 1e-10 * scale,
+                    "D_beta H[{row},{column}] differs between frames on a CONSTANT \
+                     margin along {direction:?}: static={:.9e} follow-up={:.9e}",
+                    want[[row, column]],
+                    got[[row, column]],
+                );
+            }
+        }
+    }
+}
