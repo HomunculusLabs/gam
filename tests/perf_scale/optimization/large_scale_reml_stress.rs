@@ -32,8 +32,10 @@ use gam::basis::{
 };
 use gam::estimate::{FitOptions, UnifiedFitResult};
 use gam::smooth::{
-    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
-    build_term_collection_design, fit_term_collection_forspec, freeze_term_collection_from_design,
+    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
+    TermCollectionSpec, build_term_collection_design, fit_term_collection_forspec,
+    fit_term_collectionwith_spatial_length_scale_optimization,
+    freeze_term_collection_from_design,
 };
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -463,15 +465,39 @@ fn large_scale_reml_stress_main() {
     let weights = Array1::ones(N_TRAIN);
     let offset = Array1::<f64>::zeros(N_TRAIN);
 
+    // gam#2735 — THE ENTRY POINT IS PART OF WHAT THIS FIXTURE CLAIMS TO TEST.
+    //
+    // This used to call `fit_term_collection_forspec`, the FIXED-GEOMETRY entry:
+    // it builds the design once and optimizes λ. Neither the global length scale
+    // (pinned at `HYBRID_LENGTH_SCALE`) nor the per-axis anisotropy ever moved,
+    // so a header promising "the full Duchon-on-PC GAM pipeline end-to-end" was
+    // describing a pipeline with its geometry nailed down — and the held-out
+    // reconstruction it then scored was the best a smoother can do at ONE
+    // arbitrary length scale with a response-blind metric.
+    //
+    // `fit_term_collectionwith_spatial_length_scale_optimization` is the entry
+    // the production path uses (`StandardFitRequest` → `fit_standard_base`), so
+    // it is the one whose reconstruction the bar is about.
+    //
+    // `pilot_subsample_threshold: 0` disables the large-n pilot geometry
+    // initializer deliberately: the pilot exists to seed κ/η cheaply from a
+    // subsample, and this fixture is scoring what the FULL-data outer solve
+    // learns. Leaving the pilot on would make the measurement partly a
+    // measurement of the subsample.
+    let kappa_options = SpatialLengthScaleOptimizationOptions {
+        pilot_subsample_threshold: 0,
+        ..SpatialLengthScaleOptimizationOptions::default()
+    };
     let start = Instant::now();
-    let fitted = fit_term_collection_forspec(
+    let fitted = fit_term_collectionwith_spatial_length_scale_optimization(
         x_train.view(),
-        y_train.view(),
-        weights.view(),
-        offset.view(),
+        y_train.clone(),
+        weights.clone(),
+        offset.clone(),
         &spec,
         gaussian_identity_likelihood(),
         &fit_options(MAIN_MAX_ITER),
+        &kappa_options,
     )
     .expect("large-scale Duchon-on-PC fit should succeed");
     let elapsed = start.elapsed();
@@ -485,8 +511,10 @@ fn large_scale_reml_stress_main() {
     // (2) Held-out-grid reconstruction error: build the held-out design
     //     using the *fitted* term collection design (so centers, scaling,
     //     etc. match), then compute relative L2 against truth.
-    let frozenspec = freeze_term_collection_from_design(&spec, &fitted.design)
-        .expect("freezing trained spec must succeed");
+    //     The optimizing entry already returns the frozen trained spec, which
+    //     carries the LEARNED length scale and per-axis η — refreezing the
+    //     caller's spec against the design would silently score the seed.
+    let frozenspec = fitted.resolvedspec.clone();
     let holdout_design = build_term_collection_design(x_holdout.view(), &frozenspec)
         .expect("holdout design build must succeed");
     let holdout_dense = holdout_design.design.to_dense();

@@ -1526,6 +1526,156 @@ pub fn build_duchon_basis_log_kappa_derivativeswithworkspace(
     )
 }
 
+/// Per-axis ψ derivatives of a hybrid Duchon basis — the anisotropic sibling of
+/// [`build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace`]
+/// (gam#2735).
+///
+/// The design half is the family-agnostic
+/// `build_aniso_design_psi_derivatives_shared`, which already handles
+/// `RadialScalarKind::Duchon` including its `δ/d` prefactor share; the penalty
+/// half is the `_in_directions` entries, called once with `[Axis(0) … Axis(d−1)]`
+/// so the whole per-axis surface costs one pass over the pairs.
+///
+/// Callers must have cleared [`crate::basis::duchon_spec_supports_axis_psi`]
+/// first: this refuses rather than silently degrading, because a per-axis
+/// coordinate whose derivative came from the isotropic route would be a
+/// value/gradient desync rather than an approximation.
+pub fn build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspace(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    centers: ArrayView2<'_, f64>,
+    identifiability_transform: Option<&Array2<f64>>,
+    operator_collocation_points: Option<ArrayView2<'_, f64>>,
+    workspace: &mut BasisWorkspace,
+) -> Result<AnisoBasisPsiDerivatives, BasisError> {
+    let dim = data.ncols();
+    if !crate::basis::duchon_spec_supports_axis_psi(spec, dim) {
+        crate::bail_invalid_basis!(
+            "Duchon per-axis ψ derivatives requested for a spec whose per-axis surface is not \
+             derived (dim={dim}, length_scale={:?}, periodic={}, power={})",
+            spec.length_scale,
+            spec.periodic.is_some(),
+            spec.power
+        );
+    }
+    let length_scale = spec.length_scale.expect("capability check requires a hybrid scale");
+    let eta = spec
+        .aniso_log_scales
+        .clone()
+        .expect("capability check requires resolved anisotropy");
+    let effective_nullspace_order = duchon_effective_nullspace_order(centers, spec.nullspace_order);
+    let p_order = duchon_p_from_nullspace_order(effective_nullspace_order);
+    let s_order = spec.power_as_usize();
+    let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
+    let z_kernel = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "aniso design",
+    )?;
+    let poly_cols = polynomial_block_from_order(data, effective_nullspace_order).ncols();
+    let p_padded = z_kernel.ncols() + poly_cols;
+    if let Some(zf) = identifiability_transform
+        && p_padded != zf.nrows()
+    {
+        crate::bail_dim_basis!(
+            "Duchon identifiability transform mismatch in aniso design derivatives: local cols={}, transform rows={}",
+            p_padded,
+            zf.nrows()
+        );
+    }
+    let p_final = identifiability_transform
+        .map(|zf| zf.ncols())
+        .unwrap_or(p_padded);
+    let mut result = build_aniso_design_psi_derivatives_shared(
+        data,
+        centers,
+        &eta,
+        p_final,
+        Some(z_kernel),
+        identifiability_transform.cloned(),
+        poly_cols,
+        RadialScalarKind::Duchon {
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            coeffs,
+        },
+    )?;
+
+    let directions: Vec<DuchonPsiDirection> = (0..dim).map(DuchonPsiDirection::Axis).collect();
+    let native = crate::basis::build_duchon_native_penalty_psi_derivatives_in_directions(
+        centers,
+        spec,
+        identifiability_transform,
+        workspace,
+        &directions,
+    )?;
+    let operator = if duchon_operator_penalties_requested(&spec.operator_penalties) {
+        let Some(collocation_points) = operator_collocation_points else {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis operator penalty derivatives require realized collocation points"
+            );
+        };
+        crate::basis::build_duchon_operator_penalty_psi_derivatives_in_directions(
+            collocation_points,
+            centers,
+            spec,
+            identifiability_transform,
+            workspace,
+            &directions,
+        )?
+    } else {
+        vec![(Vec::new(), Vec::new(), Vec::new()); dim]
+    };
+
+    // Same order the isotropic bundle ships: native candidates then operator
+    // candidates, per axis. A mismatch here would misalign the ψ blocks against
+    // the realized penalty list, so it is asserted rather than assumed.
+    let mut penalties_first = Vec::with_capacity(dim);
+    let mut penalties_second_diag = Vec::with_capacity(dim);
+    let expected = native[0].0.len() + operator[0].0.len();
+    for axis in 0..dim {
+        if native[axis].0.len() != native[0].0.len()
+            || operator[axis].0.len() != operator[0].0.len()
+        {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis penalty source counts disagree across axes: axis {axis} has \
+                 {}+{} blocks, axis 0 has {}+{}",
+                native[axis].0.len(),
+                operator[axis].0.len(),
+                native[0].0.len(),
+                operator[0].0.len()
+            );
+        }
+        let mut first = Vec::with_capacity(expected);
+        let mut second = Vec::with_capacity(expected);
+        first.extend(native[axis].1.iter().cloned());
+        first.extend(operator[axis].1.iter().cloned());
+        second.extend(native[axis].2.iter().cloned());
+        second.extend(operator[axis].2.iter().cloned());
+        if first.len() != expected || second.len() != expected {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis penalty derivative count mismatch on axis {axis}: assembled \
+                 {}/{} against {expected} active sources",
+                first.len(),
+                second.len()
+            );
+        }
+        penalties_first.push(first);
+        penalties_second_diag.push(second);
+    }
+    result.penalties_first = penalties_first;
+    result.penalties_second_diag = penalties_second_diag;
+    // Cross-axis PENALTY seconds are not provided: the outer solve consumes the
+    // per-axis diagonal seconds plus the operator's exact cross-axis DESIGN
+    // seconds, and an absent provider is the shape the anisotropic Matérn's
+    // operator-triplet path already ships.
+    result.penalties_cross_pairs = Vec::new();
+    result.penalties_cross_provider = None;
+    Ok(result)
+}
+
 pub fn build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,

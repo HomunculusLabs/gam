@@ -3362,13 +3362,36 @@ pub fn spatial_term_uses_per_axis_psi(resolvedspec: &TermCollectionSpec, term_id
     if eta.len() != d {
         return false;
     }
-    !matches!(
-        resolvedspec
-            .smooth_terms
-            .get(term_idx)
-            .map(|term| &term.basis),
-        Some(SmoothBasisSpec::Duchon { .. })
-    )
+    // gam#2735 — a hybrid Duchon's per-axis η IS a REML coordinate wherever its
+    // per-axis ψ derivative surface is complete.
+    //
+    // It used to be excluded outright, on the reading that "η is a FIXED,
+    // geometry-derived basis parameter … standardize the geometry, then learn
+    // the smoothness". That reading is right about the SEED and wrong about the
+    // estimand: `initial_aniso_contrasts` reads the per-axis spread of the KNOT
+    // CLOUD, which is a property of where the inputs are and carries no
+    // information about which axis the RESPONSE varies along. On a design whose
+    // inputs are isotropic and whose signal is not — `large_scale_reml_stress`
+    // draws `X ~ N(0, I)` and puts its entire non-linear content on one axis —
+    // the seeded contrasts are sampling noise, and freezing them there costs
+    // 1795 nats of criterion and 3.6x of held-out reconstruction error against
+    // the η the criterion itself prefers. The contrasts are identifiable (they
+    // change the kernel's shape, not merely its scale), so REML can and should
+    // estimate them, exactly as it already does for the anisotropic Matérn.
+    //
+    // The capability predicate — not this site — decides which specs qualify;
+    // anything it declines stays on its single isotropic ψ axis, bit-identically
+    // to before.
+    match resolvedspec
+        .smooth_terms
+        .get(term_idx)
+        .map(|term| &term.basis)
+    {
+        Some(SmoothBasisSpec::Duchon { spec, .. }) => {
+            crate::basis::duchon_spec_supports_axis_psi(spec, d)
+        }
+        _ => true,
+    }
 }
 
 pub fn set_spatial_length_scale(
@@ -3425,12 +3448,17 @@ pub fn spatial_term_supports_hyper_optimization(
         return false;
     }
 
-    // Duchon anisotropy η is a FIXED, geometry-derived basis parameter, NOT a
-    // REML hyper axis: the metric is estimated once from the knot-cloud spread
-    // (`auto_seed_aniso_contrasts`, applied on every Duchon basis build) and the
-    // Hilbert-scale λ's carry all learned smoothness. So a pure Duchon (no κ)
-    // contributes no outer optimization axis even when `scale_dims` is on —
-    // "standardize the geometry, then learn the smoothness." Only an explicit
+    // Duchon anisotropy η is SEEDED from geometry and ESTIMATED by REML
+    // (gam#2735). `auto_seed_aniso_contrasts` still supplies the starting
+    // contrasts from the knot-cloud spread on every Duchon basis build — that is
+    // a good seed, because it standardizes a genuinely elongated input cloud
+    // before the search begins. What it cannot do is finish the job: the knot
+    // cloud says where the inputs ARE, not which axis the RESPONSE varies along,
+    // so on an isotropic design it seeds noise and a frozen η is then simply
+    // wrong. `spatial_term_uses_per_axis_psi` enrolls the contrasts as outer ψ
+    // coordinates wherever `duchon_spec_supports_axis_psi` certifies the
+    // per-axis derivative surface; a pure Duchon (no κ) is one of the
+    // configurations it declines, so that path is unchanged. Only an explicit
     // kernel length scale κ (the Matérn / hybrid path) is optimized here.
     //
     // ISOTROPIC Matérn: the *default* `matern(x1, x2)` is isotropic
