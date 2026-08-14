@@ -38,6 +38,39 @@ mod iso_kappa_reml_gradient_fd_tests {
     };
     use ndarray::{Array1, Array2, s};
 
+/// gam#2735 — the PER-AXIS ψ gate, and the reason it lives beside the
+/// isotropic one rather than in `gam-terms`.
+///
+/// The unit gate in `zz_duchon_axis_psi_2735_tests` verifies the per-axis
+/// derivative of each penalty BLOCK. That is necessary and not sufficient: the
+/// outer REML gradient the κ-optimizer follows also carries the design
+/// derivative, the `tr(S⁺ Ṡ)` log-determinant term, and the moving-subspace
+/// contribution, none of which a block-level test can see. This runs the SAME
+/// self-certifying Ridders oracle the isotropic arm is gated by — central
+/// differences of the production criterion `evaluate_cost_only` against
+/// `evaluate_joint_reml_outer_eval_at_theta` — over a θ whose ψ half is now
+/// TWO raw per-axis coordinates rather than one isotropic log-κ.
+///
+/// The fixture's own topology assertion (`dims_per_term == [2]`) is half the
+/// gate: a regression that re-froze Duchon anisotropy would fail there, before
+/// any gradient is compared.
+#[test]
+fn aniso_psi_duchon_gaussian_joint_gradient_matches_finite_difference_2735() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_aniso_2d",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "anisotropic Duchon Gaussian n=80 per-axis ψ FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
 #[test]
 fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
     let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
@@ -143,6 +176,10 @@ fn build_iso_kappa_fixture(
     // `matern_2d_iso_kappa_outer_gradient_matches_fd`.
     let two_d = label.ends_with("_2d");
     let d = if two_d { 2 } else { 1 };
+    // gam#2735: the anisotropic arm enrols `d` per-axis ψ coordinates instead
+    // of one isotropic log-κ, so the same oracle differentiates every one of
+    // them. Only meaningful for `d ≥ 2`.
+    let aniso = label.contains("_aniso") && two_d;
     let mut data = Array2::<f64>::zeros((n, d));
     let mut y = Array1::<f64>::zeros(n);
     for i in 0..n {
@@ -209,7 +246,7 @@ fn build_iso_kappa_fixture(
         }
     } else {
         SmoothBasisSpec::Duchon {
-            feature_cols: vec![0],
+            feature_cols: (0..d).collect(),
             spec: DuchonBasisSpec {
                 radial_reparam: None,
                 periodic: None,
@@ -218,7 +255,17 @@ fn build_iso_kappa_fixture(
                 power: 1.0,
                 nullspace_order: DuchonNullspaceOrder::Linear,
                 identifiability: SpatialIdentifiability::default(),
-                aniso_log_scales: None,
+                // gam#2735 — an `"*_aniso*"` label asks for the per-axis η the
+                // hybrid Duchon now enrols as OUTER ψ coordinates. The
+                // contrasts are deliberately non-zero and unequal: an all-zero
+                // vector is the `auto_seed_aniso_contrasts` sentinel and would
+                // be replaced by knot-cloud geometry, which is a different
+                // (and here nearly symmetric) starting point.
+                aniso_log_scales: if aniso {
+                    Some((0..d).map(|a| 0.25 - 0.5 * a as f64).collect())
+                } else {
+                    None
+                },
                 operator_penalties: DuchonOperatorPenaltySpec::default(),
                 boundary: OneDimensionalBoundary::Open,
             },
@@ -242,8 +289,15 @@ fn build_iso_kappa_fixture(
     let spatial_terms = spatial_length_scale_term_indices(&frozen);
     let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
     // Isotropic κ: one log-κ axis regardless of feature dimension `d` (the 2-D
-    // cloud still enrolls a single isotropic κ, not a per-axis η).
-    assert_eq!(dims_per_term, vec![1], "{label}: expect one log-κ axis");
+    // cloud still enrolls a single isotropic κ, not a per-axis η) — UNLESS the
+    // term carries explicit per-axis contrasts, in which case gam#2735 enrols
+    // one raw ψ_a per axis. This assertion is itself the enrollment gate: a
+    // regression that re-froze Duchon anisotropy would report `[1]` here.
+    let expected_dims = if aniso { vec![d] } else { vec![1] };
+    assert_eq!(
+        dims_per_term, expected_dims,
+        "{label}: expect {expected_dims:?} spatial ψ axes"
+    );
     let rho_dim = frozen_design.penalties.len();
     let psi_dim: usize = dims_per_term.iter().sum();
     assert!(psi_dim >= 1);

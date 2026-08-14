@@ -1,5 +1,97 @@
 ## Unreleased
 
+- **A metric estimated from the knot cloud cannot see which axis the response
+  varies along, so freezing it there is not "standardize the geometry, then
+  learn the smoothness" — it is not learning the geometry at all (#2735).**
+  `spatial_term_uses_per_axis_psi` excluded every `SmoothBasisSpec::Duchon` from
+  per-axis ψ enrollment, so a hybrid Duchon term's `aniso_log_scales` were set
+  once by `initial_aniso_contrasts` — the per-axis spread of the knot cloud —
+  and never moved again. That seed is a statement about where the inputs ARE.
+  On `large_scale_reml_stress`, whose inputs are iid `N(0, I)` and whose entire
+  non-linear content is `0.4·sin(π x₀)`, it is sampling noise.
+
+  Measured on the fixture's own generator at `n=6000, K=150, pc_dim=6`, one fit
+  per explicit η along the single ray `η = (c, −c/5, −c/5, −c/5, −c/5, −c/5)`:
+
+  ```text
+      η ray        REML criterion    held-out rel_l2
+      sentinel           3359.16             0.3261
+      c = 0.25           3221.59             0.3038
+      c = 0.50           2783.65             0.2430
+      c = 0.75           2164.18             0.1650
+      c = 1.00           1734.85             0.1112
+      c = 1.50           1563.84             0.0914
+  ```
+
+  The criterion falls **1795 nats** and the held-out error falls **3.6×**,
+  crossing the `0.10` bar at this shape, along a direction the outer loop was
+  structurally forbidden from taking. The criterion and the held-out error agree
+  about that direction at every step, which is what makes it a defect rather
+  than an objective/estimand disagreement.
+
+  The contrasts are identifiable — they change the kernel's SHAPE, not merely
+  its scale — so REML can and should estimate them, exactly as it already does
+  for the anisotropic Matérn. The repair enrolls them.
+
+- **The isotropic ψ derivative is now a CONTRACTION of the per-axis one, not a
+  parallel derivation (#2735).** For a radial scalar `F(r; κ) = κ^E G(κ r)`,
+  with `A = r F_r`, `B = r² F_rr − r F_r`, `σ_a = s_a/r²` and `c = E/d`:
+
+  ```text
+      ∂F/∂ψ_a       = c F + A σ_a
+      ∂²F/∂ψ_a∂ψ_b  = B σ_a σ_b + c A (σ_a + σ_b) + 2 A σ_a δ_ab + c² F
+  ```
+
+  `Σ_a` of the first is `E F + r F_r`; `Σ_{a,b}` of the second is
+  `E² F + (2E+1) r F_r + r² F_rr`. Those are `scaled_log_kappa_derivatives`
+  verbatim. `A` and `B` are the same two combinations the isotropic helper
+  already forms, and both vanish with `r`, so the per-axis jet is finite at
+  collision with no `1/r` anywhere. `duchon_radial_core_psi_triplet` — the old
+  single-direction bundle — is retired: keeping a second way to spell the
+  isotropic contraction is the drift the split exists to prevent.
+
+  For a block carrying `m` explicit metric weights the same algebra collapses to
+  `∂B/∂ψ_a = M_a(B) + (δ/d)·B`, where `M_a` is the scale-free per-axis
+  derivative. That is not an analogy to the anisotropic Matérn: the Matérn
+  helpers `hessian_operator_eta_entry` / `_eta2_entry` ARE this construction at
+  `δ = 0` (its kernel carries no `κ^δ` prefactor), and they are reused rather
+  than re-derived. `E_F − 2m = δ` for every block the operator penalty
+  assembles — `D0` (`F = φ`, `m = 0`), the `D1` gradient (`F = q`, `m = 1`), the
+  `D2` diagonal (`F = q`, `m = 1`) and its mixed term (`F = t`, `m = 2`).
+
+  Collision is handled exactly and separately, NOT through the lift: every `s_a`
+  vanishes at `r = 0`, so the block's only ψ dependence is `w_axis · φ_rr(0; κ)`
+  — and `φ_rr` at the origin is not a pure power of `κ`, because the
+  even-dimensional log-Riesz representative carries κ-dependent finite parts.
+  That is precisely why the existing code refuses the scaling shortcut there.
+
+- **A capability predicate, so the enrollment cannot outrun the derivative
+  (#2735).** `duchon_spec_supports_axis_psi` answers from the spec alone.
+  It declines — leaving the term on its single isotropic ψ axis,
+  bit-identically to before — the scale-free spectrum, the periodic path,
+  fractional spectral powers, terms with no contrasts to learn, terms carrying a
+  joint null rotation (which the per-axis consumer does not apply and the
+  isotropic one does), and any spec whose ACTIVE operator penalty routes through
+  the closed-form Lebesgue block, whose ψ-derivative exists only for the
+  isotropic direction. Shipping one of those would mean a block whose value and
+  gradient came from two different constructions. The closed-form sweep covers
+  every null-space order the realized build could degrade to, because
+  `duchon_effective_nullspace_order` only ever reduces and the predicate is
+  asked before centers exist.
+
+- **A fixture's entry point is part of what it claims to test (#2735).**
+  `large_scale_reml_stress_main` called `fit_term_collection_forspec` — the
+  fixed-geometry entry, which builds the design once and optimizes λ — while its
+  header promised "the full Duchon-on-PC GAM pipeline end-to-end". Neither the
+  global length scale nor the per-axis anisotropy ever moved, so the held-out
+  reconstruction it scored was the best a smoother can do at one arbitrary
+  length scale under a response-blind metric. It now calls
+  `fit_term_collectionwith_spatial_length_scale_optimization`, the entry
+  `StandardFitRequest` uses, with the pilot geometry initializer disabled so the
+  measurement is of what the full-data outer solve learns rather than partly of
+  a subsample, and scores `fitted.resolvedspec` — the trained spec — because
+  refreezing the caller's spec would have scored the seed.
+
 - **An escape that RETIRES a coordinate onto a rail is not the pathology the
   small cap exists for (#2612).** `OUTER_SADDLE_ESCAPE_BUDGET = 3` carried the
   premise *"a genuine saddle is cleared in one escape"*, which this lane measured
