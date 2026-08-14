@@ -7915,12 +7915,27 @@ pub(crate) fn try_build_spatial_log_kappa_derivativeinfo_list(
                 out.extend(entries);
                 continue;
             } else {
+                // The enrollment predicate said `d` axes and the producer could
+                // not supply them. Falling back to the isotropic builder here
+                // would answer a `d`-coordinate question with one coordinate,
+                // so the whole list declines — and says which term did it,
+                // because the caller turns this into "spatial kappa
+                // optimization is unavailable for one or more eligible spatial
+                // terms", which names none of them.
+                log::warn!(
+                    "[spatial-kappa] term {term_idx}: enrolled for per-axis ψ but its per-axis \
+                     derivative producer declined; the joint κ route is unavailable for this fit"
+                );
                 return Ok(None);
             }
         }
         let Some(info) =
             try_build_spatial_term_log_kappa_derivativeinfo(data, resolvedspec, design, term_idx)?
         else {
+            log::warn!(
+                "[spatial-kappa] term {term_idx}: isotropic ψ derivative producer declined; the \
+                 joint κ route is unavailable for this fit"
+            );
             return Ok(None);
         };
         out.push(info);
@@ -8025,6 +8040,10 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
                 ..
             } = &smooth_term.metadata
             else {
+                log::warn!(
+                    "[spatial-kappa] term {term_idx}: per-axis ψ declined -- a Duchon spec whose \
+                     realized design does not carry Duchon metadata"
+                );
                 return Ok(None);
             };
             if spec_local.radial_reparam.is_none() {
@@ -8061,12 +8080,20 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
         0
     };
     if d == 0 {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the producer reported zero \
+             axes (no implicit operator and no dense design list)"
+        );
         return Ok(None);
     }
     let Some(penalty_range) = design
         .smooth_term_penalty_range(term_idx)
         .map_err(EstimationError::InvalidInput)?
     else {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the realized design exposes \
+             no penalty range for this term"
+        );
         return Ok(None);
     };
     let penalty_start = penalty_range.start;
@@ -8097,6 +8124,17 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
     let producer_emits_active_list = matches!(&termspec.basis, SmoothBasisSpec::Duchon { .. });
     let keep: Vec<usize> = if producer_emits_active_list {
         if emitted != smooth_term.active_penalties.len() {
+            log::warn!(
+                "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the Duchon producer \
+                 emitted {emitted} active penalty block(s) but the realized design carries {} \
+                 ({:?}); the term falls back to its isotropic axis",
+                smooth_term.active_penalties.len(),
+                smooth_term
+                    .active_penalties
+                    .iter()
+                    .map(|active| active.info.source.clone())
+                    .collect::<Vec<_>>()
+            );
             return Ok(None);
         }
         (0..emitted).collect()
@@ -8108,6 +8146,10 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             .collect()
     };
     if keep.is_empty() || keep.iter().any(|&index| index >= emitted) {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- candidate→fitted map \
+             {keep:?} does not index the {emitted} emitted block(s)"
+        );
         return Ok(None);
     }
     let penalty_indices: Vec<usize> = (0..keep.len()).map(|j| penalty_start + j).collect();

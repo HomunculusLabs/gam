@@ -195,47 +195,6 @@ pub enum DuchonPsiDirection {
     Axis(usize),
 }
 
-/// Lift a **scale-free** per-axis jet of a Duchon operator block to the true
-/// per-axis ψ jet (gam#2735).
-///
-/// A block `B = (Π of m explicit metric weights) × F`, where `F` is a radial
-/// scalar of κ-exponent `E_F`, has
-///
-/// ```text
-///     ∂B/∂ψ_a = M_a(B) + ((E_F − 2m)/d) · B
-/// ```
-///
-/// and `E_F − 2m = δ` — the Duchon prefactor exponent `d − 2(p+s)` — for EVERY
-/// block the operator penalty assembles: `D0` (`F = φ`, `E = δ`, `m = 0`), the
-/// `D1` gradient block (`F = q`, `E = δ+2`, `m = 1`), the `D2` Hessian's
-/// diagonal (`F = q`, `m = 1`) and its mixed term (`F = t`, `E = δ+4`,
-/// `m = 2`). `M_a` is the scale-free per-axis derivative — the one the
-/// anisotropic Matérn already implements in `hessian_operator_eta_entry` and
-/// its siblings, which are exactly this construction at `δ = 0` because the
-/// Matérn kernel carries no `κ^δ` prefactor.
-///
-/// So the entire Duchon-specific content of the per-axis operator derivative is
-/// this one uniform shift, and the second derivative follows by applying the
-/// same shifted operator twice:
-///
-/// ```text
-///     ∂²B/∂ψ_a²  = M_aa(B) + 2 (δ/d) M_a(B) + (δ/d)² B
-/// ```
-#[inline(always)]
-pub(crate) fn duchon_prefactor_lift(
-    value: f64,
-    scale_free_first: f64,
-    scale_free_second: f64,
-    prefactor_share: f64,
-) -> (f64, f64) {
-    (
-        scale_free_first + prefactor_share * value,
-        scale_free_second
-            + 2.0 * prefactor_share * scale_free_first
-            + prefactor_share * prefactor_share * value,
-    )
-}
-
 /// Per-axis ψ derivatives of a radial scalar `F(r; κ) = κ^E G(κ r)`.
 ///
 /// `axis_share[a] = s_a / r²` where `s_a = exp(2 η_a) h_a²` is the per-axis
@@ -625,7 +584,6 @@ pub(crate) struct DuchonRadialCoreValueJet {
     pub(crate) first: f64,
     pub(crate) second: f64,
     pub(crate) exponent: f64,
-    pub(crate) jets: DuchonRadialJets,
 }
 
 pub(crate) fn duchon_radial_core_value_jet(
@@ -642,7 +600,6 @@ pub(crate) fn duchon_radial_core_value_jet(
         first: jets.phi_r,
         second: jets.phi_rr,
         exponent: duchon_scaling_exponent(p_order, s_order, k_dim),
-        jets,
     })
 }
 

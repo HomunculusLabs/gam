@@ -282,7 +282,24 @@ fn production_fit(
     );
 }
 
+struct StderrInfoLogger;
+impl log::Log for StderrInfoLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+static LOGGER: StderrInfoLogger = StderrInfoLogger;
+
 fn main() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(6000);
     let k: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(150);

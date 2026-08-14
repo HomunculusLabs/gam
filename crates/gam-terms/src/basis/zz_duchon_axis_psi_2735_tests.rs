@@ -485,3 +485,124 @@ fn duchon_operator_penalty_axis_psi_second_matches_a_difference_of_the_first_273
         }
     }
 }
+
+/// Operator penalty: the ψ derivative is the derivative of the **shipped**
+/// value blocks — the test whose absence let a value/derivative desync live.
+///
+/// The value side builds its collocation operators with `aniso = None` and, on
+/// a `scale_dims` term, REPLACES the single isotropic tension block with `dim`
+/// per-axis `OperatorRelevance` blocks. The derivative side used to do neither:
+/// it differentiated an anisotropic operator penalty the design never ships,
+/// and emitted one tension block against the design's `dim` relevance blocks,
+/// which the consumer then zipped positionally. Two independent desyncs, both
+/// invisible to a sum-identity or second-vs-first check, because those compare
+/// the derivative against ITSELF.
+///
+/// This differences the value.
+#[test]
+fn duchon_operator_penalty_psi_matches_a_central_difference_of_the_value_2735() {
+    let (data, spec) = frozen_aniso_fixture();
+    let centers = fixture_centers(&spec);
+    let dim = centers.ncols();
+    let transform = frozen_transform(&spec);
+    let order = duchon_effective_nullspace_order(centers.view(), spec.nullspace_order);
+    let collocation = select_thin_plate_knots(
+        data.view(),
+        (DUCHON_COLLOCATION_OVERSAMPLE * centers.nrows()).min(data.nrows()),
+    )
+    .expect("collocation points");
+
+    let mut directions = vec![DuchonPsiDirection::Global];
+    directions.extend(axis_directions(dim));
+    let mut workspace = BasisWorkspace::default();
+    let analytic = build_duchon_operator_penalty_psi_derivatives_in_directions(
+        collocation.view(),
+        centers.view(),
+        &spec,
+        transform.as_ref(),
+        &mut workspace,
+        &directions,
+    )
+    .expect("operator per-direction derivatives");
+
+    // The value, through the SAME entry the realized design uses.
+    let value_blocks = |local: &DuchonBasisSpec| -> (Vec<PenaltySource>, Vec<Array2<f64>>) {
+        let mut ws = BasisWorkspace::default();
+        let candidates = duchon_operator_penalty_candidates(
+            collocation.view(),
+            centers.view(),
+            &local.operator_penalties,
+            local.length_scale,
+            local.power,
+            order,
+            local.aniso_log_scales.is_some(),
+            transform.as_ref(),
+            local.radial_reparam.as_ref(),
+            &mut ws,
+        )
+        .expect("operator penalty candidates");
+        let filtered = filter_penalty_candidates(candidates).expect("filter operator candidates");
+        (
+            filtered
+                .active
+                .iter()
+                .map(|penalty| penalty.info.source.clone())
+                .collect(),
+            filtered
+                .active
+                .iter()
+                .map(|penalty| penalty.matrix.to_owned())
+                .collect(),
+        )
+    };
+
+    let (value_sources, _) = value_blocks(&spec);
+    assert_eq!(
+        analytic[0].0, value_sources,
+        "the derivative's active penalty SOURCES must be the design's, in order"
+    );
+    assert!(
+        value_sources
+            .iter()
+            .any(|source| matches!(source, PenaltySource::OperatorRelevance { .. })),
+        "the fixture must exercise the per-axis relevance split: got {value_sources:?}"
+    );
+
+    let eps = 1e-5_f64;
+    // Global: ψ = log κ, so ℓ ↦ ℓ·e^{∓h}.
+    {
+        let mut plus = spec.clone();
+        plus.length_scale = Some(spec.length_scale.unwrap() * (-eps).exp());
+        let mut minus = spec.clone();
+        minus.length_scale = Some(spec.length_scale.unwrap() * eps.exp());
+        let (_, blocks_plus) = value_blocks(&plus);
+        let (_, blocks_minus) = value_blocks(&minus);
+        for (block, first) in analytic[0].1.iter().enumerate() {
+            let fd = (&blocks_plus[block] - &blocks_minus[block]) / (2.0 * eps);
+            let gap = relative_gap(first, &fd);
+            assert!(
+                gap < 5e-5,
+                "operator block {block} ({:?}): analytic ∂S/∂ψ differs from the central \
+                 difference of the shipped value by {gap:.3e}",
+                value_sources[block]
+            );
+        }
+    }
+    // Per axis: the raw ψ_a moves ℓ at rate 1/d and every contrast, and the
+    // operator penalty ignores the contrasts — so the FD must come out at 1/d
+    // of the isotropic one, which is what the analytic claims.
+    for axis in 0..dim {
+        let (_, blocks_plus) = value_blocks(&shift_raw_psi(&spec, axis, eps));
+        let (_, blocks_minus) = value_blocks(&shift_raw_psi(&spec, axis, -eps));
+        for (block, first) in analytic[1 + axis].1.iter().enumerate() {
+            let fd = (&blocks_plus[block] - &blocks_minus[block]) / (2.0 * eps);
+            let gap = relative_gap(first, &fd);
+            assert!(
+                gap < 5e-5,
+                "operator block {block} ({:?}), axis {axis}: analytic ∂S/∂ψ_a differs from \
+                 the central difference of the shipped value by {gap:.3e}",
+                value_sources[block]
+            );
+        }
+    }
+}

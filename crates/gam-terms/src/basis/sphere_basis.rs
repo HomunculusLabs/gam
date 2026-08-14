@@ -1669,44 +1669,26 @@ pub(crate) struct DuchonRawPenaltyPsiDerivativeBlocks {
     pub(crate) d0: Array2<f64>,
     pub(crate) d1: Array2<f64>,
     pub(crate) d2: Array2<f64>,
-    /// One `(d0, d1, d2)` first-derivative triple per requested
-    /// [`DuchonPsiDirection`], in the caller's order.
-    pub(crate) first: Vec<DuchonRawPenaltyBlockTriple>,
-    /// The matching second derivatives.
-    pub(crate) second: Vec<DuchonRawPenaltyBlockTriple>,
-}
-
-#[derive(Clone)]
-pub(crate) struct DuchonRawPenaltyBlockTriple {
-    pub(crate) d0: Array2<f64>,
-    pub(crate) d1: Array2<f64>,
-    pub(crate) d2: Array2<f64>,
-}
-
-impl DuchonRawPenaltyBlockTriple {
-    fn zeros(p: usize, d: usize, cols: usize) -> Self {
-        Self {
-            d0: Array2::<f64>::zeros((p, cols)),
-            d1: Array2::<f64>::zeros((p * d, cols)),
-            d2: Array2::<f64>::zeros((p * d * d, cols)),
-        }
-    }
-
-    fn add_assign(&mut self, rhs: &Self) {
-        self.d0 += &rhs.d0;
-        self.d1 += &rhs.d1;
-        self.d2 += &rhs.d2;
-    }
+    pub(crate) d0_psi: Array2<f64>,
+    pub(crate) d1_psi: Array2<f64>,
+    pub(crate) d2_psi: Array2<f64>,
+    pub(crate) d0_psi_psi: Array2<f64>,
+    pub(crate) d1_psi_psi: Array2<f64>,
+    pub(crate) d2_psi_psi: Array2<f64>,
 }
 
 impl DuchonRawPenaltyPsiDerivativeBlocks {
-    pub(crate) fn zeros(p: usize, d: usize, cols: usize, directions: usize) -> Self {
+    pub(crate) fn zeros(p: usize, d: usize, cols: usize) -> Self {
         Self {
             d0: Array2::<f64>::zeros((p, cols)),
             d1: Array2::<f64>::zeros((p * d, cols)),
             d2: Array2::<f64>::zeros((p * d * d, cols)),
-            first: vec![DuchonRawPenaltyBlockTriple::zeros(p, d, cols); directions],
-            second: vec![DuchonRawPenaltyBlockTriple::zeros(p, d, cols); directions],
+            d0_psi: Array2::<f64>::zeros((p, cols)),
+            d1_psi: Array2::<f64>::zeros((p * d, cols)),
+            d2_psi: Array2::<f64>::zeros((p * d * d, cols)),
+            d0_psi_psi: Array2::<f64>::zeros((p, cols)),
+            d1_psi_psi: Array2::<f64>::zeros((p * d, cols)),
+            d2_psi_psi: Array2::<f64>::zeros((p * d * d, cols)),
         }
     }
 
@@ -1714,12 +1696,12 @@ impl DuchonRawPenaltyPsiDerivativeBlocks {
         self.d0 += &rhs.d0;
         self.d1 += &rhs.d1;
         self.d2 += &rhs.d2;
-        for (slot, block) in self.first.iter_mut().zip(rhs.first.iter()) {
-            slot.add_assign(block);
-        }
-        for (slot, block) in self.second.iter_mut().zip(rhs.second.iter()) {
-            slot.add_assign(block);
-        }
+        self.d0_psi += &rhs.d0_psi;
+        self.d1_psi += &rhs.d1_psi;
+        self.d2_psi += &rhs.d2_psi;
+        self.d0_psi_psi += &rhs.d0_psi_psi;
+        self.d1_psi_psi += &rhs.d1_psi_psi;
+        self.d2_psi_psi += &rhs.d2_psi_psi;
     }
 }
 
@@ -1741,13 +1723,28 @@ pub fn build_duchon_operator_penalty_psi_derivatives(
     Ok(per_direction.remove(0))
 }
 
-/// The operator-collocation (mass / tension / stiffness) penalty ψ-derivatives,
-/// one bundle per requested [`DuchonPsiDirection`].
+/// The operator-collocation penalty ψ-derivatives, one bundle per requested
+/// [`DuchonPsiDirection`] — and the per-axis bundles are the isotropic one
+/// scaled, because the operator penalties DO NOT DEPEND ON η (gam#2735).
 ///
-/// Like the native half, every direction shares one pass over the
-/// (collocation point × center) pairs and one Gram assembly; only the
-/// contraction of the radial jets — and, for the blocks that carry explicit
-/// metric weights, the [`duchon_prefactor_lift`] — depends on the direction.
+/// That is a property of the value side, stated in
+/// `duchon_operator_penalty_candidates`' own doc: *"The operators use the
+/// ISOTROPIC metric (`aniso = None`) … Keeping these low-order stabilizers
+/// isotropic makes their `η`-gradient identically zero, so the REML anisotropy
+/// optimization stays consistent without per-axis operator derivatives."* The
+/// anisotropy lives entirely in the curvature (`Primary`) RKHS Gram, which is
+/// the native half.
+///
+/// So with `κ = exp(mean ψ)` and `∂η_b/∂ψ_a` contributing nothing,
+///
+/// ```text
+///     ∂S/∂ψ_a = (1/d) ∂S/∂log κ          ∂²S/∂ψ_a² = (1/d²) ∂²S/∂log κ²
+/// ```
+///
+/// and `Σ_a ∂S/∂ψ_a = ∂S/∂log κ` still holds. Normalization does not disturb
+/// this: the normalized first derivative is linear in the raw first and the
+/// normalized second is (first-order linear in the raw second, quadratic in the
+/// raw first), so the same `(1/d, 1/d²)` scaling passes through it exactly.
 pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     collocation_points: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1822,16 +1819,28 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     let d = dim;
     let kernel_cols = z_kernel.ncols();
 
-    let aniso = spec.aniso_log_scales.as_deref();
-    if let Some(eta) = aniso
-        && eta.len() != d
-    {
-        crate::bail_dim_basis!(
-            "Duchon anisotropy dimension mismatch: got {}, expected {d}",
-            eta.len()
-        );
-    }
-    let metric_weights: Option<Vec<f64>> = aniso.map(centered_aniso_metric_weights);
+    // gam#2735 — the METRIC here is isotropic, because the value is.
+    //
+    // `duchon_operator_penalty_candidates` builds its collocation operators with
+    // `aniso = None` on purpose: the anisotropy lives entirely in the curvature
+    // (`Primary`) RKHS Gram, and keeping these low-order stabilizers isotropic
+    // is what makes their η-gradient identically zero. This routine used to read
+    // `spec.aniso_log_scales` and differentiate an anisotropic operator penalty
+    // the design never ships — a value/derivative desync on every `scale_dims`
+    // Duchon, which is exactly the configuration whose geometry the outer loop
+    // is supposed to be learning.
+    let per_axis_relevance = match spec.aniso_log_scales.as_deref() {
+        Some(eta) if eta.len() != d => {
+            crate::bail_dim_basis!(
+                "Duchon anisotropy dimension mismatch: got {}, expected {d}",
+                eta.len()
+            );
+        }
+        Some(_) => true,
+        None => false,
+    };
+    let aniso: Option<&[f64]> = None;
+    let metric_weights: Option<Vec<f64>> = None;
     // Only assemble derivative-order blocks that the *enabled* operator
     // penalties actually consume. `max_derivative_order` is computed from
     // `effective_operator_penalties`, which has tension/stiffness already
@@ -1855,33 +1864,22 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
         .into_par_iter()
         .map(
             |(start, end)| -> Result<DuchonRawPenaltyPsiDerivativeBlocks, BasisError> {
-                let mut local = DuchonRawPenaltyPsiDerivativeBlocks::zeros(
-                    p_colloc,
-                    d,
-                    kernel_cols,
-                    directions.len(),
-                );
-                let mut row_i = vec![0.0_f64; d];
-                let mut row_j = vec![0.0_f64; d];
-                let mut components = vec![0.0_f64; d];
+                let mut local =
+                    DuchonRawPenaltyPsiDerivativeBlocks::zeros(p_colloc, d, kernel_cols);
                 for i in start..end {
                     for j in 0..n_basis {
-                        for axis in 0..d {
-                            row_i[axis] = collocation_points[[i, axis]];
-                            row_j[axis] = centers[[j, axis]];
-                        }
                         let r = if let Some(eta) = aniso {
-                            let (r, s_vec) = aniso_distance_and_components(&row_i, &row_j, eta);
-                            components.copy_from_slice(&s_vec);
+                            let row_i: Vec<f64> =
+                                (0..d).map(|a| collocation_points[[i, a]]).collect();
+                            let row_j: Vec<f64> = (0..d).map(|a| centers[[j, a]]).collect();
+                            let (r, _) = aniso_distance_and_components(&row_i, &row_j, eta);
                             r
                         } else {
-                            for axis in 0..d {
-                                let h = row_i[axis] - row_j[axis];
-                                components[axis] = h * h;
-                            }
-                            stable_euclidean_norm((0..d).map(|axis| row_i[axis] - row_j[axis]))
+                            stable_euclidean_norm(
+                                (0..d)
+                                    .map(|axis| collocation_points[[i, axis]] - centers[[j, axis]]),
+                            )
                         };
-                        let shares = duchon_axis_shares(&components, r);
                         let core = duchon_radial_core_value_jet(
                             r,
                             length_scale,
@@ -1890,166 +1888,83 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
                             d,
                             &coeffs,
                         )?;
-                        let delta_exponent = core.exponent;
-                        // `δ/d` — the share of the `κ^δ` prefactor that one raw
-                        // per-axis coordinate carries. Zero along `Global`,
-                        // where the prefactor is differentiated in full by
-                        // `scaled_log_kappa_derivatives` instead.
-                        let prefactor_share = delta_exponent / d.max(1) as f64;
-                        for (slot, &direction) in directions.iter().enumerate() {
-                            let (psi, psi_psi) = duchon_direction_derivatives(
-                                direction,
-                                core.value,
-                                core.first,
-                                core.second,
-                                delta_exponent,
-                                r,
-                                d,
-                                &shares,
-                            );
-                            for col in 0..kernel_cols {
-                                let z_jc = z_kernel[[j, col]];
-                                local.first[slot].d0[[i, col]] += psi * z_jc;
-                                local.second[slot].d0[[i, col]] += psi_psi * z_jc;
-                            }
-                        }
+                        let (phi_psi, phi_psi_psi) = scaled_log_kappa_derivatives(
+                            core.value,
+                            core.first,
+                            core.second,
+                            core.exponent,
+                            r,
+                        );
                         for col in 0..kernel_cols {
-                            local.d0[[i, col]] += core.value * z_kernel[[j, col]];
+                            let z_jc = z_kernel[[j, col]];
+                            local.d0[[i, col]] += core.value * z_jc;
+                            local.d0_psi[[i, col]] += phi_psi * z_jc;
+                            local.d0_psi_psi[[i, col]] += phi_psi_psi * z_jc;
                         }
                         if !need_d1 && !need_d2 {
                             continue;
                         }
                         if r > 1e-10 {
-                            let jets = &core.jets;
+                            let jets =
+                                duchon_radial_jets(r, length_scale, p_order, s_order, d, &coeffs)?;
                             let q = jets.q;
                             let (q_psi, q_psi_psi) =
-                                duchon_q_psi_triplet_from_jets(jets, p_order, s_order, d, r);
-                            let t_exponent = delta_exponent + 4.0;
+                                duchon_q_psi_triplet_from_jets(&jets, p_order, s_order, d, r);
+                            let t_exponent = duchon_scaling_exponent(p_order, s_order, d) + 4.0;
                             let (t_psi, t_psi_psi) = scaled_log_kappa_derivatives(
                                 jets.t, jets.t_r, jets.t_rr, t_exponent, r,
                             );
                             if need_d1 {
                                 for axis in 0..d {
-                                    let h_axis = row_i[axis] - row_j[axis];
+                                    let delta = collocation_points[[i, axis]] - centers[[j, axis]];
                                     let axis_scale = metric_weights
                                         .as_ref()
                                         .map(|weights| weights[axis])
                                         .unwrap_or(1.0);
                                     let row = i * d + axis;
-                                    let value = q * axis_scale * h_axis;
                                     for col in 0..kernel_cols {
-                                        local.d1[[row, col]] += value * z_kernel[[j, col]];
-                                    }
-                                    for (slot, &direction) in directions.iter().enumerate() {
-                                        let (first, second) = match direction {
-                                            DuchonPsiDirection::Global => (
-                                                q_psi * axis_scale * h_axis,
-                                                q_psi_psi * axis_scale * h_axis,
-                                            ),
-                                            DuchonPsiDirection::Axis(a) => {
-                                                // Scale-free per-axis jet of
-                                                // `q · w_axis · h_axis`, then the
-                                                // `δ/d` prefactor lift.
-                                                let s_a = components[a];
-                                                let same = usize::from(a == axis) as f64;
-                                                let t_over_r = if r > 1e-14 {
-                                                    jets.t_r * s_a / r
-                                                } else {
-                                                    0.0
-                                                };
-                                                let scale_free_first =
-                                                    axis_scale * h_axis * (jets.t * s_a + 2.0 * q * same);
-                                                let scale_free_second = axis_scale
-                                                    * h_axis
-                                                    * (t_over_r * s_a
-                                                        + 2.0 * jets.t * s_a
-                                                        + 4.0 * same * jets.t * s_a
-                                                        + 4.0 * same * q);
-                                                duchon_prefactor_lift(
-                                                    value,
-                                                    scale_free_first,
-                                                    scale_free_second,
-                                                    prefactor_share,
-                                                )
-                                            }
-                                        };
-                                        for col in 0..kernel_cols {
-                                            let z_jc = z_kernel[[j, col]];
-                                            local.first[slot].d1[[row, col]] += first * z_jc;
-                                            local.second[slot].d1[[row, col]] += second * z_jc;
-                                        }
+                                        let z_jc = z_kernel[[j, col]];
+                                        local.d1[[row, col]] += q * axis_scale * delta * z_jc;
+                                        local.d1_psi[[row, col]] +=
+                                            q_psi * axis_scale * delta * z_jc;
+                                        local.d1_psi_psi[[row, col]] +=
+                                            q_psi_psi * axis_scale * delta * z_jc;
                                     }
                                 }
                             }
                             if need_d2 {
-                                for axis_b in 0..d {
-                                    let h_b = row_i[axis_b] - row_j[axis_b];
-                                    let w_b = metric_weights
-                                        .as_ref()
-                                        .map(|weights| weights[axis_b])
-                                        .unwrap_or(1.0);
-                                    for axis_c in 0..d {
-                                        let h_c = row_i[axis_c] - row_j[axis_c];
-                                        let w_c = metric_weights
+                                for col in 0..kernel_cols {
+                                    let z_jc = z_kernel[[j, col]];
+                                    for axis_b in 0..d {
+                                        let h_b =
+                                            collocation_points[[i, axis_b]] - centers[[j, axis_b]];
+                                        let w_b = metric_weights
                                             .as_ref()
-                                            .map(|weights| weights[axis_c])
+                                            .map(|weights| weights[axis_b])
                                             .unwrap_or(1.0);
-                                        let row = (i * d + axis_b) * d + axis_c;
-                                        let value = hessian_operator_entry(
-                                            q, jets.t, h_b, h_c, w_b, w_c, axis_b, axis_c,
-                                        );
-                                        for col in 0..kernel_cols {
-                                            local.d2[[row, col]] += value * z_kernel[[j, col]];
-                                        }
-                                        for (slot, &direction) in directions.iter().enumerate() {
-                                            let (first, second) = match direction {
-                                                DuchonPsiDirection::Global => (
-                                                    hessian_operator_entry(
-                                                        q_psi, t_psi, h_b, h_c, w_b, w_c, axis_b,
-                                                        axis_c,
-                                                    ),
-                                                    hessian_operator_entry(
-                                                        q_psi_psi, t_psi_psi, h_b, h_c, w_b, w_c,
-                                                        axis_b, axis_c,
-                                                    ),
-                                                ),
-                                                DuchonPsiDirection::Axis(a) => {
-                                                    let s_a = components[a];
-                                                    duchon_prefactor_lift(
-                                                        value,
-                                                        hessian_operator_eta_entry(
-                                                            q, jets.t, jets.t_r, r, s_a, h_b, h_c,
-                                                            w_b, w_c, a, axis_b, axis_c,
-                                                        ),
-                                                        hessian_operator_eta2_entry(
-                                                            q, jets.t, jets.t_r, jets.t_rr, r, s_a,
-                                                            h_b, h_c, w_b, w_c, a, axis_b, axis_c,
-                                                        ),
-                                                        prefactor_share,
-                                                    )
-                                                }
-                                            };
-                                            for col in 0..kernel_cols {
-                                                let z_jc = z_kernel[[j, col]];
-                                                local.first[slot].d2[[row, col]] += first * z_jc;
-                                                local.second[slot].d2[[row, col]] += second * z_jc;
-                                            }
+                                        for axis_c in 0..d {
+                                            let h_c = collocation_points[[i, axis_c]]
+                                                - centers[[j, axis_c]];
+                                            let w_c = metric_weights
+                                                .as_ref()
+                                                .map(|weights| weights[axis_c])
+                                                .unwrap_or(1.0);
+                                            let row = (i * d + axis_b) * d + axis_c;
+                                            local.d2[[row, col]] += hessian_operator_entry(
+                                                q, jets.t, h_b, h_c, w_b, w_c, axis_b, axis_c,
+                                            ) * z_jc;
+                                            local.d2_psi[[row, col]] += hessian_operator_entry(
+                                                q_psi, t_psi, h_b, h_c, w_b, w_c, axis_b, axis_c,
+                                            ) * z_jc;
+                                            local.d2_psi_psi[[row, col]] += hessian_operator_entry(
+                                                q_psi_psi, t_psi_psi, h_b, h_c, w_b, w_c, axis_b,
+                                                axis_c,
+                                            ) * z_jc;
                                         }
                                     }
                                 }
                             }
                         } else if need_d2 {
-                            // Collision. Every `s_a` is zero, so the block's ONLY
-                            // ψ dependence is `w_axis = exp(2(η_axis − η̄))` times
-                            // `φ_rr(0; κ)` — and at the origin `φ_rr` is not a
-                            // pure power of κ (the even-dimensional log-Riesz
-                            // representative carries κ-dependent finite parts),
-                            // which is why the scaling shortcut is refused here
-                            // and `duchonphi_rr_collision_psi_triplet` is used
-                            // instead. `κ = exp(mean ψ)` depends on `ψ_a`
-                            // linearly with rate `1/d`, and
-                            // `∂w_b/∂ψ_a = 2 w_b (δ_ab − 1/d)`, so both
-                            // directions are exact one-liners off that triplet.
                             let (phi_rr, phi_rr_psi, phi_rr_psi_psi) =
                                 duchonphi_rr_collision_psi_triplet(
                                     length_scale,
@@ -2058,40 +1973,17 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
                                     d,
                                     &coeffs,
                                 )?;
-                            let inv_d = 1.0 / d.max(1) as f64;
-                            for axis in 0..d {
-                                let w_axis = metric_weights
-                                    .as_ref()
-                                    .map(|weights| weights[axis])
-                                    .unwrap_or(1.0);
-                                let row = (i * d + axis) * d + axis;
-                                let value = w_axis * phi_rr;
-                                for col in 0..kernel_cols {
-                                    local.d2[[row, col]] += value * z_kernel[[j, col]];
-                                }
-                                for (slot, &direction) in directions.iter().enumerate() {
-                                    let (first, second) = match direction {
-                                        DuchonPsiDirection::Global => {
-                                            (w_axis * phi_rr_psi, w_axis * phi_rr_psi_psi)
-                                        }
-                                        DuchonPsiDirection::Axis(a) => {
-                                            let rate = usize::from(a == axis) as f64 - inv_d;
-                                            let weight_first = 2.0 * rate * w_axis;
-                                            let weight_second = 4.0 * rate * rate * w_axis;
-                                            (
-                                                weight_first * phi_rr
-                                                    + w_axis * inv_d * phi_rr_psi,
-                                                weight_second * phi_rr
-                                                    + 2.0 * weight_first * inv_d * phi_rr_psi
-                                                    + w_axis * inv_d * inv_d * phi_rr_psi_psi,
-                                            )
-                                        }
-                                    };
-                                    for col in 0..kernel_cols {
-                                        let z_jc = z_kernel[[j, col]];
-                                        local.first[slot].d2[[row, col]] += first * z_jc;
-                                        local.second[slot].d2[[row, col]] += second * z_jc;
-                                    }
+                            for col in 0..kernel_cols {
+                                let z_jc = z_kernel[[j, col]];
+                                for axis in 0..d {
+                                    let w_axis = metric_weights
+                                        .as_ref()
+                                        .map(|weights| weights[axis])
+                                        .unwrap_or(1.0);
+                                    let row = (i * d + axis) * d + axis;
+                                    local.d2[[row, col]] += w_axis * phi_rr * z_jc;
+                                    local.d2_psi[[row, col]] += w_axis * phi_rr_psi * z_jc;
+                                    local.d2_psi_psi[[row, col]] += w_axis * phi_rr_psi_psi * z_jc;
                                 }
                             }
                         }
@@ -2101,14 +1993,19 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
             },
         )
         .collect::<Result<Vec<_>, BasisError>>()?;
-    let mut raw =
-        DuchonRawPenaltyPsiDerivativeBlocks::zeros(p_colloc, d, kernel_cols, directions.len());
+    let mut raw = DuchonRawPenaltyPsiDerivativeBlocks::zeros(p_colloc, d, kernel_cols);
     for partial in &partial_blocks {
         raw.add_assign(partial);
     }
     let d0_raw = raw.d0;
     let d1_raw = raw.d1;
     let d2_raw = raw.d2;
+    let d0_raw_psi = raw.d0_psi;
+    let d1_raw_psi = raw.d1_psi;
+    let d2_raw_psi = raw.d2_psi;
+    let d0_raw_psi_psi = raw.d0_psi_psi;
+    let d1_raw_psi_psi = raw.d1_psi_psi;
+    let d2_raw_psi_psi = raw.d2_psi_psi;
 
     let poly = polynomial_block_from_order(centers, effective_nullspace_order);
     let kernel_cols = d0_raw.ncols();
@@ -2117,6 +2014,12 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     let mut d0 = Array2::<f64>::zeros((p_colloc, total_cols));
     let mut d1 = Array2::<f64>::zeros((p_colloc * d, total_cols));
     let mut d2 = Array2::<f64>::zeros((p_colloc * d * d, total_cols));
+    let mut d0_psi = Array2::<f64>::zeros((p_colloc, total_cols));
+    let mut d1_psi = Array2::<f64>::zeros((p_colloc * d, total_cols));
+    let mut d2_psi = Array2::<f64>::zeros((p_colloc * d * d, total_cols));
+    let mut d0_psi_psi = Array2::<f64>::zeros((p_colloc, total_cols));
+    let mut d1_psi_psi = Array2::<f64>::zeros((p_colloc * d, total_cols));
+    let mut d2_psi_psi = Array2::<f64>::zeros((p_colloc * d * d, total_cols));
     d0.slice_mut(s![.., 0..kernel_cols]).assign(&d0_raw);
     d1.slice_mut(s![.., 0..kernel_cols]).assign(&d1_raw);
     d2.slice_mut(s![.., 0..kernel_cols]).assign(&d2_raw);
@@ -2157,6 +2060,18 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
                 ));
         }
     }
+    d0_psi.slice_mut(s![.., 0..kernel_cols]).assign(&d0_raw_psi);
+    d1_psi.slice_mut(s![.., 0..kernel_cols]).assign(&d1_raw_psi);
+    d2_psi.slice_mut(s![.., 0..kernel_cols]).assign(&d2_raw_psi);
+    d0_psi_psi
+        .slice_mut(s![.., 0..kernel_cols])
+        .assign(&d0_raw_psi_psi);
+    d1_psi_psi
+        .slice_mut(s![.., 0..kernel_cols])
+        .assign(&d1_raw_psi_psi);
+    d2_psi_psi
+        .slice_mut(s![.., 0..kernel_cols])
+        .assign(&d2_raw_psi_psi);
     // The polynomial block is the Duchon nullspace. Keep it in the total
     // coordinate system so identifiability transforms line up, but leave its
     // operator columns and psi-derivatives at zero so it remains unpenalized.
@@ -2173,179 +2088,215 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     let d0 = project(d0);
     let d1 = project(d1);
     let d2 = project(d2);
+    let d0_psi = project(d0_psi);
+    let d1_psi = project(d1_psi);
+    let d2_psi = project(d2_psi);
+    let d0_psi_psi = project(d0_psi_psi);
+    let d1_psi_psi = project(d1_psi_psi);
+    let d2_psi_psi = project(d2_psi_psi);
 
-    // The closed-form Lebesgue operator penalty, where it converges, REPLACES
-    // the collocation Gram on the value side, so its ψ-derivative has to be the
-    // one that ships. It is derived only for the isotropic direction today;
-    // `spatial_term_duchon_axis_psi_supported` refuses to enroll per-axis
-    // coordinates for any spec where an ACTIVE operator penalty routes through
-    // it, so a per-axis request can never reach a block whose value and
-    // derivative would then come from two different constructions.
+    let (s0, s0_psi, s0_psi_psi) =
+        centered_operator_gram_and_psi_derivatives(&d0, &d0_psi, &d0_psi_psi);
+    let (mut s1, mut s1_psi, mut s1_psi_psi) =
+        gram_and_psi_derivatives_from_operator(&d1, &d1_psi, &d1_psi_psi);
+    let (mut s2, mut s2_psi, mut s2_psi_psi) =
+        gram_and_psi_derivatives_from_operator(&d2, &d2_psi, &d2_psi_psi);
+
+    // Match the value-side Duchon penalty exactly. q=0 mass remains the
+    // collocation Gram; q∈{1,2} uses the continuous closed-form Lebesgue
+    // penalty whenever the UV+IR+precondition predicate holds, independent of
+    // the polynomial nullspace order. Polynomial columns are zero-padded in
+    // the closed-form block because they are the unpenalized Duchon nullspace.
     let kappa = 1.0 / length_scale.max(1e-300);
     let aniso = spec.aniso_log_scales.as_deref();
-    let closed_form_q1 = duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d);
-    let closed_form_q2 = duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d);
-
-    let mut out = Vec::with_capacity(directions.len());
-    for (slot, &direction) in directions.iter().enumerate() {
-        if !matches!(direction, DuchonPsiDirection::Global)
-            && ((closed_form_q1
-                && matches!(
-                    effective_operator_penalties.tension,
-                    OperatorPenaltySpec::Active { .. }
-                ))
-                || (closed_form_q2
-                    && matches!(
-                        effective_operator_penalties.stiffness,
-                        OperatorPenaltySpec::Active { .. }
-                    )))
-        {
-            crate::bail_invalid_basis!(
-                "Duchon per-axis ψ derivatives are not derived for the closed-form Lebesgue \
-                 operator penalty (q1={closed_form_q1}, q2={closed_form_q2}); this spec must not \
-                 have been enrolled for per-axis ψ"
-            );
-        }
-        let mut d0_psi = Array2::<f64>::zeros((p_colloc, total_cols));
-        let mut d1_psi = Array2::<f64>::zeros((p_colloc * d, total_cols));
-        let mut d2_psi = Array2::<f64>::zeros((p_colloc * d * d, total_cols));
-        let mut d0_psi_psi = Array2::<f64>::zeros((p_colloc, total_cols));
-        let mut d1_psi_psi = Array2::<f64>::zeros((p_colloc * d, total_cols));
-        let mut d2_psi_psi = Array2::<f64>::zeros((p_colloc * d * d, total_cols));
-        d0_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.first[slot].d0);
-        d1_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.first[slot].d1);
-        d2_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.first[slot].d2);
-        d0_psi_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.second[slot].d0);
-        d1_psi_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.second[slot].d1);
-        d2_psi_psi
-            .slice_mut(s![.., 0..kernel_cols])
-            .assign(&raw.second[slot].d2);
-        let d0_psi = project(d0_psi);
-        let d1_psi = project(d1_psi);
-        let d2_psi = project(d2_psi);
-        let d0_psi_psi = project(d0_psi_psi);
-        let d1_psi_psi = project(d1_psi_psi);
-        let d2_psi_psi = project(d2_psi_psi);
-
-        let (s0, s0_psi, s0_psi_psi) =
-            centered_operator_gram_and_psi_derivatives(&d0, &d0_psi, &d0_psi_psi);
-        let (mut s1, mut s1_psi, mut s1_psi_psi) =
-            gram_and_psi_derivatives_from_operator(&d1, &d1_psi, &d1_psi_psi);
-        let (mut s2, mut s2_psi, mut s2_psi_psi) =
-            gram_and_psi_derivatives_from_operator(&d2, &d2_psi, &d2_psi_psi);
-
-        // Match the value-side Duchon penalty exactly. q=0 mass remains the
-        // collocation Gram; q∈{1,2} uses the continuous closed-form Lebesgue
-        // penalty whenever the UV+IR+precondition predicate holds, independent of
-        // the polynomial nullspace order. Polynomial columns are zero-padded in
-        // the closed-form block because they are the unpenalized Duchon nullspace.
-        if closed_form_q1 {
-            let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
-                centers,
-                1,
-                p_order,
-                s_order,
-                kappa,
-                aniso,
-                Some(&z_kernel),
-                poly_cols,
-                identifiability_transform,
-            );
-            s1 = cf_s;
-            s1_psi = cf_s_psi;
-            s1_psi_psi = cf_s_psi_psi;
-        }
-        if closed_form_q2 {
-            let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
-                centers,
-                2,
-                p_order,
-                s_order,
-                kappa,
-                aniso,
-                Some(&z_kernel),
-                poly_cols,
-                identifiability_transform,
-            );
-            s2 = cf_s;
-            s2_psi = cf_s_psi;
-            s2_psi_psi = cf_s_psi_psi;
-        }
-
-        let (s0_norm, s0_norm_psi, s0_norm_psi_psi, c0) =
-            normalize_penaltywith_psi_derivatives(&s0, &s0_psi, &s0_psi_psi);
-        let (s1_norm, s1_norm_psi, s1_norm_psi_psi, c1) =
-            normalize_penaltywith_psi_derivatives(&s1, &s1_psi, &s1_psi_psi);
-        let (s2_norm, s2_norm_psi, s2_norm_psi_psi, c2) =
-            normalize_penaltywith_psi_derivatives(&s2, &s2_psi, &s2_psi_psi);
-
-        let candidates = vec![
-            PenaltyCandidate {
-                matrix: ConstructiveQuadratic::try_from_dense_psd(
-                    s0_norm,
-                    "spherical operator mass penalty",
-                )?,
-                source: PenaltySource::OperatorMass,
-                normalization_scale: c0,
-                kronecker_factors: None,
-                op: None,
-            },
-            PenaltyCandidate {
-                matrix: ConstructiveQuadratic::try_from_dense_psd(
-                    s1_norm,
-                    "spherical operator tension penalty",
-                )?,
-                source: PenaltySource::OperatorTension,
-                normalization_scale: c1,
-                kronecker_factors: None,
-                op: None,
-            },
-            PenaltyCandidate {
-                matrix: ConstructiveQuadratic::try_from_dense_psd(
-                    s2_norm,
-                    "spherical operator stiffness penalty",
-                )?,
-                source: PenaltySource::OperatorStiffness,
-                normalization_scale: c2,
-                kronecker_factors: None,
-                op: None,
-            },
-        ];
-        let candidates = operator_penalty_candidates_from_derivative_candidates(
-            candidates,
-            &effective_operator_penalties,
+    if duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d) {
+        let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
+            centers,
+            1,
+            p_order,
+            s_order,
+            kappa,
+            aniso,
+            Some(&z_kernel),
+            poly_cols,
+            identifiability_transform,
         );
+        s1 = cf_s;
+        s1_psi = cf_s_psi;
+        s1_psi_psi = cf_s_psi_psi;
+    }
+    if duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d) {
+        let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
+            centers,
+            2,
+            p_order,
+            s_order,
+            kappa,
+            aniso,
+            Some(&z_kernel),
+            poly_cols,
+            identifiability_transform,
+        );
+        s2 = cf_s;
+        s2_psi = cf_s_psi;
+        s2_psi_psi = cf_s_psi_psi;
+    }
 
-        let first_derivs = vec![s0_norm_psi, s1_norm_psi, s2_norm_psi];
-        let second_derivs = vec![s0_norm_psi_psi, s1_norm_psi_psi, s2_norm_psi_psi];
+    let (s0_norm, s0_norm_psi, s0_norm_psi_psi, c0) =
+        normalize_penaltywith_psi_derivatives(&s0, &s0_psi, &s0_psi_psi);
+    let (s1_norm, s1_norm_psi, s1_norm_psi_psi, c1) =
+        normalize_penaltywith_psi_derivatives(&s1, &s1_psi, &s1_psi_psi);
+    let (s2_norm, s2_norm_psi, s2_norm_psi_psi, c2) =
+        normalize_penaltywith_psi_derivatives(&s2, &s2_psi, &s2_psi_psi);
 
-        let filtered = filter_penalty_candidates(candidates)?;
-        let active_sources = filtered
+    // gam#2735 — MIRROR THE VALUE'S TENSION SPLIT.
+    //
+    // When `scale_dims` is on and tension is a collocation-valid active order,
+    // `duchon_operator_penalty_candidates` REPLACES the single isotropic
+    // gradient penalty `Σ‖∇f‖²` with `dim` per-axis penalties `Σ(∂f/∂x_a)²`,
+    // one `PenaltySource::OperatorRelevance { axis }` each. This builder emitted
+    // a single `OperatorTension` block regardless, so on every `scale_dims`
+    // Duchon the realized design carried `2 + dim` operator penalties while the
+    // derivative carried 3 — and the consumer zips them POSITIONALLY, so the
+    // tension ψ-derivative was being attributed to `OperatorRelevance { 0 }` and
+    // the remaining `dim − 1` relevance blocks were left with no ψ-derivative at
+    // all. Splitting here is what makes that zip mean what it says.
+    //
+    // `D1` rows are indexed `collocation_i · dim + axis`, so axis `a` owns the
+    // strided row set `a, a+dim, a+2·dim, …` — the same slice the value uses.
+    let split_tension = per_axis_relevance
+        && matches!(
+            effective_operator_penalties.tension,
+            OperatorPenaltySpec::Active { .. }
+        );
+    let mut candidates = vec![PenaltyCandidate {
+        matrix: ConstructiveQuadratic::try_from_dense_psd(
+            s0_norm,
+            "spherical operator mass penalty",
+        )?,
+        source: PenaltySource::OperatorMass,
+        normalization_scale: c0,
+        kronecker_factors: None,
+        op: None,
+    }];
+    let mut first_derivs = vec![s0_norm_psi];
+    let mut second_derivs = vec![s0_norm_psi_psi];
+    if split_tension {
+        for axis in 0..d {
+            let stride = ndarray::s![axis..; d, ..];
+            let (relevance, relevance_psi, relevance_psi_psi) =
+                gram_and_psi_derivatives_from_operator(
+                    &d1.slice(stride).to_owned(),
+                    &d1_psi.slice(stride).to_owned(),
+                    &d1_psi_psi.slice(stride).to_owned(),
+                );
+            let (norm, norm_psi, norm_psi_psi, scale) = normalize_penaltywith_psi_derivatives(
+                &relevance,
+                &relevance_psi,
+                &relevance_psi_psi,
+            );
+            candidates.push(PenaltyCandidate {
+                matrix: ConstructiveQuadratic::try_from_dense_psd(
+                    norm,
+                    "Duchon operator per-axis relevance penalty",
+                )?,
+                source: PenaltySource::OperatorRelevance { axis },
+                normalization_scale: scale,
+                kronecker_factors: None,
+                op: None,
+            });
+            first_derivs.push(norm_psi);
+            second_derivs.push(norm_psi_psi);
+        }
+    } else {
+        candidates.push(PenaltyCandidate {
+            matrix: ConstructiveQuadratic::try_from_dense_psd(
+                s1_norm,
+                "spherical operator tension penalty",
+            )?,
+            source: PenaltySource::OperatorTension,
+            normalization_scale: c1,
+            kronecker_factors: None,
+            op: None,
+        });
+        first_derivs.push(s1_norm_psi);
+        second_derivs.push(s1_norm_psi_psi);
+    }
+    candidates.push(PenaltyCandidate {
+        matrix: ConstructiveQuadratic::try_from_dense_psd(
+            s2_norm,
+            "spherical operator stiffness penalty",
+        )?,
+        source: PenaltySource::OperatorStiffness,
+        normalization_scale: c2,
+        kronecker_factors: None,
+        op: None,
+    });
+    first_derivs.push(s2_norm_psi);
+    second_derivs.push(s2_norm_psi_psi);
+
+    let candidates = operator_penalty_candidates_from_derivative_candidates(
+        candidates,
+        &effective_operator_penalties,
+    );
+
+    let filtered = filter_penalty_candidates(candidates)?;
+    let active_sources = filtered
+        .active
+        .iter()
+        .map(|penalty| penalty.info.source.clone())
+        .collect::<Vec<_>>();
+    // Select by `original_index`, not by SOURCE. `active_operator_penalty_derivatives`
+    // maps mass/tension/stiffness onto three fixed slots, which cannot express the
+    // per-axis relevance split — and a source-keyed lookup would have to invent an
+    // ordering for `dim` blocks that share a discriminant. The filter already
+    // records where each survivor came from in the list this function just built,
+    // in the same order as `first_derivs` / `second_derivs`, so the index IS the map.
+    let select = |blocks: &[Array2<f64>]| -> Result<Vec<Array2<f64>>, BasisError> {
+        filtered
             .active
             .iter()
-            .map(|penalty| penalty.info.source.clone())
-            .collect::<Vec<_>>();
-        let penalties_derivative =
-            active_operator_penalty_derivatives(&filtered.active, &first_derivs, "Duchon")?;
-        let penaltiessecond_derivative =
-            active_operator_penalty_derivatives(&filtered.active, &second_derivs, "Duchon")?;
-        out.push((
-            active_sources,
-            penalties_derivative,
-            penaltiessecond_derivative,
-        ));
-    }
-    Ok(out)
+            .map(|penalty| {
+                blocks
+                    .get(penalty.info.original_index)
+                    .cloned()
+                    .ok_or_else(|| {
+                        BasisError::InvalidInput(format!(
+                            "Duchon operator penalty derivative index {} out of range for {} \
+                             emitted block(s) ({:?})",
+                            penalty.info.original_index,
+                            blocks.len(),
+                            penalty.info.source
+                        ))
+                    })
+            })
+            .collect()
+    };
+    let penalties_derivative = select(&first_derivs)?;
+    let penaltiessecond_derivative = select(&second_derivs)?;
+
+    // Per-axis bundles are the isotropic one scaled — see this function's doc.
+    let inv_d = 1.0 / d.max(1) as f64;
+    Ok(directions
+        .iter()
+        .map(|direction| {
+            let (first_scale, second_scale) = match direction {
+                DuchonPsiDirection::Global => (1.0, 1.0),
+                DuchonPsiDirection::Axis(_) => (inv_d, inv_d * inv_d),
+            };
+            (
+                active_sources.clone(),
+                penalties_derivative
+                    .iter()
+                    .map(|block| block.mapv(|value| value * first_scale))
+                    .collect(),
+                penaltiessecond_derivative
+                    .iter()
+                    .map(|block| block.mapv(|value| value * second_scale))
+                    .collect(),
+            )
+        })
+        .collect())
 }
 
 pub(crate) fn operator_penalty_candidates_from_derivative_candidates(
