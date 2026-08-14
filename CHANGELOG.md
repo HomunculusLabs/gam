@@ -1,5 +1,42 @@
 ## Unreleased
 
+- **What the follow-up-varying slope still cannot do, measured rather than
+  guessed (#2765 / #2767).** With the one-channel pullback repaired, the
+  acceptance fixture's outer solve goes from *zero* iterations (its first line
+  search died at `StepSizeTooSmall after 50 attempt(s)`) to **1500+ outer
+  evaluations across five BFGS multi-starts**, steps accepted via Strong Wolfe,
+  descending `2148.09 → 2134.79`. It still does not certify, and the reason is
+  now bounded on three sides:
+
+  1. **Every criterion atom except `½ log|H|` is exact.** At the fixture's own
+     shape the θ-wide audit gives `fixed_beta` to six digits and `logdet_s` to
+     seven on all five coordinates; `logdet_h` disagrees on all five.
+  2. **It is the mode-response half**, and on the ρ block that is proved by a
+     bound with no oracle in it (`½ tr(K·λ_kS_k) ∈ [0, rank/2]`), not inferred.
+  3. **It is not the follow-up axis.** The `logslope_time_k`-unset control
+     reproduces the same `logdet_h` disagreement bit for bit, so it predates
+     this issue — it is the `#979`/`#1040` lane, where
+     `survival_marginal_slope_outer_gradient_fd_1040.rs` has recorded a wrong
+     analytic ψ gradient since `#2461`.
+
+  Every object that atom is built from is now differenced against its own
+  Ridders-certified oracle and passes: `D_β H[δ]` (five gates, both slope
+  frames, block-confined directions, plus an oracle-free constant-margin
+  reduction), `D²_β H[u,v]` (three gates), `D_β H_Φ[δ]` (one gate in
+  `gam-custom-family`, on a family whose Jeffreys information genuinely depends
+  on β), and the ψ coefficient mode response `dβ̂/dψ` itself (`5.0e-8` relative
+  against its finite difference, from `3.3e-2` before the repair). A binomial
+  `matern(x1,x2)` control through the shipped GLM assembly — `c`-nontrivial, so
+  the same mode-response term is live — agrees to `1e-6…1e-11` on every
+  coordinate, which puts the residual inside the custom-family joint lane rather
+  than in machinery every penalized non-Gaussian fit uses.
+
+  The fixture also shows what the outer search now runs into instead: inner
+  solves that exit at `residual ≈ 1.9e3` with the trust radius collapsed to
+  `8e-12`, and an outer cost-stall guard that measures the criterion's own
+  evaluation noise at `σ ≈ 1.0` nat. That is the `#979` inner-solve stall, not a
+  gradient defect, and it is what the acceptance fixture is waiting on.
+
 - **`D_β H` pulled the row Hessian back through ONE slope channel, so the outer
   criterion's whole mode-response term was the derivative of a different model
   (#2765 / #2767).** `add_pullback_primary_hessian` — the pullback that
