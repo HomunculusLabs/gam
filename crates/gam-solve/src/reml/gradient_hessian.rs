@@ -3046,8 +3046,32 @@ impl<'a> RemlState<'a> {
             );
             return Ok(zero());
         }
-        let spectral_scale = evals.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
-        let degeneracy_tol = 1e-10 * spectral_scale.max(f64::MIN_POSITIVE);
+        // When is `λ_r − σ_q` a MEASUREMENT rather than a rounding residue?
+        //
+        // This tolerance used to be `1e-10 · max|λ|` — 4.5e5 machine epsilons
+        // against the LARGEST eigenvalue, compared with gaps between the
+        // SMALLEST ones. `H_pen = XᵀWX + S_λ` spans the λ range the outer search
+        // drives, so at `ρ = 21` (`λ = 1.3e9`) `max|λ|` reached `3.78e11` here
+        // and the tolerance became an ABSOLUTE `37.8`: gaps of `1.3`, `37.1`,
+        // `0.49` — resolved by the eigensolver to twelve significant digits —
+        // were all declared degenerate. Measured on `haberman_5yr` fold 2
+        // (#2748): the splice declined **10305 times against 10603
+        // admissions** inside one fit, toggling a `Δ_b` of the same size the τ
+        // gate used to toggle, and the fit died with `|Pg| = 6.700e-1` after
+        // 362.6 s.
+        //
+        // The question the tolerance is about is the eigendecomposition's own
+        // accuracy, and this repo measures that rather than declaring it:
+        // `‖H v_r − λ_r v_r‖` is a backward error, and by Weyl each eigenvalue
+        // carries at most that much uncertainty, so a gap is a measurement when
+        // it exceeds TWO of them. Nothing is chosen; at a genuine crossing the
+        // eigenframe really is non-differentiable and the splice still declines.
+        let eigen_resolution = crate::estimate::smoothing_correction::eigenpair_backward_error_bound(
+            &sym_h, &evals, &evecs,
+        )
+        .map_err(EstimationError::InvalidInput)?
+        .resolution();
+        let degeneracy_tol = (2.0 * eigen_resolution).max(f64::MIN_POSITIVE);
         let r_tilde = evecs.t().dot(&r_mat); // p × m
         let mut g_mat = Array2::<f64>::zeros((p, m));
         for (jr, &col_r) in block_cols.iter().enumerate() {
