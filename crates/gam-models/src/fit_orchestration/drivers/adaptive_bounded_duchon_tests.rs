@@ -55,6 +55,7 @@ mod adaptive_bounded_duchon_tests {
             [8.0, 1.1, 1.0, 3.0, 1.00, 0.71],
         ];
         let smooth = |name: &str, feature_col: usize| SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: name.to_string(),
             basis: SmoothBasisSpec::BSpline1D {
                 feature_col,
@@ -250,6 +251,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "pure_duchon".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0, 1, 2],
@@ -333,6 +335,7 @@ mod adaptive_bounded_duchon_tests {
                 lenient_unseen: true,
             }],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "ps".to_string(),
                 basis: SmoothBasisSpec::BSpline1D {
                     feature_col: 0,
@@ -400,6 +403,7 @@ mod adaptive_bounded_duchon_tests {
         }
 
         let duchon_term = |name: &str, length_scale: f64| SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: name.to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0, 1],
@@ -471,6 +475,7 @@ mod adaptive_bounded_duchon_tests {
         }
 
         let pure_duchon_term = |name: &str| SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: name.to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: (0..d).collect(),
@@ -1509,6 +1514,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -1587,6 +1593,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "pure_duchon_circle".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0, 1],
@@ -1684,6 +1691,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -1858,6 +1866,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "duchon".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0],
@@ -1996,6 +2005,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "duchon".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0],
@@ -2159,6 +2169,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "matern".to_string(),
                 basis: SmoothBasisSpec::Matern {
                     feature_cols: vec![0, 1],
@@ -2246,6 +2257,7 @@ mod adaptive_bounded_duchon_tests {
             linear_terms: vec![],
             random_effect_terms: vec![],
             smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
                 name: "duchon".to_string(),
                 basis: SmoothBasisSpec::Duchon {
                     feature_cols: vec![0],

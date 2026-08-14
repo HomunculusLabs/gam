@@ -6805,7 +6805,7 @@ fn test_thin_plate_log_kappasecond_derivative_matchesfd() {
 /// `build_duchon_operator_penalty_psi_derivatives` internals) against
 /// FD of the cost-side collocation operators. Isolates whether the
 /// bug lives in the operator-derivative formulas
-/// (duchon_radial_core_psi_triplet + jets) vs the gram chain rule.
+/// (duchon_radial_core_value_jet + jets) vs the gram chain rule.
 #[test]
 fn test_duchon_operator_psi_derivatives_fd_dim1() {
     use ndarray::array;
@@ -6887,10 +6887,20 @@ fn test_duchon_operator_psi_derivatives_fd_dim1() {
         for j in 0..p {
             let r = (centers[[k, 0]] - centers[[j, 0]]).abs();
             let core =
-                duchon_radial_core_psi_triplet(r, length_scale, p_order, s_order, d, &coeffs)
+                duchon_radial_core_value_jet(r, length_scale, p_order, s_order, d, &coeffs)
                     .unwrap();
+            let (phi_psi, _) = duchon_direction_derivatives(
+                DuchonPsiDirection::Global,
+                core.value,
+                core.first,
+                core.second,
+                core.exponent,
+                r,
+                d,
+                &[],
+            );
             for col in 0..kernel_cols {
-                d0_psi_analytic[[k, col]] += core.phi.psi * z_kernel[[j, col]];
+                d0_psi_analytic[[k, col]] += phi_psi * z_kernel[[j, col]];
             }
         }
     }
@@ -8079,11 +8089,21 @@ fn test_duchonspectral_scaling_matches_implementation() {
     assert!((jets_2.lap - op_scale * jets_1.lap).abs() < 1e-8);
 
     let core =
-        duchon_radial_core_psi_triplet(r, length_scale_2, p_order, s_order, k_dim, &coeffs_2)
+        duchon_radial_core_value_jet(r, length_scale_2, p_order, s_order, k_dim, &coeffs_2)
             .unwrap_or_else(|e| panic!("{} failed: {:?}", "radial core", e));
-    assert!(core.phi.value.is_finite());
-    assert!(core.phi.psi.is_finite());
-    assert!(core.phi.psi_psi.is_finite());
+    let (phi_psi, phi_psi_psi) = duchon_direction_derivatives(
+        DuchonPsiDirection::Global,
+        core.value,
+        core.first,
+        core.second,
+        core.exponent,
+        r,
+        k_dim,
+        &[],
+    );
+    assert!(core.value.is_finite());
+    assert!(phi_psi.is_finite());
+    assert!(phi_psi_psi.is_finite());
 }
 
 #[test]

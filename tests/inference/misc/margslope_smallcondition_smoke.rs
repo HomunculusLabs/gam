@@ -85,6 +85,7 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
     let logslope_offset = Array1::<f64>::zeros(n);
 
     let smooth = SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "f_x".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,

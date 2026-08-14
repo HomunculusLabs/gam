@@ -144,6 +144,7 @@ fn exact_spatial_adaptive_joint_hypergradient_matches_finite_difference() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -321,6 +322,7 @@ fn adaptive_hyper_derivative_dispatch_matches_reference() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "duchon".to_string(),
             basis: SmoothBasisSpec::Duchon {
                 feature_cols: vec![0],

@@ -195,6 +195,7 @@ fn aniso_matern_full_outer_loop_recovers_planted_signal_r2() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_2d_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
@@ -336,6 +337,7 @@ fn fit_aniso_recovery(double_penalty: bool, num_centers: usize) -> AnisoRecovery
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_2d_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],

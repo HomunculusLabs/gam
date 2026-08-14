@@ -83,6 +83,7 @@ fn thin_plate_term(d: usize, num_centers: usize) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "tp".to_string(),
             basis: SmoothBasisSpec::ThinPlate {
                 feature_cols: (0..d).collect(),

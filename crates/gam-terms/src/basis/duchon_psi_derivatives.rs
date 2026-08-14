@@ -41,18 +41,6 @@ pub(crate) struct DuchonMaternDerivativeTerm {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct PsiTriplet {
-    pub(crate) value: f64,
-    pub(crate) psi: f64,
-    pub(crate) psi_psi: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct DuchonRadialCore {
-    pub(crate) phi: PsiTriplet,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct DuchonRadialJets {
     pub(crate) phi: f64,
     pub(crate) phi_r: f64,
@@ -176,6 +164,140 @@ pub(crate) fn scaled_log_kappa_derivatives(
         + (2.0 * exponent + 1.0) * r * radial_first
         + r * r * radialsecond;
     (first, second)
+}
+
+/// The outer coordinate a Duchon ψ-derivative differentiates (gam#2735).
+///
+/// The anisotropic Duchon metric is `u² = Σ_a exp(2 ψ_a) h_a²`, and the ψ
+/// coordinates the outer REML solve owns are the **raw** `ψ_a`: each one
+/// decodes simultaneously into the global scale `κ = exp(mean ψ)` and the
+/// centered contrast `η_a = ψ_a − mean ψ`, so
+///
+/// ```text
+///     ∂ log κ / ∂ψ_a = 1/d           ∂η_b / ∂ψ_a = δ_ab − 1/d
+/// ```
+///
+/// `Global` is the all-ones direction of that frame — moving every `ψ_a` by the
+/// same amount leaves every contrast fixed and multiplies `κ`. That is not a
+/// convention, it is an identity, and it is what
+/// [`duchon_axis_log_kappa_derivatives`] reproduces by construction:
+/// summing its first derivative over `a`, and its second over `(a, b)`, gives
+/// [`scaled_log_kappa_derivatives`] exactly. The isotropic route is therefore a
+/// contraction of the anisotropic one rather than a parallel derivation that
+/// could drift from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DuchonPsiDirection {
+    /// `ψ = log κ`. Every contrast — and therefore every metric weight
+    /// `w_a = exp(2η_a)` appearing explicitly in the operator-penalty blocks —
+    /// is constant along this direction.
+    Global,
+    /// The raw per-axis coordinate `ψ_a`.
+    Axis(usize),
+}
+
+/// Per-axis ψ derivatives of a radial scalar `F(r; κ) = κ^E G(κ r)`.
+///
+/// `axis_share[a] = s_a / r²` where `s_a = exp(2 η_a) h_a²` is the per-axis
+/// weighted squared displacement produced by `aniso_distance_and_components`;
+/// the shares are non-negative and sum to one. Writing
+///
+/// ```text
+///     A = r F_r                 B = r² F_rr − r F_r                 c = E/d
+/// ```
+///
+/// the exact chain rule through `(κ, η)` collapses to
+///
+/// ```text
+///     ∂F/∂ψ_a        = c F + A σ_a
+///     ∂²F/∂ψ_a∂ψ_b   = B σ_a σ_b + c A (σ_a + σ_b) + 2 A σ_a δ_ab + c² F
+/// ```
+///
+/// `A` and `B` are exactly the two combinations [`scaled_log_kappa_derivatives`]
+/// already forms, so the per-axis jet needs no radial quantity the isotropic
+/// jet does not, and — crucially — it is finite at collision: `σ` is bounded by
+/// 1 and both `A` and `B` vanish with `r`, so no `1/r` ever appears.
+///
+/// Contracting over the all-ones direction returns the isotropic jet:
+/// `Σ_a first = E F + r F_r` and `Σ_{a,b} second = E² F + (2E+1) r F_r + r² F_rr`.
+#[inline(always)]
+pub fn duchon_axis_log_kappa_derivatives(
+    value: f64,
+    radial_first: f64,
+    radialsecond: f64,
+    exponent: f64,
+    r: f64,
+    dim: usize,
+    axis_share: f64,
+    second_axis_share: f64,
+    same_axis: bool,
+) -> (f64, f64) {
+    let a_term = r * radial_first;
+    let b_term = r * r * radialsecond - a_term;
+    let c = exponent / dim.max(1) as f64;
+    let first = c * value + a_term * axis_share;
+    let second = b_term * axis_share * second_axis_share
+        + c * a_term * (axis_share + second_axis_share)
+        + if same_axis {
+            2.0 * a_term * axis_share
+        } else {
+            0.0
+        }
+        + c * c * value;
+    (first, second)
+}
+
+/// First and second ψ derivatives of a radial scalar along `direction`.
+///
+/// The single dispatch point between the isotropic and per-axis routes: every
+/// Duchon penalty assembly consumes this and nothing else, so a route can only
+/// differ from another by its `direction`.
+#[inline(always)]
+pub fn duchon_direction_derivatives(
+    direction: DuchonPsiDirection,
+    value: f64,
+    radial_first: f64,
+    radialsecond: f64,
+    exponent: f64,
+    r: f64,
+    dim: usize,
+    axis_shares: &[f64],
+) -> (f64, f64) {
+    match direction {
+        DuchonPsiDirection::Global => {
+            scaled_log_kappa_derivatives(value, radial_first, radialsecond, exponent, r)
+        }
+        DuchonPsiDirection::Axis(a) => {
+            let share = axis_shares.get(a).copied().unwrap_or(0.0);
+            duchon_axis_log_kappa_derivatives(
+                value,
+                radial_first,
+                radialsecond,
+                exponent,
+                r,
+                dim,
+                share,
+                share,
+                true,
+            )
+        }
+    }
+}
+
+/// Normalized per-axis shares `σ_a = s_a / r²` of the anisotropic squared
+/// distance, with the symmetric convention `σ_a = 1/d` at collision.
+///
+/// At `r = 0` both `A = r F_r` and `B = r² F_rr − r F_r` vanish for every
+/// radial scalar the Duchon jets produce, so the share is multiplied by zero
+/// and the convention only has to keep `Σ_a σ_a = 1` — which is what makes the
+/// isotropic contraction identity hold at collision too.
+#[inline(always)]
+pub fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
+    let d = components.len().max(1);
+    let r2 = r * r;
+    if !(r2 > 0.0) || !r2.is_finite() {
+        return vec![1.0 / d as f64; components.len()];
+    }
+    components.iter().map(|&s| s / r2).collect()
 }
 
 #[inline(always)]
@@ -422,89 +544,62 @@ pub(crate) fn duchon_radial_jets(
     Ok(out)
 }
 
-pub(crate) fn duchon_radial_core_psi_triplet(
+/// The scalar core's radial jet, before any ψ direction has been chosen.
+///
+/// **Duchon spectral derivation.** Start from the isotropic spectrum
+/// `K^(ω; κ) ∝ 1 / (|ω|^{2p} (κ² + |ω|²)^s)`, with fixed integer orders `p, s`
+/// and continuous scale `ψ = log κ`, `κ = 1/length_scale`. Rescaling frequency
+/// by `ω = κ ξ` gives the full spatial kernel scaling law
+///
+/// ```text
+///     φ(r; κ) = κ^δ H(κ r),      δ = d − 2p − 2s
+/// ```
+///
+/// so every radial scalar this file forms is `κ^E G(κ r)` for some exponent
+/// `E`: `φ` at `δ`, `q = φ_r/r` and `Δφ` at `δ + 2`, `t = q_r/r` at `δ + 4`.
+/// [`scaled_log_kappa_derivatives`] contracts that along the isotropic
+/// direction; [`duchon_axis_log_kappa_derivatives`] contracts it per axis, and
+/// summing the latter reproduces the former exactly. Splitting the value jet
+/// from the contraction makes the DIRECTION the only thing that differs
+/// between the two routes, so a global and a per-axis derivative can never be
+/// taken of two different kernels.
+///
+/// Once `{φ, q, Δφ}` and their ψ derivatives are known the collocation
+/// operators follow exactly — `D0[k,j] = φ(r)`, `D1[(k,a),j] = q(r)·h_a`,
+/// `D2[k,j] = Δφ(r)` — and the penalty Hessians come from the Gram identities
+/// `S_ψ = D_ψᵀD + DᵀD_ψ` and `S_ψψ = D_ψψᵀD + 2D_ψᵀD_ψ + DᵀD_ψψ`.
+///
+/// **Representation note.** When `p > 0` the Duchon kernel is only
+/// conditionally positive definite, so the spatial kernel is canonical only up
+/// to polynomial additions. These formulas are tied to the specific
+/// representative encoded by the partial-fraction construction and the
+/// collision rules; the operator penalties, exact ψ derivatives, and
+/// center-collision limits all have to use that same representative or the
+/// resulting penalty geometry drifts across code paths. In particular the
+/// `r = 0` limit is NOT the naive `(δ+2)·φ_rr` scaling shortcut — in even
+/// dimensions the log-Riesz representative carries κ-dependent finite parts at
+/// the origin, which is what [`duchonphi_rr_collision_psi_triplet`] exists for.
+pub(crate) struct DuchonRadialCoreValueJet {
+    pub(crate) value: f64,
+    pub(crate) first: f64,
+    pub(crate) second: f64,
+    pub(crate) exponent: f64,
+}
+
+pub(crate) fn duchon_radial_core_value_jet(
     r: f64,
     length_scale: f64,
     p_order: usize,
     s_order: usize,
     k_dim: usize,
     coeffs: &DuchonPartialFractionCoeffs,
-) -> Result<DuchonRadialCore, BasisError> {
-    // Duchon spectral derivation
-    // Start from the isotropic spectrum
-    //   K^(ω; kappa) ∝ 1 / (|ω|^(2p) * (kappa^2 + |ω|^2)^s),
-    // with fixed integer orders p,s and continuous scale
-    //   psi = log(kappa),   kappa = 1 / length_scale.
-    //
-    // Rescaling frequency by ω = kappa ξ gives the full spatial kernel scaling law
-    //   phi(r; kappa) = kappa^delta H(kappa r),
-    //   delta = d - 2p - 2s.
-    //
-    // Therefore the exact full-kernel psi derivatives are
-    //   phi_psi     = delta * phi + r * phi_r
-    //   phi_psipsi  = delta^2 * phi + (2 delta + 1) r phi_r + r^2 phi_rr.
-    //
-    // The operator scalars are
-    //   q(r; kappa) = phi_r(r; kappa) / r
-    //   ell(r; kappa) = Δphi(r; kappa) = phi_rr + (d-1) q.
-    // Both q and ell scale with exponent delta + 2, so
-    //   q_psi       = (delta + 2) q + r q_r
-    //   q_psipsi    = (delta + 2)^2 q + (2 delta + 5) r q_r + r^2 q_rr
-    // and identically for ell.
-    //
-    // Once {phi, q, ell} and their psi derivatives are known, the collocation
-    // operators follow exactly:
-    //   D0[k,j]         = phi(r_kj)
-    //   D1[(k,a), j]    = q(r_kj) * (x_{k,a} - c_{j,a})
-    //   D2[k,j]         = ell(r_kj)
-    // and the penalty Hessians come from the Gram identities
-    //   S_psi     = D_psi^T D + D^T D_psi
-    //   S_psipsi  = D_psipsi^T D + 2 D_psi^T D_psi + D^T D_psipsi.
-    //
-    // This helper computes exactly that minimal scalar core:
-    //   phi, q = phi_r / r, ell = Δphi
-    // together with their first and second psi derivatives.
-    //
-    // Representation note:
-    //   When p > 0 the Duchon kernel is only conditionally positive definite, so
-    //   the spatial kernel is canonical only up to polynomial additions. The
-    //   formulas in this helper are therefore tied to the specific representative
-    //   encoded by the partial-fraction construction and the collision rules used
-    //   below. The operator penalties, exact psi derivatives, and center-collision
-    //   limits all have to use that same representative or the resulting penalty
-    //   geometry will drift across code paths.
-    let delta = duchon_scaling_exponent(p_order, s_order, k_dim);
+) -> Result<DuchonRadialCoreValueJet, BasisError> {
     let jets = duchon_radial_jets(r, length_scale, p_order, s_order, k_dim, coeffs)?;
-    let phi = jets.phi;
-    let (phi_psi, phi_psi_psi) =
-        scaled_log_kappa_derivatives(phi, jets.phi_r, jets.phi_rr, delta, r);
-    if r > 1e-10 {
-        assert!(
-            ((delta * phi + r * jets.phi_r) - phi_psi).abs() < 1e-7_f64.max(1e-7_f64 * phi.abs())
-        );
-        return Ok(DuchonRadialCore {
-            phi: PsiTriplet {
-                value: phi,
-                psi: phi_psi,
-                psi_psi: phi_psi_psi,
-            },
-        });
-    }
-
-    // Continuous center-collision extension for the scalar operator core:
-    //   q(0; kappa) = phi_rr(0; kappa)
-    //   L(0; kappa) = d * phi_rr(0; kappa).
-    //
-    // The value and psi derivatives are extracted from the same Taylor
-    // coefficient of the assembled partial-fraction kernel. In even dimensions
-    // this preserves the log-Riesz finite-part constants, so the collision
-    // derivative is not the naive `(delta + 2) * phi_rr` scaling shortcut.
-    Ok(DuchonRadialCore {
-        phi: PsiTriplet {
-            value: phi,
-            psi: phi_psi,
-            psi_psi: phi_psi_psi,
-        },
+    Ok(DuchonRadialCoreValueJet {
+        value: jets.phi,
+        first: jets.phi_r,
+        second: jets.phi_rr,
+        exponent: duchon_scaling_exponent(p_order, s_order, k_dim),
     })
 }
 
@@ -1316,6 +1411,156 @@ pub fn build_duchon_basis_log_kappa_derivativeswithworkspace(
             .map(|points| points.view()),
         workspace,
     )
+}
+
+/// Per-axis ψ derivatives of a hybrid Duchon basis — the anisotropic sibling of
+/// [`build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace`]
+/// (gam#2735).
+///
+/// The design half is the family-agnostic
+/// `build_aniso_design_psi_derivatives_shared`, which already handles
+/// `RadialScalarKind::Duchon` including its `δ/d` prefactor share; the penalty
+/// half is the `_in_directions` entries, called once with `[Axis(0) … Axis(d−1)]`
+/// so the whole per-axis surface costs one pass over the pairs.
+///
+/// Callers must have cleared [`crate::basis::duchon_spec_supports_axis_psi`]
+/// first: this refuses rather than silently degrading, because a per-axis
+/// coordinate whose derivative came from the isotropic route would be a
+/// value/gradient desync rather than an approximation.
+pub fn build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspace(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    centers: ArrayView2<'_, f64>,
+    identifiability_transform: Option<&Array2<f64>>,
+    operator_collocation_points: Option<ArrayView2<'_, f64>>,
+    workspace: &mut BasisWorkspace,
+) -> Result<AnisoBasisPsiDerivatives, BasisError> {
+    let dim = data.ncols();
+    if !crate::basis::duchon_spec_supports_axis_psi(spec, dim) {
+        crate::bail_invalid_basis!(
+            "Duchon per-axis ψ derivatives requested for a spec whose per-axis surface is not \
+             derived (dim={dim}, length_scale={:?}, periodic={}, power={})",
+            spec.length_scale,
+            spec.periodic.is_some(),
+            spec.power
+        );
+    }
+    let length_scale = spec.length_scale.expect("capability check requires a hybrid scale");
+    let eta = spec
+        .aniso_log_scales
+        .clone()
+        .expect("capability check requires resolved anisotropy");
+    let effective_nullspace_order = duchon_effective_nullspace_order(centers, spec.nullspace_order);
+    let p_order = duchon_p_from_nullspace_order(effective_nullspace_order);
+    let s_order = spec.power_as_usize();
+    let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
+    let z_kernel = duchon_frozen_radial_chart(
+        kernel_constraint_nullspace(centers, effective_nullspace_order, &mut workspace.cache)?,
+        spec,
+        "aniso design",
+    )?;
+    let poly_cols = polynomial_block_from_order(data, effective_nullspace_order).ncols();
+    let p_padded = z_kernel.ncols() + poly_cols;
+    if let Some(zf) = identifiability_transform
+        && p_padded != zf.nrows()
+    {
+        crate::bail_dim_basis!(
+            "Duchon identifiability transform mismatch in aniso design derivatives: local cols={}, transform rows={}",
+            p_padded,
+            zf.nrows()
+        );
+    }
+    let p_final = identifiability_transform
+        .map(|zf| zf.ncols())
+        .unwrap_or(p_padded);
+    let mut result = build_aniso_design_psi_derivatives_shared(
+        data,
+        centers,
+        &eta,
+        p_final,
+        Some(z_kernel),
+        identifiability_transform.cloned(),
+        poly_cols,
+        RadialScalarKind::Duchon {
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            coeffs,
+        },
+    )?;
+
+    let directions: Vec<DuchonPsiDirection> = (0..dim).map(DuchonPsiDirection::Axis).collect();
+    let native = crate::basis::build_duchon_native_penalty_psi_derivatives_in_directions(
+        centers,
+        spec,
+        identifiability_transform,
+        workspace,
+        &directions,
+    )?;
+    let operator = if duchon_operator_penalties_requested(&spec.operator_penalties) {
+        let Some(collocation_points) = operator_collocation_points else {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis operator penalty derivatives require realized collocation points"
+            );
+        };
+        crate::basis::build_duchon_operator_penalty_psi_derivatives_in_directions(
+            collocation_points,
+            centers,
+            spec,
+            identifiability_transform,
+            workspace,
+            &directions,
+        )?
+    } else {
+        vec![(Vec::new(), Vec::new(), Vec::new()); dim]
+    };
+
+    // Same order the isotropic bundle ships: native candidates then operator
+    // candidates, per axis. A mismatch here would misalign the ψ blocks against
+    // the realized penalty list, so it is asserted rather than assumed.
+    let mut penalties_first = Vec::with_capacity(dim);
+    let mut penalties_second_diag = Vec::with_capacity(dim);
+    let expected = native[0].0.len() + operator[0].0.len();
+    for axis in 0..dim {
+        if native[axis].0.len() != native[0].0.len()
+            || operator[axis].0.len() != operator[0].0.len()
+        {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis penalty source counts disagree across axes: axis {axis} has \
+                 {}+{} blocks, axis 0 has {}+{}",
+                native[axis].0.len(),
+                operator[axis].0.len(),
+                native[0].0.len(),
+                operator[0].0.len()
+            );
+        }
+        let mut first = Vec::with_capacity(expected);
+        let mut second = Vec::with_capacity(expected);
+        first.extend(native[axis].1.iter().cloned());
+        first.extend(operator[axis].1.iter().cloned());
+        second.extend(native[axis].2.iter().cloned());
+        second.extend(operator[axis].2.iter().cloned());
+        if first.len() != expected || second.len() != expected {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis penalty derivative count mismatch on axis {axis}: assembled \
+                 {}/{} against {expected} active sources",
+                first.len(),
+                second.len()
+            );
+        }
+        penalties_first.push(first);
+        penalties_second_diag.push(second);
+    }
+    result.penalties_first = penalties_first;
+    result.penalties_second_diag = penalties_second_diag;
+    // Cross-axis PENALTY seconds are not provided: the outer solve consumes the
+    // per-axis diagonal seconds plus the operator's exact cross-axis DESIGN
+    // seconds, and an absent provider is the shape the anisotropic Matérn's
+    // operator-triplet path already ships.
+    result.penalties_cross_pairs = Vec::new();
+    result.penalties_cross_provider = None;
+    Ok(result)
 }
 
 pub fn build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace(

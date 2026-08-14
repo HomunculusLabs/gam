@@ -137,6 +137,7 @@ fn build_problem(
     }
 
     let smooth = SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "f_bmi".to_string(),
         basis: SmoothBasisSpec::BSpline1D {
             feature_col: 0,

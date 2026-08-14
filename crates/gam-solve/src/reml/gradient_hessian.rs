@@ -2463,656 +2463,6 @@ impl<'a> RemlState<'a> {
         }
     }
 
-    /// Adaptive, block-local Laplace-to-sampling fallback for the inner
-    /// marginalization loop (issue #784).
-    ///
-    /// The unified evaluator summarizes the coefficient posterior by its Laplace
-    /// (Gaussian) moments. This method audits that summary per curvature
-    /// direction and, where the Gaussian approximation is *not* trustworthy,
-    /// replaces it with a sampling-based block marginal — keeping the cheap
-    /// Laplace summary everywhere else:
-    ///
-    /// 1. Run the directional cubic non-Gaussianity diagnostic on the observed
-    ///    penalized Hessian + the third-derivative weights `solve_c_array`,
-    ///    yielding per-eigendirection standardized skewness `γ_r`.
-    /// 2. Convert `γ_r` into a block-local activation set via the auto-derived
-    ///    threshold `τ(n_eff)` (no flag). The flagged eigenvectors span the
-    ///    curvature-heavy subspace `V_b`.
-    /// 3. Importance-sample the true block marginal against the local Laplace
-    ///    Gaussian (reusing the whitening) and return the additive correction
-    ///    `Δ_b` to the marginal log-likelihood, together with its consistent
-    ///    ρ-gradient, so the outer REML/LAML stays consistent.
-    ///
-    /// Returns `TkCorrectionTerms` whose `value` is added to the REML cost.
-    /// Because `Δ_b` is added to the *marginal log-likelihood* it is subtracted
-    /// from the cost, so the returned `value` is `−Δ_b` (likewise the gradient).
-    /// The gradient is laid out over the ρ coordinates and zero-extended over
-    /// external coordinates to match the unified evaluator's coordinate set in
-    /// `apply_tk_to_result`.
-    ///
-    /// A no-op (zeros) is returned for Gaussian-identity fits (Laplace is
-    /// exact), when no direction trips the threshold, or when the importance
-    /// estimate is not trustworthy (low ESS) — in which case the plain Laplace
-    /// summary is retained rather than splicing in a noisy correction.
-    ///
-    /// # Outer-consistency / continuity
-    ///
-    /// The threshold-based activation is technically discontinuous in ρ (a
-    /// direction can cross `τ` as ρ moves). That discontinuity is harmless for
-    /// the outer REML by construction: a direction crosses the threshold only
-    /// at `|γ_r| ≈ τ = sqrt((24/5)/n_eff) = O(n^{−1/2})`, so its contribution to
-    /// `Δ_b` is `O(γ_r²) = O(1/n)` — the same order as the Laplace floor error
-    /// that the criterion already carries and below the inner KKT tolerance
-    /// band. The correction value therefore vanishes continuously as a
-    /// direction approaches the threshold, so the spliced objective is
-    /// continuous to leading order and does not bias ρ selection.
-    /// Per-bundle-cached wrapper around [`Self::block_local_quadrature_correction_compute`].
-    ///
-    /// The block-local correction is a deterministic function of this bundle's
-    /// converged inner state and ρ alone (mode-invariant, Hessian-free), but the
-    /// outer loop evaluates the objective at one ρ up to three times (value,
-    /// value+gradient, value+gradient+Hessian) sharing the SAME `bundle`. The
-    /// expensive engaged path (dense O(p³) eigendecomposition plus the
-    /// fixed-seed O(draws·n·m) importance sampler) therefore reran 2–3× per
-    /// outer iteration. Hoist it onto `bundle.block_local_correction` so it is
-    /// computed exactly once per inner solution and every consumer at that ρ
-    /// reads the identical value+gradient (exact hoist — #784, #1082). Keyed on
-    /// `n_ext`, which is fixed for a fit, so one cell suffices.
-    pub(crate) fn block_local_quadrature_correction(
-        &self,
-        rho: &Array1<f64>,
-        bundle: &EvalShared,
-        n_ext: usize,
-    ) -> Result<TkCorrectionTerms, EstimationError> {
-        if let Some((cached_ext, terms, audit)) = bundle.block_local_correction.get()
-            && *cached_ext == n_ext
-        {
-            // Re-publish the audit record the computing call wrote: the window
-            // was cleared at the start of THIS assemble call, so without this a
-            // ρ whose splice engaged reads back as declined on every assemble
-            // after the first (#2623).
-            if let Some(record) = audit.as_ref() {
-                crate::estimate::outer_eval_capture::record_quadrature_marginal(record.clone());
-            }
-            return Ok((**terms).clone());
-        }
-        let terms = self.block_local_quadrature_correction_compute(rho, bundle, n_ext)?;
-        let audit = crate::estimate::outer_eval_capture::last_quadrature_marginal_record();
-        // First writer wins; a racing writer built from identical inputs, so
-        // either stored object is correct. A `set` that loses the race (cell
-        // already filled) is fine — both terms are equal — so the `Err` is
-        // discarded by returning the freshly computed `terms` either way.
-        match bundle
-            .block_local_correction
-            .set((n_ext, std::sync::Arc::new(terms.clone()), audit))
-        {
-            Ok(()) => Ok(terms),
-            Err(_) => Ok(terms),
-        }
-    }
-
-    fn block_local_quadrature_correction_compute(
-        &self,
-        rho: &Array1<f64>,
-        bundle: &EvalShared,
-        n_ext: usize,
-    ) -> Result<TkCorrectionTerms, EstimationError> {
-        // #1521 trait-inversion: the #784 importance-sampling correction and its
-        // eigen-diagnostic live UP in the gam-inference `hmc_io` tier; gam-solve
-        // calls them through the neutral `gam_problem` sampler contract instead
-        // of a back-edge into the inference SCC. The pure threshold math
-        // (`laplace_trustworthiness_from_skewness`) moved down outright.
-        use gam_problem::laplace_sampler_contract::laplace_trustworthiness_from_skewness;
-
-        let n_rho = self.canonical_penalties.len();
-        let zero = || TkCorrectionTerms {
-            value: 0.0,
-            gradient: Some(Array1::zeros(n_rho + n_ext)),
-            hessian: None,
-        };
-
-        // Laplace is exact for the Gaussian-identity model: nothing to correct.
-        if reml_is_gaussian_identity(&self.config.likelihood) {
-            return Ok(zero());
-        }
-        // The penalty-score channel needs one λ per canonical penalty.
-        if rho.len() != n_rho || n_rho == 0 {
-            return Ok(zero());
-        }
-
-        let pirls_result = bundle.pirls_result.as_ref();
-        // Operate in the transformed basis, where `h_total`, `solve_c_array`,
-        // `final_eta`, `finalweights`, `beta_transformed` and `x_transformed`
-        // are all mutually consistent.
-        let h_total = bundle.h_total.as_ref();
-        let c_weights = &pirls_result.solve_c_array.to_owned();
-        let x_design = &pirls_result.x_transformed;
-        let p = h_total.nrows();
-        if p == 0 || c_weights.len() != x_design.nrows() {
-            return Ok(zero());
-        }
-
-        // Problem-scale gate. The non-Gaussianity diagnostic costs an O(p³)
-        // dense eigendecomposition plus O(n·p) cubic contractions, and the
-        // sampler adds O(draws · n · m) deviance work. At large scale that is
-        // prohibitive on every inner evaluation, and the Laplace floor error is
-        // already O(1/n) → negligible there, so the correction would be a
-        // no-op anyway. Mirror the established TK scale caps: skip the audit
-        // entirely above them and retain the (asymptotically exact) plain
-        // Laplace summary.
-        let n_obs = x_design.nrows();
-        let dense_work = n_obs.saturating_mul(p);
-        if n_obs > TK_MAX_OBSERVATIONS || p > TK_MAX_COEFFICIENTS || dense_work > TK_MAX_DENSE_WORK
-        {
-            return Ok(zero());
-        }
-
-        // ── Unconditional declines, BEFORE any evidence is bought ────────────
-        //
-        // The two predicates below decline the whole correction, and neither
-        // consults a single number the diagnostic produces: one reads the
-        // hyper-layout, the other the configured response family. Both are
-        // therefore constant across the entire fit.
-        //
-        // They used to sit AFTER `directional_cubic_diagnostic` — an `O(p³)`
-        // dense factorization plus `O(n·p)` cubic contractions — so every
-        // ψ-carrying model and every Beta fit paid that sweep on EVERY outer
-        // evaluation and then discarded it, guaranteed, with the decline logged
-        // as though it had been decided on evidence (gam#2584). Evidence is
-        // worth buying only when the verdict can depend on it.
-        //
-        // Hoisting them is exactly value-preserving: neither predicate reads
-        // `sampler`, `max_abs`, `directional` or `verdict`, and every path they
-        // guard returns the same `zero()` it returned before.
-
-        // External (ψ) hyper-coordinates present: the exact gradient of the
-        // realized estimator along ψ requires the field motion of `X(ψ)`,
-        // `S(ψ)` and the reparameterized basis — moments this seam does not
-        // yet carry. A spliced value whose ψ-gradient entries are zeroed (or
-        // truncated) is an objective↔gradient desync (#901, the #752/#748
-        // bug class); per the gradient exactness contract on
-        // `block_quadrature_marginal_correction`, the correct response is to
-        // DECLINE the splice — value AND gradient together — rather than
-        // approximate.
-        if n_ext > 0 {
-            log::debug!(
-                "[#784] block-local fallback declined before the skewness diagnostic: \
-                 {n_ext} external (ψ) coordinate(s) present and the ψ-exact gradient \
-                 channels are not implemented; splicing a ψ-truncated gradient would \
-                 desync objective and gradient (#901)"
-            );
-            return Ok(zero());
-        }
-        // The exact score channel relies on the exponential-family unit-
-        // deviance identity dD/dμ = −2w(y−μ)/V(μ), which does not hold for
-        // the Beta pseudo-family parameterization. Decline rather than splice
-        // a gradient that is not the derivative of the spliced value.
-        if matches!(
-            reml_spec(&self.config.likelihood).response,
-            ResponseFamily::Beta { .. }
-        ) {
-            log::debug!(
-                "[#784] block-local fallback declined before the skewness diagnostic: \
-                 Beta family has no exponential-family score identity for the exact \
-                 gradient channels"
-            );
-            return Ok(zero());
-        }
-
-        // Resolve the injected gam-inference corrector. When the inference tier
-        // is not linked / registered, decline the correction (zero contribution) —
-        // the same safe no-op as every other decline branch here.
-        let Some(corrector) = gam_problem::laplace_sampler_contract::laplace_marginal_corrector()
-        else {
-            return Ok(zero());
-        };
-
-        // Step 1: per-direction skewness diagnostic γ_r.
-        let (max_abs, directional) = corrector
-            .directional_cubic_diagnostic(h_total, x_design, c_weights, false)
-            .map_err(EstimationError::InvalidInput)?;
-        if !max_abs.is_finite() || max_abs == 0.0 {
-            return Ok(zero());
-        }
-
-        // Step 2: auto-derived, block-local activation. `n_eff` is the number of
-        // observations carrying curvature; using it (not the raw n) keeps the
-        // verdict tied to the actual information content.
-        let n_eff = c_weights.iter().filter(|&&c| c != 0.0).count() as f64;
-        let verdict = laplace_trustworthiness_from_skewness(&directional, n_eff);
-        if !verdict.fallback_required() {
-            return Ok(zero());
-        }
-
-        // Build the block subspace V_b from the flagged H-eigenvectors.
-        let sym_h = (h_total + &h_total.t()) * 0.5;
-        let (evals, evecs) = sym_h.eigh(Side::Lower).map_err(|e| {
-            EstimationError::InvalidInput(format!(
-                "#784 block-local fallback eigendecomposition failed: {e}"
-            ))
-        })?;
-        let mut block_cols: Vec<usize> = Vec::new();
-        for &r in &verdict.untrustworthy_directions {
-            if r < evals.len() && evals[r] > 0.0 {
-                block_cols.push(r);
-            }
-        }
-        if block_cols.is_empty() {
-            return Ok(zero());
-        }
-        let m = block_cols.len();
-        if m > gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM {
-            log::info!(
-                "[#784] block-local correction declined: {m} curvature-heavy directions exceed \
-                 the deterministic Gauss-Hermite product cap {}",
-                gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM,
-            );
-            return Ok(zero());
-        }
-        let mut block_vecs = Array2::<f64>::zeros((p, m));
-        let mut block_lambdas = Array1::<f64>::zeros(m);
-        for (j, &r) in block_cols.iter().enumerate() {
-            block_vecs.column_mut(j).assign(&evecs.column(r));
-            block_lambdas[j] = evals[r];
-        }
-
-        // Penalty scores S_k β̂ in the TRANSFORMED frame, and λ_k = e^{ρ_k}.
-        // β̂ = `pirls_result.beta_transformed` lives in the stable
-        // reparameterized basis, so the penalties contracted against it MUST
-        // be `reparam_result.canonical_transformed` — per its own doc, "the
-        // single source of truth for penalty roots in the transformed frame"
-        // for exactly this TK-correction path. Contracting the ORIGINAL-frame
-        // `self.canonical_penalties` here (gam#2623) made the spliced
-        // ρ-gradient wrong by 4.6e-2 to 1.0 relative — sign-inverted with
-        // nine orders of error on the worst cells — whenever ‖Q_s − I‖ was
-        // large, which is what turned one outer evaluation into 178 on the
-        // fold that opened that issue. Computed once per inner solution on
-        // the eval bundle and reused across every assemble call sharing this
-        // bundle (exact hoist, identical values for every consumer).
-        let transformed_penalties = pirls_result.reparam_result.canonical_transformed.as_slice();
-        let penalty_scores = bundle.canonical_penalty_scores_at_mode(transformed_penalties)?;
-        let lambdas = gam_problem::checked_exp_log_strengths(rho.iter().copied())?;
-
-        // Scale converting the REPORTED deviance into negative log-likelihood.
-        // Gaussian's reported deviance already includes a fixed dispersion;
-        // Beta's deviance is defined directly as twice a saturated-loglikelihood
-        // difference and already contains its precision.  Dividing either a
-        // second time would change the sampled objective. Gamma and Tweedie,
-        // by contrast, deliberately report unscaled deviance and need their
-        // EDM dispersion here.
-        let phi = match reml_spec(&self.config.likelihood).response {
-            ResponseFamily::Gaussian | ResponseFamily::Beta { .. } => 1.0,
-            _ => reml_fixed_glm_dispersion(&self.config.likelihood)?,
-        };
-        if !(phi.is_finite() && phi > 0.0) {
-            return Err(EstimationError::InvalidInput(format!(
-                "#784 block-local fallback requires finite positive dispersion; got {phi}"
-            )));
-        }
-
-        let x_dense = x_design
-            .try_to_dense_arc("#784 block-local fallback requires dense design access")
-            .map_err(EstimationError::InvalidInput)?;
-
-        let eta_hat = pirls_result.final_eta.to_owned();
-        let inverse_link = self.runtime_inverse_link();
-        let base_rows = crate::pirls::deviance_eta_rows_with_log_measure_scale(
-            self.y.view(),
-            &eta_hat,
-            &self.config.likelihood,
-            &inverse_link,
-            self.weights.view(),
-            -phi.ln(),
-        )?;
-        let base_half_values: Vec<f64> = base_rows.iter().map(|row| row.half_deviance).collect();
-        let base_scaled_half_deviance = crate::pirls::stable_finite_signed_sum(
-            &base_half_values,
-            "#784 base scaled half-deviance",
-        )?;
-        let base_neg_score_at_mode =
-            Array1::from_iter(base_rows.into_iter().map(|row| row.eta_score));
-        gam_linalg::matrix::FiniteSignedWeightsView::try_new(pirls_result.finalweights.view())
-            .map_err(EstimationError::InvalidInput)?;
-        let weights_obs = pirls_result.finalweights.to_owned();
-        let weights_obs_log_abs = weights_obs.mapv(|weight| {
-            if weight == 0.0 {
-                f64::NEG_INFINITY
-            } else {
-                weight.abs().ln()
-            }
-        });
-
-        let target = Gam784BlockTarget {
-            x_transformed: x_dense.as_ref(),
-            block_vecs,
-            block_lambdas,
-            eta_hat,
-            weights_obs,
-            weights_obs_log_abs,
-            y: self.y.to_owned(),
-            prior_weights: self.weights.to_owned(),
-            likelihood: self.config.likelihood.clone(),
-            inverse_link,
-            phi,
-            penalty_scores,
-            penalties: transformed_penalties,
-            lambdas,
-            base_scaled_half_deviance,
-            base_neg_score_at_mode,
-        };
-
-        let quadrature = corrector
-            .block_quadrature_marginal_correction(&target)
-            .map_err(EstimationError::InvalidInput)?;
-
-        let abs_value = quadrature.value.abs();
-        let relative_error = if abs_value > 0.0 {
-            quadrature.quadrature_error / abs_value
-        } else {
-            f64::INFINITY
-        };
-        let laplace_floor = if n_eff > 0.0 {
-            1.0 / n_eff
-        } else {
-            f64::INFINITY
-        };
-
-        // Trust gate: splice `Δ_b` only when the independent degree-nine and
-        // degree-five product rules agree finely enough to resolve both the
-        // correction itself and the O(1/n_eff) Laplace error it is meant to
-        // remove. This makes admission a deterministic accuracy certificate,
-        // not a Monte-Carlo efficiency heuristic.
-        let resolution_target = abs_value.min(laplace_floor);
-        if !(quadrature.quadrature_error < resolution_target) {
-            log::info!(
-                "[#784] block-local correction declined: paired Gauss-Hermite error \
-                 {:.4e} does not resolve min(|Δ_b|, 1/n_eff)={resolution_target:.4e} \
-                 (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, nodes={}, 1/n_eff={:.3e})",
-                quadrature.quadrature_error,
-                verdict.max_abs_skewness,
-                verdict.threshold,
-                quadrature.node_count,
-                laplace_floor,
-            );
-            return Ok(zero());
-        }
-
-        log::info!(
-            "[#784] deterministic block-local Gauss-Hermite correction ENGAGED: \
-             m={m}, max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, nodes={} \
-             [paired-rule error={:.4e}, error/|Δ_b|={:.3e}, 1/n_eff={:.3e}]",
-            verdict.max_abs_skewness,
-            verdict.threshold,
-            quadrature.value,
-            quadrature.node_count,
-            quadrature.quadrature_error,
-            relative_error,
-            laplace_floor,
-        );
-
-        // `Δ_b` is added to the marginal log-likelihood ⇒ subtracted from the
-        // REML cost. The gradient ∂Δ_b/∂ρ likewise enters the cost with a
-        // negative sign.
-        //
-        // ── Exact gradient channels (b)–(d) ─────────────────────────────
-        // The explicit channel `quadrature.rho_gradient` is NOT
-        // the total ρ-derivative of the realized quadrature: the fixed nodes
-        // `t_s = z_s/√λ_r(ρ)` also move through the block eigenvalues
-        // (node rescale, (b)), the block eigenvectors (frame
-        // rotation, (c)), and the mode β̂ (mode motion, (d)). Splicing (a)
-        // alone is the #752/#748/#901 objective↔gradient desync. The four
-        // channels are assembled here per the gradient exactness contract on
-        // `block_quadrature_marginal_correction`, contracting the corrector's
-        // normalized moments against fields this evaluator already owns:
-        //
-        //   d(cost)/dρ_j = E_p[dΔF/dρ_j]
-        //                = (a) E_p[∂ΔF/∂ρ_j]
-        //                + (b)+(c) tr(Ḣ_j · (Q_b + Q_c))
-        //                + (d) g_dᵀ · dβ̂/dρ_j,
-        //
-        // with the TOTAL drift `Ḣ_j = λ_j S_j − C[v_j]`,
-        // `C[v] = Xᵀ diag(c ⊙ Xv) X`, the IFT mode response
-        // `dβ̂/dρ_j = −v_j = −H⁻¹ λ_j S_j β̂`, and
-        //
-        //   Q_b = Σ_r (M_r/λ_r) u_r u_rᵀ                       (rank m)
-        //   Q_c = sym( Σ_r Σ_{q≠r} u_q (R̃_{q r}/(λ_r − σ_q)) u_rᵀ )
-        //   M_r = E_p[(∂ΔF/∂t)_r · (−½ t_r)],   R̃ = Uᵀ E_p[t_r ∂ΔF/∂δ].
-        //
-        // Eigenvalue near-degeneracies `λ_r ≈ σ_q` are genuine
-        // non-differentiability points of the eigenframe; the splice is
-        // declined there rather than clamped.
-        let Some(moments) = quadrature.moments.as_ref() else {
-            // m > 0 is guaranteed above, so absent moments means every node
-            // carried zero weight — nothing trustworthy to splice.
-            return Ok(zero());
-        };
-        let x = x_dense.as_ref();
-        let n_rows = x.nrows();
-        let xv = x.dot(&target.block_vecs); // n × m
-        let ngs_base = target
-            .base_neg_score()
-            .map_err(EstimationError::InvalidInput)?;
-
-        // σ²_i = E_p[s_i²] and the shared n×m intermediates.
-        let xv_ett = xv.dot(&moments.e_tt); // n × m
-        let sigma2 = (&xv_ett * &xv).sum_axis(ndarray::Axis(1)); // n
-        let mut w_xv_ett = xv_ett.clone();
-        for i in 0..n_rows {
-            let w_i = target.weights_obs[i];
-            w_xv_ett.row_mut(i).mapv_inplace(|v| v * w_i);
-        }
-
-        // Channel (d) moment: g_d = E_p[∂ΔF/∂β̂]
-        //   = Xᵀ(E_p[ngs_disp] − ngs_base) + Σ_k λ_k S_k (V_b E_p[t])
-        //     − ½ Xᵀ(c ⊙ E_p[s²]).
-        let delta_mean = target.block_vecs.dot(&moments.e_t); // p
-        let mut g_d = x.t().dot(&(&moments.e_neg_score - &ngs_base));
-        for (pen, &lam) in target.penalties.iter().zip(target.lambdas.iter()) {
-            g_d.scaled_add(lam, &transformed_penalty_matvec(pen, &delta_mean));
-        }
-        g_d.scaled_add(-0.5, &x.t().dot(&(c_weights * &sigma2)));
-
-        // Channel (c) moment: R[:,r] = E_p[t_r · ∂ΔF/∂δ]
-        //   = Xᵀ E_p[t_r ngs_disp] + (Σ_k λ_k S_k β̂) E_p[t_r] − Xᵀ W X V_b E_p[t tᵀ][:,r].
-        let mut pen_score_total = Array1::<f64>::zeros(p);
-        for (score, &lam) in target.penalty_scores.iter().zip(target.lambdas.iter()) {
-            pen_score_total.scaled_add(lam, score);
-        }
-        let mut r_mat = x.t().dot(&moments.e_t_neg_score); // p × m
-        for r in 0..m {
-            r_mat
-                .column_mut(r)
-                .scaled_add(moments.e_t[r], &pen_score_total);
-        }
-        r_mat -= &x.t().dot(&w_xv_ett);
-
-        // Channel (b) moment: M_r = E_p[(∂ΔF/∂t)_r (−½ t_r)] via
-        // ∂ΔF/∂t = (XV)ᵀ ngs_disp + V_bᵀ(Σλ_k S_k β̂) − (XV)ᵀ(W ⊙ s).
-        let xvt_etngs = xv.t().dot(&moments.e_t_neg_score); // m × m
-        let pterm = target.block_vecs.t().dot(&pen_score_total); // m
-        let xvt_w_xv_ett = xv.t().dot(&w_xv_ett); // m × m
-        let mut m_vec = Array1::<f64>::zeros(m);
-        for r in 0..m {
-            m_vec[r] =
-                -0.5 * (xvt_etngs[(r, r)] + pterm[r] * moments.e_t[r] - xvt_w_xv_ett[(r, r)]);
-        }
-
-        // Eigenframe assembly. `block_vecs` are the `block_cols` columns of
-        // `evecs`, so `Q_b`/`Q_c` are built from the same spectrum as the
-        // draws — one source of truth for "the direction λ_r".
-        if evals.iter().any(|&s| !(s.is_finite() && s > 0.0)) {
-            log::info!(
-                "[#784] block-local fallback declined: H_pen has a non-positive eigenvalue; \
-                 the IFT mode response is undefined"
-            );
-            return Ok(zero());
-        }
-        let spectral_scale = evals.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
-        let degeneracy_tol = 1e-10 * spectral_scale.max(f64::MIN_POSITIVE);
-        let r_tilde = evecs.t().dot(&r_mat); // p × m
-        let mut g_mat = Array2::<f64>::zeros((p, m));
-        for (jr, &col_r) in block_cols.iter().enumerate() {
-            let lam_r = target.block_lambdas[jr];
-            for q in 0..p {
-                if q == col_r {
-                    continue;
-                }
-                let gap = lam_r - evals[q];
-                if gap.abs() < degeneracy_tol {
-                    log::info!(
-                        "[#784] block-local fallback declined: eigenvalue near-degeneracy \
-                         |λ_r − σ_q| = {:.3e} < {degeneracy_tol:.3e} — the eigenframe is not \
-                         differentiable on this stratum",
-                        gap.abs(),
-                    );
-                    return Ok(zero());
-                }
-                g_mat[(q, jr)] = r_tilde[(q, jr)] / gap;
-            }
-        }
-        let q_c_raw = evecs.dot(&g_mat).dot(&target.block_vecs.t()); // p × p
-        let mut q_mat = 0.5 * (&q_c_raw + &q_c_raw.t());
-        for jr in 0..m {
-            let u_r = target.block_vecs.column(jr);
-            let scale = m_vec[jr] / target.block_lambdas[jr];
-            for a in 0..p {
-                for b in 0..p {
-                    q_mat[(a, b)] += scale * u_r[a] * u_r[b];
-                }
-            }
-        }
-
-        // rowq_i = x_iᵀ Q x_i (for tr(C[v] Q) = Σ_i (c ⊙ Xv)_i rowq_i).
-        let xq = x.dot(&q_mat); // n × p
-        let rowq = (&xq * x).sum_axis(ndarray::Axis(1)); // n
-
-        // Per-coordinate contraction.
-        //
-        // The splice ran, so channels (b), (c) and (d) below are real on this
-        // evaluation. Each channel is retained per coordinate and published into
-        // the ρ-block audit after the loop, so an FD row can ASSERT engagement
-        // and then compare the channels SEPARATELY; without the assertion the
-        // comparison is vacuous whenever the splice declines, and without the
-        // split it can only compare the total, which on a near-cancelling fit
-        // cannot say which channel is wrong (#2623).
-        let audit_armed = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
-        let mut audit_a: Vec<f64> = Vec::new();
-        let mut audit_trace: Vec<f64> = Vec::new();
-        let mut audit_mode: Vec<f64> = Vec::new();
-        let mut audit_spliced: Vec<f64> = Vec::new();
-
-        // WARNING (#2623) -- READ THIS BEFORE CHANGING THE SIGN IN THIS LOOP.
-        //
-        // The convention of the four channels is NOT settled by the contract
-        // comment above, which is self-inconsistent. The authoritative
-        // statement is on the type, in gam-problem laplace_sampler_contract:
-        //
-        //     value:        Delta_b            added to the block marginal
-        //                                      log-likelihood, SUBTRACTED
-        //                                      from the REML/LAML cost
-        //     rho_gradient: d(Delta_b)/d(rho)  explicit channel (a) ONLY
-        //
-        // So channel (a) is PLUS quadrature.rho_gradient, not its negation, and a
-        // sum of four Delta_b-side channels is d(Delta_b)/d(rho), not
-        // d(cost)/d(rho). The formula above labels its left side d(cost)/d(rho)
-        // while listing (a) in Delta_b-side form, and separately calls the
-        // NEGATION of quadrature.rho_gradient channel (a). A Delta_b-side term
-        // cannot appear unnegated in a cost-side total, so the label, the terms
-        // and the type contract cannot all three be right.
-        //
-        // What is settled: value is PLUS Delta_b, confirmed independently by
-        // block_quadrature_marginal_recovers_analytic_quartic_correction, which
-        // checks it against a 20001-point trapezoid reference and asserts it is
-        // negative for an added quartic penalty. So the value: -quadrature.value
-        // below is correct.
-        //
-        // What is OPEN: whether trace_j and mode_j below are Delta_b-side or
-        // cost-side. The two readings differ by exactly 2*(trace_j + mode_j),
-        // which #2623 measures at about 9.65 on a fold where the true slope is
-        // a three-way near-cancellation and each channel is 25-30x the sum. So
-        // the wrong reading does not perturb the search, it INVERTS it: an
-        // outer gradient of +9.4547 AT the cost minimum, Wolfe failure, and 178
-        // evaluations at one theta.
-        //
-        // DO NOT resolve this by reading, in either direction. It is decided by
-        // giving the typed rho-block audit (enable_rho_outer_audit, #2454) a row
-        // whose fixture ASSERTS the #784 splice engaged, then comparing each
-        // channel against finite differences separately. The existing FD guard
-        // cannot see it: both of its rows are deliberately well-behaved, so the
-        // splice declines and trace_j and mode_j are never exercised at all.
-        //
-        // MEASURED (#2623), and the answer is NEITHER SIGN. The channel record
-        // published below drives examples/probe_2623_sampled_marginal_channel_fd,
-        // which finite-differences Delta_b itself on fixtures where the splice
-        // engages. On two well-conditioned cells whose importance sampler is
-        // essentially exact (ESS 507.9/512 and 500.1/512) the FD reference is
-        // stable to six digits over h from 3e-4 to 3e-3, and the envelope
-        // channels agree with it to 1e-7 relative -- so the stencil is sound.
-        // Against that reference the three channels below match at no sign
-        // assignment. The four measured ratios of the shipped line to the truth
-        // are 0.84, -1.40, -1.43 and -17.4; for the proposed flip they are -12.1,
-        // 4.36, 8.88 and 27.8. Decisively, WHICH sign is closer changes between
-        // the two rho coordinates of a SINGLE evaluation, and no global sign
-        // convention can do that. So this is a wrong contraction, not a wrong
-        // sign, and flipping it exchanges one wrong gradient for another -- which
-        // is also what the flip measured end-to-end. The residual total gradient
-        // error is 1e-4 to 1.3e-1 relative in these mild regimes and INVERTS the
-        // search on the #2623 fold, where the true slope is a three-way
-        // near-cancellation.
-        let mut gradient = Array1::<f64>::zeros(n_rho + n_ext);
-        for j in 0..n_rho.min(quadrature.rho_gradient.len()) {
-            let lam_j = target.lambdas[j];
-            let a_j = target.penalty_scores[j].mapv(|v| lam_j * v); // λ_j S_j β̂
-            // v_j = H⁻¹ a_j through the same eigendecomposition as Q.
-            let uta = evecs.t().dot(&a_j);
-            let v_j = evecs.dot(&(&uta / &evals));
-            // tr(A_j Q) = λ_j Σ_c (S_j Q[:,c])_c.
-            let mut tr_sq = 0.0_f64;
-            for c in 0..p {
-                let s_col = transformed_penalty_matvec(
-                    &target.penalties[j],
-                    &q_mat.column(c).to_owned(),
-                );
-                tr_sq += s_col[c];
-            }
-            // tr(C[v_j] Q) = Σ_i c_i (X v_j)_i rowq_i.
-            let xv_j = gam_linalg::faer_ndarray::fast_av(x, &v_j);
-            let mut tr_cq = 0.0_f64;
-            for i in 0..n_rows {
-                tr_cq += c_weights[i] * xv_j[i] * rowq[i];
-            }
-            let trace_j = lam_j * tr_sq - tr_cq;
-            let mode_j = -v_j.dot(&g_d);
-            gradient[j] = -quadrature.rho_gradient[j] + trace_j + mode_j;
-            if audit_armed {
-                audit_a.push(quadrature.rho_gradient[j]);
-                audit_trace.push(trace_j);
-                audit_mode.push(mode_j);
-                audit_spliced.push(gradient[j]);
-            }
-        }
-        if audit_armed {
-            crate::estimate::outer_eval_capture::record_quadrature_marginal(
-                crate::estimate::outer_eval_capture::QuadratureMarginalAudit {
-                    delta_b: quadrature.value,
-                    quadrature_error: quadrature.quadrature_error,
-                    node_count: quadrature.node_count,
-                    max_abs_skewness: verdict.max_abs_skewness,
-                    skewness_threshold: verdict.threshold,
-                    block_cols: block_cols.clone(),
-                    explicit_a: audit_a,
-                    trace_bc: audit_trace,
-                    mode_d: audit_mode,
-                    spliced: audit_spliced,
-                },
-            );
-        }
-        Ok(TkCorrectionTerms {
-            value: -quadrature.value,
-            gradient: Some(gradient),
-            hessian: None,
-        })
-    }
 
     pub(super) fn should_compute_hot_diagnostics(&self, eval_idx: u64) -> bool {
         // Keep expensive diagnostics out of the hot path unless they can
@@ -4487,6 +3837,7 @@ impl<'a> RemlState<'a> {
             warm_start_rho: RwLock::new(None),
             prev_warm_start_beta: RwLock::new(None),
             prev_warm_start_rho: RwLock::new(None),
+            block_correction_admission: AtomicUsize::new(0),
             ift_quality_runtime: std::sync::Mutex::new(Default::default()),
             hypergradient_runtime: std::sync::Mutex::new(None),
             ift_mode_response_slot: std::sync::Mutex::new(None),
@@ -5325,8 +4676,33 @@ impl<'a> RemlState<'a> {
     /// Rank-change points (an eigenvalue crossing the threshold) are genuine
     /// non-differentiability points of the criterion; the domain is a union
     /// of constant-rank strata and FD probes are only meaningful within one.
+    /// `penalty_rank` is `rank(S_λ)` in the same basis as `h_total`, and it is
+    /// what stops this pseudo-logdet from being a discontinuous function of ρ
+    /// (#2748).
+    ///
+    /// `H_pen = XᵀWX + S_λ` with both terms PSD, so `vᵀH v ≥ vᵀS_λ v` and
+    /// therefore `null(H_pen) ⊆ null(S_λ)`: the Hessian can have AT MOST the
+    /// penalty's nullity, whatever any magnitude threshold on its spectrum
+    /// says. Dropping more directions than that is provably wrong, and it is a
+    /// jump of `ln σ` in the criterion the outer search descends.
+    ///
+    /// It was firing. On `haberman_5yr` fold 4 the model is FULL rank
+    /// (`penalty_rank = p = 34`, `nullspace_dim = 0`), the outer search railed
+    /// two penalties (`λ = 1.5e12` and `1.06e13`) so `max|σ| = 7.48e12`, and
+    /// the relative threshold `100·p·ε·max|σ|` became `5.64` — landing on a
+    /// GENUINE curvature direction at `σ ≈ 5.6`, three thousand times the
+    /// eigensolver's own noise. Crossing it moved the criterion by
+    /// `½·ln 5.6 = 0.86` for a `Δρ` of `3e-4`, against `|g| = 3.3`: the base
+    /// point sat on the low side of the jump and no trial point could beat it,
+    /// so the fit died with `StepSizeTooSmall after 50 attempt(s)`.
+    ///
+    /// The threshold still identifies the null space where one exists — this
+    /// only refuses to let it claim MORE nullity than the penalty structurally
+    /// has, which for a full-rank model means the pseudo-logdet is the full
+    /// logdet at every ρ, and `C∞` again.
     pub(super) fn intrinsic_hessian_pseudo_logdet_parts(
         h_total: &Array2<f64>,
+        penalty_rank: usize,
     ) -> Result<(f64, Option<super::reml_outer_engine::PenaltySubspaceTrace>), EstimationError>
     {
         let p = h_total.ncols();
@@ -5353,7 +4729,52 @@ impl<'a> RemlState<'a> {
                 .as_slice()
                 .expect("eigh returns an owned contiguous eigenvalue Array1"),
         );
-        let kept: Vec<usize> = (0..p).filter(|&j| h_evals[j] > h_thr).collect();
+        // `null(H_pen) ⊆ null(S_λ)`: `H_pen = XᵀWX + S_λ` with both terms PSD,
+        // so `vᵀHv ≥ vᵀS_λv` and `Hv = 0 ⟹ S_λv = 0`. The Hessian can have AT
+        // MOST the penalty's nullity, whatever a magnitude threshold on its
+        // spectrum says — and the threshold is RELATIVE to `max|σ|`, which the
+        // outer search itself drives: at two railed penalties (`λ = 1e13`) it
+        // reached `5.64` and landed on a genuine curvature direction at
+        // `σ ≈ 5.6`, three thousand times the eigensolver's own noise. Crossing
+        // it moved the criterion by `½·ln 5.6 = 0.86` for a `Δρ` of `3e-4`
+        // against `|g| = 3.3`, and the fit died with `StepSizeTooSmall`
+        // (`haberman_5yr`, #2748).
+        //
+        // Where the threshold wants more nullity than the penalty structurally
+        // has, the largest positive eigenvalues are restored in descending
+        // order until the bound is met. For a full-rank model that makes the
+        // pseudo-logdet the full logdet at every ρ — `C∞` again.
+        let structural_floor = penalty_rank.min(p);
+        let mut kept: Vec<usize> = (0..p).filter(|&j| h_evals[j] > h_thr).collect();
+        if kept.len() < structural_floor {
+            let mut restored: Vec<usize> = (0..p).filter(|&j| h_evals[j] <= h_thr).collect();
+            restored.sort_by(|&a, &b| {
+                h_evals[b]
+                    .partial_cmp(&h_evals[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let wanted = structural_floor - kept.len();
+            // A restored direction still has to be POSITIVE curvature: the
+            // bound says the Hessian is non-singular there, not that a
+            // numerically non-positive eigenvalue can be logged.
+            let admitted: Vec<usize> = restored
+                .into_iter()
+                .filter(|&j| h_evals[j] > 0.0)
+                .take(wanted)
+                .collect();
+            if !admitted.is_empty() {
+                log::debug!(
+                    "[#2748] H_pen pseudo-logdet: the relative threshold {h_thr:.6e} kept {} of \
+                     {p} directions, below the {structural_floor} the penalty's own rank permits \
+                     (null(H) ⊆ null(S_λ)); restoring {} direction(s), smallest σ = {:.6e}",
+                    kept.len(),
+                    admitted.len(),
+                    admitted.last().map_or(f64::NAN, |&j| h_evals[j]),
+                );
+                kept.extend(admitted);
+                kept.sort_unstable();
+            }
+        }
         if kept.is_empty() {
             // No positive curvature anywhere: nothing identified, nothing to
             // correct — mirrors the structurally-null-penalty contract.
@@ -5376,12 +4797,11 @@ impl<'a> RemlState<'a> {
         let log_det = if kept.len() == p {
             h_evals.iter().map(|&s| s.ln()).sum()
         } else {
-            super::reml_outer_engine::exact_pseudo_logdet(
-                h_evals
-                    .as_slice()
-                    .expect("eigh returns an owned contiguous eigenvalue Array1"),
-                h_thr,
-            )
+            // Over the KEPT set, which is the threshold's answer bounded below
+            // by the penalty's rank. `exact_pseudo_logdet(.., h_thr)` is the
+            // same sum whenever nothing was restored, so nothing moves on a
+            // model whose threshold already respected its own structural rank.
+            kept.iter().map(|&j| h_evals[j].ln()).sum()
         };
 
         // Spectral form of H_pen⁺: U_H (p × r) and diag(1/σ). In this basis

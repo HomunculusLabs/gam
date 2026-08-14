@@ -1956,6 +1956,7 @@ pub(crate) fn smooth_term_primary_column(term: &SmoothTermSpec) -> Option<usize>
         SmoothBasisSpec::ByVariable { inner, .. }
         | SmoothBasisSpec::FactorSumToZero { inner, .. } => {
             smooth_term_primary_column(&SmoothTermSpec {
+                frozen_parametric_residualization: None,
                 name: term.name.clone(),
                 basis: (**inner).clone(),
                 shape: term.shape,
@@ -1963,6 +1964,7 @@ pub(crate) fn smooth_term_primary_column(term: &SmoothTermSpec) -> Option<usize>
             })
         }
         SmoothBasisSpec::BySmooth { smooth, .. } => smooth_term_primary_column(&SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: term.name.clone(),
             basis: (**smooth).clone(),
             shape: term.shape,

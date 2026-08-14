@@ -349,18 +349,70 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             // it is the difference between pricing `λ̂` as chosen and pricing it
             // as given, and a model shape that cannot reach it silently gets
             // the reference this issue measured at `size@.05 = 0.0962`.
-            let replay = p.selection.as_ref().unwrap_or_else(|| {
+            let replay = p.selection.replay().unwrap_or_else(|| {
                 panic!(
                     "{formula} [{family}] amplitude={amplitude}: no selection replay on a \
-                     penalized smooth whose λ̂ the outer search chose. Provenance: {p:?}"
+                     penalized smooth whose λ̂ the outer search chose — declined with \
+                     `{}`. Provenance: {p:?}",
+                    p.selection
+                        .decline()
+                        .map(|reason| reason.label())
+                        .unwrap_or("unreported")
                 )
             });
             assert!(
                 !replay.generalized.is_empty()
-                    && replay.generalized.iter().all(|v| v.is_finite() && *v >= 0.0),
+                    && replay
+                        .generalized
+                        .iter()
+                        .all(|v| v.is_finite() && *v >= 0.0),
                 "{formula} [{family}]: the replay's generalized spectrum is not a \
                  spectrum: {:?}",
                 replay.generalized
+            );
+
+            // THE REPLAY'S CONDITIONAL ARM MUST BE THE LAW WHOSE TAIL IT IS
+            // ADDED TO. The published p-value is
+            // `p_conditional + [P̂(W_sel ≥ w) − P̂(W_cond ≥ w)]`, a control
+            // variate — and a control variate is only a control variate if the
+            // subtracted term has the SAME law as the exactly-integrated one.
+            // The two are assembled by different routes (`[H⁻¹]_jj S_jj` for the
+            // published spectrum, `eig(Ĩ⁻¹ S(λ̂))` whitened for the replay), so
+            // the identity `w_j = 2f̄_j − f̄_j²`, `f̄_j = 1/(1 + ν_j)` is checked
+            // rather than assumed. A mismatch here does not show up as a wrong
+            // p-value on any single fit; it shows up as a shift measured against
+            // the wrong baseline, which is invisible everywhere except in the
+            // size.
+            let from_generalized: f64 = replay
+                .generalized
+                .iter()
+                .map(|nu| {
+                    let shrinkage = 1.0 / (1.0 + nu);
+                    2.0 * shrinkage - shrinkage * shrinkage
+                })
+                .sum();
+            assert!(
+                (from_generalized - p.mean).abs() <= 1e-8 * p.mean.abs().max(1.0),
+                "{formula} [{family}] amplitude={amplitude}: the replay's own null law \
+                 has mean {from_generalized} while the reference whose tail its shift is \
+                 added to has mean {}. The control variate is then a difference of two \
+                 DIFFERENT laws. generalized = {:?}, weights = {:?}",
+                p.mean,
+                replay.generalized,
+                p.weights
+            );
+            // The replay may carry FEWER directions than the reference, and that
+            // is not a discrepancy: a direction whose data share `1 − p` is at
+            // the decomposition's noise floor cannot be whitened, and it carries
+            // `w = 1 − p² = 0` — no mass in either law. The identity above is
+            // what says so, and it is the claim that matters; this only pins
+            // that the replay never invents directions.
+            assert!(
+                replay.generalized.len() <= p.weights.len(),
+                "{formula} [{family}] amplitude={amplitude}: the replay carries {} \
+                 directions against the reference's {}",
+                replay.generalized.len(),
+                p.weights.len()
             );
 
             // The CONDITIONAL half of the published p-value is the exact tail of
@@ -369,10 +421,8 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             // `tail_probability_with_bound`), so the comparison is against
             // `gam-math`'s strict default THROUGH the published bound: the bound
             // has to be honest, not decorative.
-            let strict = gam_math::probability::weighted_chi_square_sf(
-                &p.weights,
-                r.statistic_corrected,
-            );
+            let strict =
+                gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_corrected);
             assert!(
                 (r.p_value_conditional - strict).abs() <= r.p_value_bound + 1e-12,
                 "{formula} [{family}]: the published conditional p {} differs from the \
@@ -393,7 +443,10 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             checked += 1;
         }
     }
-    assert!(checked >= 10, "the sweep must actually run: {checked} cells");
+    assert!(
+        checked >= 10,
+        "the sweep must actually run: {checked} cells"
+    );
     // The replay is not decoration: somewhere in this sweep it has to have moved
     // a published p-value by more than its own Monte-Carlo noise. A replay that
     // never moves anything is the conditional reference with extra steps.
@@ -437,8 +490,7 @@ fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
     for multiple in [1.0_f64, 4.0, 16.0] {
         let statistic = multiple * p.mean;
         let exact = gam_math::probability::weighted_chi_square_sf(&p.weights, statistic);
-        let summary =
-            gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
+        let summary = gam_math::probability::chi_square_sf(statistic / p.scale, p.chi_square_df);
         // The bar is the dust itself, not a tolerance. The only thing separating
         // this spectrum from a single weight — where the two references are
         // IDENTICAL — is `dust`, and the two laws place that mass differently
@@ -469,8 +521,7 @@ fn the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672() {
     for multiple in [2.0_f64, 4.0, 8.0] {
         let statistic = multiple * q.mean;
         let exact = gam_math::probability::weighted_chi_square_sf(&q.weights, statistic);
-        let summary =
-            gam_math::probability::chi_square_sf(statistic / q.scale, q.chi_square_df);
+        let summary = gam_math::probability::chi_square_sf(statistic / q.scale, q.chi_square_df);
         assert!(
             summary <= exact + 1e-12,
             "at W = {multiple}·Σw the two-moment summary ({summary}) reports a LARGER \

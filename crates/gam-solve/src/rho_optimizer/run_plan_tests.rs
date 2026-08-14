@@ -2656,10 +2656,36 @@ fn optimize_three_certify_four_exactly_once_at_mint_2359() {
     );
 }
 
-/// First-order stationarity is necessary but cannot mint through a failed
-/// fourth-order minimum audit.
+/// Order four is spent once per TERMINAL CERTIFICATION (#2359) — and the
+/// curvature it reports is priced against the criterion, not believed (#2612,
+/// #2748).
+///
+/// # What this test used to assert, and why that expectation was wrong
+///
+/// It asserted that the run REFUSES with `hessian_psd=NO`. Its mock reports
+/// `cost = 1 + theta^2`, whose second derivative is exactly `+2`, while
+/// declaring a Hessian of `[[-1.0]]` at order four. That Hessian is not the
+/// Hessian of that criterion, and #2612 made the certificate check: it steps
+/// the criterion along the reported negative eigenvector, finds no descent, and
+/// WITHDRAWS the curvature verdict. The test went red when that landed and
+/// stayed red, because the fixture's premise — "negative terminal curvature" —
+/// was never true of its own criterion.
+///
+/// #2748 turns that from an argument into a number. The adjudication's ladder
+/// measures the criterion's own curvature along the disputed direction:
+///
+/// ```text
+///     c_criterion = +2.000000e0     (exactly d²/dtheta² of `1 + theta^2`)
+///     analytic    = -1.000000e0
+///     ||dH||_2    =  3.000000e0     measured, not asserted
+/// ```
+///
+/// So the assertions below are the ones the fixture can actually support: the
+/// #2359 order-four economics, the #2641 provenance labelling (asserted on the
+/// PRODUCER rather than on a substring of a refusal that no longer happens),
+/// and the measurement that says why the curvature verdict was withdrawn.
 #[test]
-fn certify_four_refuses_stationary_negative_curvature_2359() {
+fn certify_four_spends_order_four_once_and_prices_the_curvature_against_the_criterion_2359() {
     let fourth_order_calls = Arc::new(AtomicUsize::new(0));
     let problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
@@ -2696,24 +2722,57 @@ fn certify_four_refuses_stationary_negative_curvature_2359() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
 
-    let message = problem
+    let result = problem
         .run(&mut obj, "certify-4 negative curvature")
-        .expect_err("negative terminal curvature must refuse the fit")
-        .to_string();
+        .expect(
+            "the declared negative curvature is not the criterion's, so the verdict is \
+             withdrawn rather than minted through (#2612)",
+        );
+
+    // #2641: the plan's provenance labels BFGS as SEARCH geometry, never as the
+    // terminal certificate's curvature source. Asserted on the producer, which
+    // is stronger than the substring of a refusal message the old form matched
+    // — and is reachable whether or not the fit refuses.
+    let provenance = format!("{}", result.plan_used);
     assert!(
-        message.contains("hessian_psd=NO")
-            && message.contains("curvature_source=terminal-analytic"),
-        "refusal must name the failed terminal analytic curvature audit: {message}"
+        provenance.contains("solver=Bfgs") && provenance.contains("search_hessian_source"),
+        "search provenance must label BfgsApprox as search geometry: {provenance}"
     );
     assert!(
-        message.contains("plan=solver=Bfgs, search_hessian_source=BfgsApprox"),
-        "search provenance must label BfgsApprox as search geometry, not as the \
-         terminal certificate's curvature source (#2641): {message}"
-    );
-    assert!(
-        !message.contains("plan=solver=Bfgs, hessian_source=BfgsApprox"),
+        !provenance.contains("solver=Bfgs, hessian_source="),
         "the ambiguous legacy label falsely made an exact terminal Hessian verdict \
-         look like a BFGS-approximation verdict (#2641): {message}"
+         look like a BFGS-approximation verdict (#2641): {provenance}"
+    );
+
+    // #2612/#2748: the curvature verdict was withdrawn, and the ladder says by
+    // how much the declared Hessian was wrong. `1 + theta^2` has second
+    // derivative exactly `2`, so this is a planted number, not a recorded one.
+    let certificate = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified run carries its certificate");
+    assert!(
+        matches!(
+            certificate.curvature,
+            crate::model_types::CurvatureEvidence::CriterionContradicted
+        ),
+        "a Hessian that disagrees with its own criterion must have its curvature verdict \
+         WITHDRAWN, not believed: {:?}",
+        certificate.curvature
+    );
+    let measured = result
+        .criterion_hessian_error
+        .as_ref()
+        .expect("the adjudication's ladder must have measured this criterion");
+    assert!(
+        (measured.ladder.curvature - 2.0).abs() <= 1.0e-9,
+        "the ladder must recover d²/dtheta² of `1 + theta^2`, which is exactly 2: got {:.6e}",
+        measured.ladder.curvature
+    );
+    assert!(
+        (measured.hessian_error_2norm() - 3.0).abs() <= 1.0e-9,
+        "the declared `-1` against a true `+2` is a measured ||dH||_2 of exactly 3: got {:.6e}",
+        measured.hessian_error_2norm()
     );
     // Order four is spent once per TERMINAL CERTIFICATION, not once per
     // multistart candidate — that is the economics #2359 exists to protect, and
@@ -2725,10 +2784,9 @@ fn certify_four_refuses_stationary_negative_curvature_2359() {
     // loop — which meant the #2357 interior strict-saddle escape was
     // unreachable for every analytic-Hessian objective. Now the refusal lands
     // where the escape lives, so a genuine saddle gets its bounded attempt to
-    // step below itself and re-certify there. This mock reports negative
-    // curvature at every point, so its escape cannot succeed and the run still
-    // refuses — after `OUTER_SADDLE_ESCAPE_BUDGET`-bounded extra certifications
-    // (measured: exactly one).
+    // step below itself and re-certify there. This mock's declared curvature is
+    // not its criterion's, so the adjudication withdraws it after one terminal
+    // certification rather than spending the escape budget on it.
     //
     // A regression that re-introduced per-candidate order four would scale with
     // the seed budget and blow this ceiling; a regression that dropped the mint
@@ -5835,7 +5893,7 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
 }
 
 #[test]
-fn run_indefinite_analytic_seed_stays_on_arc() {
+fn run_indefinite_analytic_seed_stays_on_arc_and_its_declared_curvature_is_measured() {
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.seed_budget = 1;
     let problem = OuterProblem::new(1)
@@ -5869,41 +5927,76 @@ fn run_indefinite_analytic_seed_stays_on_arc() {
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    // The seed is stationary (|g|=0) but sits on genuinely indefinite analytic
-    // curvature ([[-1.0]]) — a saddle/maximum, NOT an interior minimum. The ARC
-    // plan must REFUSE it (a certified optimum cannot waive negative curvature;
-    // see `curvature_not_refused`), returning typed non-convergence rather than
-    // minting.
+    // The seed is stationary (|g| = 0) and the objective DECLARES indefinite
+    // analytic curvature `[[-1.0]]` — but its criterion is `cost = 0` at every
+    // theta, whose second derivative is exactly ZERO. The declared Hessian is
+    // therefore not the Hessian of this criterion, and since #2612 the
+    // certificate checks rather than believes: it steps the criterion along the
+    // reported negative eigenvector, finds no descent anywhere in the claim's
+    // falsifiable range, and WITHDRAWS the curvature verdict.
     //
-    // `hessian_psd=NO` identifies the TERMINAL analytic mint audit, not the
-    // search geometry: a BFGS search intentionally reserves exact curvature for
-    // this same audit under optimize-3/certify-4 (#2359). Plan provenance now
-    // calls its field `search_hessian_source` so those two phases cannot be
-    // conflated again (#2641). This fixture stays on ARC because the capability
-    // planner selects ARC/Analytic and its fallback ladder has no BFGS demotion.
-    let err = problem
+    // #2748 makes that a number instead of an argument. The adjudication's
+    // ladder measures `c_criterion = 0` against the declared `-1`, i.e. a
+    // measured `||dH||_2` of exactly `1` — the whole of the claim. There is no
+    // saddle here; there is a mock whose two lanes describe different functions,
+    // which is the same class of fixture defect the sibling bimodal objective
+    // documents at length.
+    //
+    // What this test still pins, and what it was named for, is the PLAN: the
+    // capability planner selects ARC/Analytic for a declared dense Hessian and
+    // its fallback ladder has no BFGS demotion. That is now asserted directly on
+    // `plan_used` rather than inferred from a refusal string (#2641: the
+    // provenance field is `search_hessian_source`, i.e. SEARCH geometry, and
+    // must never be read as the terminal certificate's curvature source).
+    let result = problem
         .run(&mut obj, "indefinite seed geometry")
-        .expect_err(
-            "an indefinite analytic seed is a saddle: the second-order plan must refuse \
-             to certify it, not mint an optimum",
+        .expect(
+            "the declared curvature is not this criterion's, so the verdict is withdrawn \
+             rather than minted through (#2612)",
         );
-    let EstimationError::RemlDidNotConverge {
-        reason,
-        projected_grad_norm,
-        ..
-    } = err
-    else {
-        panic!("expected typed REML non-convergence carrying the certificate verdict, got {err}");
-    };
+    assert_eq!(
+        result.plan_used.solver,
+        Solver::Arc,
+        "a declared dense analytic Hessian must stay on ARC, with no lateral demote to BFGS"
+    );
+    assert_eq!(
+        result.plan_used.hessian_source,
+        HessianSource::Analytic,
+        "the ARC plan must consume the analytic Hessian it was planned for"
+    );
+    let certificate = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified run carries its certificate");
     assert!(
-        reason.contains("INDEFINITE CURVATURE AT INTERIOR OPTIMUM"),
-        "the refusal must be the analytic second-order curvature verdict (proving the run \
-         stayed on ARC/Analytic, not demoted to BFGS); got reason: {reason}"
+        matches!(
+            certificate.curvature,
+            crate::model_types::CurvatureEvidence::CriterionContradicted
+        ),
+        "the criterion contradicts the declared curvature, so the verdict is withdrawn: {:?}",
+        certificate.curvature
     );
     assert!(
-        projected_grad_norm.is_some_and(|value| value.abs() <= 1.0e-9),
-        "the refusal is a CURVATURE verdict at a stationary point, not a stationarity \
-         failure: the projected gradient must be ~0; got {projected_grad_norm:?}"
+        result
+            .final_grad_norm
+            .is_some_and(|value| value.abs() <= 1.0e-9),
+        "the point really is stationary, which is what makes this a CURVATURE question \
+         at all: {:?}",
+        result.final_grad_norm
+    );
+    let measured = result
+        .criterion_hessian_error
+        .as_ref()
+        .expect("the adjudication's ladder must have measured this criterion");
+    assert_eq!(
+        measured.ladder.curvature, 0.0,
+        "an exactly constant criterion has exactly zero curvature"
+    );
+    assert!(
+        (measured.hessian_error_2norm() - 1.0).abs() <= 1.0e-12,
+        "a declared `-1` against a true `0` is a measured ||dH||_2 of exactly 1 — the \
+         whole of the claim: got {:.6e}",
+        measured.hessian_error_2norm()
     );
 }
 

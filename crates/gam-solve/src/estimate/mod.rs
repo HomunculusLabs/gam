@@ -100,7 +100,8 @@ pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm
 pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
 pub use outer_eval_capture::{
     OuterEvalRecord, OuterGradientFdAtoms, OuterGradientFdDecomposition, OuterGradientFdRecord,
-    enable_outer_eval_capture, enable_outer_gradient_fd_capture, take_outer_eval_capture,
+    OuterGradientFdRhoBlock, enable_outer_eval_capture, enable_outer_gradient_fd_capture,
+    enable_outer_gradient_fd_capture_over_theta, take_outer_eval_capture,
     take_outer_gradient_fd_capture,
 };
 pub(crate) use penalty::{
@@ -140,6 +141,8 @@ mod gaussian_high_edf_scale_tests;
 mod gaussian_observation_interval_calibration_tests;
 #[cfg(test)]
 mod invert_regularized_rho_hessian_tests;
+#[cfg(test)]
+mod constrained_marginal_truncation_2705_tests;
 // Finite-difference debug probes on `ExternalJointHyperEvaluator`
 // (`debug_full_h`). These are `pub` inherent methods so the #1601-orphaned
 // design-assembly regression guards re-homed into gam-models (a separate crate)

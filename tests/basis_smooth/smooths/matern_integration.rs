@@ -54,6 +54,7 @@ fn matern_fit_term_collection_gaussian_simulated_10d() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_10d".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: (0..d).collect(),
@@ -153,6 +154,7 @@ fn matern_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regulari
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_10d".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: (0..d).collect(),
@@ -226,7 +228,13 @@ fn matern_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regulari
     assert!(diag.epsilon_g.is_finite() && diag.epsilon_g > 0.0);
     assert!(diag.epsilon_c.is_finite() && diag.epsilon_c > 0.0);
     assert_eq!(diag.maps.len(), 1);
-    assert!(fitted.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite());
+    assert!(
+        fitted
+            .fit
+            .reml_score()
+            .expect("the fit reports a REML/LAML criterion")
+            .is_finite()
+    );
 
     let pred_mean = fitted.design.design.to_dense().dot(&fitted.fit.beta) + &offset;
     assert!(pred_mean.iter().all(|v| v.is_finite()));
@@ -296,6 +304,7 @@ fn matern_3d_aniso_fits_successfully() {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "matern_3d_aniso".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: (0..d).collect(),

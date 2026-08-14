@@ -29,6 +29,7 @@ fn spec_with(strategy: CenterStrategy, dim: usize) -> TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
             name: "curv".to_string(),
             basis: SmoothBasisSpec::ConstantCurvature {
                 feature_cols: (0..dim).collect(),

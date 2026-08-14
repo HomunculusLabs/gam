@@ -117,6 +117,7 @@ fn local_synth_copd_like_duchon_rejects_inadmissible_explicit_power() {
     let pc_cols: Vec<usize> = (3..3 + NUM_PCS).collect();
 
     let duchon_term = SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "duchon_pcs".to_string(),
         basis: SmoothBasisSpec::Duchon {
             feature_cols: pc_cols.clone(),

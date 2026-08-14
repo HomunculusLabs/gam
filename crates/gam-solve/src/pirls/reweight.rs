@@ -14,7 +14,8 @@ use super::{
     PirlsStatus, SoftAcceptProgress, WorkingModel, WorkingModelIterationInfo,
     WorkingModelPirlsOptions, WorkingModelPirlsResult, WorkingState,
     add_scaled_diagonal_to_upper_sparse, commit_pending_arrow_latent,
-    compute_constraint_kkt_diagnostics, compute_lm_d2, constrained_stationarity_norm,
+    compute_constraint_kkt_diagnostics, compute_lm_d2, constraint_geometry_is_certified,
+    constrained_stationarity_norm,
     effective_kkt_tolerance, linear_constraints_from_lower_bounds, pirls_soft_acceptance,
     project_coefficients_to_lower_bounds, restore_pending_arrow_latent_if_needed,
     objective_curvature_for_direction, solve_direction_with_dense_factor,
@@ -242,6 +243,63 @@ pub(crate) fn constraint_kkt_admits_progress_exhausted_stall(
                 && kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
                 && kkt.dual_feasibility <= cleanliness_band
                 && kkt.complementarity <= cleanliness_band
+        }
+    }
+}
+
+/// Whether NO inequality is active at this iterate — the condition under which
+/// the plain coefficient-space Newton certificate (the exact decrement, and the
+/// undamped polish that pursues it) is exactly valid for a fit that carries a
+/// constraint system (#2705 group B).
+///
+/// With an empty active set every multiplier is zero, so
+/// `∇L − Aᵀλ = ∇L` and the constrained KKT system IS the unconstrained
+/// stationarity system. Nothing about the certificate has to be weakened for it;
+/// the only obligation the constraints still impose is that a step must not
+/// leave the feasible set, which the polish checks on each candidate.
+///
+/// Deliberately measured on `beta` and `gradient` rather than cached: the active
+/// set is a property of the iterate, and a polish step can change it.
+pub(crate) fn inequalities_are_all_inactive(
+    options: &WorkingModelPirlsOptions,
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+) -> bool {
+    let diagnostics = match options.linear_constraints.as_ref() {
+        Some(lin) => Some(compute_constraint_kkt_diagnostics(beta, gradient, lin)),
+        None => options.coefficient_lower_bounds.as_ref().and_then(|lb| {
+            linear_constraints_from_lower_bounds(lb)
+                .map(|lin| compute_constraint_kkt_diagnostics(beta, gradient, &lin))
+        }),
+    };
+    match diagnostics {
+        None => true,
+        Some(kkt) => kkt.n_active == 0,
+    }
+}
+
+/// Whether `beta` is primal-feasible for every inequality the fit carries, to
+/// the tolerance the active-set solver guarantees.
+///
+/// The undamped polish takes UNCONSTRAINED Newton steps, which is exact while
+/// the active set is empty but says nothing about where the step lands. This is
+/// the check that keeps an interior refinement interior (#2705 group B).
+pub(crate) fn iterate_is_primal_feasible(
+    options: &WorkingModelPirlsOptions,
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+) -> bool {
+    let diagnostics = match options.linear_constraints.as_ref() {
+        Some(lin) => Some(compute_constraint_kkt_diagnostics(beta, gradient, lin)),
+        None => options.coefficient_lower_bounds.as_ref().and_then(|lb| {
+            linear_constraints_from_lower_bounds(lb)
+                .map(|lin| compute_constraint_kkt_diagnostics(beta, gradient, &lin))
+        }),
+    };
+    match diagnostics {
+        None => true,
+        Some(kkt) => {
+            kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
         }
     }
 }
@@ -526,13 +584,27 @@ where
     let mut candidate_buf: Array1<f64> = Array1::zeros(beta.len());
     let kkt_tolerance = effective_kkt_tolerance(options);
     // Only this geometry admits a plain coefficient-space Newton certificate:
-    // active constraints carry multipliers, and Arrow-Schur has latent
-    // directions outside beta. Keep the in-loop plateau handoff and the
-    // post-loop polish on one predicate so neither can silently broaden the
-    // other's mathematical scope.
-    let undamped_polish_allowed = options.linear_constraints.is_none()
-        && options.coefficient_lower_bounds.is_none()
-        && options.arrow_schur.is_none();
+    // Arrow-Schur has latent directions outside beta, so the coefficient-space
+    // Newton system is not the objective's system at all. That is structural and
+    // cannot change during the solve.
+    //
+    // The geometric half of the old predicate — "the fit carries no
+    // inequalities" — was the wrong question (#2705 group B). The mathematical
+    // requirement, stated in the comment this replaces, is that no ACTIVE
+    // constraint carries a multiplier. A fit whose constraint system is present
+    // but whose ACTIVE SET IS EMPTY has no multipliers: its KKT system reduces
+    // exactly to the unconstrained one, and the coefficient-space certificate is
+    // valid verbatim. Gating on the system's existence denied both the exact
+    // decrement AND the undamped polish to every constrained fit, including the
+    // ones sitting strictly inside their cone — which is the entire population
+    // of `shape=monotone_increasing` on data that is already monotone. Measured
+    // on the #2601 fixture: `active=0/11`, stationarity `2.357428e-8` against a
+    // `6.244998e-9` bound, with the one machinery that closes that gap switched
+    // off because eleven inactive rows existed.
+    //
+    // The active set is a property of the ITERATE, so it is asked per use rather
+    // than once up front (`inequalities_are_all_inactive`).
+    let undamped_polish_allowed = options.arrow_schur.is_none();
     if let Some(adaptive) = options.adaptive_kkt_tolerance {
         log::info!(
             "[ADAPTIVE-KKT] outer_g_norm={:.3e} effective_tol={:.3e} floor={:.3e} ceiling={:.3e}",
@@ -1609,8 +1681,20 @@ where
                         // Newton decrement is an independent additional
                         // acceptance for ill-conditioned problems where ‖g‖
                         // is intrinsically large but H⁻¹g is already tiny.
-                        if final_state_ref.certifies_kkt(convergence_grad_norm, kkt_tolerance)
-                            || exact_nd_pass
+                        //
+                        // `convergence_grad_norm` is the GRADIENT-SPACE residual
+                        // only; the geometric constraint channels (primal
+                        // feasibility, complementarity) answer to their own
+                        // contracts and are required alongside it, never folded
+                        // into the same max (#2705 group B — see
+                        // `constrained_stationarity_norm`).
+                        if (final_state_ref.certifies_kkt(convergence_grad_norm, kkt_tolerance)
+                            || exact_nd_pass)
+                            && constraint_geometry_is_certified(
+                                beta.as_ref(),
+                                &final_state_ref.gradient,
+                                options.linear_constraints.as_ref(),
+                            )
                         {
                             status = PirlsStatus::Converged;
                             break 'pirls_loop;
@@ -1637,6 +1721,11 @@ where
                         if numerical_plateau
                             && exact_decrement_sq.is_some()
                             && undamped_polish_allowed
+                            && inequalities_are_all_inactive(
+                                options,
+                                beta.as_ref(),
+                                &final_state_ref.gradient,
+                            )
                         {
                             log::debug!(
                                 "[PIRLS] objective resolution exhausted at iter {iter}; \
@@ -2211,7 +2300,9 @@ where
     // Condition (3) makes the polish Pareto-safe: a fit that is already
     // machine-stationary (residual at round-off) sees no accepted step, so
     // existing golden values are untouched; only LM-ridge-biased iterates move.
-    if undamped_polish_allowed {
+    if undamped_polish_allowed
+        && inequalities_are_all_inactive(options, beta.as_ref(), &state.gradient)
+    {
         // #2273 state locality. The polish inverts the OBJECTIVE's curvature,
         // and the omitted part of it (`HΦ`) is read off the model, which holds
         // whatever point it evaluated LAST — after an LM rejection that is a
@@ -2297,6 +2388,25 @@ where
             else {
                 break;
             };
+            // The step is an UNCONSTRAINED Newton step, exact while the active
+            // set is empty (every multiplier is zero, so `∇L − Aᵀλ = ∇L`), but
+            // it says nothing about where it LANDS. A polished iterate outside
+            // the cone would be an infeasible model, so the step is refused
+            // rather than projected: a projection is not a Newton step and the
+            // strict-improvement guard below would be certifying a different
+            // point than the one it measured (#2705 group B).
+            if !iterate_is_primal_feasible(
+                options,
+                polished_beta.as_ref(),
+                &polished_state.gradient,
+            ) {
+                log::debug!(
+                    "[PIRLS] undamped Newton polish step {} would leave the feasible \
+                     set; stopping the refinement at the last feasible iterate",
+                    polish_iter + 1,
+                );
+                break;
+            }
             let g_norm_after = constrained_stationarity_norm(
                 &polished_state.gradient,
                 polished_beta.as_ref(),
@@ -2353,7 +2463,10 @@ where
     // contract: only a genuinely certified inner mode is recorded as
     // `Converged`.
     let can_still_certify = !status.is_converged() && status != PirlsStatus::Unstable;
-    let final_exact_decrement_sq = if can_still_certify && undamped_polish_allowed {
+    let final_exact_decrement_sq = if can_still_certify
+        && undamped_polish_allowed
+        && inequalities_are_all_inactive(options, beta.as_ref(), &state.gradient)
+    {
         let curvature_correction = model.objective_hessian_matrix_correction().cloned();
         model
             .exact_unconstrained_decrement_sq(&beta, &state)?
@@ -2391,13 +2504,21 @@ where
         // anything accepted here is also a candidate for early-exit, and
         // anything that meets the early criterion would have been rescued
         // here.
-        if state.certifies_kkt(final_projected_grad, kkt_tolerance) {
+        // The geometric constraint channels are a separate, always-required
+        // obligation; `final_projected_grad` is the gradient-space residual only
+        // (#2705 group B).
+        let geometry_certified = constraint_geometry_is_certified(
+            beta.as_ref(),
+            &state.gradient,
+            options.linear_constraints.as_ref(),
+        );
+        if geometry_certified && state.certifies_kkt(final_projected_grad, kkt_tolerance) {
             log::debug!(
                 "[PIRLS] final-state certification: strict KKT \
                  (‖g‖={final_projected_grad:.3e})",
             );
             status = PirlsStatus::Converged;
-        } else if final_exact_decrement_pass {
+        } else if geometry_certified && final_exact_decrement_pass {
             log::debug!(
                 "[PIRLS] final-state certification: exact decrement \
                  (‖g‖={final_projected_grad:.3e}, decrement_sq={:.3e})",
@@ -2634,6 +2755,7 @@ where
         last_step_halving,
         max_abs_eta,
         min_penalized_deviance,
+        final_kkt_tolerance: Some(kkt_tolerance),
         final_lm_lambda: lambda,
         final_accept_rho: last_iter_accept_rho,
         exported_laplace_curvature,

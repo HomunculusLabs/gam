@@ -124,6 +124,7 @@ fn smooth_term(basis: &str, n_pcs: usize, centers: usize) -> SmoothTermSpec {
         other => panic!("unknown basis {other} (this repro covers matern only)"),
     };
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: "geo".to_string(),
         basis: basis_spec,
         shape: ShapeConstraint::None,

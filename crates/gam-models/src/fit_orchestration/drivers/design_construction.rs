@@ -7915,12 +7915,27 @@ pub(crate) fn try_build_spatial_log_kappa_derivativeinfo_list(
                 out.extend(entries);
                 continue;
             } else {
+                // The enrollment predicate said `d` axes and the producer could
+                // not supply them. Falling back to the isotropic builder here
+                // would answer a `d`-coordinate question with one coordinate,
+                // so the whole list declines — and says which term did it,
+                // because the caller turns this into "spatial kappa
+                // optimization is unavailable for one or more eligible spatial
+                // terms", which names none of them.
+                log::warn!(
+                    "[spatial-kappa] term {term_idx}: enrolled for per-axis ψ but its per-axis \
+                     derivative producer declined; the joint κ route is unavailable for this fit"
+                );
                 return Ok(None);
             }
         }
         let Some(info) =
             try_build_spatial_term_log_kappa_derivativeinfo(data, resolvedspec, design, term_idx)?
         else {
+            log::warn!(
+                "[spatial-kappa] term {term_idx}: isotropic ψ derivative producer declined; the \
+                 joint κ route is unavailable for this fit"
+            );
             return Ok(None);
         };
         out.push(info);
@@ -7995,6 +8010,64 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             build_measure_jet_basis_psi_derivatives(x.view(), spec)
                 .map_err(EstimationError::from)?
         }
+        // gam#2735 — the hybrid Duchon's per-axis η, on the SAME frozen chart
+        // the isotropic arm replays (`try_build_spatial_term_log_kappa_derivative`
+        // does the identical `radial_reparam` restore for the same reason,
+        // #1355): centers, identifiability transform and collocation points all
+        // come from the realized design's metadata, so the ψ-jet differentiates
+        // exactly the design and penalties the criterion is built on.
+        SmoothBasisSpec::Duchon {
+            feature_cols,
+            spec,
+            input_scale,
+        } => {
+            let mut x = select_columns(data, feature_cols).map_err(EstimationError::from)?;
+            let mut spec_local = spec.clone();
+            if let Some(scale) = input_scale {
+                scale.standardize(&mut x);
+                spec_local.length_scale = spec.length_scale.map(|length| {
+                    scale
+                        .to_standardized_units(gam_terms::OriginalUnits::new(length))
+                        .standardized_value()
+                });
+            }
+            let BasisMetadata::Duchon {
+                centers,
+                identifiability_transform,
+                operator_collocation_points,
+                radial_reparam,
+                aniso_log_scales,
+                ..
+            } = &smooth_term.metadata
+            else {
+                log::warn!(
+                    "[spatial-kappa] term {term_idx}: per-axis ψ declined -- a Duchon spec whose \
+                     realized design does not carry Duchon metadata"
+                );
+                return Ok(None);
+            };
+            if spec_local.radial_reparam.is_none() {
+                spec_local.radial_reparam = radial_reparam.clone();
+            }
+            // The realized anisotropy, not the requested one: the forward build
+            // resolves the all-zero sentinel into knot-cloud contrasts, and a
+            // derivative taken at the requested η would be the derivative of a
+            // design nobody shipped.
+            if let Some(resolved) = aniso_log_scales.as_ref() {
+                spec_local.aniso_log_scales = Some(resolved.clone());
+            }
+            gam_terms::basis::build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspace(
+                x.view(),
+                &spec_local,
+                centers.view(),
+                identifiability_transform.as_ref(),
+                operator_collocation_points
+                    .as_ref()
+                    .map(|points| points.view()),
+                &mut BasisWorkspace::default(),
+            )
+            .map_err(EstimationError::from)?
+        }
         _ => return Ok(None),
     };
     // Get number of axes from the shared operator when available; otherwise
@@ -8007,12 +8080,20 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
         0
     };
     if d == 0 {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the producer reported zero \
+             axes (no implicit operator and no dense design list)"
+        );
         return Ok(None);
     }
     let Some(penalty_range) = design
         .smooth_term_penalty_range(term_idx)
         .map_err(EstimationError::InvalidInput)?
     else {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the realized design exposes \
+             no penalty range for this term"
+        );
         return Ok(None);
     };
     let penalty_start = penalty_range.start;
@@ -8029,13 +8110,46 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
     // its null-component candidate at a long representer range, and the fit
     // then aborted with `penalty_index for dir 0 out of bounds: 1 >= 1`.
     // Selecting the survivors here, once, keeps every downstream zip positional.
+    //
+    // The Duchon producer is the exception, and deliberately: its penalty
+    // ψ-derivative builders run `filter_penalty_candidates` themselves, on the
+    // same candidates the design filtered, so they emit the ACTIVE list already
+    // — the identical convention its isotropic sibling
+    // (`try_build_spatial_term_log_kappa_derivativeinfo`) relies on when it zips
+    // positionally against `penalty_start + j`. Re-selecting by
+    // `original_index` there would index an active list with emitted indices.
+    // The equal-length check below is what makes the two conventions
+    // distinguishable rather than merely asserted (gam#2735).
     let emitted = aniso_result.penalties_first[0].len();
-    let keep: Vec<usize> = smooth_term
-        .active_penalties
-        .iter()
-        .map(|active| active.info.original_index)
-        .collect();
+    let producer_emits_active_list = matches!(&termspec.basis, SmoothBasisSpec::Duchon { .. });
+    let keep: Vec<usize> = if producer_emits_active_list {
+        if emitted != smooth_term.active_penalties.len() {
+            log::warn!(
+                "[spatial-kappa] term {term_idx}: per-axis ψ declined -- the Duchon producer \
+                 emitted {emitted} active penalty block(s) but the realized design carries {} \
+                 ({:?}); the term falls back to its isotropic axis",
+                smooth_term.active_penalties.len(),
+                smooth_term
+                    .active_penalties
+                    .iter()
+                    .map(|active| active.info.source.clone())
+                    .collect::<Vec<_>>()
+            );
+            return Ok(None);
+        }
+        (0..emitted).collect()
+    } else {
+        smooth_term
+            .active_penalties
+            .iter()
+            .map(|active| active.info.original_index)
+            .collect()
+    };
     if keep.is_empty() || keep.iter().any(|&index| index >= emitted) {
+        log::warn!(
+            "[spatial-kappa] term {term_idx}: per-axis ψ declined -- candidate→fitted map \
+             {keep:?} does not index the {emitted} emitted block(s)"
+        );
         return Ok(None);
     }
     let penalty_indices: Vec<usize> = (0..keep.len()).map(|j| penalty_start + j).collect();

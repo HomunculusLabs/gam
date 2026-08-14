@@ -22,6 +22,7 @@ use std::time::Instant;
 
 fn matern_smooth(name: &str, centers: usize, kappa_auto: bool) -> SmoothTermSpec {
     SmoothTermSpec {
+        frozen_parametric_residualization: None,
         name: name.to_string(),
         basis: SmoothBasisSpec::Matern {
             feature_cols: vec![0, 1],
@@ -62,7 +63,11 @@ fn erf_approx(x: f64) -> f64 {
     sign * y
 }
 
-fn build(n: usize, centers: usize, kappa_auto: bool) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
+fn build(
+    n: usize,
+    centers: usize,
+    kappa_auto: bool,
+) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
     let mut rng = StdRng::seed_from_u64(0x9797_0001);
     let mut data = Array2::<f64>::zeros((n, 2));
     for i in 0..n {
@@ -174,6 +179,8 @@ fn main() {
             );
         }
         Ok(_) => eprintln!("[979-REPRO] wrong FitResult variant"),
-        Err(e) => eprintln!("[979-REPRO] kappa_auto={kappa_auto} fit failed after {elapsed:.2}s: {e}"),
+        Err(e) => {
+            eprintln!("[979-REPRO] kappa_auto={kappa_auto} fit failed after {elapsed:.2}s: {e}")
+        }
     }
 }
