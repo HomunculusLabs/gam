@@ -2783,6 +2783,41 @@ fn adjudicate_negative_curvature(
             point[i] += sign * alpha * direction[i];
         }
         let point = project_to_bounds(&point, Some(bounds));
+        // PROBE (#2612, temporary): the escape ladder only ever steps DOWN from
+        // alpha=1, so the reseed cannot travel more than one e-fold in log-lambda.
+        // Measure how far the confirmed descent actually runs before deciding what
+        // the escape step should be.
+        {
+            let mut sweep: Vec<String> = Vec::new();
+            for &(s, a, c) in &evaluations {
+                sweep.push(format!("(ladder sign={s:+.0} a={a:.4e} cost={c:.12e})"));
+            }
+            let mut a = alpha;
+            for _ in 0..12 {
+                a *= 2.0;
+                let mut trial = rho.clone();
+                for i in 0..n {
+                    trial[i] += sign * a * direction[i];
+                }
+                let projected = project_to_bounds(&trial, Some(bounds));
+                let clamped = !outer_theta_bitwise_eq(&projected, &trial);
+                match obj.eval_cost(&projected) {
+                    Ok(c) => sweep.push(format!(
+                        "(expand sign={sign:+.0} a={a:.4e} cost={c:.12e} clamped={clamped})"
+                    )),
+                    Err(_) => sweep.push(format!("(expand sign={sign:+.0} a={a:.4e} EVAL-FAILED)")),
+                }
+                if clamped {
+                    break;
+                }
+            }
+            let _ = obj.eval_cost(rho);
+            log::info!(
+                "[PROBE-2612-RIDGE] {context}: baseline={baseline:.12e} chosen(sign={sign:+.0} \
+                 alpha={alpha:.4e} cost={cost:.12e}) direction={direction:?} :: {}",
+                sweep.join(" ")
+            );
+        }
         let measured = criterion_curvature
             .as_ref()
             .expect("a measured escape implies a determined ladder");
