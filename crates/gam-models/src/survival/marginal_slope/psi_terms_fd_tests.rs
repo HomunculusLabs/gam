@@ -831,3 +831,161 @@ fn a_zero_psi_design_derivative_publishes_zero_terms_2765() {
     };
     assert!(hessian.iter().all(|value| *value == 0.0));
 }
+
+// ── The β-drift of the joint Hessian: `D_β H[δ]` ────────────────────────────
+//
+// The outer criterion's `½ log|H(β̂(θ), θ) + S_λ|` has TWO derivative halves at
+// every θ coordinate — the frozen one, `½ tr(K · ∂_θ H|_β)`, and the
+// mode-response one, `½ tr(K · D_β H[dβ̂/dθ])`. The second is the ONLY atom in
+// the whole criterion that reads `dβ̂/dθ`; `fixed_beta` is an envelope
+// derivative at fixed β̂ and `logdet_s` never sees β at all. So when the
+// `logdet_h` atom is the only one that disagrees with a finite difference of
+// the criterion — which is exactly what #2765 measured, on EVERY ρ and ψ
+// coordinate of the acceptance fixture, with `fixed_beta` right to six digits
+// and `logdet_s` right to seven — `D_β H` is one of the two objects that can
+// own it.
+//
+// Nothing differenced it. The shipped coverage for this hook is finiteness,
+// subsample-vs-unsampled equality and batched-vs-per-axis agreement, every one
+// of which a consistently wrong third derivative passes. These gates difference
+// the family's OWN joint Hessian along the direction, which is the definition
+// the outer trace contracts.
+
+/// Block states at an arbitrary flat β, with every `η` rebuilt from it.
+///
+/// `η` is a cached function of `(X, β)`, so a β displacement that left `η`
+/// stale would difference a different function from the one `D_β H` claims to
+/// differentiate — the same contract [`states_at`] states for the ψ lane.
+fn states_at_beta(
+    family: &SurvivalMarginalSlopeFamily,
+    beta_flat: &Array1<f64>,
+) -> Vec<ParameterBlockState> {
+    let m_cols = family.marginal_design.ncols();
+    let g_cols = family.logslope_layout.coefficient_design().ncols();
+    assert_eq!(
+        beta_flat.len(),
+        m_cols + g_cols,
+        "the fixture's flat β is the marginal block followed by the log-slope block"
+    );
+    let m_beta = beta_flat.slice(ndarray::s![..m_cols]).to_owned();
+    let g_beta = beta_flat.slice(ndarray::s![m_cols..]).to_owned();
+    let m_design = family.marginal_design.to_dense().to_owned();
+    let g_design = family
+        .logslope_layout
+        .coefficient_design()
+        .to_dense()
+        .to_owned();
+    vec![
+        ParameterBlockState {
+            beta: Array1::zeros(0),
+            eta: Array1::zeros(family.n),
+        },
+        ParameterBlockState {
+            eta: m_design.dot(&m_beta),
+            beta: m_beta,
+        },
+        ParameterBlockState {
+            eta: g_design.dot(&g_beta),
+            beta: g_beta,
+        },
+    ]
+}
+
+fn flat_beta() -> Array1<f64> {
+    let mut beta = Array1::<f64>::zeros(4);
+    beta.slice_mut(ndarray::s![..2]).assign(&marginal_beta());
+    beta.slice_mut(ndarray::s![2..]).assign(&logslope_beta());
+    beta
+}
+
+/// The joint Hessian at `β + t·δ`, in the same NLL sign the hook publishes.
+fn joint_hessian_at(
+    family: &SurvivalMarginalSlopeFamily,
+    beta: &Array1<f64>,
+    direction: &Array1<f64>,
+    t: f64,
+) -> Array2<f64> {
+    let displaced = beta + &(direction * t);
+    let states = states_at_beta(family, &displaced);
+    family
+        .exact_newton_joint_hessian(&states)
+        .expect("joint hessian")
+        .expect("survival marginal-slope publishes an explicit joint hessian")
+}
+
+fn run_beta_drift_gate(frame: SlopeFrame, direction: Array1<f64>, label: &str) {
+    // Any ψ axis builds the same family at `t = 0`; the drift is a property of
+    // the row program, not of the ψ lane.
+    let family = family_at(PsiAxis::MarginalDesign, frame, 0.0);
+    let beta = flat_beta();
+    let states = states_at_beta(&family, &beta);
+    let analytic = family
+        .exact_newton_joint_hessian_directional_derivative(&states, &direction)
+        .expect("joint Hessian directional derivative")
+        .expect("survival marginal-slope publishes an exact D_beta H");
+    let dim = beta.len();
+    assert_eq!(analytic.dim(), (dim, dim), "{label}: D_beta H shape");
+
+    let h = 1e-3;
+    let coarse_plus = joint_hessian_at(&family, &beta, &direction, h);
+    let coarse_minus = joint_hessian_at(&family, &beta, &direction, -h);
+    let fine_plus = joint_hessian_at(&family, &beta, &direction, 0.5 * h);
+    let fine_minus = joint_hessian_at(&family, &beta, &direction, -0.5 * h);
+
+    let scale = max_abs(analytic.iter()).max(1e-12);
+    for row in 0..dim {
+        for column in 0..dim {
+            let oracle = ridders(
+                (coarse_plus[[row, column]] - coarse_minus[[row, column]]) / (2.0 * h),
+                (fine_plus[[row, column]] - fine_minus[[row, column]]) / h,
+            );
+            assert_matches(
+                &format!("{label}/{} D_beta H[{row},{column}]", frame.label()),
+                analytic[[row, column]],
+                &oracle,
+                scale,
+            );
+        }
+    }
+}
+
+/// `D_β H[δ]` along a direction that moves BOTH blocks, in the four-primary
+/// static frame.
+#[test]
+fn beta_hessian_drift_matches_finite_difference_static_2765() {
+    run_beta_drift_gate(
+        SlopeFrame::Static,
+        ndarray::array![0.41, -0.27, 0.33, 0.19],
+        "joint",
+    );
+}
+
+/// The same, in the six-primary follow-up-varying frame. A drift that is right
+/// in one frame says nothing about the other: the pullback out of primary space
+/// is a different map in each, and #2765's whole subject is the second one.
+#[test]
+fn beta_hessian_drift_matches_finite_difference_follow_up_2765() {
+    run_beta_drift_gate(
+        SlopeFrame::FollowUpVarying,
+        ndarray::array![0.41, -0.27, 0.33, 0.19],
+        "joint",
+    );
+}
+
+/// A direction confined to the MARGINAL block, so a defect in the log-slope
+/// pullback cannot mask (or be masked by) one in the marginal pullback.
+#[test]
+fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        run_beta_drift_gate(frame, ndarray::array![0.55, -0.31, 0.0, 0.0], "marginal-only");
+    }
+}
+
+/// A direction confined to the LOG-SLOPE block — the one #2765 generalized from
+/// one channel to three.
+#[test]
+fn beta_hessian_drift_matches_finite_difference_logslope_direction_2765() {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        run_beta_drift_gate(frame, ndarray::array![0.0, 0.0, 0.47, 0.23], "logslope-only");
+    }
+}

@@ -152,9 +152,12 @@ fn main() {
                 );
                 eprintln!(
                     "[2765-CTRL] rho_i={j} analytic atoms: fixed_beta={:+.6e} logdet_h={:+.6e} \
+                     (frozen={:+.6e} mode_response={:+.6e}) \
                      logdet_s={:+.6e} kkt={:+.6e}",
                     rho.analytic_fixed_beta[j],
                     rho.analytic_logdet_h[j],
+                    rho.analytic_frozen_logdet_h[j],
+                    rho.analytic_mode_response_logdet_h[j],
                     rho.analytic_logdet_s[j],
                     rho.analytic_kkt[j],
                 );

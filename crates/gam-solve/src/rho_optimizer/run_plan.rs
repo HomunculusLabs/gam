@@ -839,12 +839,16 @@ fn capture_outer_gradient_fd_at_seed(
         let mut analytic_audit_total = Array1::<f64>::from_elem(rho_dim, f64::NAN);
         let mut analytic_fixed_beta = Array1::<f64>::from_elem(rho_dim, f64::NAN);
         let mut analytic_logdet_h = Array1::<f64>::from_elem(rho_dim, f64::NAN);
+        let mut analytic_frozen_logdet_h = Array1::<f64>::from_elem(rho_dim, f64::NAN);
+        let mut analytic_mode_response_logdet_h = Array1::<f64>::from_elem(rho_dim, f64::NAN);
         let mut analytic_logdet_s = Array1::<f64>::from_elem(rho_dim, f64::NAN);
         let mut analytic_kkt = Array1::<f64>::from_elem(rho_dim, f64::NAN);
         for part in analytic_rho_parts.iter().filter(|part| part.index < rho_dim) {
             analytic_audit_total[part.index] = part.total;
             analytic_fixed_beta[part.index] = part.fixed_beta;
             analytic_logdet_h[part.index] = part.logdet_h;
+            analytic_frozen_logdet_h[part.index] = part.frozen_logdet_h;
+            analytic_mode_response_logdet_h[part.index] = part.mode_response_logdet_h;
             analytic_logdet_s[part.index] = part.logdet_s;
             analytic_kkt[part.index] =
                 part.total - (part.fixed_beta + part.logdet_h + part.logdet_s);
@@ -858,6 +862,8 @@ fn capture_outer_gradient_fd_at_seed(
             analytic_audit_total,
             analytic_fixed_beta,
             analytic_logdet_h,
+            analytic_frozen_logdet_h,
+            analytic_mode_response_logdet_h,
             analytic_logdet_s,
             analytic_kkt,
             finite_difference_fixed_beta: finite_difference_components[0].clone(),

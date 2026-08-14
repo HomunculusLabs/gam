@@ -117,6 +117,12 @@ pub struct OuterGradientFdRhoBlock {
     pub analytic_audit_total: Array1<f64>,
     pub analytic_fixed_beta: Array1<f64>,
     pub analytic_logdet_h: Array1<f64>,
+    /// `analytic_logdet_h` split at the drift: the half that does not read the
+    /// coefficient mode response, `½ tr(K · λ_k S_k)`, and the half that does,
+    /// `½ tr(K · D_β H[v_k])`. The first is PSD-by-construction, so a negative
+    /// entry is a defect that needs no oracle at all.
+    pub analytic_frozen_logdet_h: Array1<f64>,
+    pub analytic_mode_response_logdet_h: Array1<f64>,
     pub analytic_logdet_s: Array1<f64>,
     /// `audit_total − (fixed_beta + logdet_h + logdet_s)`: the IFT/KKT fold.
     pub analytic_kkt: Array1<f64>,
@@ -489,6 +495,12 @@ pub struct RhoGradientParts {
     pub dim: usize,
     pub fixed_beta: f64,
     pub logdet_h: f64,
+    /// `logdet_h` split at the drift: `½ tr(K · λ_k S_k)`, the half that does
+    /// not read the coefficient mode response. Both `K` and `S_k` are PSD, so a
+    /// NEGATIVE value here is a defect with no oracle required.
+    pub frozen_logdet_h: f64,
+    /// The other half, `½ tr(K · D_β H[v_k])`.
+    pub mode_response_logdet_h: f64,
     pub logdet_s: f64,
     pub total: f64,
 }
