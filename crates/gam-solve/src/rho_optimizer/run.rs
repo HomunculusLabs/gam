@@ -2653,10 +2653,12 @@ fn adjudicate_negative_curvature(
             obj,
             rho,
             &direction,
-            sign,
-            alpha,
-            cost,
-            strict_floor,
+            LadderConfirmedStep {
+                sign,
+                alpha,
+                cost,
+                strict_floor,
+            },
             bounds,
             context,
         );
@@ -2796,10 +2798,12 @@ fn adjudicate_negative_curvature(
             obj,
             rho,
             &direction,
-            sign,
-            alpha,
-            cost,
-            measured_floor,
+            LadderConfirmedStep {
+                sign,
+                alpha,
+                cost,
+                strict_floor: measured_floor,
+            },
             bounds,
             context,
         );
@@ -2868,6 +2872,28 @@ fn adjudicate_negative_curvature(
 }
 
 /// The escape point a CONFIRMED negative-curvature descent actually supports
+/// The falsifiability ladder's own confirmed step, as handed to the expansion.
+///
+/// These four travel together — they are one measurement (a signed step along
+/// the negative-curvature direction, the objective there, and the floor that
+/// decision was strict against) — so they are one argument. Splitting them into
+/// four positional `f64`s is what pushed `expand_confirmed_descent` over the
+/// argument count and produced an `#[allow(clippy::too_many_arguments)]`, which
+/// this repo bans outright: the lint is naming a real thing, and four adjacent
+/// same-typed scalars at a call site are a transposition waiting to happen.
+#[derive(Clone, Copy, Debug)]
+struct LadderConfirmedStep {
+    /// Which way along `direction` the ladder confirmed the descent.
+    sign: f64,
+    /// The step the ladder confirmed it at.
+    alpha: f64,
+    /// The objective there, in the ladder's instrument state.
+    cost: f64,
+    /// The decrease the acceptance was strict against — the ladder's measured
+    /// evaluation floor at the confirming site, never a declared tolerance.
+    strict_floor: f64,
+}
+
 /// (#2612), after the step has been extended past the falsifiability ladder.
 #[derive(Clone, Debug)]
 struct ConfirmedDescent {
@@ -2984,18 +3010,20 @@ fn max_feasible_step_along(
 /// symmetric ladder measures on itself. Re-evaluating the incumbent here puts
 /// the whole comparison chain in one instrument state, for the same reason
 /// `restored_baseline` is re-measured rather than reused.
-#[allow(clippy::too_many_arguments)]
 fn expand_confirmed_descent(
     obj: &mut dyn OuterObjective,
     rho: &Array1<f64>,
     direction: &Array1<f64>,
-    sign: f64,
-    alpha: f64,
-    cost: f64,
-    strict_floor: f64,
+    seed: LadderConfirmedStep,
     bounds: &(Array1<f64>, Array1<f64>),
     context: &str,
 ) -> ConfirmedDescent {
+    let LadderConfirmedStep {
+        sign,
+        alpha,
+        cost,
+        strict_floor,
+    } = seed;
     /// Runaway bound on the doubling sweep. Not a modelling choice — the sweep's
     /// END is the box intersection — but a bound on what a pathologically small
     /// confirmed step could ask for. Binding it is logged rather than silently

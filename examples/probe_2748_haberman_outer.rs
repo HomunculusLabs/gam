@@ -26,6 +26,36 @@ use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
 
 const FEATURES: [&str; 3] = ["age", "op_year", "axil_nodes"];
 
+/// A pre-z-scored fold frame written by the bench harness: a header row of
+/// `age,op_year,axil_nodes,y` followed by the fold's training rows. Used so the
+/// benchmark CELL — not just the full dataset — reproduces without a wheel; the
+/// folds are stratified with the harness's own `CV_SEED`, which is Rust code
+/// living in `gam-pyffi` and not reachable from an example.
+fn load_prepared_csv(path: &std::path::Path) -> (Vec<[f64; 3]>, Vec<f64>) {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("prepared fold frame {}: {error}", path.display()));
+    let mut features = Vec::new();
+    let mut response = Vec::new();
+    let mut header: Option<Vec<String>> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        let Some(columns) = header.as_ref() else {
+            header = Some(fields.iter().map(|f| f.to_string()).collect());
+            continue;
+        };
+        let column = |name: &str| -> f64 {
+            let index = columns
+                .iter()
+                .position(|c| c == name)
+                .unwrap_or_else(|| panic!("prepared frame has no column '{name}'"));
+            fields[index].parse().expect("numeric field")
+        };
+        features.push([column("age"), column("op_year"), column("axil_nodes")]);
+        response.push(column("y"));
+    }
+    (features, response)
+}
+
 /// `bench/datasets/haberman.csv`, the first four columns, `status == 2` as the
 /// positive class — verbatim from `_load_haberman_dataset`.
 fn load_rows() -> (Vec<[f64; 3]>, Vec<f64>) {
@@ -91,8 +121,16 @@ fn main() {
     };
     let knots: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(8);
 
-    let (mut features, response) = load_rows();
-    zscore(&mut features);
+    // Arg 5 is an optional prepared (already z-scored) fold frame; without it
+    // the probe fits the whole dataset with its own z-scoring.
+    let (features, response) = match args.get(5) {
+        Some(path) => load_prepared_csv(std::path::Path::new(path)),
+        None => {
+            let (mut raw, response) = load_rows();
+            zscore(&mut raw);
+            (raw, response)
+        }
+    };
     println!(
         "[2748-haberman] n={} positives={} double_penalty={double_penalty} smooths={selected:?} knots={knots}",
         features.len(),
