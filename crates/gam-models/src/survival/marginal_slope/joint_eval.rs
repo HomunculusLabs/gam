@@ -1417,6 +1417,18 @@ impl SurvivalMarginalSlopeFamily {
         if slices.total < 512 {
             return self.evaluate_blockwise_exact_newton_dense(block_states);
         }
+        // A follow-up-varying slope keeps the DENSE blockwise route whatever `p`
+        // is (gam#2765). The sparse/mixed routes below scatter the log-slope
+        // block as ONE `f_pipi[[3,3]]` rank-1 over ONE CSR — a shape that cannot
+        // express `Σ_{c,d} f_pipi[[c,d]] · D_c ⊗ D_d` over the three channel
+        // designs `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit`, `X_cov ⊗ B′_exit`. They
+        // are a STORAGE optimisation for a sparse design, not a different model,
+        // so taking the exact route instead of a cheaper wrong one is the only
+        // admissible reading. The dense route goes through
+        // `add_pullback_block_diagonals`, which runs the channel pair loop.
+        if self.slope_is_follow_up_varying() {
+            return self.evaluate_blockwise_exact_newton_dense(block_states);
+        }
 
         // Large p (>= 512): joint dense Hessian is too expensive.
         // Fall back to blockwise sparse/mixed assembly for memory efficiency.

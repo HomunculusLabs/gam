@@ -50,63 +50,89 @@ impl SurvivalMarginalSlopeFamily {
             )
             .expect("marginal syr_row_into dimension mismatch");
 
-        // logslope-logslope block: H[3,3] * g_row ⊗ g_row
-        self.logslope_layout
-            .coefficient_design()
-            .syr_row_into_view(
-                row,
-                h[[3, 3]],
-                target.slice_mut(s![slices.logslope.clone(), slices.logslope.clone()]),
-            )
-            .expect("logslope syr_row_into dimension mismatch");
+        // Every log-slope contribution below runs once per follow-up CHANNEL —
+        // exactly one for a time-constant slope, three (`g₀`, `g₁`, `ġ₁`) for a
+        // follow-up-varying one, each against its own design (gam#2765). This
+        // sibling of `BlockHessianAccumulator::add_pullback` was the sixth site
+        // still reading the literal primary index `3` and the single
+        // `coefficient_design`; it is the hook `RowKernel::add_pullback_hessian`
+        // routes through, so on a varying slope `D_β H[δ]` — the outer
+        // criterion's whole mode-response term — was the pullback of a DIFFERENT
+        // model, while the joint Hessian itself (which takes the BLAS-3
+        // `hessian_dense_override` path) was right. That is why every gate on
+        // `H` passed while the outer `½ tr(K·D_β H[v])` did not.
+        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_designs = slope_channels.as_slice();
 
-        // marginal-logslope block: (H[0,3]+H[1,3]) * m_row ⊗ g_row  (+ transpose)
-        {
-            let alpha_mg = h[[0, 3]] + h[[1, 3]];
-            if alpha_mg != 0.0 {
-                self.marginal_design
-                    .row_outer_into_view(
-                        row,
-                        self.logslope_layout.coefficient_design(),
-                        alpha_mg,
-                        target.slice_mut(s![slices.marginal.clone(), slices.logslope.clone()]),
-                    )
-                    .expect("marginal-logslope row_outer_into dimension mismatch");
-                self.logslope_layout
-                    .coefficient_design()
-                    .row_outer_into_view(
-                        row,
-                        &self.marginal_design,
-                        alpha_mg,
-                        target.slice_mut(s![slices.logslope.clone(), slices.marginal.clone()]),
-                    )
-                    .expect("logslope-marginal row_outer_into dimension mismatch");
+        // logslope-logslope block: Σ_{c,d} H[c,d] * g_c_row ⊗ g_d_row
+        for &(left_primary, left_design) in slope_designs {
+            for &(right_primary, right_design) in slope_designs {
+                let alpha = h[[left_primary, right_primary]];
+                if alpha == 0.0 {
+                    continue;
+                }
+                let block =
+                    target.slice_mut(s![slices.logslope.clone(), slices.logslope.clone()]);
+                if left_primary == right_primary {
+                    left_design
+                        .syr_row_into_view(row, alpha, block)
+                        .expect("logslope syr_row_into dimension mismatch");
+                } else {
+                    left_design
+                        .row_outer_into_view(row, right_design, alpha, block)
+                        .expect("logslope channel row_outer_into dimension mismatch");
+                }
             }
         }
 
-        // time-logslope block: H[a,3] * time_a_row ⊗ g_row  (+ transpose)
-        for a in 0..3 {
-            let alpha = h[[a, 3]];
-            if alpha == 0.0 {
+        // marginal-logslope block: Σ_c (H[0,c]+H[1,c]) * m_row ⊗ g_c_row  (+ transpose)
+        for &(slope_primary, slope_design) in slope_designs {
+            let alpha_mg = h[[0, slope_primary]] + h[[1, slope_primary]];
+            if alpha_mg == 0.0 {
                 continue;
             }
-            time_designs[a]
+            self.marginal_design
                 .row_outer_into_view(
                     row,
-                    self.logslope_layout.coefficient_design(),
-                    alpha,
-                    target.slice_mut(s![slices.time.clone(), slices.logslope.clone()]),
+                    slope_design,
+                    alpha_mg,
+                    target.slice_mut(s![slices.marginal.clone(), slices.logslope.clone()]),
                 )
-                .expect("time-logslope row_outer_into dimension mismatch");
-            self.logslope_layout
-                .coefficient_design()
+                .expect("marginal-logslope row_outer_into dimension mismatch");
+            slope_design
                 .row_outer_into_view(
                     row,
-                    time_designs[a],
-                    alpha,
-                    target.slice_mut(s![slices.logslope.clone(), slices.time.clone()]),
+                    &self.marginal_design,
+                    alpha_mg,
+                    target.slice_mut(s![slices.logslope.clone(), slices.marginal.clone()]),
                 )
-                .expect("logslope-time row_outer_into dimension mismatch");
+                .expect("logslope-marginal row_outer_into dimension mismatch");
+        }
+
+        // time-logslope block: Σ_c H[a,c] * time_a_row ⊗ g_c_row  (+ transpose)
+        for &(slope_primary, slope_design) in slope_designs {
+            for a in 0..3 {
+                let alpha = h[[a, slope_primary]];
+                if alpha == 0.0 {
+                    continue;
+                }
+                time_designs[a]
+                    .row_outer_into_view(
+                        row,
+                        slope_design,
+                        alpha,
+                        target.slice_mut(s![slices.time.clone(), slices.logslope.clone()]),
+                    )
+                    .expect("time-logslope row_outer_into dimension mismatch");
+                slope_design
+                    .row_outer_into_view(
+                        row,
+                        time_designs[a],
+                        alpha,
+                        target.slice_mut(s![slices.logslope.clone(), slices.time.clone()]),
+                    )
+                    .expect("logslope-time row_outer_into dimension mismatch");
+            }
         }
 
         // time-marginal block: (H[a,0]+H[a,1]) * time_a_row ⊗ m_row  (+ transpose)
@@ -167,10 +193,27 @@ impl SurvivalMarginalSlopeFamily {
         self.marginal_design
             .syr_row_into_view(row, alpha_mm, marginal_target.view_mut())
             .expect("marginal syr_row_into dimension mismatch");
-        self.logslope_layout
-            .coefficient_design()
-            .syr_row_into_view(row, h[[3, 3]], logslope_target.view_mut())
-            .expect("logslope syr_row_into dimension mismatch");
+        // One rank-1 per follow-up channel PAIR, as in the full pullback above
+        // (gam#2765): a time-constant slope has one, a varying one has nine.
+        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_designs = slope_channels.as_slice();
+        for &(left_primary, left_design) in slope_designs {
+            for &(right_primary, right_design) in slope_designs {
+                let alpha = h[[left_primary, right_primary]];
+                if alpha == 0.0 {
+                    continue;
+                }
+                if left_primary == right_primary {
+                    left_design
+                        .syr_row_into_view(row, alpha, logslope_target.view_mut())
+                        .expect("logslope syr_row_into dimension mismatch");
+                } else {
+                    left_design
+                        .row_outer_into_view(row, right_design, alpha, logslope_target.view_mut())
+                        .expect("logslope channel row_outer_into dimension mismatch");
+                }
+            }
+        }
     }
 
     pub(crate) fn row_primary_direction_from_flat_dynamic(
