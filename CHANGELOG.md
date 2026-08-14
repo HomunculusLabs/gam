@@ -1,5 +1,91 @@
 ## Unreleased
 
+- **A negative-curvature direction has no interior minimiser, so its escape step
+  could not come from the falsifiability ladder (#2612).**
+  `adjudicate_negative_curvature` built ONE step ladder — `α = 1, ½, ¼, …` down to
+  `α_min = sqrt(2·objective_resolution/|λ_min|)` — and used it for two different
+  jobs. As a *falsifier* it is exactly right and is untouched: the smallest step
+  at which the claim `½|λ_min|α²` still predicts something the criterion can
+  represent is the end of the range in which the claim could be refuted. As a
+  *step rule* it is wrong, because along a direction of negative curvature
+
+  ```text
+      V(ρ + αv) − V(ρ) ≈ α(g·v) + ½λ_min α²,    λ_min < 0
+  ```
+
+  decreases without bound once the sign is chosen so the linear term is
+  non-positive. A model with no interior minimiser cannot supply a step length;
+  it has to come from the objective and the feasible box — the standard treatment
+  of a negative-curvature direction, and exactly what a trust region does when
+  its solution lands on the boundary. Capping the reseed at the falsifier's
+  largest rung silently asserted the opposite: that one e-fold in log-λ is as far
+  as any such descent ever runs.
+
+  Measured on the `#2612` banded quasi-separated fixture, where the escape
+  direction is `−e₁` to six digits:
+
+  ```text
+    baseline        1.786314898942e1
+    ladder  α=1     1.786314894043e1
+    ladder  α=½     1.786314883184e1   <- the ladder's pick, decrease 1.6e-7
+    α=1             1.786314862766e1
+    α=2             1.786314814710e1
+    α=4             1.786314708132e1
+    α=8             1.786314488769e1   <- box intersection, decrease 4.1e-6
+  ```
+
+  Monotone to the wall, and the wall step is worth **26×** the ladder's. The BFGS
+  resume seeded at the ladder's point made *no* progress (reseed and next refused
+  point bit-identical), so the escape was the only thing moving ρ — one e-fold per
+  escape, against `OUTER_SADDLE_ESCAPE_BUDGET = 3`, on a ridge six e-folds long.
+  The fit refused with `hessian_psd=NO curvature_source=terminal-analytic
+  railed=[2,3,4,5]`.
+
+  The rule: double the confirmed step while the criterion strictly improves,
+  clamped to the exact box intersection along the ray. No constant — termination
+  is structural, since the intersection is finite whenever the ray moves any
+  bounded coordinate, doubling reaches it in `⌈log₂(α_box/α)⌉` steps, and any
+  non-improving trial stops the sweep. The accepted point is the lowest measured,
+  so it is never worse than the ladder's. `MAX_EXPANSIONS = 64` bounds a
+  pathologically small confirmed step and is LOGGED when it binds.
+
+  One extra evaluation re-measures the incumbent in the expansion's own instrument
+  state. That is not tidiness: the same point (`sign = −1, α = 1`) evaluated in
+  the falsifiability ladder and again afterwards differs by `3.1e-7` on this
+  fixture — larger than the descent being adjudicated — because the profiled
+  criterion carries warm-start hysteresis well above the `ε_f = 7.45e-10` the
+  symmetric ladder measures on itself.
+
+  ```text
+    before   FIT FAILED after 6.5 s
+    after    FIT OK in 2.9 s, ONE escape (4 doublings, α_box = 5.470155,
+             "the accepted step IS it")
+             acc=0.9750 logloss=0.07682 mean_argmax_p=0.9599 calib_gap=-0.01513
+  ```
+
+  bit-identical to a control with the escape budget raised to 40 (not landed).
+  The escaped coordinate lands on the zero-smoothing rail, `λ = 2.0000e-4 =
+  exp(−8.517193)`, where it is railed and leaves the certificate a PSD reduced
+  block. `multinomial_separation_arming_2612` 3/3 in 4.6 s (was 1 FAIL);
+  `gam-solve --lib -- rho_optimizer::` 362/362, and with the expansion disabled
+  the two new travel assertions are the only reds.
+
+  The `#2357`/`#2155` escape fixtures are double wells whose saddle sits *exactly
+  one unit* from its minima, so nothing in that file could ever see the cap. The
+  new fixtures are the shape that can: a stationary ridge with **no interior
+  minimiser**, plus the guard that the expansion must not overshoot a genuine
+  well, plus an end-to-end run pinned to `prefer_gradient_only` — because an ARC
+  search reads the analytic Hessian and can follow negative curvature by itself,
+  so letting the planner choose ARC would make a pipeline test green either way.
+
+  Rejected: raising the escape budget (moves a constant to clear a bar and leaves
+  the one-e-fold cap in place everywhere else); relaxing the curvature gate (the
+  criterion's own symmetric ladder CONFIRMS the sign and resolves it against its
+  Law 1 floor, so the verdict is correct and it was the response that was wrong);
+  switching the outer search to ARC (`prefer_gradient_only` exists because the
+  generic REML/LAML Hessian consumes the order-four family tower, and the escape
+  has to work for the gradient-only plan regardless).
+
 - **`76a520c45` withheld a deletion the geometry did not license and dropped the
   ORTHOGONALIZATION with it: the smooth-ownership hierarchy was inert for every
   dependent smooth (#2747).** `apply_global_smooth_identifiability` exists to
