@@ -860,25 +860,35 @@ fn states_at_beta(
     family: &SurvivalMarginalSlopeFamily,
     beta_flat: &Array1<f64>,
 ) -> Vec<ParameterBlockState> {
+    let t_cols = family.design_exit.ncols();
     let m_cols = family.marginal_design.ncols();
     let g_cols = family.logslope_layout.coefficient_design().ncols();
     assert_eq!(
         beta_flat.len(),
-        m_cols + g_cols,
-        "the fixture's flat β is the marginal block followed by the log-slope block"
+        t_cols + m_cols + g_cols,
+        "the fixture's flat β is the time block, then the marginal block, then the log-slope block"
     );
-    let m_beta = beta_flat.slice(ndarray::s![..m_cols]).to_owned();
-    let g_beta = beta_flat.slice(ndarray::s![m_cols..]).to_owned();
+    let t_beta = beta_flat.slice(ndarray::s![..t_cols]).to_owned();
+    let m_beta = beta_flat.slice(ndarray::s![t_cols..t_cols + m_cols]).to_owned();
+    let g_beta = beta_flat.slice(ndarray::s![t_cols + m_cols..]).to_owned();
     let m_design = family.marginal_design.to_dense().to_owned();
     let g_design = family
         .logslope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
+    // The time block's own `eta` is the EXIT channel, matching the block spec
+    // the fit installs; the entry and derivative channels are read from their
+    // designs by the row program rather than from a cached `eta`.
+    let t_eta = if t_cols == 0 {
+        Array1::zeros(family.n)
+    } else {
+        family.design_exit.to_dense().to_owned().dot(&t_beta)
+    };
     vec![
         ParameterBlockState {
-            beta: Array1::zeros(0),
-            eta: Array1::zeros(family.n),
+            eta: t_eta,
+            beta: t_beta,
         },
         ParameterBlockState {
             eta: m_design.dot(&m_beta),
@@ -889,13 +899,6 @@ fn states_at_beta(
             beta: g_beta,
         },
     ]
-}
-
-fn flat_beta() -> Array1<f64> {
-    let mut beta = Array1::<f64>::zeros(4);
-    beta.slice_mut(ndarray::s![..2]).assign(&marginal_beta());
-    beta.slice_mut(ndarray::s![2..]).assign(&logslope_beta());
-    beta
 }
 
 /// The joint Hessian at `β + t·δ`, in the same NLL sign the hook publishes.
@@ -913,11 +916,60 @@ fn joint_hessian_at(
         .expect("survival marginal-slope publishes an explicit joint hessian")
 }
 
+/// The drift fixture's TIME block: `q` gains a real `(1, log t)` surface on top
+/// of the baseline chart's offsets.
+///
+/// [`family_at`] leaves the three time designs empty, which is the right fixture
+/// for a ψ lane that never touches them — but it means the time↔marginal and
+/// time↔log-slope halves of the pullback are never exercised. `D_β H` reads
+/// every block, so its gate builds them: `X_entry = (1, log t₀)`,
+/// `X_exit = (1, log t₁)` and `X_derivative = (0, 1/t₁)`, which is the exact
+/// derivative pair the row program's monotonicity contract expects (`q̇₁ > 0`
+/// for any positive slope coefficient).
+fn time_designs() -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+    let entry = age_entry();
+    let exit = age_exit();
+    let x_entry = Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
+        if col == 0 { 1.0 } else { entry[row].ln() }
+    });
+    let x_exit = Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
+        if col == 0 { 1.0 } else { exit[row].ln() }
+    });
+    let x_derivative = Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
+        if col == 0 { 0.0 } else { 1.0 / exit[row] }
+    });
+    (x_entry, x_exit, x_derivative)
+}
+
+fn time_beta() -> Array1<f64> {
+    ndarray::array![0.12, 0.45]
+}
+
+/// [`family_at`] with a non-empty time block, and the block states that go with
+/// it. The drift gate uses this rather than the ψ fixture so all six coefficient
+/// blocks of the pullback — `tt`, `mm`, `gg`, `tm`, `tg`, `mg` — carry weight.
+fn drift_family_and_states(
+    frame: SlopeFrame,
+) -> (SurvivalMarginalSlopeFamily, Array1<f64>) {
+    let mut family = family_at(PsiAxis::MarginalDesign, frame, 0.0);
+    let (x_entry, x_exit, x_derivative) = time_designs();
+    family.design_entry = DesignMatrix::from(x_entry);
+    family.design_exit = DesignMatrix::from(x_exit);
+    family.design_derivative_exit = DesignMatrix::from(x_derivative);
+    let mut beta = Array1::<f64>::zeros(6);
+    beta.slice_mut(ndarray::s![..2]).assign(&time_beta());
+    beta.slice_mut(ndarray::s![2..4]).assign(&marginal_beta());
+    beta.slice_mut(ndarray::s![4..]).assign(&logslope_beta());
+    (family, beta)
+}
+
 fn run_beta_drift_gate(frame: SlopeFrame, direction: Array1<f64>, label: &str) {
-    // Any ψ axis builds the same family at `t = 0`; the drift is a property of
-    // the row program, not of the ψ lane.
-    let family = family_at(PsiAxis::MarginalDesign, frame, 0.0);
-    let beta = flat_beta();
+    let (family, beta) = drift_family_and_states(frame);
+    assert_eq!(
+        direction.len(),
+        beta.len(),
+        "{label}: the drift direction lives in the same flat coefficient space as β"
+    );
     let states = states_at_beta(&family, &beta);
     let analytic = family
         .exact_newton_joint_hessian_directional_derivative(&states, &direction)
@@ -955,7 +1007,7 @@ fn run_beta_drift_gate(frame: SlopeFrame, direction: Array1<f64>, label: &str) {
 fn beta_hessian_drift_matches_finite_difference_static_2765() {
     run_beta_drift_gate(
         SlopeFrame::Static,
-        ndarray::array![0.41, -0.27, 0.33, 0.19],
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
         "joint",
     );
 }
@@ -967,7 +1019,7 @@ fn beta_hessian_drift_matches_finite_difference_static_2765() {
 fn beta_hessian_drift_matches_finite_difference_follow_up_2765() {
     run_beta_drift_gate(
         SlopeFrame::FollowUpVarying,
-        ndarray::array![0.41, -0.27, 0.33, 0.19],
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
         "joint",
     );
 }
@@ -977,7 +1029,11 @@ fn beta_hessian_drift_matches_finite_difference_follow_up_2765() {
 #[test]
 fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
     for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
-        run_beta_drift_gate(frame, ndarray::array![0.55, -0.31, 0.0, 0.0], "marginal-only");
+        run_beta_drift_gate(
+            frame,
+            ndarray::array![0.0, 0.0, 0.55, -0.31, 0.0, 0.0],
+            "marginal-only",
+        );
     }
 }
 
@@ -986,6 +1042,24 @@ fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
 #[test]
 fn beta_hessian_drift_matches_finite_difference_logslope_direction_2765() {
     for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
-        run_beta_drift_gate(frame, ndarray::array![0.0, 0.0, 0.47, 0.23], "logslope-only");
+        run_beta_drift_gate(
+            frame,
+            ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
+            "logslope-only",
+        );
+    }
+}
+
+/// A direction confined to the TIME block. The time↔log-slope half of the
+/// pullback has its own channel loop, and a direction that never moves the
+/// slope block is the only one that isolates it.
+#[test]
+fn beta_hessian_drift_matches_finite_difference_time_direction_2765() {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        run_beta_drift_gate(
+            frame,
+            ndarray::array![0.29, -0.21, 0.0, 0.0, 0.0, 0.0],
+            "time-only",
+        );
     }
 }
