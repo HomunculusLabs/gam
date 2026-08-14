@@ -455,13 +455,44 @@ fn a_genuine_saddle_still_descends_and_never_reaches_the_ladder_2748() {
         objective.value(&point) < baseline,
         "the minted reseed must be a strictly lower point"
     );
-    // The escape found its descent on the first rung of the first sign, then
-    // the restore. No ladder extension ran.
+    // The escape found its descent on the first rung of the first sign, so the
+    // ladder extension — the MEASUREMENT this test is about — never ran.
+    //
+    // The evaluations it does pay for are all step search, and every one of them
+    // is derived (#2612): the falsification rung, the checkpoint restore, the
+    // incumbent re-measured in the expansion's own instrument state, one per
+    // doubling out to the box intersection along the ray, and the final restore.
+    // On this planted criterion the descent really is unbounded inside the box —
+    // `f(α) = baseline + g·α − 800α² + α⁴/24` does not turn back until
+    // `α = √19200 ≈ 138.6`, far outside `α_box = 30/√½ ≈ 42.4` — so the
+    // expansion runs to the face, which is the correct answer and not a cost to
+    // be avoided. The bound below is that arithmetic, not a recorded count: if
+    // the extension ever ran it would add two evaluations per rung down to the
+    // roundoff plateau and blow straight past it.
+    let alpha_box = 30.0 / 0.5_f64.sqrt();
+    let doublings = alpha_box.log2().ceil() as usize;
+    let budget = 1 + 1 + 1 + doublings + 1;
     assert!(
-        *counter.lock().expect("counter") <= 3,
-        "a confirmed saddle must not pay for a measurement it does not need; \
-         {} evaluations",
+        *counter.lock().expect("counter") <= budget,
+        "a confirmed saddle must not pay for a measurement it does not need: \
+         {} evaluations against a derived budget of {budget} (1 falsification rung + 1 checkpoint \
+         restore + 1 incumbent re-measure + {doublings} doubling(s) to alpha_box={alpha_box:.4} + \
+         1 restore)",
         *counter.lock().expect("counter")
+    );
+    // And the positive statement those evaluations bought, which is the point of
+    // paying for them: on a descent with no interior minimiser the reseed is the
+    // box face, not the falsifier's largest rung (#2612).
+    let travelled = point
+        .iter()
+        .zip(theta.iter())
+        .map(|(after, before)| (after - before).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        (travelled - 30.0).abs() < 1e-9,
+        "the descent runs to the box, so the reseed must sit ON it: travelled {travelled:.6e} \
+         against a bound of 30. A reseed one e-fold out is the falsifiability ladder's rung being \
+         reused as a step length: {point:?}"
     );
 }
 
