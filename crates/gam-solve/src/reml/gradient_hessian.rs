@@ -4729,12 +4729,21 @@ impl<'a> RemlState<'a> {
                 .as_slice()
                 .expect("eigh returns an owned contiguous eigenvalue Array1"),
         );
-        // `null(H_pen) ⊆ null(S_λ)`, so the threshold may identify at most
-        // `p − penalty_rank` null directions. Where it wants more, the largest
-        // positive eigenvalues are restored in descending order until the floor
-        // is met — the same directions the exact rank keeps, and the count is
-        // then a property of the MODEL rather than of where the spectrum
-        // happens to sit at this ρ.
+        // `null(H_pen) ⊆ null(S_λ)`: `H_pen = XᵀWX + S_λ` with both terms PSD,
+        // so `vᵀHv ≥ vᵀS_λv` and `Hv = 0 ⟹ S_λv = 0`. The Hessian can have AT
+        // MOST the penalty's nullity, whatever a magnitude threshold on its
+        // spectrum says — and the threshold is RELATIVE to `max|σ|`, which the
+        // outer search itself drives: at two railed penalties (`λ = 1e13`) it
+        // reached `5.64` and landed on a genuine curvature direction at
+        // `σ ≈ 5.6`, three thousand times the eigensolver's own noise. Crossing
+        // it moved the criterion by `½·ln 5.6 = 0.86` for a `Δρ` of `3e-4`
+        // against `|g| = 3.3`, and the fit died with `StepSizeTooSmall`
+        // (`haberman_5yr`, #2748).
+        //
+        // Where the threshold wants more nullity than the penalty structurally
+        // has, the largest positive eigenvalues are restored in descending
+        // order until the bound is met. For a full-rank model that makes the
+        // pseudo-logdet the full logdet at every ρ — `C∞` again.
         let structural_floor = penalty_rank.min(p);
         let mut kept: Vec<usize> = (0..p).filter(|&j| h_evals[j] > h_thr).collect();
         if kept.len() < structural_floor {
@@ -4745,7 +4754,7 @@ impl<'a> RemlState<'a> {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             let wanted = structural_floor - kept.len();
-            // A restored direction still has to be a POSITIVE curvature: the
+            // A restored direction still has to be POSITIVE curvature: the
             // bound says the Hessian is non-singular there, not that a
             // numerically non-positive eigenvalue can be logged.
             let admitted: Vec<usize> = restored
