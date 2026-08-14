@@ -149,7 +149,13 @@ fn main() {
         Some(LOGSLOPE_TIME_K)
     };
 
-    gam::estimate::enable_outer_gradient_fd_capture(1);
+    // Grade the WHOLE θ vector, not just ψ. The ρ block and the ψ block share
+    // the criterion's moving-Hessian machinery (the trace kernel and the
+    // mode-response drift `D_β H[v]`) and differ only in their frozen drift, so
+    // a `logdet_h` disagreement present in one and absent in the other says
+    // which half of `frozen + mode_response` is wrong — the question a ψ-only
+    // audit cannot ask.
+    gam::estimate::enable_outer_gradient_fd_capture_over_theta(1);
     let data = build_dataset(n);
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
@@ -206,6 +212,42 @@ fn main() {
             audit.psi_fd_uncertainty[j],
             audit.psi_fd_orders[j],
         );
+    }
+    match audit.rho.as_ref() {
+        None => eprintln!("[2765-FD] no rho block in the record"),
+        Some(rho) => {
+            for j in 0..audit.rho_dim {
+                let analytic = rho.analytic_gradient[j];
+                let fd = rho.finite_difference_gradient[j];
+                let gap = (analytic - fd).abs();
+                let scale = analytic.abs().max(fd.abs()).max(1e-6);
+                eprintln!(
+                    "[2765-FD] rho_i={j} analytic={analytic:+.6e} fd={fd:+.6e} gap={gap:.3e} \
+                     rel={:.3e} step={:.3e} oracle_unc={:.3e} order={}",
+                    gap / scale,
+                    rho.steps[j],
+                    rho.fd_uncertainty[j],
+                    rho.fd_orders[j],
+                );
+                eprintln!(
+                    "[2765-FD] rho_i={j} analytic atoms: fixed_beta={:+.6e} logdet_h={:+.6e} \
+                     logdet_s={:+.6e} kkt={:+.6e} audit_total={:+.6e}",
+                    rho.analytic_fixed_beta[j],
+                    rho.analytic_logdet_h[j],
+                    rho.analytic_logdet_s[j],
+                    rho.analytic_kkt[j],
+                    rho.analytic_audit_total[j],
+                );
+                eprintln!(
+                    "[2765-FD] rho_i={j} scalar-FD atoms: fixed_beta={:+.6e} logdet_h={:+.6e} \
+                     logdet_s={:+.6e} kkt={:+.6e}",
+                    rho.finite_difference_fixed_beta[j],
+                    rho.finite_difference_logdet_h[j],
+                    rho.finite_difference_logdet_s[j],
+                    rho.finite_difference_kkt[j],
+                );
+            }
+        }
     }
     match audit.decomposition.atoms() {
         None => eprintln!("[2765-FD] no atom breakdown: {:?}", audit.decomposition),

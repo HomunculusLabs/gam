@@ -100,7 +100,8 @@ pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm
 pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
 pub use outer_eval_capture::{
     OuterEvalRecord, OuterGradientFdAtoms, OuterGradientFdDecomposition, OuterGradientFdRecord,
-    enable_outer_eval_capture, enable_outer_gradient_fd_capture, take_outer_eval_capture,
+    OuterGradientFdRhoBlock, enable_outer_eval_capture, enable_outer_gradient_fd_capture,
+    enable_outer_gradient_fd_capture_over_theta, take_outer_eval_capture,
     take_outer_gradient_fd_capture,
 };
 pub(crate) use penalty::{
