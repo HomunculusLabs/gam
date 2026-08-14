@@ -1133,3 +1133,98 @@ fn a_constant_follow_up_margin_reproduces_the_static_beta_drift_2765() {
         }
     }
 }
+
+// ── `D²_β H[u, v]`: the SECOND directional derivative ───────────────────────
+//
+// The Jeffreys curvature `H_Φ` is a divided-difference object built from `H` and
+// its first directional derivatives, so ITS β-drift `D_β H_Φ[δ]` consumes the
+// family's SECOND directional derivatives `H²dot[δ, e_a]`. That drift is added
+// to the likelihood drift before the outer criterion contracts
+// `½ tr(K · D_β H[dβ̂/dθ])`, so a wrong `D²_β H` corrupts the same
+// mode-response atom `D_β H` does — and, like `D_β H` before the four gates
+// above, nothing differenced it.
+//
+// `D²_β H[u, v]` is symmetric in `(u, v)` and equals `∂/∂t D_β H[v]` at
+// `β + t·u`, which is what these difference.
+
+fn joint_drift_at(
+    family: &SurvivalMarginalSlopeFamily,
+    beta: &Array1<f64>,
+    shift: &Array1<f64>,
+    t: f64,
+    direction: &Array1<f64>,
+) -> Array2<f64> {
+    let displaced = beta + &(shift * t);
+    let states = states_at_beta(family, &displaced);
+    family
+        .exact_newton_joint_hessian_directional_derivative(&states, direction)
+        .expect("joint Hessian directional derivative")
+        .expect("survival marginal-slope publishes an exact D_beta H")
+}
+
+fn run_beta_second_drift_gate(frame: SlopeFrame, u: Array1<f64>, v: Array1<f64>, label: &str) {
+    let (family, beta) = drift_family_and_states(frame);
+    let states = states_at_beta(&family, &beta);
+    let analytic = family
+        .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &v)
+        .expect("joint Hessian second directional derivative")
+        .expect("survival marginal-slope publishes an exact D2_beta H");
+    let dim = beta.len();
+    assert_eq!(analytic.dim(), (dim, dim), "{label}: D2_beta H shape");
+
+    let h = 1e-3;
+    let coarse_plus = joint_drift_at(&family, &beta, &u, h, &v);
+    let coarse_minus = joint_drift_at(&family, &beta, &u, -h, &v);
+    let fine_plus = joint_drift_at(&family, &beta, &u, 0.5 * h, &v);
+    let fine_minus = joint_drift_at(&family, &beta, &u, -0.5 * h, &v);
+
+    let scale = max_abs(analytic.iter()).max(1e-12);
+    for row in 0..dim {
+        for column in 0..dim {
+            let oracle = ridders(
+                (coarse_plus[[row, column]] - coarse_minus[[row, column]]) / (2.0 * h),
+                (fine_plus[[row, column]] - fine_minus[[row, column]]) / h,
+            );
+            assert_matches(
+                &format!("{label}/{} D2_beta H[{row},{column}]", frame.label()),
+                analytic[[row, column]],
+                &oracle,
+                scale,
+            );
+        }
+    }
+}
+
+#[test]
+fn beta_hessian_second_drift_matches_finite_difference_static_2765() {
+    run_beta_second_drift_gate(
+        SlopeFrame::Static,
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
+        ndarray::array![-0.11, 0.31, 0.19, 0.24, -0.28, 0.14],
+        "joint",
+    );
+}
+
+#[test]
+fn beta_hessian_second_drift_matches_finite_difference_follow_up_2765() {
+    run_beta_second_drift_gate(
+        SlopeFrame::FollowUpVarying,
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
+        ndarray::array![-0.11, 0.31, 0.19, 0.24, -0.28, 0.14],
+        "joint",
+    );
+}
+
+/// A log-slope-only pair, so a defect in the slope channels' fourth-order
+/// contraction cannot be masked by the time/marginal blocks.
+#[test]
+fn beta_hessian_second_drift_matches_finite_difference_logslope_pair_2765() {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        run_beta_second_drift_gate(
+            frame,
+            ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
+            ndarray::array![0.0, 0.0, 0.0, 0.0, -0.19, 0.35],
+            "logslope-pair",
+        );
+    }
+}
