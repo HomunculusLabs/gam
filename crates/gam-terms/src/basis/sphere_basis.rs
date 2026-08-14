@@ -2168,6 +2168,30 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     identifiability_transform: Option<&Array2<f64>>,
     workspace: &mut BasisWorkspace,
 ) -> Result<(Vec<PenaltySource>, Vec<Array2<f64>>, Vec<Array2<f64>>), BasisError> {
+    let mut per_direction = build_duchon_native_penalty_psi_derivatives_in_directions(
+        centers,
+        spec,
+        identifiability_transform,
+        workspace,
+        &[DuchonPsiDirection::Global],
+    )?;
+    Ok(per_direction.remove(0))
+}
+
+/// The native (kernel-Gram + trend-ridge) penalty ψ-derivatives, one bundle per
+/// requested [`DuchonPsiDirection`].
+///
+/// Every direction shares one evaluation of the center-kernel radial jets — the
+/// Bessel-dominated cost — and one assembly path. Only the *contraction* of
+/// those jets differs, which is what keeps the isotropic and per-axis routes
+/// from being two derivations of the same penalty (gam#2735).
+pub fn build_duchon_native_penalty_psi_derivatives_in_directions(
+    centers: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    identifiability_transform: Option<&Array2<f64>>,
+    workspace: &mut BasisWorkspace,
+    directions: &[DuchonPsiDirection],
+) -> Result<Vec<(Vec<PenaltySource>, Vec<Array2<f64>>, Vec<Array2<f64>>)>, BasisError> {
     let length_scale = spec.length_scale.ok_or_else(|| {
         BasisError::InvalidInput(
             "exact Duchon native penalty log-kappa derivatives require hybrid Duchon with length_scale"
@@ -2199,26 +2223,55 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         Some(&coeffs),
         None,
     );
-    let axis_scales = spec.aniso_log_scales.as_deref().map(aniso_axis_scales);
+    let aniso = spec.aniso_log_scales.as_deref();
+    let axis_scales = aniso.map(aniso_axis_scales);
     let n_centers = centers.nrows();
+    let n_dir = directions.len();
     let mut kernel = Array2::<f64>::zeros((n_centers, n_centers));
-    let mut kernel_psi = Array2::<f64>::zeros((n_centers, n_centers));
-    let mut kernel_psi_psi = Array2::<f64>::zeros((n_centers, n_centers));
+    let mut kernel_psi_by_dir = vec![Array2::<f64>::zeros((n_centers, n_centers)); n_dir];
+    let mut kernel_psi_psi_by_dir = vec![Array2::<f64>::zeros((n_centers, n_centers)); n_dir];
+    // One radial evaluation per center pair, contracted once per direction.
+    let mut row_i = vec![0.0_f64; dim];
+    let mut row_j = vec![0.0_f64; dim];
     for i in 0..n_centers {
         for j in i..n_centers {
-            let r = if let Some(scales) = axis_scales.as_deref() {
-                aniso_distance_rows_with_scales(centers, i, centers, j, scales)
+            let (r, components) = if let Some(scales) = axis_scales.as_deref() {
+                for axis in 0..dim {
+                    row_i[axis] = centers[[i, axis]];
+                    row_j[axis] = centers[[j, axis]];
+                }
+                let r = aniso_distance_rows_with_scales(centers, i, centers, j, scales);
+                let components: Vec<f64> = (0..dim)
+                    .map(|axis| {
+                        let scaled = scales[axis] * (row_i[axis] - row_j[axis]);
+                        scaled * scaled
+                    })
+                    .collect();
+                (r, components)
             } else {
-                euclidean_distance_rows(centers, i, centers, j)
+                let r = euclidean_distance_rows(centers, i, centers, j);
+                let components: Vec<f64> = (0..dim)
+                    .map(|axis| {
+                        let h = centers[[i, axis]] - centers[[j, axis]];
+                        h * h
+                    })
+                    .collect();
+                (r, components)
             };
             let core =
-                duchon_radial_core_psi_triplet(r, length_scale, p_order, s_order, dim, &coeffs)?;
-            kernel[[i, j]] = core.phi.value;
-            kernel[[j, i]] = core.phi.value;
-            kernel_psi[[i, j]] = core.phi.psi;
-            kernel_psi[[j, i]] = core.phi.psi;
-            kernel_psi_psi[[i, j]] = core.phi.psi_psi;
-            kernel_psi_psi[[j, i]] = core.phi.psi_psi;
+                duchon_radial_core_value_jet(r, length_scale, p_order, s_order, dim, &coeffs)?;
+            let shares = duchon_axis_shares(&components, r);
+            kernel[[i, j]] = core.value;
+            kernel[[j, i]] = core.value;
+            for (slot, &direction) in directions.iter().enumerate() {
+                let (psi, psi_psi) = duchon_direction_derivatives(
+                    direction, core.value, core.first, core.second, core.exponent, r, dim, &shares,
+                );
+                kernel_psi_by_dir[slot][[i, j]] = psi;
+                kernel_psi_by_dir[slot][[j, i]] = psi;
+                kernel_psi_psi_by_dir[slot][[i, j]] = psi_psi;
+                kernel_psi_psi_by_dir[slot][[j, i]] = psi_psi;
+            }
         }
     }
 
@@ -2226,8 +2279,23 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     let kernel_gauge = gam_problem::Gauge::from_block_transforms(&[z.clone()]);
     let project_kernel = |k: &Array2<f64>| kernel_gauge.restrict_penalty(k).mapv(|v| v * amp2);
     let omega = project_kernel(&kernel);
-    let omega_psi = project_kernel(&kernel_psi);
-    let omega_psi_psi = project_kernel(&kernel_psi_psi);
+    let candidates = duchon_native_penalty_candidates(
+        centers,
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        aniso,
+        &z,
+        identifiability_transform,
+    )?;
+    let filtered = filter_penalty_candidates(candidates)?;
+
+    let mut out = Vec::with_capacity(n_dir);
+    for slot in 0..n_dir {
+        let kernel_psi = &kernel_psi_by_dir[slot];
+        let kernel_psi_psi = &kernel_psi_psi_by_dir[slot];
+        let omega_psi = project_kernel(kernel_psi);
+        let omega_psi_psi = project_kernel(kernel_psi_psi);
 
     // Mirror `duchon_native_penalty_candidates`' Primary construction exactly:
     // the shipped curvature block is the RANGE-FLOORED Gram (#1815), whose
@@ -2419,38 +2487,30 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     }
     let (_, trend_psi_norm, trend_psi_psi_norm, _) =
         normalize_penaltywith_psi_derivatives(&trend_value, &trend_first, &trend_second);
-    let candidates = duchon_native_penalty_candidates(
-        centers,
-        spec.length_scale,
-        spec.power,
-        effective_nullspace_order,
-        spec.aniso_log_scales.as_deref(),
-        &z,
-        identifiability_transform,
-    )?;
-    let filtered = filter_penalty_candidates(candidates)?;
-    let mut sources = Vec::new();
-    let mut first = Vec::new();
-    let mut second = Vec::new();
-    for penalty in &filtered.active {
-        sources.push(penalty.info.source.clone());
-        match penalty.info.source {
-            PenaltySource::Primary => {
-                first.push(primary_psi_norm.clone());
-                second.push(primary_psi_psi_norm.clone());
-            }
-            PenaltySource::DoublePenaltyNullspace => {
-                first.push(trend_psi_norm.clone());
-                second.push(trend_psi_psi_norm.clone());
-            }
-            ref other => {
-                crate::bail_invalid_basis!(
-                    "unexpected Duchon native penalty source in derivative path: {other:?}"
-                );
+        let mut sources = Vec::new();
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for penalty in &filtered.active {
+            sources.push(penalty.info.source.clone());
+            match penalty.info.source {
+                PenaltySource::Primary => {
+                    first.push(primary_psi_norm.clone());
+                    second.push(primary_psi_psi_norm.clone());
+                }
+                PenaltySource::DoublePenaltyNullspace => {
+                    first.push(trend_psi_norm.clone());
+                    second.push(trend_psi_psi_norm.clone());
+                }
+                ref other => {
+                    crate::bail_invalid_basis!(
+                        "unexpected Duchon native penalty source in derivative path: {other:?}"
+                    );
+                }
             }
         }
+        out.push((sources, first, second));
     }
-    Ok((sources, first, second))
+    Ok(out)
 }
 
 /// The chart a `(data, spec)` pair's ψ-derivative must be assembled in.

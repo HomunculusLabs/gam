@@ -198,7 +198,7 @@ pub(crate) fn scaled_log_kappa_derivatives(
 /// contraction of the anisotropic one rather than a parallel derivation that
 /// could drift from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DuchonPsiDirection {
+pub enum DuchonPsiDirection {
     /// `ψ = log κ`. Every contrast — and therefore every metric weight
     /// `w_a = exp(2η_a)` appearing explicitly in the operator-penalty blocks —
     /// is constant along this direction.
@@ -207,28 +207,45 @@ pub(crate) enum DuchonPsiDirection {
     Axis(usize),
 }
 
-impl DuchonPsiDirection {
-    /// `∂η_b/∂ψ_direction` — the rate at which the centered contrast on axis
-    /// `b` moves. Zero for [`DuchonPsiDirection::Global`] by definition.
-    #[inline(always)]
-    pub(crate) fn contrast_rate(self, b: usize, dim: usize) -> f64 {
-        match self {
-            DuchonPsiDirection::Global => 0.0,
-            DuchonPsiDirection::Axis(a) => {
-                f64::from(a == b) - 1.0 / dim.max(1) as f64
-            }
-        }
-    }
-
-    /// `∂w_b/∂ψ_direction` and `∂²w_b/∂ψ_direction²` for the metric weight
-    /// `w_b = exp(2 η_b)`, which appears as an explicit factor (not only inside
-    /// `r`) wherever a Duchon operator block differentiates the kernel in the
-    /// data frame: `∂φ/∂x_b = q · w_b · h_b`.
-    #[inline(always)]
-    pub(crate) fn metric_weight_jet(self, weight: f64, b: usize, dim: usize) -> (f64, f64) {
-        let rate = self.contrast_rate(b, dim);
-        (2.0 * rate * weight, 4.0 * rate * rate * weight)
-    }
+/// Lift a **scale-free** per-axis jet of a Duchon operator block to the true
+/// per-axis ψ jet (gam#2735).
+///
+/// A block `B = (Π of m explicit metric weights) × F`, where `F` is a radial
+/// scalar of κ-exponent `E_F`, has
+///
+/// ```text
+///     ∂B/∂ψ_a = M_a(B) + ((E_F − 2m)/d) · B
+/// ```
+///
+/// and `E_F − 2m = δ` — the Duchon prefactor exponent `d − 2(p+s)` — for EVERY
+/// block the operator penalty assembles: `D0` (`F = φ`, `E = δ`, `m = 0`), the
+/// `D1` gradient block (`F = q`, `E = δ+2`, `m = 1`), the `D2` Hessian's
+/// diagonal (`F = q`, `m = 1`) and its mixed term (`F = t`, `E = δ+4`,
+/// `m = 2`). `M_a` is the scale-free per-axis derivative — the one the
+/// anisotropic Matérn already implements in `hessian_operator_eta_entry` and
+/// its siblings, which are exactly this construction at `δ = 0` because the
+/// Matérn kernel carries no `κ^δ` prefactor.
+///
+/// So the entire Duchon-specific content of the per-axis operator derivative is
+/// this one uniform shift, and the second derivative follows by applying the
+/// same shifted operator twice:
+///
+/// ```text
+///     ∂²B/∂ψ_a²  = M_aa(B) + 2 (δ/d) M_a(B) + (δ/d)² B
+/// ```
+#[inline(always)]
+pub(crate) fn duchon_prefactor_lift(
+    value: f64,
+    scale_free_first: f64,
+    scale_free_second: f64,
+    prefactor_share: f64,
+) -> (f64, f64) {
+    (
+        scale_free_first + prefactor_share * value,
+        scale_free_second
+            + 2.0 * prefactor_share * scale_free_first
+            + prefactor_share * prefactor_share * value,
+    )
 }
 
 /// Per-axis ψ derivatives of a radial scalar `F(r; κ) = κ^E G(κ r)`.
@@ -256,7 +273,7 @@ impl DuchonPsiDirection {
 /// Contracting over the all-ones direction returns the isotropic jet:
 /// `Σ_a first = E F + r F_r` and `Σ_{a,b} second = E² F + (2E+1) r F_r + r² F_rr`.
 #[inline(always)]
-pub(crate) fn duchon_axis_log_kappa_derivatives(
+pub fn duchon_axis_log_kappa_derivatives(
     value: f64,
     radial_first: f64,
     radialsecond: f64,
@@ -282,6 +299,43 @@ pub(crate) fn duchon_axis_log_kappa_derivatives(
     (first, second)
 }
 
+/// First and second ψ derivatives of a radial scalar along `direction`.
+///
+/// The single dispatch point between the isotropic and per-axis routes: every
+/// Duchon penalty assembly consumes this and nothing else, so a route can only
+/// differ from another by its `direction`.
+#[inline(always)]
+pub fn duchon_direction_derivatives(
+    direction: DuchonPsiDirection,
+    value: f64,
+    radial_first: f64,
+    radialsecond: f64,
+    exponent: f64,
+    r: f64,
+    dim: usize,
+    axis_shares: &[f64],
+) -> (f64, f64) {
+    match direction {
+        DuchonPsiDirection::Global => {
+            scaled_log_kappa_derivatives(value, radial_first, radialsecond, exponent, r)
+        }
+        DuchonPsiDirection::Axis(a) => {
+            let share = axis_shares.get(a).copied().unwrap_or(0.0);
+            duchon_axis_log_kappa_derivatives(
+                value,
+                radial_first,
+                radialsecond,
+                exponent,
+                r,
+                dim,
+                share,
+                share,
+                true,
+            )
+        }
+    }
+}
+
 /// Normalized per-axis shares `σ_a = s_a / r²` of the anisotropic squared
 /// distance, with the symmetric convention `σ_a = 1/d` at collision.
 ///
@@ -290,7 +344,7 @@ pub(crate) fn duchon_axis_log_kappa_derivatives(
 /// and the convention only has to keep `Σ_a σ_a = 1` — which is what makes the
 /// isotropic contraction identity hold at collision too.
 #[inline(always)]
-pub(crate) fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
+pub fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
     let d = components.len().max(1);
     let r2 = r * r;
     if !(r2 > 0.0) || !r2.is_finite() {
@@ -543,6 +597,39 @@ pub(crate) fn duchon_radial_jets(
     Ok(out)
 }
 
+/// The scalar core's radial jet, before any ψ direction has been chosen.
+///
+/// [`duchon_radial_core_psi_triplet`] contracts this along the isotropic
+/// (all-ones) direction; the per-axis routes contract it with
+/// [`duchon_axis_log_kappa_derivatives`]. Splitting the two makes the direction
+/// the ONLY thing that differs between them, so a global and a per-axis
+/// derivative can never be taken of two different kernels.
+pub(crate) struct DuchonRadialCoreValueJet {
+    pub(crate) value: f64,
+    pub(crate) first: f64,
+    pub(crate) second: f64,
+    pub(crate) exponent: f64,
+    pub(crate) jets: DuchonRadialJets,
+}
+
+pub(crate) fn duchon_radial_core_value_jet(
+    r: f64,
+    length_scale: f64,
+    p_order: usize,
+    s_order: usize,
+    k_dim: usize,
+    coeffs: &DuchonPartialFractionCoeffs,
+) -> Result<DuchonRadialCoreValueJet, BasisError> {
+    let jets = duchon_radial_jets(r, length_scale, p_order, s_order, k_dim, coeffs)?;
+    Ok(DuchonRadialCoreValueJet {
+        value: jets.phi,
+        first: jets.phi_r,
+        second: jets.phi_rr,
+        exponent: duchon_scaling_exponent(p_order, s_order, k_dim),
+        jets,
+    })
+}
+
 pub(crate) fn duchon_radial_core_psi_triplet(
     r: f64,
     length_scale: f64,
@@ -594,11 +681,11 @@ pub(crate) fn duchon_radial_core_psi_triplet(
     //   below. The operator penalties, exact psi derivatives, and center-collision
     //   limits all have to use that same representative or the resulting penalty
     //   geometry will drift across code paths.
-    let delta = duchon_scaling_exponent(p_order, s_order, k_dim);
-    let jets = duchon_radial_jets(r, length_scale, p_order, s_order, k_dim, coeffs)?;
-    let phi = jets.phi;
-    let (phi_psi, phi_psi_psi) =
-        scaled_log_kappa_derivatives(phi, jets.phi_r, jets.phi_rr, delta, r);
+    let core = duchon_radial_core_value_jet(r, length_scale, p_order, s_order, k_dim, coeffs)?;
+    let delta = core.exponent;
+    let jets = core.jets;
+    let phi = core.value;
+    let (phi_psi, phi_psi_psi) = scaled_log_kappa_derivatives(phi, core.first, core.second, delta, r);
     if r > 1e-10 {
         assert!(
             ((delta * phi + r * jets.phi_r) - phi_psi).abs() < 1e-7_f64.max(1e-7_f64 * phi.abs())
