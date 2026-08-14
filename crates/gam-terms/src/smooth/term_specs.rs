@@ -3382,13 +3382,20 @@ pub fn spatial_term_uses_per_axis_psi(resolvedspec: &TermCollectionSpec, term_id
     // The capability predicate — not this site — decides which specs qualify;
     // anything it declines stays on its single isotropic ψ axis, bit-identically
     // to before.
-    match resolvedspec
-        .smooth_terms
-        .get(term_idx)
-        .map(|term| &term.basis)
-    {
-        Some(SmoothBasisSpec::Duchon { spec, .. }) => {
-            crate::basis::duchon_spec_supports_axis_psi(spec, d)
+    let Some(term) = resolvedspec.smooth_terms.get(term_idx) else {
+        return false;
+    };
+    match &term.basis {
+        SmoothBasisSpec::Duchon { spec, .. } => {
+            // A joint null rotation `Q` has to be applied to every ψ-derivative
+            // block — the isotropic arm does it explicitly in
+            // `try_build_spatial_term_log_kappa_derivative`. The per-axis
+            // consumer does not, so a rotated Duchon term stays isotropic
+            // rather than shipping an unrotated per-axis derivative against a
+            // rotated design. (The anisotropic Matérn has the same gap; it is
+            // pre-existing and not touched here.)
+            term.joint_null_rotation.is_none()
+                && crate::basis::duchon_spec_supports_axis_psi(spec, d)
         }
         _ => true,
     }

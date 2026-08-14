@@ -28,9 +28,10 @@ use gam::basis::{
 };
 use gam::estimate::FitOptions;
 use gam::smooth::{
-    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
-    build_term_collection_design, fit_term_collection_forspec, freeze_term_collection_from_design,
-    get_spatial_aniso_log_scales,
+    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
+    TermCollectionSpec, build_term_collection_design, fit_term_collection_forspec,
+    fit_term_collectionwith_spatial_length_scale_optimization,
+    freeze_term_collection_from_design, get_spatial_aniso_log_scales, get_spatial_length_scale,
 };
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2, ArrayView2};
@@ -220,6 +221,67 @@ fn one_fit(
     );
 }
 
+/// One fit through the PRODUCTION entry — the one `StandardFitRequest` uses —
+/// so the ψ outer solve runs and the geometry is learned rather than pinned.
+fn production_fit(
+    x_train: ArrayView2<'_, f64>,
+    y_train: &Array1<f64>,
+    x_holdout: ArrayView2<'_, f64>,
+    y_true_holdout: &Array1<f64>,
+    k_centers: usize,
+    label: &str,
+) {
+    let pc_dim = x_train.ncols();
+    let spec = duchon_spec(pc_dim, k_centers, &vec![0.0; pc_dim]);
+    let weights = Array1::ones(x_train.nrows());
+    let offset = Array1::<f64>::zeros(x_train.nrows());
+    let start = Instant::now();
+    let fitted = match fit_term_collectionwith_spatial_length_scale_optimization(
+        x_train,
+        y_train.clone(),
+        weights,
+        offset,
+        &spec,
+        LikelihoodSpec::new(
+            ResponseFamily::Gaussian,
+            InverseLink::Standard(StandardLink::Identity),
+        ),
+        &fit_options(40),
+        &SpatialLengthScaleOptimizationOptions {
+            pilot_subsample_threshold: 0,
+            ..SpatialLengthScaleOptimizationOptions::default()
+        },
+    ) {
+        Ok(f) => f,
+        Err(err) => {
+            println!("[{label}] FIT FAILED: {err}");
+            return;
+        }
+    };
+    let elapsed = start.elapsed().as_secs_f64();
+    let frozen = fitted.resolvedspec.clone();
+    let holdout_design =
+        build_term_collection_design(x_holdout, &frozen).expect("holdout design build");
+    let dense = holdout_design.design.to_dense();
+    let pred = dense.dot(&fitted.fit.beta);
+    let rel = relative_l2(&pred, y_true_holdout);
+    let frozen_eta = get_spatial_aniso_log_scales(&frozen, 0).unwrap_or_default();
+    let parts: Vec<String> = frozen_eta.iter().map(|v| format!("{v:+.4}")).collect();
+    let spread = frozen_eta
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max)
+        - frozen_eta.iter().cloned().fold(f64::INFINITY, f64::min);
+    println!(
+        "[{label}] learned_eta=[{}] spread={spread:.4} learned_length_scale={:?} \
+         reml={:?} outer_iter={} rel_l2={rel:.4} wall={elapsed:.1}s",
+        parts.join(","),
+        get_spatial_length_scale(&frozen, 0),
+        fitted.fit.reml_score(),
+        fitted.fit.outer_iterations,
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(6000);
@@ -248,6 +310,16 @@ fn main() {
         k,
         &vec![0.0; d],
         "sentinel",
+    );
+    // The production entry, which runs the ψ outer solve: with #2735's
+    // enrollment the per-axis η is one of its coordinates.
+    production_fit(
+        x_train.view(),
+        &y_train,
+        x_holdout.view(),
+        &y_true_holdout,
+        k,
+        "production",
     );
     // Axis-0 contrast sweep: c > 0 gives axis 0 a SHORTER correlation range
     // (larger metric weight) and every other axis an equal share of the

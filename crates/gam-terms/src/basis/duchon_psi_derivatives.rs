@@ -41,18 +41,6 @@ pub(crate) struct DuchonMaternDerivativeTerm {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct PsiTriplet {
-    pub(crate) value: f64,
-    pub(crate) psi: f64,
-    pub(crate) psi_psi: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct DuchonRadialCore {
-    pub(crate) phi: PsiTriplet,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct DuchonRadialJets {
     pub(crate) phi: f64,
     pub(crate) phi_r: f64,
@@ -599,11 +587,39 @@ pub(crate) fn duchon_radial_jets(
 
 /// The scalar core's radial jet, before any ψ direction has been chosen.
 ///
-/// [`duchon_radial_core_psi_triplet`] contracts this along the isotropic
-/// (all-ones) direction; the per-axis routes contract it with
-/// [`duchon_axis_log_kappa_derivatives`]. Splitting the two makes the direction
-/// the ONLY thing that differs between them, so a global and a per-axis
-/// derivative can never be taken of two different kernels.
+/// **Duchon spectral derivation.** Start from the isotropic spectrum
+/// `K^(ω; κ) ∝ 1 / (|ω|^{2p} (κ² + |ω|²)^s)`, with fixed integer orders `p, s`
+/// and continuous scale `ψ = log κ`, `κ = 1/length_scale`. Rescaling frequency
+/// by `ω = κ ξ` gives the full spatial kernel scaling law
+///
+/// ```text
+///     φ(r; κ) = κ^δ H(κ r),      δ = d − 2p − 2s
+/// ```
+///
+/// so every radial scalar this file forms is `κ^E G(κ r)` for some exponent
+/// `E`: `φ` at `δ`, `q = φ_r/r` and `Δφ` at `δ + 2`, `t = q_r/r` at `δ + 4`.
+/// [`scaled_log_kappa_derivatives`] contracts that along the isotropic
+/// direction; [`duchon_axis_log_kappa_derivatives`] contracts it per axis, and
+/// summing the latter reproduces the former exactly. Splitting the value jet
+/// from the contraction makes the DIRECTION the only thing that differs
+/// between the two routes, so a global and a per-axis derivative can never be
+/// taken of two different kernels.
+///
+/// Once `{φ, q, Δφ}` and their ψ derivatives are known the collocation
+/// operators follow exactly — `D0[k,j] = φ(r)`, `D1[(k,a),j] = q(r)·h_a`,
+/// `D2[k,j] = Δφ(r)` — and the penalty Hessians come from the Gram identities
+/// `S_ψ = D_ψᵀD + DᵀD_ψ` and `S_ψψ = D_ψψᵀD + 2D_ψᵀD_ψ + DᵀD_ψψ`.
+///
+/// **Representation note.** When `p > 0` the Duchon kernel is only
+/// conditionally positive definite, so the spatial kernel is canonical only up
+/// to polynomial additions. These formulas are tied to the specific
+/// representative encoded by the partial-fraction construction and the
+/// collision rules; the operator penalties, exact ψ derivatives, and
+/// center-collision limits all have to use that same representative or the
+/// resulting penalty geometry drifts across code paths. In particular the
+/// `r = 0` limit is NOT the naive `(δ+2)·φ_rr` scaling shortcut — in even
+/// dimensions the log-Riesz representative carries κ-dependent finite parts at
+/// the origin, which is what [`duchonphi_rr_collision_psi_triplet`] exists for.
 pub(crate) struct DuchonRadialCoreValueJet {
     pub(crate) value: f64,
     pub(crate) first: f64,
@@ -627,92 +643,6 @@ pub(crate) fn duchon_radial_core_value_jet(
         second: jets.phi_rr,
         exponent: duchon_scaling_exponent(p_order, s_order, k_dim),
         jets,
-    })
-}
-
-pub(crate) fn duchon_radial_core_psi_triplet(
-    r: f64,
-    length_scale: f64,
-    p_order: usize,
-    s_order: usize,
-    k_dim: usize,
-    coeffs: &DuchonPartialFractionCoeffs,
-) -> Result<DuchonRadialCore, BasisError> {
-    // Duchon spectral derivation
-    // Start from the isotropic spectrum
-    //   K^(ω; kappa) ∝ 1 / (|ω|^(2p) * (kappa^2 + |ω|^2)^s),
-    // with fixed integer orders p,s and continuous scale
-    //   psi = log(kappa),   kappa = 1 / length_scale.
-    //
-    // Rescaling frequency by ω = kappa ξ gives the full spatial kernel scaling law
-    //   phi(r; kappa) = kappa^delta H(kappa r),
-    //   delta = d - 2p - 2s.
-    //
-    // Therefore the exact full-kernel psi derivatives are
-    //   phi_psi     = delta * phi + r * phi_r
-    //   phi_psipsi  = delta^2 * phi + (2 delta + 1) r phi_r + r^2 phi_rr.
-    //
-    // The operator scalars are
-    //   q(r; kappa) = phi_r(r; kappa) / r
-    //   ell(r; kappa) = Δphi(r; kappa) = phi_rr + (d-1) q.
-    // Both q and ell scale with exponent delta + 2, so
-    //   q_psi       = (delta + 2) q + r q_r
-    //   q_psipsi    = (delta + 2)^2 q + (2 delta + 5) r q_r + r^2 q_rr
-    // and identically for ell.
-    //
-    // Once {phi, q, ell} and their psi derivatives are known, the collocation
-    // operators follow exactly:
-    //   D0[k,j]         = phi(r_kj)
-    //   D1[(k,a), j]    = q(r_kj) * (x_{k,a} - c_{j,a})
-    //   D2[k,j]         = ell(r_kj)
-    // and the penalty Hessians come from the Gram identities
-    //   S_psi     = D_psi^T D + D^T D_psi
-    //   S_psipsi  = D_psipsi^T D + 2 D_psi^T D_psi + D^T D_psipsi.
-    //
-    // This helper computes exactly that minimal scalar core:
-    //   phi, q = phi_r / r, ell = Δphi
-    // together with their first and second psi derivatives.
-    //
-    // Representation note:
-    //   When p > 0 the Duchon kernel is only conditionally positive definite, so
-    //   the spatial kernel is canonical only up to polynomial additions. The
-    //   formulas in this helper are therefore tied to the specific representative
-    //   encoded by the partial-fraction construction and the collision rules used
-    //   below. The operator penalties, exact psi derivatives, and center-collision
-    //   limits all have to use that same representative or the resulting penalty
-    //   geometry will drift across code paths.
-    let core = duchon_radial_core_value_jet(r, length_scale, p_order, s_order, k_dim, coeffs)?;
-    let delta = core.exponent;
-    let jets = core.jets;
-    let phi = core.value;
-    let (phi_psi, phi_psi_psi) = scaled_log_kappa_derivatives(phi, core.first, core.second, delta, r);
-    if r > 1e-10 {
-        assert!(
-            ((delta * phi + r * jets.phi_r) - phi_psi).abs() < 1e-7_f64.max(1e-7_f64 * phi.abs())
-        );
-        return Ok(DuchonRadialCore {
-            phi: PsiTriplet {
-                value: phi,
-                psi: phi_psi,
-                psi_psi: phi_psi_psi,
-            },
-        });
-    }
-
-    // Continuous center-collision extension for the scalar operator core:
-    //   q(0; kappa) = phi_rr(0; kappa)
-    //   L(0; kappa) = d * phi_rr(0; kappa).
-    //
-    // The value and psi derivatives are extracted from the same Taylor
-    // coefficient of the assembled partial-fraction kernel. In even dimensions
-    // this preserves the log-Riesz finite-part constants, so the collision
-    // derivative is not the naive `(delta + 2) * phi_rr` scaling shortcut.
-    Ok(DuchonRadialCore {
-        phi: PsiTriplet {
-            value: phi,
-            psi: phi_psi,
-            psi_psi: phi_psi_psi,
-        },
     })
 }
 
