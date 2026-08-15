@@ -143,6 +143,46 @@
   `the_multiscale_replay_is_bit_identical_across_generations` is #1017 for the
   lane that now searches rather than enumerates.
 
+  Verified on one 4-core box, `--test-threads=1`:
+
+  ```text
+                                                        at main        after
+  exhaustive_null_simulation_size_grid              pooled .0564   ok   pooled .0542
+  null_simulation_size_is_calibrated_small_n        pooled .0669   ok   pooled .0638
+  poisson_smooth_lr_is_bartlett_corrected_...            ok        ok
+  the_two_routes_to_the_null_spectrum_agree_on_real_fits ok        ok
+  the_two_moment_summary_is_exact_when_shrunk_...        ok        ok
+  per_term_edf_plus_unpenalized_columns_equals_edf_total ok        ok
+  the_null_spectrum_reaches_the_reference_with_a_param.. ok        ok
+  cargo test -p gam-models --lib selection_replay lr_null      23 passed
+  ```
+
+  (these fixtures are deterministic, so the before/after comparison is exact
+  rather than distributional.)
+
+  **What is left, and it is one cell family.** On the small-n grid the other six
+  cells average `0.046` against nominal `0.05`; `bernoulli/logit, k = 12` sits at
+  `0.119` at both `n = 30` and `n = 50` and carries the pooled figure by itself.
+  A Gaussian arm — added here as
+  `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672`, because
+  the residual's two readings (a wrong reference versus the QUADRATIC EXPANSION
+  the reference and the Lawley factor both are) are separated by a family whose
+  likelihood IS that quadratic — reads `0.0750` pooled at `n ∈ {30, 50}` and
+  `0.0588` at `n ∈ {100, 200}` (pooled s.e. `0.0077`), with the Lawley factor
+  inert in every cell.
+
+  That decay is the PROFILED SCALE, and it is a defect of its own rather than
+  more of this one. `σ` is estimated from the same data, so
+  `W = 2(ℓ_full − ℓ_null) ≈ Q/(V/ν)` with `V ~ χ²_ν`, `ν = n − edf_total`, while
+  the reference scores `Q` alone. Scored on one set of fits, an `F` reference
+  removes `0.135 → 0.100` of it at `n = 30` and `0.120 → 0.115` at `n = 200` —
+  the right size and the right decay — and `mean(W)/E[W(λ̂)]` runs `1.34` at
+  `n = 30` down to `1.005` at `n = 200` against the `n/(ν−2) = 1.18` that
+  mechanism predicts. It applies to every scale-ESTIMATED family and to none of
+  the fixed-scale ones this issue's grid is built from, so it is separable, and
+  `zz_measure_gaussian_reference_against_the_profiled_scale_2672` is the
+  measurement it starts from.
+
 - **The conditional-transformation-normal likelihood renormalized every row by
   the standard-normal mass between two FITTED endpoints, and that is what left
   the fit with no mode to find (#2600).** The row density was
