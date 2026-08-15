@@ -809,43 +809,6 @@ pub(crate) fn ctn_row_quantity_cache_matches_direct_formulas() {
     );
 }
 
-/// gam#2600: the fitted CTN density carries no endpoint renormalizer, so every
-/// channel of the endpoint tower the SCOP chain consumes is structurally zero.
-/// This is what makes the whole `endpoint_chain_*` cascade inert; if a future
-/// change reintroduces a fitted `log Z`, the coercivity pin
-/// [`ctn_penalized_objective_is_coercive_in_the_location_column_2600`] is what
-/// will name the consequence, and this pin is what names the cause.
-#[test]
-pub(crate) fn ctn_endpoint_normalizer_is_structurally_untruncated_2600() {
-    let q = LogNormalCdfDiffDerivatives::untruncated();
-    assert_eq!(q.log_z, 0.0, "log Z of an ℝ-valued transformation is 0");
-    for e in 0..2 {
-        assert_eq!(q.first[e], 0.0);
-        for f in 0..2 {
-            assert_eq!(q.second[e][f], 0.0);
-            for g in 0..2 {
-                assert_eq!(q.third[e][f][g], 0.0);
-                for h in 0..2 {
-                    assert_eq!(q.fourth[e][f][g][h], 0.0);
-                }
-            }
-        }
-    }
-    // ...and therefore every chain contraction the row loops call is zero for
-    // ANY endpoint sensitivities, not merely for the ones a fixture supplies.
-    let a = [0.7, -1.3];
-    let b = [-0.4, 2.1];
-    let c = [1.9, 0.3];
-    let d = [-2.2, 0.8];
-    assert_eq!(endpoint_chain_first(&q, a), 0.0);
-    assert_eq!(endpoint_chain_second(&q, a, b, c), 0.0);
-    assert_eq!(endpoint_chain_third(&q, a, b, c, d, a, b, c), 0.0);
-    assert_eq!(
-        endpoint_chain_fourth(&q, a, b, c, d, a, b, c, d, a, b, c, d, a, b, c),
-        0.0
-    );
-}
-
 #[test]
 pub(crate) fn transformation_normal_pit_score_is_the_model_cdf_2600() {
     // The fitted CDF is `F = Φ(h)`, so the PIT score is `Φ⁻¹(F) = h` — no

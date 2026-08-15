@@ -1,5 +1,4 @@
 use super::chart::{CtnRowBases, CtnRowFloors, ctn_component_sensitivity, ctn_row_geometry};
-use super::LogNormalCdfDiffDerivatives;
 use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -124,12 +123,12 @@ pub fn transformation_normal_alo_row_geometry(
             "transformation-normal ALO row derivative must be positive, got {h_prime}"
         ));
     }
-    // gam#2600: the fitted likelihood is the untruncated MLT density, so the
-    // ALO replay must use the same normalizer (`log Z ≡ 0`, all derivatives 0).
-    let endpoint = LogNormalCdfDiffDerivatives::untruncated();
+    // gam#2600: the fitted likelihood is the untruncated MLT density, so the ALO
+    // replay uses the same one — `f(y) = φ(h)·h'`, with no renormalization by
+    // the mass between the saved support endpoints.
     let weight = input.prior_weight;
-    let negative_log_likelihood = weight
-        * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln() + endpoint.log_z);
+    let negative_log_likelihood =
+        weight * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln());
 
     let mut dh = vec![0.0; dimension];
     let mut dh_prime = vec![0.0; dimension];
@@ -154,18 +153,11 @@ pub fn transformation_normal_alo_row_geometry(
     let mut nll_score = Array1::<f64>::zeros(dimension);
     let mut observed_hessian = Array2::<f64>::zeros((dimension, dimension));
     for left in 0..dimension {
-        let endpoint_first = endpoint.first[0] * dupper[left] + endpoint.first[1] * dlower[left];
-        nll_score[left] =
-            weight * (h * dh[left] - dh_prime[left] * inverse_h_prime + endpoint_first);
+        nll_score[left] = weight * (h * dh[left] - dh_prime[left] * inverse_h_prime);
         for right in 0..dimension {
-            let endpoint_second = endpoint.second[0][0] * dupper[left] * dupper[right]
-                + endpoint.second[0][1] * dupper[left] * dlower[right]
-                + endpoint.second[1][0] * dlower[left] * dupper[right]
-                + endpoint.second[1][1] * dlower[left] * dlower[right];
             observed_hessian[[left, right]] = weight
                 * (dh[left] * dh[right]
-                    + dh_prime[left] * dh_prime[right] * inverse_h_prime_squared
-                    + endpoint_second);
+                    + dh_prime[left] * dh_prime[right] * inverse_h_prime_squared);
         }
     }
     if !negative_log_likelihood.is_finite()

@@ -115,18 +115,12 @@ pub(crate) struct TransformationNormalRowQuantityCache {
     pub(crate) alpha: Arc<Array2<f64>>,
     pub(crate) h: Arc<Array1<f64>>,
     pub(crate) h_prime: Arc<Array1<f64>>,
-    /// The untruncated endpoint tower, one entry per row. Every channel is zero
-    /// (gam#2600), so the `endpoint_chain_*` contractions in the SCOP row loops
-    /// are inert; the tower is still threaded through them so that the value and
-    /// all four derivative orders read the SAME normalizer object.
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     pub(crate) log_likelihood: f64,
 }
 
 #[derive(Debug)]
 pub(crate) struct TransformationNormalRowDerived {
     pub(crate) log_likelihood: f64,
-    pub(crate) endpoint_q: Vec<LogNormalCdfDiffDerivatives>,
 }
 
 impl TransformationNormalRowQuantityCache {
@@ -171,19 +165,15 @@ pub(crate) fn build_transformation_row_derived(
         .into());
     }
 
-    // Parallelize the per-row endpoint-normalizer build: each row runs
-    // `log_normal_cdf_diff_derivatives` (two `normal_logcdf` calls, three
-    // 5x5 truncated polynomial multiplies, 32 `signed_normal_pdf_ratio`
-    // calls) which dominates this function's runtime at large scale.
-    // Rows are fully independent — no shared state, no OnceLock guards —
-    // and `LogNormalCdfDiffDerivatives` is a POD struct that's `Send`.
-    // The fast finiteness check rolls all eight derived quantities into
-    // a single short-circuit `||` chain so the named-field error format
-    // only runs on the non-finite slow path.
+    // Rows are fully independent — no shared state, no OnceLock guards — so the
+    // per-row reciprocal-power build parallelizes directly. The fast finiteness
+    // check rolls all seven derived quantities into a single short-circuit `||`
+    // chain so the named-field error format only runs on the non-finite slow
+    // path.
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
-    let rows: Vec<(f64, LogNormalCdfDiffDerivatives)> = (0..n)
+    let rows: Vec<f64> = (0..n)
         .into_par_iter()
-        .map(|i| -> Result<(f64, LogNormalCdfDiffDerivatives), String> {
+        .map(|i| -> Result<f64, String> {
             let hp = h_prime[i];
             let inv_h_prime = 1.0 / hp;
             let inv_h_prime_sq = inv_h_prime * inv_h_prime;
@@ -195,15 +185,12 @@ pub(crate) fn build_transformation_row_derived(
             let weighted_inv_h_prime = w_i * inv_h_prime;
             let weighted_inv_h_prime_sq = w_i * inv_h_prime_sq;
             // gam#2600: the most-likely-transformation density, log φ(h) + log h',
-            // with NO renormalization by the mass between the fitted endpoints.
-            // `log Z ≡ 0` and every endpoint derivative vanishes, so the whole
-            // endpoint chain below contributes nothing. The −½ln(2π) constant is
-            // kept so the reported absolute log-likelihood (and AIC) is comparable
-            // to mlt/tram; it is coefficient-independent.
-            let q = LogNormalCdfDiffDerivatives::untruncated();
-            let log_z = q.log_z;
-            let row_ll = w_i
-                * (-0.5 * h_i * h_i - 0.5 * (2.0 * std::f64::consts::PI).ln() + hp.ln() - log_z);
+            // with NO renormalization by the mass between the fitted support
+            // endpoints. The −½ln(2π) constant is kept so the reported absolute
+            // log-likelihood (and AIC) is comparable to mlt/tram; it is
+            // coefficient-independent.
+            let row_ll =
+                w_i * (-0.5 * h_i * h_i - 0.5 * (2.0 * std::f64::consts::PI).ln() + hp.ln());
             // Fast path: a single short-circuited finiteness check. Only
             // when something is non-finite do we walk the named-field
             // table to produce a precise diagnostic.
@@ -213,8 +200,7 @@ pub(crate) fn build_transformation_row_derived(
                 && inv_h_prime_qu.is_finite()
                 && weighted_h.is_finite()
                 && weighted_inv_h_prime.is_finite()
-                && weighted_inv_h_prime_sq.is_finite()
-                && log_z.is_finite())
+                && weighted_inv_h_prime_sq.is_finite())
             {
                 let derived_values = [
                     ("1/h'", inv_h_prime),
@@ -224,7 +210,6 @@ pub(crate) fn build_transformation_row_derived(
                     ("w*h", weighted_h),
                     ("w/h'", weighted_inv_h_prime),
                     ("w/h'^2", weighted_inv_h_prime_sq),
-                    ("log normalizer", log_z),
                 ];
                 for (name, value) in derived_values {
                     if !value.is_finite() {
@@ -237,7 +222,7 @@ pub(crate) fn build_transformation_row_derived(
                     "TransformationNormalFamily row_quantities: row {i} entered non-finite branch but no named field was non-finite; h'={hp}",
                 ) }.into());
             }
-            Ok((row_ll, q))
+            Ok(row_ll)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -246,11 +231,9 @@ pub(crate) fn build_transformation_row_derived(
     // parallelized the independent per-row computation; the final scalar
     // reduction stays serial to preserve numerical reproducibility against
     // existing tests.
-    let mut log_likelihood = 0.0;
-    let mut endpoint_q = Vec::with_capacity(n);
-    for (row_ll, q) in rows {
+    let mut log_likelihood = 0.0_f64;
+    for row_ll in rows {
         log_likelihood += row_ll;
-        endpoint_q.push(q);
     }
     if !log_likelihood.is_finite() {
         return Err(TransformationNormalError::NonFinite { reason: format!(
@@ -258,10 +241,7 @@ pub(crate) fn build_transformation_row_derived(
         ) }.into());
     }
 
-    Ok(TransformationNormalRowDerived {
-        log_likelihood,
-        endpoint_q,
-    })
+    Ok(TransformationNormalRowDerived { log_likelihood })
 }
 
 impl TransformationNormalFamily {
@@ -1037,7 +1017,6 @@ impl TransformationNormalFamily {
             alpha: Arc::new(alpha),
             h: Arc::new(h),
             h_prime: Arc::new(h_prime),
-            endpoint_q: Arc::new(derived.endpoint_q),
             log_likelihood: derived.log_likelihood,
         };
 

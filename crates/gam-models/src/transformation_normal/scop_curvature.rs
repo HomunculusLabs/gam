@@ -81,11 +81,8 @@ impl TransformationNormalFamily {
             .map_err(|e| format!("SCOP gradient requires cached covariate design: {e}"))?;
         let weights = self.effective_weights();
         let h_prime = row_quantities.h_prime.as_ref();
-        let endpoint_q = row_quantities.endpoint_q.as_ref();
         let response_val_basis = &self.response_val_basis;
         let response_deriv_basis = &self.response_deriv_basis;
-        let response_lower_basis = &self.response_lower_basis;
-        let response_upper_basis = &self.response_upper_basis;
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
         let response_pairs: Vec<(usize, usize)> = (0..p_resp)
             .flat_map(|k| (k..p_resp).map(move |l| (k, l)))
@@ -99,16 +96,7 @@ impl TransformationNormalFamily {
                     let rd = response_deriv_basis.row(i);
                     let inv_hp = 1.0 / h_prime[i];
                     let inv_hp_sq = inv_hp * inv_hp;
-                    let q = endpoint_q[i];
-                    let upper_k = response_upper_basis[k];
-                    let lower_k = response_lower_basis[k];
-                    let upper_l = response_upper_basis[l];
-                    let lower_l = response_lower_basis[l];
-                    let mut block_factor = rv[k] * rv[l] + rd[k] * rd[l] * inv_hp_sq;
-                    block_factor += q.second[0][0] * upper_k * upper_l
-                        + q.second[0][1] * upper_k * lower_l
-                        + q.second[1][0] * lower_k * upper_l
-                        + q.second[1][1] * lower_k * lower_l;
+                    let block_factor = rv[k] * rv[l] + rd[k] * rd[l] * inv_hp_sq;
                     block_weights[i] = weights[i] * block_factor;
                 }
                 let block = gam_problem::with_nested_parallel(|| {
@@ -159,12 +147,9 @@ impl TransformationNormalFamily {
             let wi = weights[i];
             let hi = h[i];
             let inv_hp = 1.0 / h_prime[i];
-            let q = row_quantities.endpoint_q[i];
 
             for k in 0..p_resp {
-                let normalizer_score = q.first[0] * self.response_upper_basis[k]
-                    + q.first[1] * self.response_lower_basis[k];
-                let score_factor = wi * (-hi * rv[k] + rd[k] * inv_hp - normalizer_score);
+                let score_factor = wi * (-hi * rv[k] + rd[k] * inv_hp);
                 let offset = k * p_cov;
                 for c in 0..p_cov {
                     gradient[offset + c] += score_factor * cov_row[c];
@@ -204,26 +189,17 @@ impl TransformationNormalFamily {
         let weights = self.effective_weights();
         let h_prime = row_quantities.h_prime.as_ref();
         let response_deriv_basis = &self.response_deriv_basis;
-        let response_lower_basis = &self.response_lower_basis;
-        let response_upper_basis = &self.response_upper_basis;
 
-        // Per-row directional endpoint / derivative rates (linear in u).
+        // Per-row directional derivative rate (linear in u).
         let mut hp_dir = Array1::<f64>::zeros(n);
-        let mut endpoint_dir = Array2::<f64>::zeros((n, 2));
         for i in 0..n {
             let cov_row = cov.row(i);
             let rd = response_deriv_basis.row(i);
             let mut hp_u = 0.0;
-            let mut ep_u = [0.0_f64; 2];
             for k in 0..p_resp {
-                let u_k = dir_mat.row(k).dot(&cov_row);
-                hp_u += rd[k] * u_k;
-                ep_u[0] += response_upper_basis[k] * u_k;
-                ep_u[1] += response_lower_basis[k] * u_k;
+                hp_u += rd[k] * dir_mat.row(k).dot(&cov_row);
             }
             hp_dir[i] = hp_u;
-            endpoint_dir[[i, 0]] = ep_u[0];
-            endpoint_dir[[i, 1]] = ep_u[1];
         }
 
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -238,19 +214,7 @@ impl TransformationNormalFamily {
                     let rd = response_deriv_basis.row(i);
                     let inv_hp = 1.0 / h_prime[i];
                     let inv_hp_cu = inv_hp * inv_hp * inv_hp;
-                    let q = row_quantities.endpoint_q[i];
-                    let e_k = [response_upper_basis[k], response_lower_basis[k]];
-                    let e_l = [response_upper_basis[l], response_lower_basis[l]];
-                    let mut factor = -2.0 * rd[k] * rd[l] * hp_dir[i] * inv_hp_cu;
-                    for e1 in 0..2 {
-                        for e2 in 0..2 {
-                            let mut third = 0.0;
-                            for e3 in 0..2 {
-                                third += q.third[e1][e2][e3] * endpoint_dir[[i, e3]];
-                            }
-                            factor += third * e_k[e1] * e_l[e2];
-                        }
-                    }
+                    let factor = -2.0 * rd[k] * rd[l] * hp_dir[i] * inv_hp_cu;
                     block_weights[i] = weights[i] * factor;
                 }
                 let block = gam_problem::with_nested_parallel(|| {
@@ -314,36 +278,20 @@ impl TransformationNormalFamily {
         let weights = self.effective_weights();
         let h_prime = row_quantities.h_prime.as_ref();
         let response_deriv_basis = &self.response_deriv_basis;
-        let response_lower_basis = &self.response_lower_basis;
-        let response_upper_basis = &self.response_upper_basis;
 
         let mut hp_u = Array1::<f64>::zeros(n);
         let mut hp_v = Array1::<f64>::zeros(n);
-        let mut ep_u = Array2::<f64>::zeros((n, 2));
-        let mut ep_v = Array2::<f64>::zeros((n, 2));
         for i in 0..n {
             let cov_row = cov.row(i);
             let rd = response_deriv_basis.row(i);
             let mut hpu = 0.0;
             let mut hpv = 0.0;
-            let mut epu = [0.0_f64; 2];
-            let mut epv = [0.0_f64; 2];
             for k in 0..p_resp {
-                let u_k = dir_u_mat.row(k).dot(&cov_row);
-                let v_k = dir_v_mat.row(k).dot(&cov_row);
-                hpu += rd[k] * u_k;
-                hpv += rd[k] * v_k;
-                epu[0] += response_upper_basis[k] * u_k;
-                epu[1] += response_lower_basis[k] * u_k;
-                epv[0] += response_upper_basis[k] * v_k;
-                epv[1] += response_lower_basis[k] * v_k;
+                hpu += rd[k] * dir_u_mat.row(k).dot(&cov_row);
+                hpv += rd[k] * dir_v_mat.row(k).dot(&cov_row);
             }
             hp_u[i] = hpu;
             hp_v[i] = hpv;
-            ep_u[[i, 0]] = epu[0];
-            ep_u[[i, 1]] = epu[1];
-            ep_v[[i, 0]] = epv[0];
-            ep_v[[i, 1]] = epv[1];
         }
 
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -359,23 +307,7 @@ impl TransformationNormalFamily {
                     let inv_hp = 1.0 / h_prime[i];
                     let inv_hp_sq = inv_hp * inv_hp;
                     let inv_hp_qu = inv_hp_sq * inv_hp_sq;
-                    let q = row_quantities.endpoint_q[i];
-                    let e_k = [response_upper_basis[k], response_lower_basis[k]];
-                    let e_l = [response_upper_basis[l], response_lower_basis[l]];
-                    let mut factor = 6.0 * rd[k] * rd[l] * hp_u[i] * hp_v[i] * inv_hp_qu;
-                    for e1 in 0..2 {
-                        for e2 in 0..2 {
-                            let mut fourth = 0.0;
-                            for e3 in 0..2 {
-                                for e4 in 0..2 {
-                                    fourth += q.fourth[e1][e2][e3][e4]
-                                        * ep_u[[i, e3]]
-                                        * ep_v[[i, e4]];
-                                }
-                            }
-                            factor += fourth * e_k[e1] * e_l[e2];
-                        }
-                    }
+                    let factor = 6.0 * rd[k] * rd[l] * hp_u[i] * hp_v[i] * inv_hp_qu;
                     block_weights[i] = weights[i] * factor;
                 }
                 let block = gam_problem::with_nested_parallel(|| {
@@ -435,30 +367,17 @@ impl TransformationNormalFamily {
             let wi = weights[i];
             let inv_hp = 1.0 / h_prime[i];
             let inv_hp_sq = inv_hp * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             let mut h_probe = 0.0;
             let mut hp_probe = 0.0;
-            let mut upper_probe = 0.0;
-            let mut lower_probe = 0.0;
             for k in 0..p_resp {
                 let pg = probe_mat.row(k).dot(&cov_row);
                 h_probe += rv[k] * pg;
                 hp_probe += rd[k] * pg;
-                upper_probe += self.response_upper_basis[k] * pg;
-                lower_probe += self.response_lower_basis[k] * pg;
             }
 
             for k in 0..p_resp {
-                let upper_factor = self.response_upper_basis[k];
-                let lower_factor = self.response_lower_basis[k];
-                let normalizer_probe = (q.second[0][0] * upper_factor
-                    + q.second[1][0] * lower_factor)
-                    * upper_probe
-                    + (q.second[0][1] * upper_factor + q.second[1][1] * lower_factor)
-                        * lower_probe;
-                let scalar =
-                    wi * (rv[k] * h_probe + rd[k] * hp_probe * inv_hp_sq + normalizer_probe);
+                let scalar = wi * (rv[k] * h_probe + rd[k] * hp_probe * inv_hp_sq);
                 let row_offset = k * p_cov;
                 for c in 0..p_cov {
                     out[row_offset + c] += scalar * cov_row[c];
@@ -520,8 +439,6 @@ impl TransformationNormalFamily {
         let h_prime = row_quantities.h_prime.as_ref();
         let mut out = Array2::<f64>::zeros((p_total, n_probe));
         let mut hp_probe = vec![0.0; n_probe];
-        let mut upper_probe = vec![0.0; n_probe];
-        let mut lower_probe = vec![0.0; n_probe];
 
         for i in 0..n {
             let cov_row = cov.row(i);
@@ -529,18 +446,11 @@ impl TransformationNormalFamily {
             let wi = weights[i];
             let inv_hp = 1.0 / h_prime[i];
             let inv_hp_cu = inv_hp * inv_hp * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             let mut hp_dir = 0.0;
-            let mut ep_dir = [0.0_f64; 2];
             hp_probe.iter_mut().for_each(|v| *v = 0.0);
-            upper_probe.iter_mut().for_each(|v| *v = 0.0);
-            lower_probe.iter_mut().for_each(|v| *v = 0.0);
             for k in 0..p_resp {
-                let u_k = dir_mat.row(k).dot(&cov_row);
-                hp_dir += rd[k] * u_k;
-                ep_dir[0] += self.response_upper_basis[k] * u_k;
-                ep_dir[1] += self.response_lower_basis[k] * u_k;
+                hp_dir += rd[k] * dir_mat.row(k).dot(&cov_row);
                 let row_offset = k * p_cov;
                 for j in 0..n_probe {
                     let mut pg = 0.0;
@@ -548,27 +458,12 @@ impl TransformationNormalFamily {
                         pg += probes[[row_offset + c, j]] * cov_row[c];
                     }
                     hp_probe[j] += rd[k] * pg;
-                    upper_probe[j] += self.response_upper_basis[k] * pg;
-                    lower_probe[j] += self.response_lower_basis[k] * pg;
                 }
             }
 
             for k in 0..p_resp {
-                let e_k = [self.response_upper_basis[k], self.response_lower_basis[k]];
                 for j in 0..n_probe {
-                    let mut normalizer_scalar = 0.0;
-                    let ep_probe = [upper_probe[j], lower_probe[j]];
-                    for e1 in 0..2 {
-                        for e2 in 0..2 {
-                            let mut third = 0.0;
-                            for e3 in 0..2 {
-                                third += q.third[e1][e2][e3] * ep_dir[e3];
-                            }
-                            normalizer_scalar += third * e_k[e1] * ep_probe[e2];
-                        }
-                    }
-                    let scalar = wi
-                        * (-2.0 * rd[k] * hp_probe[j] * hp_dir * inv_hp_cu + normalizer_scalar);
+                    let scalar = wi * (-2.0 * rd[k] * hp_probe[j] * hp_dir * inv_hp_cu);
                     for c in 0..p_cov {
                         out[[k * p_cov + c, j]] += scalar * cov_row[c];
                     }
@@ -701,35 +596,17 @@ impl TransformationNormalFamily {
             let wi = weights[i];
             let inv_hp = 1.0 / h_prime[i];
             let inv_hp_cu = inv_hp * inv_hp * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             let mut hp_dir = 0.0;
-            let mut ep_dir = [0.0_f64; 2];
             for k in 0..p_resp {
-                let u_k = dir_mat.row(k).dot(&cov_row);
-                hp_dir += rd[k] * u_k;
-                ep_dir[0] += self.response_upper_basis[k] * u_k;
-                ep_dir[1] += self.response_lower_basis[k] * u_k;
+                hp_dir += rd[k] * dir_mat.row(k).dot(&cov_row);
             }
 
             let gram_row = row_grams.row(i);
             let mut total = 0.0;
             for k in 0..p_resp {
-                let e_k = [self.response_upper_basis[k], self.response_lower_basis[k]];
                 for l in 0..p_resp {
-                    let e_l = [self.response_upper_basis[l], self.response_lower_basis[l]];
-                    let mut normalizer_block = 0.0;
-                    for e1 in 0..2 {
-                        for e2 in 0..2 {
-                            let mut third = 0.0;
-                            for e3 in 0..2 {
-                                third += q.third[e1][e2][e3] * ep_dir[e3];
-                            }
-                            normalizer_block += third * e_k[e1] * e_l[e2];
-                        }
-                    }
-                    let q_kl =
-                        -2.0 * rd[k] * rd[l] * hp_dir * inv_hp_cu + normalizer_block;
+                    let q_kl = -2.0 * rd[k] * rd[l] * hp_dir * inv_hp_cu;
                     total += q_kl * gram_row[k * p_resp + l];
                 }
             }
@@ -812,8 +689,6 @@ impl TransformationNormalFamily {
         let h_prime = row_quantities.h_prime.as_ref();
         let mut out = Array2::<f64>::zeros((p_total, n_probe));
         let mut hp_probe = vec![0.0; n_probe];
-        let mut upper_probe = vec![0.0; n_probe];
-        let mut lower_probe = vec![0.0; n_probe];
 
         for i in 0..n {
             let cov_row = cov.row(i);
@@ -822,24 +697,13 @@ impl TransformationNormalFamily {
             let inv_hp = 1.0 / h_prime[i];
             let inv_hp_sq = inv_hp * inv_hp;
             let inv_hp_qu = inv_hp_sq * inv_hp_sq;
-            let q = row_quantities.endpoint_q[i];
 
             let mut hp_u = 0.0;
             let mut hp_v = 0.0;
-            let mut ep_u = [0.0_f64; 2];
-            let mut ep_v = [0.0_f64; 2];
             hp_probe.iter_mut().for_each(|value| *value = 0.0);
-            upper_probe.iter_mut().for_each(|value| *value = 0.0);
-            lower_probe.iter_mut().for_each(|value| *value = 0.0);
             for k in 0..p_resp {
-                let u_k = dir_u_mat.row(k).dot(&cov_row);
-                let v_k = dir_v_mat.row(k).dot(&cov_row);
-                hp_u += rd[k] * u_k;
-                hp_v += rd[k] * v_k;
-                ep_u[0] += self.response_upper_basis[k] * u_k;
-                ep_u[1] += self.response_lower_basis[k] * u_k;
-                ep_v[0] += self.response_upper_basis[k] * v_k;
-                ep_v[1] += self.response_lower_basis[k] * v_k;
+                hp_u += rd[k] * dir_u_mat.row(k).dot(&cov_row);
+                hp_v += rd[k] * dir_v_mat.row(k).dot(&cov_row);
                 let row_offset = k * p_cov;
                 for j in 0..n_probe {
                     let mut pg = 0.0;
@@ -847,30 +711,12 @@ impl TransformationNormalFamily {
                         pg += probes[[row_offset + c, j]] * cov_row[c];
                     }
                     hp_probe[j] += rd[k] * pg;
-                    upper_probe[j] += self.response_upper_basis[k] * pg;
-                    lower_probe[j] += self.response_lower_basis[k] * pg;
                 }
             }
 
             for k in 0..p_resp {
-                let e_k = [self.response_upper_basis[k], self.response_lower_basis[k]];
                 for j in 0..n_probe {
-                    let ep_probe = [upper_probe[j], lower_probe[j]];
-                    let mut normalizer_scalar = 0.0;
-                    for e1 in 0..2 {
-                        for e2 in 0..2 {
-                            let mut fourth = 0.0;
-                            for e3 in 0..2 {
-                                for e4 in 0..2 {
-                                    fourth += q.fourth[e1][e2][e3][e4] * ep_u[e3] * ep_v[e4];
-                                }
-                            }
-                            normalizer_scalar += fourth * e_k[e1] * ep_probe[e2];
-                        }
-                    }
-                    let scalar = wi
-                        * (6.0 * rd[k] * hp_probe[j] * hp_u * hp_v * inv_hp_qu
-                            + normalizer_scalar);
+                    let scalar = wi * (6.0 * rd[k] * hp_probe[j] * hp_u * hp_v * inv_hp_qu);
                     for c in 0..p_cov {
                         out[[k * p_cov + c, j]] += scalar * cov_row[c];
                     }
@@ -908,16 +754,9 @@ impl TransformationNormalFamily {
             let wi = weights[i];
             let inv_hp = 1.0 / h_prime[i];
             let inv_hp_sq = inv_hp * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             for k in 0..p_resp {
-                let upper_factor = self.response_upper_basis[k];
-                let lower_factor = self.response_lower_basis[k];
-                let normalizer_second = q.second[0][0] * upper_factor * upper_factor
-                    + (q.second[0][1] + q.second[1][0]) * upper_factor * lower_factor
-                    + q.second[1][1] * lower_factor * lower_factor;
-                let coeff =
-                    wi * (rv[k] * rv[k] + rd[k] * rd[k] * inv_hp_sq + normalizer_second);
+                let coeff = wi * (rv[k] * rv[k] + rd[k] * rd[k] * inv_hp_sq);
                 let row_offset = k * p_cov;
                 for c in 0..p_cov {
                     let cc = cov_row[c] * cov_row[c];

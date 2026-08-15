@@ -81,56 +81,22 @@ pub(crate) fn scop_second_order_h(
     [h_i, h_j, h_ij, hp_i, hp_j, hp_ij]
 }
 
-/// Accumulates the second-order endpoint-normalizer chain inputs
-/// `(endpoint_i, endpoint_j, endpoint_ij)` for one row. Shared verbatim across
-/// the SCOP Hessian/HVP/bilinear row loops.
-pub(crate) fn scop_second_order_endpoints(
-    endpoint_basis: [&[f64]; 2],
-    p_resp: usize,
-    alpha_i: &[f64],
-    alpha_j: &[f64],
-    alpha_ij: &[f64],
-) -> ([f64; 2], [f64; 2], [f64; 2]) {
-    let mut endpoint_i = [0.0; 2];
-    let mut endpoint_j = [0.0; 2];
-    let mut endpoint_ij = [0.0; 2];
-    for e in 0..2 {
-        let basis = endpoint_basis[e];
-        for k in 0..p_resp {
-            endpoint_i[e] += basis[k] * alpha_i[k];
-            endpoint_j[e] += basis[k] * alpha_j[k];
-            endpoint_ij[e] += basis[k] * alpha_ij[k];
-        }
-    }
-    (endpoint_i, endpoint_j, endpoint_ij)
-}
-
-/// Accumulates the psi-direction transform quantities `(h_psi, hp_psi,
-/// endpoint_psi)` for one row from the response bases and the per-knot psi
-/// directional derivatives of α. Shared verbatim across the SCOP psi setup
-/// loops.
+/// Accumulates the psi-direction transform quantities `(h_psi, hp_psi)` for one
+/// row from the response bases and the per-knot psi directional derivatives of
+/// α. Shared verbatim across the SCOP psi setup loops.
 pub(crate) fn scop_psi_marginal(
     rv: ArrayView1<'_, f64>,
     rd: ArrayView1<'_, f64>,
     p_resp: usize,
-    endpoint_basis: [&[f64]; 2],
     alpha_psi: &[f64],
-) -> (f64, f64, [f64; 2]) {
+) -> (f64, f64) {
     let mut h_psi = 0.0;
     let mut hp_psi = 0.0;
     for k in 0..p_resp {
         h_psi += rv[k] * alpha_psi[k];
         hp_psi += rd[k] * alpha_psi[k];
     }
-
-    let mut endpoint_psi = [0.0; 2];
-    for e in 0..2 {
-        let basis = endpoint_basis[e];
-        for k in 0..p_resp {
-            endpoint_psi[e] += basis[k] * alpha_psi[k];
-        }
-    }
-    (h_psi, hp_psi, endpoint_psi)
+    (h_psi, hp_psi)
 }
 
 // ---------------------------------------------------------------------------
@@ -272,38 +238,15 @@ mod tests {
         );
     }
 
-    // ---- scop_second_order_endpoints ----
-
-    #[test]
-    fn scop_second_order_endpoints_matches_hand_formula() {
-        let lower = [1.0, 2.0];
-        let upper = [3.0, 4.0];
-        let ai = [1.0, 6.0];
-        let aj = [1.0, 7.0];
-        let aij = [1.0, 8.0];
-        let (ei, ej, eij) = scop_second_order_endpoints([&lower, &upper], 2, &ai, &aj, &aij);
-        assert_eq!(ei[0], 1.0 + 2.0 * 6.0);
-        assert_eq!(ei[1], 3.0 + 4.0 * 6.0);
-        assert_eq!(ej[0], 1.0 + 2.0 * 7.0);
-        assert_eq!(ej[1], 3.0 + 4.0 * 7.0);
-        assert_eq!(eij[0], 1.0 + 2.0 * 8.0);
-        assert_eq!(eij[1], 3.0 + 4.0 * 8.0);
-    }
-
     // ---- scop_psi_marginal ----
 
     #[test]
     fn scop_psi_marginal_matches_hand_formula() {
         let rv = array![1.0, 4.0];
         let rd = array![1.0, 6.0];
-        let lower = [1.0, 2.0];
-        let upper = [3.0, 4.0];
         let alpha_psi = [9.0, 10.0];
-        let (h_psi, hp_psi, endpoint_psi) =
-            scop_psi_marginal(rv.view(), rd.view(), 2, [&lower, &upper], &alpha_psi);
+        let (h_psi, hp_psi) = scop_psi_marginal(rv.view(), rd.view(), 2, &alpha_psi);
         assert_eq!(h_psi, 9.0 + 4.0 * 10.0);
         assert_eq!(hp_psi, 9.0 + 6.0 * 10.0);
-        assert_eq!(endpoint_psi[0], 1.0 * 9.0 + 2.0 * 10.0);
-        assert_eq!(endpoint_psi[1], 3.0 * 9.0 + 4.0 * 10.0);
     }
 }

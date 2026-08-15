@@ -63,14 +63,6 @@ impl TransformationNormalFamily {
         let h_prime = row_quantities.h_prime.as_ref();
         let mut objective_psi = 0.0;
         let mut score_psi = Array1::<f64>::zeros(p_total);
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
         let mut alpha_psi = vec![0.0; p_resp];
 
         for i in 0..n {
@@ -83,7 +75,6 @@ impl TransformationNormalFamily {
             let hp = h_prime[i];
             let inv_hp = 1.0 / hp;
             let inv_hp_sq = inv_hp * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             for k in 0..p_resp {
                 alpha_psi[k] = beta_mat.row(k).dot(&psi_row);
@@ -91,16 +82,12 @@ impl TransformationNormalFamily {
 
             let mut h_psi = 0.0;
             let mut hp_psi = 0.0;
-            let mut endpoint_psi = [0.0; 2];
             for k in 0..p_resp {
                 h_psi += rv[k] * alpha_psi[k];
                 hp_psi += rd[k] * alpha_psi[k];
-                endpoint_psi[0] += endpoint_basis[0][k] * alpha_psi[k];
-                endpoint_psi[1] += endpoint_basis[1][k] * alpha_psi[k];
             }
 
-            objective_psi +=
-                wi * (hi * h_psi - hp_psi * inv_hp + endpoint_chain_first(&q, endpoint_psi));
+            objective_psi += wi * (hi * h_psi - hp_psi * inv_hp);
 
             for k in 0..p_resp {
                 for c in 0..p_cov {
@@ -109,18 +96,9 @@ impl TransformationNormalFamily {
                     let hp_a = rd[k] * cov_row[c];
                     let hpsi_a = rv[k] * psi_row[c];
                     let hppsi_a = rd[k] * psi_row[c];
-                    let endpoint_a = [
-                        endpoint_basis[0][k] * cov_row[c],
-                        endpoint_basis[1][k] * cov_row[c],
-                    ];
-                    let endpoint_psi_a = [
-                        endpoint_basis[0][k] * psi_row[c],
-                        endpoint_basis[1][k] * psi_row[c],
-                    ];
                     score_psi[idx] += wi
                         * (h_a * h_psi + hi * hpsi_a - hppsi_a * inv_hp
-                            + hp_psi * hp_a * inv_hp_sq
-                            + endpoint_chain_second(&q, endpoint_psi, endpoint_a, endpoint_psi_a));
+                            + hp_psi * hp_a * inv_hp_sq);
                 }
             }
         }
@@ -134,7 +112,6 @@ impl TransformationNormalFamily {
                 Arc::clone(&row_quantities.alpha),
                 Arc::clone(&row_quantities.h),
                 Arc::clone(&row_quantities.h_prime),
-                Arc::clone(&row_quantities.endpoint_q),
             ));
 
         Ok(ExactNewtonJointPsiTerms {
@@ -221,14 +198,6 @@ impl TransformationNormalFamily {
 
         let weights = self.effective_weights();
         let h_prime = row_quantities.h_prime.as_ref();
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
         let mut out = Array1::<f64>::zeros(p_total);
         let mut alpha_dir = vec![0.0; p_resp];
         let mut alpha_psi = vec![0.0; p_resp];
@@ -244,7 +213,6 @@ impl TransformationNormalFamily {
             let inv_hp = 1.0 / hp;
             let inv_hp_sq = inv_hp * inv_hp;
             let inv_hp_cu = inv_hp_sq * inv_hp;
-            let q = row_quantities.endpoint_q[i];
 
             for k in 0..p_resp {
                 alpha_dir[k] = dir_mat.row(k).dot(&cov_row);
@@ -260,21 +228,12 @@ impl TransformationNormalFamily {
             let mut hp_psi = 0.0;
             let mut h_psi_dir = 0.0;
             let mut hp_psi_dir = 0.0;
-            let mut endpoint_psi = [0.0; 2];
-            let mut endpoint_dir = [0.0; 2];
-            let mut endpoint_psi_dir = [0.0; 2];
             for k in 0..p_resp {
                 h_dir += rv[k] * alpha_dir[k];
                 hp_dir += rd[k] * alpha_dir[k];
                 hp_psi += rd[k] * alpha_psi[k];
                 h_psi_dir += rv[k] * alpha_psi_dir[k];
                 hp_psi_dir += rd[k] * alpha_psi_dir[k];
-                for e in 0..2 {
-                    let basis = endpoint_basis[e];
-                    endpoint_psi[e] += basis[k] * alpha_psi[k];
-                    endpoint_dir[e] += basis[k] * alpha_dir[k];
-                    endpoint_psi_dir[e] += basis[k] * alpha_psi_dir[k];
-                }
             }
             let d_inv_hp = -hp_dir * inv_hp_sq;
             let d_inv_hp_sq = -2.0 * hp_dir * inv_hp_cu;
@@ -286,32 +245,10 @@ impl TransformationNormalFamily {
                     let hp_a = rd[k] * cov_row[c];
                     let hpsi_a = rv[k] * psi_row[c];
                     let hppsi_a = rd[k] * psi_row[c];
-                    let endpoint_a = [
-                        endpoint_basis[0][k] * cov_row[c],
-                        endpoint_basis[1][k] * cov_row[c],
-                    ];
-                    let endpoint_psi_a = [
-                        endpoint_basis[0][k] * psi_row[c],
-                        endpoint_basis[1][k] * psi_row[c],
-                    ];
-                    // β-directional derivatives of the (constant) coefficient
-                    // factors vanish for the linear chart.
-                    let endpoint_a_dir = [0.0, 0.0];
-                    let endpoint_psi_a_dir = [0.0, 0.0];
                     let value = h_a * h_psi_dir + h_dir * hpsi_a
                         - hppsi_a * d_inv_hp
                         + hp_psi_dir * hp_a * inv_hp_sq
-                        + hp_psi * hp_a * d_inv_hp_sq
-                        + endpoint_chain_third(
-                            &q,
-                            endpoint_psi,
-                            endpoint_a,
-                            endpoint_dir,
-                            endpoint_psi_a,
-                            endpoint_psi_dir,
-                            endpoint_a_dir,
-                            endpoint_psi_a_dir,
-                        );
+                        + hp_psi * hp_a * d_inv_hp_sq;
                     out[idx] += wi * value;
                 }
             }
@@ -366,14 +303,6 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi Hessian batched apply beta reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiBatchedAccum {
             pub(crate) hvp: Array2<f64>,
@@ -384,8 +313,6 @@ impl TransformationNormalFamily {
             pub(crate) hp_dir: Vec<f64>,
             pub(crate) h_psi_dir: Vec<f64>,
             pub(crate) hp_psi_dir: Vec<f64>,
-            pub(crate) endpoint_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_dir: Vec<[f64; 2]>,
         }
 
         impl PsiBatchedAccum {
@@ -400,8 +327,6 @@ impl TransformationNormalFamily {
                     hp_dir: vec![0.0; rank],
                     h_psi_dir: vec![0.0; rank],
                     hp_psi_dir: vec![0.0; rank],
-                    endpoint_dir: vec![[0.0; 2]; rank],
-                    endpoint_psi_dir: vec![[0.0; 2]; rank],
                 }
             }
 
@@ -427,7 +352,6 @@ impl TransformationNormalFamily {
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
                     let inv_hp_cu = inv_hp_sq * inv_hp;
-                    let q = row_quantities.endpoint_q[i];
 
                     for k in 0..p_resp {
                         acc.alpha_psi[k] = beta_mat.row(k).dot(&psi_row);
@@ -451,18 +375,13 @@ impl TransformationNormalFamily {
                         }
                     }
 
-                    let psi_marginal =
-                        scop_psi_marginal(rv, rd, p_resp, endpoint_basis, &acc.alpha_psi);
-                    let hp_psi = psi_marginal.1;
-                    let endpoint_psi = psi_marginal.2;
+                    let (_h_psi, hp_psi) = scop_psi_marginal(rv, rd, p_resp, &acc.alpha_psi);
 
                     for col in 0..rank {
                         acc.h_dir[col] = 0.0;
                         acc.hp_dir[col] = 0.0;
                         acc.h_psi_dir[col] = 0.0;
                         acc.hp_psi_dir[col] = 0.0;
-                        acc.endpoint_dir[col] = [0.0, 0.0];
-                        acc.endpoint_psi_dir[col] = [0.0, 0.0];
                     }
                     for k in 0..p_resp {
                         for col in 0..rank {
@@ -473,11 +392,6 @@ impl TransformationNormalFamily {
                             acc.hp_dir[col] += rd[k] * a_dir;
                             acc.h_psi_dir[col] += rv[k] * a_psi_dir;
                             acc.hp_psi_dir[col] += rd[k] * a_psi_dir;
-                            for e in 0..2 {
-                                let basis = endpoint_basis[e];
-                                acc.endpoint_dir[col][e] += basis[k] * a_dir;
-                                acc.endpoint_psi_dir[col][e] += basis[k] * a_psi_dir;
-                            }
                         }
                     }
 
@@ -485,7 +399,6 @@ impl TransformationNormalFamily {
                         let offset = k * p_cov;
                         let rvk = rv[k];
                         let rdk = rd[k];
-                        let e_k = [endpoint_basis[0][k], endpoint_basis[1][k]];
                         for cidx in 0..p_cov {
                             let c = cov_row[cidx];
                             let psi = psi_row[cidx];
@@ -493,8 +406,6 @@ impl TransformationNormalFamily {
                             let hp_a = rdk * c;
                             let hpsi_a = rvk * psi;
                             let hppsi_a = rdk * psi;
-                            let endpoint_a = [e_k[0] * c, e_k[1] * c];
-                            let endpoint_psi_a = [e_k[0] * psi, e_k[1] * psi];
                             let out_idx = offset + cidx;
                             for col in 0..rank {
                                 let d_inv_hp = -acc.hp_dir[col] * inv_hp_sq;
@@ -503,17 +414,7 @@ impl TransformationNormalFamily {
                                     + acc.h_dir[col] * hpsi_a
                                     - hppsi_a * d_inv_hp
                                     + acc.hp_psi_dir[col] * hp_a * inv_hp_sq
-                                    + hp_psi * hp_a * d_inv_hp_sq
-                                    + endpoint_chain_third(
-                                        &q,
-                                        endpoint_psi,
-                                        endpoint_a,
-                                        acc.endpoint_dir[col],
-                                        endpoint_psi_a,
-                                        acc.endpoint_psi_dir[col],
-                                        [0.0, 0.0],
-                                        [0.0, 0.0],
-                                    );
+                                    + hp_psi * hp_a * d_inv_hp_sq;
                                 acc.hvp[[out_idx, col]] += wi * value;
                             }
                         }
@@ -574,14 +475,6 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi Hessian projected trace beta reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiTraceAccum {
             pub(crate) value: f64,
@@ -592,8 +485,6 @@ impl TransformationNormalFamily {
             pub(crate) hp_dir: Vec<f64>,
             pub(crate) h_psi_dir: Vec<f64>,
             pub(crate) hp_psi_dir: Vec<f64>,
-            pub(crate) endpoint_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_dir: Vec<[f64; 2]>,
         }
 
         impl PsiTraceAccum {
@@ -608,8 +499,6 @@ impl TransformationNormalFamily {
                     hp_dir: vec![0.0; rank],
                     h_psi_dir: vec![0.0; rank],
                     hp_psi_dir: vec![0.0; rank],
-                    endpoint_dir: vec![[0.0; 2]; rank],
-                    endpoint_psi_dir: vec![[0.0; 2]; rank],
                 }
             }
 
@@ -634,7 +523,6 @@ impl TransformationNormalFamily {
                     let hp = h_prime[i];
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
-                    let q = row_quantities.endpoint_q[i];
 
                     for k in 0..p_resp {
                         acc.alpha_psi[k] = beta_mat.row(k).dot(&psi_row);
@@ -660,16 +548,13 @@ impl TransformationNormalFamily {
 
                     // `h_psi` participates only through the (zero) chart
                     // second-derivative term for the linear map.
-                    let (_h_psi, hp_psi, endpoint_psi) =
-                        scop_psi_marginal(rv, rd, p_resp, endpoint_basis, &acc.alpha_psi);
+                    let (_h_psi, hp_psi) = scop_psi_marginal(rv, rd, p_resp, &acc.alpha_psi);
 
                     for col in 0..rank {
                         acc.h_dir[col] = 0.0;
                         acc.hp_dir[col] = 0.0;
                         acc.h_psi_dir[col] = 0.0;
                         acc.hp_psi_dir[col] = 0.0;
-                        acc.endpoint_dir[col] = [0.0, 0.0];
-                        acc.endpoint_psi_dir[col] = [0.0, 0.0];
                     }
                     for k in 0..p_resp {
                         for col in 0..rank {
@@ -680,11 +565,6 @@ impl TransformationNormalFamily {
                             acc.hp_dir[col] += rd[k] * a_dir;
                             acc.h_psi_dir[col] += rv[k] * a_psi_dir;
                             acc.hp_psi_dir[col] += rd[k] * a_psi_dir;
-                            for e in 0..2 {
-                                let basis = endpoint_basis[e];
-                                acc.endpoint_dir[col][e] += basis[k] * a_dir;
-                                acc.endpoint_psi_dir[col][e] += basis[k] * a_psi_dir;
-                            }
                         }
                     }
 
@@ -696,19 +576,8 @@ impl TransformationNormalFamily {
                                 * acc.hp_dir[col]
                                 * inv_hp_sq
                                 * inv_hp;
-                        acc.value += wi
-                            * (2.0 * acc.h_dir[col] * acc.h_psi_dir[col]
-                                + barrier
-                                + endpoint_chain_third(
-                                    &q,
-                                    endpoint_psi,
-                                    acc.endpoint_dir[col],
-                                    acc.endpoint_dir[col],
-                                    acc.endpoint_psi_dir[col],
-                                    acc.endpoint_psi_dir[col],
-                                    [0.0, 0.0],
-                                    [0.0, 0.0],
-                                ));
+                        acc.value +=
+                            wi * (2.0 * acc.h_dir[col] * acc.h_psi_dir[col] + barrier);
                     }
                 }
                 acc
@@ -795,26 +664,16 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi Hessian projected trace beta reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiAllAxesTraceAccum {
             pub(crate) values: Vec<f64>,
             pub(crate) alpha_dir: Vec<f64>,
             pub(crate) h_dir: Vec<f64>,
             pub(crate) hp_dir: Vec<f64>,
-            pub(crate) endpoint_dir: Vec<[f64; 2]>,
             pub(crate) alpha_psi: Vec<f64>,
             pub(crate) alpha_psi_dir: Vec<f64>,
             pub(crate) h_psi_dir: Vec<f64>,
             pub(crate) hp_psi_dir: Vec<f64>,
-            pub(crate) endpoint_psi_dir: Vec<[f64; 2]>,
         }
 
         impl PsiAllAxesTraceAccum {
@@ -825,12 +684,10 @@ impl TransformationNormalFamily {
                     alpha_dir: vec![0.0; projected_len],
                     h_dir: vec![0.0; rank],
                     hp_dir: vec![0.0; rank],
-                    endpoint_dir: vec![[0.0; 2]; rank],
                     alpha_psi: vec![0.0; p_resp],
                     alpha_psi_dir: vec![0.0; projected_len],
                     h_psi_dir: vec![0.0; rank],
                     hp_psi_dir: vec![0.0; rank],
-                    endpoint_psi_dir: vec![[0.0; 2]; rank],
                 }
             }
 
@@ -857,7 +714,6 @@ impl TransformationNormalFamily {
                     let hp = h_prime[i];
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
-                    let q = row_quantities.endpoint_q[i];
 
                     // ---- Axis-INDEP per-row state (computed exactly once) ----
                     acc.alpha_dir.fill(0.0);
@@ -878,7 +734,6 @@ impl TransformationNormalFamily {
                     for col in 0..rank {
                         acc.h_dir[col] = 0.0;
                         acc.hp_dir[col] = 0.0;
-                        acc.endpoint_dir[col] = [0.0, 0.0];
                     }
                     for k in 0..p_resp {
                         for col in 0..rank {
@@ -886,9 +741,6 @@ impl TransformationNormalFamily {
                             let a_dir = acc.alpha_dir[idx];
                             acc.h_dir[col] += rv[k] * a_dir;
                             acc.hp_dir[col] += rd[k] * a_dir;
-                            for e in 0..2 {
-                                acc.endpoint_dir[col][e] += endpoint_basis[e][k] * a_dir;
-                            }
                         }
                     }
 
@@ -915,13 +767,12 @@ impl TransformationNormalFamily {
                             }
                         }
 
-                        let (_h_psi, hp_psi, endpoint_psi) =
-                            scop_psi_marginal(rv, rd, p_resp, endpoint_basis, &acc.alpha_psi);
+                        let (_h_psi, hp_psi) =
+                            scop_psi_marginal(rv, rd, p_resp, &acc.alpha_psi);
 
                         for col in 0..rank {
                             acc.h_psi_dir[col] = 0.0;
                             acc.hp_psi_dir[col] = 0.0;
-                            acc.endpoint_psi_dir[col] = [0.0, 0.0];
                         }
                         for k in 0..p_resp {
                             for col in 0..rank {
@@ -929,10 +780,6 @@ impl TransformationNormalFamily {
                                 let a_psi_dir = acc.alpha_psi_dir[idx];
                                 acc.h_psi_dir[col] += rv[k] * a_psi_dir;
                                 acc.hp_psi_dir[col] += rd[k] * a_psi_dir;
-                                for e in 0..2 {
-                                    acc.endpoint_psi_dir[col][e] +=
-                                        endpoint_basis[e][k] * a_psi_dir;
-                                }
                             }
                         }
 
@@ -948,19 +795,8 @@ impl TransformationNormalFamily {
                                     * acc.hp_dir[col]
                                     * inv_hp_sq
                                     * inv_hp;
-                            axis_value += wi
-                                * (2.0 * acc.h_dir[col] * acc.h_psi_dir[col]
-                                    + barrier
-                                    + endpoint_chain_third(
-                                        &q,
-                                        endpoint_psi,
-                                        acc.endpoint_dir[col],
-                                        acc.endpoint_dir[col],
-                                        acc.endpoint_psi_dir[col],
-                                        acc.endpoint_psi_dir[col],
-                                        [0.0, 0.0],
-                                        [0.0, 0.0],
-                                    ));
+                            axis_value +=
+                                wi * (2.0 * acc.h_dir[col] * acc.h_psi_dir[col] + barrier);
                         }
                         acc.values[axis_idx] += axis_value;
                     }
@@ -985,7 +821,6 @@ impl TransformationNormalFamily {
         cov_j: ArrayView2<'_, f64>,
         cov_ij: ArrayView2<'_, f64>,
         row_start: usize,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         direction: Option<&Array1<f64>>,
     ) -> Result<(f64, Array1<f64>, Option<Array1<f64>>), String> {
         let total_n = self.response_val_basis.nrows();
@@ -1007,15 +842,6 @@ impl TransformationNormalFamily {
                 reason: format!(
                     "SCOP psi-psi beta length {} != p_resp({p_resp}) * p_cov({p_cov})",
                     beta.len()
-                ),
-            }
-            .into());
-        }
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
                 ),
             }
             .into());
@@ -1081,14 +907,6 @@ impl TransformationNormalFamily {
             }
             None => None,
         };
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         if direction_mat.is_none() {
             let weights = self.effective_weights();
@@ -1153,24 +971,14 @@ impl TransformationNormalFamily {
                         let inv_hp = 1.0 / hp;
                         let inv_hp_sq = inv_hp * inv_hp;
                         let inv_hp_cu = inv_hp_sq * inv_hp;
-                        let q = endpoint_q[row_idx];
-                        let (endpoint_i, endpoint_j, endpoint_ij) = scop_second_order_endpoints(
-                            endpoint_basis,
-                            p_resp,
-                            &acc.alpha_i,
-                            &acc.alpha_j,
-                            &acc.alpha_ij,
-                        );
                         let value = h_i * h_j + h * h_ij - hp_ij * inv_hp
-                            + hp_i * hp_j * inv_hp_sq
-                            + endpoint_chain_second(&q, endpoint_i, endpoint_j, endpoint_ij);
+                            + hp_i * hp_j * inv_hp_sq;
                         let wi = weights[global_row];
                         acc.objective += wi * value;
 
                         for k in 0..p_resp {
                             let offset = k * p_cov;
                             let (rvk, rdk) = (rv[k], rd[k]);
-                            let e_k = [endpoint_basis[0][k], endpoint_basis[1][k]];
                             for cidx in 0..p_cov {
                                 let c = cov_row[cidx];
                                 let ci = cov_i_row[cidx];
@@ -1187,25 +995,11 @@ impl TransformationNormalFamily {
                                 let dhp_i = rdk * ci;
                                 let dhp_j = rdk * cj;
                                 let dhp_ij = rdk * cij;
-                                let endpoint_a = [e_k[0] * c, e_k[1] * c];
-                                let endpoint_i_a = [e_k[0] * ci, e_k[1] * ci];
-                                let endpoint_j_a = [e_k[0] * cj, e_k[1] * cj];
-                                let endpoint_ij_a = [e_k[0] * cij, e_k[1] * cij];
                                 let grad = dh_i * h_j + h_i * dh_j + dh * h_ij + h * dh_ij
                                     - dhp_ij * inv_hp
                                     + hp_ij * dhp * inv_hp_sq
                                     + (dhp_i * hp_j + hp_i * dhp_j) * inv_hp_sq
-                                    - 2.0 * hp_i * hp_j * dhp * inv_hp_cu
-                                    + endpoint_chain_third(
-                                        &q,
-                                        endpoint_i,
-                                        endpoint_j,
-                                        endpoint_a,
-                                        endpoint_ij,
-                                        endpoint_i_a,
-                                        endpoint_j_a,
-                                        endpoint_ij_a,
-                                    );
+                                    - 2.0 * hp_i * hp_j * dhp * inv_hp_cu;
                                 acc.score[offset + cidx] += wi * grad;
                             }
                         }
@@ -1314,31 +1108,9 @@ impl TransformationNormalFamily {
                     let inv_hp_cu = inv_hp_sq * inv_hp;
                     let inv_hp_qu = inv_hp_sq * inv_hp_sq;
                     let wi = weights[global_row];
-                    let q = endpoint_q[row_idx];
-                    let mut endpoint_i = [0.0; 2];
-                    let mut endpoint_j = [0.0; 2];
-                    let mut endpoint_ij = [0.0; 2];
-                    let mut endpoint_d = [0.0; 2];
-                    let mut endpoint_i_d = [0.0; 2];
-                    let mut endpoint_j_d = [0.0; 2];
-                    let mut endpoint_ij_d = [0.0; 2];
-                    for e in 0..2 {
-                        let basis = endpoint_basis[e];
-                        for k in 0..p_resp {
-                            endpoint_i[e] += basis[k] * acc.alpha_i[k];
-                            endpoint_j[e] += basis[k] * acc.alpha_j[k];
-                            endpoint_ij[e] += basis[k] * acc.alpha_ij[k];
-                            endpoint_d[e] += basis[k] * acc.alpha_dot[k];
-                            endpoint_i_d[e] += basis[k] * acc.alpha_i_dot[k];
-                            endpoint_j_d[e] += basis[k] * acc.alpha_j_dot[k];
-                            endpoint_ij_d[e] += basis[k] * acc.alpha_ij_dot[k];
-                        }
-                    }
-
                     for k in 0..p_resp {
                         let offset = k * p_cov;
                         let (rvk, rdk) = (rv[k], rd[k]);
-                        let e_k = [endpoint_basis[0][k], endpoint_basis[1][k]];
                         for cidx in 0..p_cov {
                             let c = cov_row[cidx];
                             let ci = cov_i_row[cidx];
@@ -1354,10 +1126,6 @@ impl TransformationNormalFamily {
                             let dhp_i = rdk * ci;
                             let dhp_j = rdk * cj;
                             let dhp_ij = rdk * cij;
-                            let endpoint_a = [e_k[0] * c, e_k[1] * c];
-                            let endpoint_i_a = [e_k[0] * ci, e_k[1] * ci];
-                            let endpoint_j_a = [e_k[0] * cj, e_k[1] * cj];
-                            let endpoint_ij_a = [e_k[0] * cij, e_k[1] * cij];
                             let n1 = dhp_i * hp_j + hp_i * dhp_j;
                             let n1_dot = dhp_i * hp_j_dot + hp_i_dot * dhp_j;
                             let n2_dot =
@@ -1372,25 +1140,7 @@ impl TransformationNormalFamily {
                                 + n1_dot * inv_hp_sq
                                 - 2.0 * n1 * hp_dot * inv_hp_cu
                                 - 2.0 * n2_dot * inv_hp_cu
-                                + 6.0 * hp_i * hp_j * dhp * hp_dot * inv_hp_qu
-                                + endpoint_chain_fourth(
-                                    &q,
-                                    endpoint_i,
-                                    endpoint_j,
-                                    endpoint_a,
-                                    endpoint_d,
-                                    endpoint_ij,
-                                    endpoint_i_a,
-                                    endpoint_i_d,
-                                    endpoint_j_a,
-                                    endpoint_j_d,
-                                    [0.0; 2],
-                                    endpoint_ij_a,
-                                    endpoint_ij_d,
-                                    [0.0; 2],
-                                    [0.0; 2],
-                                    [0.0; 2],
-                                );
+                                + 6.0 * hp_i * hp_j * dhp * hp_dot * inv_hp_qu;
                             acc.hvp[offset + cidx] += wi * hv;
                         }
                     }
@@ -1415,7 +1165,6 @@ impl TransformationNormalFamily {
         cov_j: ArrayView2<'_, f64>,
         cov_ij: ArrayView2<'_, f64>,
         row_start: usize,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         factor: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, String> {
         let total_n = self.response_val_basis.nrows();
@@ -1439,15 +1188,6 @@ impl TransformationNormalFamily {
                 beta.len(),
                 factor.nrows()
             ) }.into());
-        }
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi batched HVP endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
-                ),
-            }
-            .into());
         }
         if cached_h.len() != n || cached_h_prime.len() != n {
             return Err(TransformationNormalError::InvalidInput { reason: format!(
@@ -1492,14 +1232,6 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi-psi batched HVP beta reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiPairBatchedAccum {
             pub(crate) hvp: Array2<f64>,
@@ -1569,15 +1301,6 @@ impl TransformationNormalFamily {
                     let inv_hp_cu = inv_hp_sq * inv_hp;
                     let inv_hp_qu = inv_hp_sq * inv_hp_sq;
                     let wi = weights[global_row];
-                    let q = endpoint_q[row_idx];
-                    let (endpoint_i, endpoint_j, endpoint_ij) = scop_second_order_endpoints(
-                        endpoint_basis,
-                        p_resp,
-                        &acc.alpha_i,
-                        &acc.alpha_j,
-                        &acc.alpha_ij,
-                    );
-
                     acc.alpha_dot.fill(0.0);
                     acc.alpha_i_dot.fill(0.0);
                     acc.alpha_j_dot.fill(0.0);
@@ -1614,10 +1337,6 @@ impl TransformationNormalFamily {
                         let mut hp_i_dot = 0.0;
                         let mut hp_j_dot = 0.0;
                         let mut hp_ij_dot = 0.0;
-                        let mut endpoint_d = [0.0; 2];
-                        let mut endpoint_i_d = [0.0; 2];
-                        let mut endpoint_j_d = [0.0; 2];
-                        let mut endpoint_ij_d = [0.0; 2];
                         for k in 0..p_resp {
                             let idx = k * rank + col;
                             let u = acc.alpha_dot[idx];
@@ -1632,19 +1351,11 @@ impl TransformationNormalFamily {
                             hp_i_dot += rd[k] * ui;
                             hp_j_dot += rd[k] * uj;
                             hp_ij_dot += rd[k] * uij;
-                            for e in 0..2 {
-                                let basis = endpoint_basis[e];
-                                endpoint_d[e] += basis[k] * u;
-                                endpoint_i_d[e] += basis[k] * ui;
-                                endpoint_j_d[e] += basis[k] * uj;
-                                endpoint_ij_d[e] += basis[k] * uij;
-                            }
                         }
 
                         for k in 0..p_resp {
                             let offset = k * p_cov;
                             let (rvk, rdk) = (rv[k], rd[k]);
-                            let e_k = [endpoint_basis[0][k], endpoint_basis[1][k]];
                             for cidx in 0..p_cov {
                                 let c = cov_row[cidx];
                                 let ci = cov_i_row[cidx];
@@ -1658,10 +1369,6 @@ impl TransformationNormalFamily {
                                 let dhp_i = rdk * ci;
                                 let dhp_j = rdk * cj;
                                 let dhp_ij = rdk * cij;
-                                let endpoint_a = [e_k[0] * c, e_k[1] * c];
-                                let endpoint_i_a = [e_k[0] * ci, e_k[1] * ci];
-                                let endpoint_j_a = [e_k[0] * cj, e_k[1] * cj];
-                                let endpoint_ij_a = [e_k[0] * cij, e_k[1] * cij];
                                 let n1 = dhp_i * hp_j + hp_i * dhp_j;
                                 let n1_dot = dhp_i * hp_j_dot + hp_i_dot * dhp_j;
                                 let n2_dot =
@@ -1676,25 +1383,7 @@ impl TransformationNormalFamily {
                                     + n1_dot * inv_hp_sq
                                     - 2.0 * n1 * hp_dot * inv_hp_cu
                                     - 2.0 * n2_dot * inv_hp_cu
-                                    + 6.0 * hp_i * hp_j * dhp * hp_dot * inv_hp_qu
-                                    + endpoint_chain_fourth(
-                                        &q,
-                                        endpoint_i,
-                                        endpoint_j,
-                                        endpoint_a,
-                                        endpoint_d,
-                                        endpoint_ij,
-                                        endpoint_i_a,
-                                        endpoint_i_d,
-                                        endpoint_j_a,
-                                        endpoint_j_d,
-                                        [0.0; 2],
-                                        endpoint_ij_a,
-                                        endpoint_ij_d,
-                                        [0.0; 2],
-                                        [0.0; 2],
-                                        [0.0; 2],
-                                    );
+                                    + 6.0 * hp_i * hp_j * dhp * hp_dot * inv_hp_qu;
                                 acc.hvp[[offset + cidx, col]] += wi * hv;
                             }
                         }
@@ -1720,7 +1409,6 @@ impl TransformationNormalFamily {
         cov_j: ArrayView2<'_, f64>,
         cov_ij: ArrayView2<'_, f64>,
         row_start: usize,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         left: ArrayView1<'_, f64>,
         right: ArrayView1<'_, f64>,
     ) -> Result<f64, String> {
@@ -1745,15 +1433,6 @@ impl TransformationNormalFamily {
                 left.len(),
                 right.len()
             ) }.into());
-        }
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi bilinear endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
-                ),
-            }
-            .into());
         }
         if cached_h.len() != n || cached_h_prime.len() != n {
             return Err(TransformationNormalError::InvalidInput { reason: format!(
@@ -1803,14 +1482,6 @@ impl TransformationNormalFamily {
         let right_mat = right
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi-psi bilinear right reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiPairBilinearAccum {
             pub(crate) value: f64,
@@ -1922,36 +1593,6 @@ impl TransformationNormalFamily {
                         hp_ij_r += rd[k] * acc.right_ij[k];
                     }
 
-                    let q = endpoint_q[row_idx];
-                    let mut endpoint_i = [0.0; 2];
-                    let mut endpoint_j = [0.0; 2];
-                    let mut endpoint_ij = [0.0; 2];
-                    let mut endpoint_l = [0.0; 2];
-                    let mut endpoint_r = [0.0; 2];
-                    let mut endpoint_i_l = [0.0; 2];
-                    let mut endpoint_j_l = [0.0; 2];
-                    let mut endpoint_ij_l = [0.0; 2];
-                    let mut endpoint_i_r = [0.0; 2];
-                    let mut endpoint_j_r = [0.0; 2];
-                    let mut endpoint_ij_r = [0.0; 2];
-                    for e in 0..2 {
-                        let basis = endpoint_basis[e];
-                        for k in 0..p_resp {
-                            let basis_k = basis[k];
-                            endpoint_i[e] += basis_k * acc.alpha_i[k];
-                            endpoint_j[e] += basis_k * acc.alpha_j[k];
-                            endpoint_ij[e] += basis_k * acc.alpha_ij[k];
-                            endpoint_l[e] += basis_k * acc.left[k];
-                            endpoint_r[e] += basis_k * acc.right[k];
-                            endpoint_i_l[e] += basis_k * acc.left_i[k];
-                            endpoint_j_l[e] += basis_k * acc.left_j[k];
-                            endpoint_ij_l[e] += basis_k * acc.left_ij[k];
-                            endpoint_i_r[e] += basis_k * acc.right_i[k];
-                            endpoint_j_r[e] += basis_k * acc.right_j[k];
-                            endpoint_ij_r[e] += basis_k * acc.right_ij[k];
-                        }
-                    }
-
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
                     let inv_hp_cu = inv_hp_sq * inv_hp;
@@ -1969,25 +1610,7 @@ impl TransformationNormalFamily {
                         + numerator_lr * inv_hp_sq
                         - 2.0 * numerator_l * hp_r * inv_hp_cu
                         - 2.0 * numerator_r * hp_l * inv_hp_cu
-                        + 6.0 * hp_i * hp_j * hp_l * hp_r * inv_hp_qu
-                        + endpoint_chain_fourth(
-                            &q,
-                            endpoint_i,
-                            endpoint_j,
-                            endpoint_l,
-                            endpoint_r,
-                            endpoint_ij,
-                            endpoint_i_l,
-                            endpoint_i_r,
-                            endpoint_j_l,
-                            endpoint_j_r,
-                            [0.0; 2],
-                            endpoint_ij_l,
-                            endpoint_ij_r,
-                            [0.0; 2],
-                            [0.0; 2],
-                            [0.0; 2],
-                        );
+                        + 6.0 * hp_i * hp_j * hp_l * hp_r * inv_hp_qu;
                     acc.value += weights[global_row] * value_lr;
                 }
                 acc
@@ -2013,7 +1636,6 @@ impl TransformationNormalFamily {
         cov_j: ArrayView2<'_, f64>,
         cov_ij: ArrayView2<'_, f64>,
         row_start: usize,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         factor: ArrayView2<'_, f64>,
     ) -> Result<f64, String> {
         let total_n = self.response_val_basis.nrows();
@@ -2053,15 +1675,6 @@ impl TransformationNormalFamily {
         let factor_data = factor.as_slice().ok_or_else(|| {
             "SCOP psi-psi projected trace factor matrix must be standard contiguous".to_string()
         })?;
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi projected trace endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
-                ),
-            }
-            .into());
-        }
         if cached_h.len() != n || cached_h_prime.len() != n {
             return Err(TransformationNormalError::InvalidInput { reason: format!(
                 "SCOP psi-psi projected trace row-quantity cache length mismatch: h={}, h_prime={}, expected={n}",
@@ -2093,14 +1706,6 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi-psi projected trace beta reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
 
         struct PsiPairTraceAccum {
             pub(crate) value: f64,
@@ -2162,15 +1767,6 @@ impl TransformationNormalFamily {
                         &acc.alpha_ij,
                     );
 
-                    let q = endpoint_q[row_idx];
-                    let (endpoint_i, endpoint_j, endpoint_ij) = scop_second_order_endpoints(
-                        endpoint_basis,
-                        p_resp,
-                        &acc.alpha_i,
-                        &acc.alpha_j,
-                        &acc.alpha_ij,
-                    );
-
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
                     let inv_hp_cu = inv_hp_sq * inv_hp;
@@ -2210,10 +1806,6 @@ impl TransformationNormalFamily {
                         let mut hp_i_f = 0.0;
                         let mut hp_j_f = 0.0;
                         let mut hp_ij_f = 0.0;
-                        let mut endpoint_f = [0.0; 2];
-                        let mut endpoint_i_f = [0.0; 2];
-                        let mut endpoint_j_f = [0.0; 2];
-                        let mut endpoint_ij_f = [0.0; 2];
                         for k in 0..p_resp {
                             let projected_idx = k * rank + col;
                             let f = acc.f[projected_idx];
@@ -2228,13 +1820,6 @@ impl TransformationNormalFamily {
                             hp_i_f += rd[k] * fi;
                             hp_j_f += rd[k] * fj;
                             hp_ij_f += rd[k] * fij;
-                            for e in 0..2 {
-                                let basis_k = endpoint_basis[e][k];
-                                endpoint_f[e] += basis_k * f;
-                                endpoint_i_f[e] += basis_k * fi;
-                                endpoint_j_f[e] += basis_k * fj;
-                                endpoint_ij_f[e] += basis_k * fij;
-                            }
                         }
 
                         let numerator_f = hp_i_f * hp_j + hp_i * hp_j_f;
@@ -2245,25 +1830,7 @@ impl TransformationNormalFamily {
                             - 2.0 * hp_ij * hp_f * hp_f * inv_hp_cu
                             + numerator_ff * inv_hp_sq
                             - 4.0 * numerator_f * hp_f * inv_hp_cu
-                            + 6.0 * hp_i * hp_j * hp_f * hp_f * inv_hp_qu
-                            + endpoint_chain_fourth(
-                                &q,
-                                endpoint_i,
-                                endpoint_j,
-                                endpoint_f,
-                                endpoint_f,
-                                endpoint_ij,
-                                endpoint_i_f,
-                                endpoint_i_f,
-                                endpoint_j_f,
-                                endpoint_j_f,
-                                [0.0; 2],
-                                endpoint_ij_f,
-                                endpoint_ij_f,
-                                [0.0; 2],
-                                [0.0; 2],
-                                [0.0; 2],
-                            );
+                            + 6.0 * hp_i * hp_j * hp_f * hp_f * inv_hp_qu;
                         acc.value += wi * value_ff;
                     }
                 }
@@ -2320,22 +1887,12 @@ impl TransformationNormalFamily {
         cached_gamma: ArrayView2<'_, f64>,
         cached_h: ArrayView1<'_, f64>,
         cached_h_prime: ArrayView1<'_, f64>,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         direction: Option<&Array1<f64>>,
     ) -> Result<(f64, Array1<f64>, Option<Array1<f64>>), String> {
         let n = self.response_val_basis.nrows();
         let p_resp = self.response_val_basis.ncols();
         let p_cov = self.covariate_design.ncols();
         let p_total = p_resp * p_cov;
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi operator endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
-                ),
-            }
-            .into());
-        }
         if cached_h.len() != n || cached_h_prime.len() != n {
             return Err(TransformationNormalError::InvalidInput { reason: format!(
                 "SCOP psi-psi operator row-quantity cache length mismatch: h={}, h_prime={}, expected={n}",
@@ -2375,7 +1932,6 @@ impl TransformationNormalFamily {
                 cov_j.view(),
                 cov_ij.view(),
                 start,
-                &endpoint_q[start..end],
                 direction,
             )?;
             objective += obj_chunk;
@@ -2397,21 +1953,11 @@ impl TransformationNormalFamily {
         cached_gamma: ArrayView2<'_, f64>,
         cached_h: ArrayView1<'_, f64>,
         cached_h_prime: ArrayView1<'_, f64>,
-        endpoint_q: &[LogNormalCdfDiffDerivatives],
         left: ArrayView1<'_, f64>,
         right: ArrayView1<'_, f64>,
     ) -> Result<f64, String> {
         let n = self.response_val_basis.nrows();
         let p_cov = self.covariate_design.ncols();
-        if endpoint_q.len() != n {
-            return Err(TransformationNormalError::InvalidInput {
-                reason: format!(
-                    "SCOP psi-psi bilinear operator endpoint normalizer cache length {} != n={n}",
-                    endpoint_q.len()
-                ),
-            }
-            .into());
-        }
         if cached_h.len() != n || cached_h_prime.len() != n {
             return Err(TransformationNormalError::InvalidInput { reason: format!(
                 "SCOP psi-psi bilinear operator row-quantity cache length mismatch: h={}, h_prime={}, expected={n}",
@@ -2449,7 +1995,6 @@ impl TransformationNormalFamily {
                 cov_j.view(),
                 cov_ij.view(),
                 start,
-                &endpoint_q[start..end],
                 left,
                 right,
             )?;
@@ -2506,14 +2051,6 @@ impl TransformationNormalFamily {
 
         let weights = self.effective_weights();
         let h_prime = row_quantities.h_prime.as_ref();
-        let endpoint_basis = [
-            self.response_upper_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint upper basis is not contiguous".to_string())?,
-            self.response_lower_basis
-                .as_slice()
-                .ok_or_else(|| "SCOP endpoint lower basis is not contiguous".to_string())?,
-        ];
         // Parallelise the outer `for i in 0..n` row accumulation across
         // Rayon threads. The inner k×l×c×d loop dominates wall-clock at
         // large scale; per-row contributions to `out` are independent
@@ -2527,12 +2064,6 @@ impl TransformationNormalFamily {
             pub(crate) gamma_dir: Vec<f64>,
             pub(crate) gamma_psi: Vec<f64>,
             pub(crate) gamma_psi_dir: Vec<f64>,
-            pub(crate) endpoint_factor: Vec<[f64; 2]>,
-            pub(crate) endpoint_factor_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_cov_factor: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_psi_factor: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_cov_factor_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_psi_factor_dir: Vec<[f64; 2]>,
             pub(crate) h_factor: Vec<f64>,
             pub(crate) hp_factor: Vec<f64>,
             pub(crate) h_factor_dir: Vec<f64>,
@@ -2551,12 +2082,6 @@ impl TransformationNormalFamily {
             gamma_dir: vec![0.0; p_resp],
             gamma_psi: vec![0.0; p_resp],
             gamma_psi_dir: vec![0.0; p_resp],
-            endpoint_factor: vec![[0.0_f64; 2]; p_resp],
-            endpoint_factor_dir: vec![[0.0_f64; 2]; p_resp],
-            endpoint_psi_cov_factor: vec![[0.0_f64; 2]; p_resp],
-            endpoint_psi_psi_factor: vec![[0.0_f64; 2]; p_resp],
-            endpoint_psi_cov_factor_dir: vec![[0.0_f64; 2]; p_resp],
-            endpoint_psi_psi_factor_dir: vec![[0.0_f64; 2]; p_resp],
             h_factor: vec![0.0; p_resp],
             hp_factor: vec![0.0; p_resp],
             h_factor_dir: vec![0.0; p_resp],
@@ -2577,12 +2102,6 @@ impl TransformationNormalFamily {
                 gamma_dir,
                 gamma_psi,
                 gamma_psi_dir,
-                endpoint_factor,
-                endpoint_factor_dir,
-                endpoint_psi_cov_factor,
-                endpoint_psi_psi_factor,
-                endpoint_psi_cov_factor_dir,
-                endpoint_psi_psi_factor_dir,
                 h_factor,
                 hp_factor,
                 h_factor_dir,
@@ -2608,12 +2127,6 @@ impl TransformationNormalFamily {
             let inv_hp_qu = inv_hp_sq * inv_hp_sq;
 
             // Reset the row scratch before writing the direct-alpha factors.
-            endpoint_factor.fill([0.0; 2]);
-            endpoint_factor_dir.fill([0.0; 2]);
-            endpoint_psi_cov_factor.fill([0.0; 2]);
-            endpoint_psi_psi_factor.fill([0.0; 2]);
-            endpoint_psi_cov_factor_dir.fill([0.0; 2]);
-            endpoint_psi_psi_factor_dir.fill([0.0; 2]);
             h_factor.fill(0.0);
             hp_factor.fill(0.0);
             h_factor_dir.fill(0.0);
@@ -2643,24 +2156,6 @@ impl TransformationNormalFamily {
                 hp_psi += rd[k] * gamma_psi[k];
                 h_psi_dir += rv[k] * gamma_psi_dir[k];
                 hp_psi_dir += rd[k] * gamma_psi_dir[k];
-            }
-            let q = row_quantities.endpoint_q[i];
-            let mut endpoint_psi = [0.0; 2];
-            let mut endpoint_dir = [0.0; 2];
-            let mut endpoint_psi_dir = [0.0; 2];
-            for e in 0..2 {
-                let basis = endpoint_basis[e];
-                for k in 0..p_resp {
-                    endpoint_psi[e] += basis[k] * gamma_psi[k];
-                    endpoint_dir[e] += basis[k] * gamma_dir[k];
-                    endpoint_psi_dir[e] += basis[k] * gamma_psi_dir[k];
-                    endpoint_factor[k][e] = basis[k];
-                    endpoint_factor_dir[k][e] = 0.0;
-                    endpoint_psi_cov_factor[k][e] = 0.0;
-                    endpoint_psi_psi_factor[k][e] = basis[k];
-                    endpoint_psi_cov_factor_dir[k][e] = 0.0;
-                    endpoint_psi_psi_factor_dir[k][e] = 0.0;
-                }
             }
             let d_inv_hp = -hp_dir * inv_hp_sq;
             let d_inv_hp_sq = -2.0 * hp_dir * inv_hp_cu;
@@ -2712,47 +2207,6 @@ impl TransformationNormalFamily {
                             let hppsi_b_dir = hppsi_cov_factor_dir[l] * cov_row[d]
                                 + hppsi_psi_factor_dir[l] * psi_row[d];
                             let (h_ab, hp_ab, hpsi_ab, hppsi_ab) = (0.0, 0.0, 0.0, 0.0);
-                            let endpoint_a = [
-                                endpoint_factor[k][0] * cov_row[c],
-                                endpoint_factor[k][1] * cov_row[c],
-                            ];
-                            let endpoint_b = [
-                                endpoint_factor[l][0] * cov_row[d],
-                                endpoint_factor[l][1] * cov_row[d],
-                            ];
-                            let endpoint_psi_a = [
-                                endpoint_psi_cov_factor[k][0] * cov_row[c]
-                                    + endpoint_psi_psi_factor[k][0] * psi_row[c],
-                                endpoint_psi_cov_factor[k][1] * cov_row[c]
-                                    + endpoint_psi_psi_factor[k][1] * psi_row[c],
-                            ];
-                            let endpoint_psi_b = [
-                                endpoint_psi_cov_factor[l][0] * cov_row[d]
-                                    + endpoint_psi_psi_factor[l][0] * psi_row[d],
-                                endpoint_psi_cov_factor[l][1] * cov_row[d]
-                                    + endpoint_psi_psi_factor[l][1] * psi_row[d],
-                            ];
-                            let endpoint_a_dir = [
-                                endpoint_factor_dir[k][0] * cov_row[c],
-                                endpoint_factor_dir[k][1] * cov_row[c],
-                            ];
-                            let endpoint_b_dir = [
-                                endpoint_factor_dir[l][0] * cov_row[d],
-                                endpoint_factor_dir[l][1] * cov_row[d],
-                            ];
-                            let endpoint_psi_a_dir = [
-                                endpoint_psi_cov_factor_dir[k][0] * cov_row[c]
-                                    + endpoint_psi_psi_factor_dir[k][0] * psi_row[c],
-                                endpoint_psi_cov_factor_dir[k][1] * cov_row[c]
-                                    + endpoint_psi_psi_factor_dir[k][1] * psi_row[c],
-                            ];
-                            let endpoint_psi_b_dir = [
-                                endpoint_psi_cov_factor_dir[l][0] * cov_row[d]
-                                    + endpoint_psi_psi_factor_dir[l][0] * psi_row[d],
-                                endpoint_psi_cov_factor_dir[l][1] * cov_row[d]
-                                    + endpoint_psi_psi_factor_dir[l][1] * psi_row[d],
-                            ];
-                            let (endpoint_ab, endpoint_psi_ab) = ([0.0; 2], [0.0; 2]);
                             let numerator = hppsi_a * hp_b + hp_a * hppsi_b;
                             let numerator_dir = hppsi_a_dir * hp_b
                                 + hppsi_a * hp_b_dir
@@ -2775,25 +2229,7 @@ impl TransformationNormalFamily {
                                         + barrier_product * d_inv_hp_cu)
                                 - hppsi_ab * d_inv_hp
                                 + hp_ab * hp_psi_dir * inv_hp_sq
-                                + hp_ab * hp_psi * d_inv_hp_sq
-                                + endpoint_chain_fourth(
-                                    &q,
-                                    endpoint_psi,
-                                    endpoint_a,
-                                    endpoint_b,
-                                    endpoint_dir,
-                                    endpoint_psi_a,
-                                    endpoint_psi_b,
-                                    endpoint_psi_dir,
-                                    endpoint_ab,
-                                    endpoint_a_dir,
-                                    endpoint_b_dir,
-                                    endpoint_psi_ab,
-                                    endpoint_psi_a_dir,
-                                    endpoint_psi_b_dir,
-                                    [0.0; 2],
-                                    [0.0; 2],
-                                );
+                                + hp_ab * hp_psi * d_inv_hp_sq;
                             out[[row_idx, col_idx]] += wi * value;
                         }
                     }
@@ -2882,14 +2318,6 @@ impl TransformationNormalFamily {
             .view()
             .into_shape_with_order((p_resp, p_cov))
             .map_err(|e| format!("SCOP psi directional trace direction reshape failed: {e}"))?;
-        let endpoint_basis = [
-            self.response_upper_basis.as_slice().ok_or_else(|| {
-                "SCOP psi directional trace endpoint upper basis is not contiguous".to_string()
-            })?,
-            self.response_lower_basis.as_slice().ok_or_else(|| {
-                "SCOP psi directional trace endpoint lower basis is not contiguous".to_string()
-            })?,
-        ];
 
         struct PsiDhTraceAccum {
             pub(crate) value: f64,
@@ -2910,12 +2338,6 @@ impl TransformationNormalFamily {
             pub(crate) hppsi_f_dir: Vec<f64>,
             pub(crate) hpsi_ff: Vec<f64>,
             pub(crate) hppsi_ff: Vec<f64>,
-            pub(crate) endpoint_f: Vec<[f64; 2]>,
-            pub(crate) endpoint_f_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_ff: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_f: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_f_dir: Vec<[f64; 2]>,
-            pub(crate) endpoint_psi_ff: Vec<[f64; 2]>,
         }
 
         impl PsiDhTraceAccum {
@@ -2940,12 +2362,6 @@ impl TransformationNormalFamily {
                     hppsi_f_dir: vec![0.0; rank],
                     hpsi_ff: vec![0.0; rank],
                     hppsi_ff: vec![0.0; rank],
-                    endpoint_f: vec![[0.0; 2]; rank],
-                    endpoint_f_dir: vec![[0.0; 2]; rank],
-                    endpoint_ff: vec![[0.0; 2]; rank],
-                    endpoint_psi_f: vec![[0.0; 2]; rank],
-                    endpoint_psi_f_dir: vec![[0.0; 2]; rank],
-                    endpoint_psi_ff: vec![[0.0; 2]; rank],
                 }
             }
 
@@ -3039,7 +2455,6 @@ impl TransformationNormalFamily {
                     let inv_hp_sq = inv_hp * inv_hp;
                     let inv_hp_cu = inv_hp_sq * inv_hp;
                     let inv_hp_qu = inv_hp_sq * inv_hp_sq;
-                    let q = row_quantities.endpoint_q[i];
 
                     for k in 0..p_resp {
                         acc.gamma_dir[k] = dir_mat.row(k).dot(&cov_row);
@@ -3076,18 +2491,6 @@ impl TransformationNormalFamily {
                     let d_inv_hp_sq = -2.0 * hp_dir * inv_hp_cu;
                     let d_inv_hp_cu = -3.0 * hp_dir * inv_hp_qu;
 
-                    let mut endpoint_psi = [0.0_f64; 2];
-                    let mut endpoint_dir = [0.0_f64; 2];
-                    let mut endpoint_psi_dir = [0.0_f64; 2];
-                    for e in 0..2 {
-                        let basis = endpoint_basis[e];
-                        for k in 0..p_resp {
-                            endpoint_psi[e] += basis[k] * acc.gamma_psi[k];
-                            endpoint_dir[e] += basis[k] * acc.gamma_dir[k];
-                            endpoint_psi_dir[e] += basis[k] * acc.gamma_psi_dir[k];
-                        }
-                    }
-
                     for col in 0..rank {
                         acc.h_f[col] = 0.0;
                         acc.hp_f[col] = 0.0;
@@ -3101,12 +2504,6 @@ impl TransformationNormalFamily {
                         acc.hppsi_f_dir[col] = 0.0;
                         acc.hpsi_ff[col] = 0.0;
                         acc.hppsi_ff[col] = 0.0;
-                        acc.endpoint_f[col] = [0.0; 2];
-                        acc.endpoint_f_dir[col] = [0.0; 2];
-                        acc.endpoint_ff[col] = [0.0; 2];
-                        acc.endpoint_psi_f[col] = [0.0; 2];
-                        acc.endpoint_psi_f_dir[col] = [0.0; 2];
-                        acc.endpoint_psi_ff[col] = [0.0; 2];
                     }
                     for k in 0..p_resp {
                         for col in 0..rank {
@@ -3117,11 +2514,6 @@ impl TransformationNormalFamily {
                             acc.hp_f[col] += rd[k] * gf;
                             acc.hpsi_f[col] += rv[k] * gpf;
                             acc.hppsi_f[col] += rd[k] * gpf;
-                            for e in 0..2 {
-                                let basis = endpoint_basis[e];
-                                acc.endpoint_f[col][e] += basis[k] * gf;
-                                acc.endpoint_psi_f[col][e] += basis[k] * gpf;
-                            }
                         }
                     }
 
@@ -3143,25 +2535,7 @@ impl TransformationNormalFamily {
                                 * (barrier_product_dir * inv_hp_cu + barrier_product * d_inv_hp_cu)
                             - acc.hppsi_ff[col] * d_inv_hp
                             + acc.hp_ff[col] * hp_psi_dir * inv_hp_sq
-                            + acc.hp_ff[col] * hp_psi * d_inv_hp_sq
-                            + endpoint_chain_fourth(
-                                &q,
-                                endpoint_psi,
-                                acc.endpoint_f[col],
-                                acc.endpoint_f[col],
-                                endpoint_dir,
-                                acc.endpoint_psi_f[col],
-                                acc.endpoint_psi_f[col],
-                                endpoint_psi_dir,
-                                acc.endpoint_ff[col],
-                                acc.endpoint_f_dir[col],
-                                acc.endpoint_f_dir[col],
-                                acc.endpoint_psi_ff[col],
-                                acc.endpoint_psi_f_dir[col],
-                                acc.endpoint_psi_f_dir[col],
-                                [0.0; 2],
-                                [0.0; 2],
-                            );
+                            + acc.hp_ff[col] * hp_psi * d_inv_hp_sq;
                         acc.value += wi * value;
                     }
                 }
