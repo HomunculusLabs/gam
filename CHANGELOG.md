@@ -1,5 +1,89 @@
 ## Unreleased
 
+- **A cached inner mode was identified by the penalty's state, not the
+  objective's, so the coefficient-mode continuation's corrector was disabled by
+  its own refinement (#2612).** `InnerPenaltyState` carried the per-block and
+  joint `log λ` and called itself "the complete smoothing state an inner Laplace
+  mode is a function of", with the reuse contract written on it: *a cached mode
+  is reusable only when the penalized objective it minimises is the identical
+  function*. The inner coefficient objective is
+  `−ℓ(β) + ½βᵀS_λβ − τ·Φ(β)`, and `τ` — the family's Jeffreys/Firth augmentation
+  strength — was not in the state, so two different objectives at the same ρ
+  compared equal.
+
+  That is not a corner case for the one path that varies `τ`: #2366's
+  `coefficient_mode_homotopy_member` DEFINES the armed coefficient mode as the
+  endpoint of a continuation in `τ` **at fixed ρ**, so on that path the ρ half is
+  constant by construction and the key matched at every waypoint. The only thing
+  left between the corrector and a no-op was the fresh curvature certificate
+  refusing a non-PSD incoming point — and the finer the discretization, the less
+  the mode moves per waypoint and the more often that certificate passes.
+  Measured on the penguins stride-4 armed refit, 8-step sweep, `λ_min` at each
+  incoming mode: `−7.9e-2, −8.7e-6, −7.3e-6, −4.8e-6, −2.5e-6, −7.4e-7, −5.2e-8,
+  +2.8e-8` — the last one reused, so the sweep's ENDPOINT was the `τ = 0.875`
+  mode relabelled as the `τ = 1` mode, printing a bit-identical log-likelihood,
+  penalty and cycle count. Refining the discretization, which is the
+  continuation's entire convergence mechanism, is what disabled its corrector.
+  This is #2615 one level up: the same key comparing equal at every `τ` because
+  it is missing a coordinate, rather than at every ρ because it was empty. The
+  state is now `InnerObjectiveState`, built from the family so no production site
+  can supply the wrong strength, and the persistent-warm-start key carries it
+  too.
+
+- **The continuation ladder's endpoint sequence is MODE-VALUED, so the dyadic
+  contraction premise could not read it (#2612).** Every sweep's last waypoint
+  corrects at the target objective to the inner solver's own KKT tolerance, so
+  each endpoint is an *exact* mode of the *same* function — refining does not
+  shrink an error, it changes which mode the path arrives at. The measured trail,
+  same fixture:
+
+  ```text
+    steps  1 → 2    endpoint discrepancy 1.521120e0
+    steps  2 → 4                         3.328619e-5
+    steps  4 → 8                         1.695145e0
+    steps  8 → 16                        5.413481e-5
+  ```
+
+  Two values four orders apart, alternating — `O(1)` between different modes and
+  `O(5e-5)` (the corrector's own reproducibility) between two arrivals at the
+  same one. There is no rate to observe. `d_k ≤ ½·d_{k−1}` therefore fired at the
+  first refinement that actually tracked the branch, using as its baseline the
+  accidental agreement of two coarse sweeps that had both jumped to the same
+  wrong mode. Three things follow and all three are now fixed:
+
+  1. the contraction ratio is reported evidence, not a verdict;
+  2. one agreement is not a limit — the `2 → 4` agreement above is a full
+     agreement on a mode the 8-step sweep leaves — so certification needs
+     consecutive agreements;
+  3. the yardstick could not be `options.inner_tol`. That is a KKT-residual
+     tolerance and the discrepancy is a relative sup-norm over linear
+     predictors; on this fixture two sweeps reaching the SAME mode differ by
+     `3.3e-5` and `5.4e-5` against a `1e-5` bar, so "the same mode, twice" was
+     not certifiable at any depth. The reason is physical: the armed mode is
+     nearly flat in one direction (`λ_min ≈ 4.7e-7`), so `β̂` is poorly determined
+     by a residual while the criterion built from it is well determined — the
+     same two endpoints agree to `5.0e-7` in the criterion. The bar is now the
+     outer solver's own relative-cost resolution, in the criterion's units, which
+     is also the only quantity the seed exists to make well defined.
+
+  #2661's requirement — accepting arbitrarily slow progress makes the loop
+  operationally unbounded, since each refinement doubles the corrector count — is
+  preserved and is now bounded as the resource it is: **the seed may not cost
+  more correctors than the outer search it seeds is budgeted for**, i.e.
+  `2^{D+1} ≤ outer_max_iter`. A ladder that exhausts it refuses with the full
+  trail rather than with two numbers out of a sequence.
+
+- **A coefficient-objective continuation that cannot certify now DECLINES
+  instead of killing the fit (#2612).** Its sibling `anchored_continuation_seed`
+  has carried that contract since #2366 — "the production caller logs a refusal
+  and keeps its existing seed, so declining a continuation still never turns a
+  fit that works today into a failure" — and the homotopy call site was the one
+  place that read the same kind of refusal as fatal. Refusing the whole fit does
+  not make `V(ρ)` well defined; it only denies the caller the answer the
+  pre-#2366 seed would have produced. What a decline costs is logged rather than
+  hidden: the mode is then selected by the caller's coefficients, so `θ̂` is a
+  functional of the seed for that fit.
+
 - **What the follow-up-varying slope still cannot do, measured rather than
   guessed (#2765 / #2767).** With the one-channel pullback repaired, the
   acceptance fixture's outer solve goes from *zero* iterations (its first line

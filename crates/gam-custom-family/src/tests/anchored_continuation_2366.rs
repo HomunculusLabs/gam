@@ -93,36 +93,259 @@ impl CustomFamily for TiltedDoubleWellFamily {
 
 const TILT: f64 = 0.3;
 
-/// #2661 witness: accepting any strict decrease makes the refinement loop
-/// operationally unbounded. A 0.999 contraction passes that old predicate on
-/// every round, while each round doubles the number of full corrector solves.
-#[test]
-fn arbitrarily_slow_progress_is_not_a_continuation_contraction_certificate_2661() {
-    let refusal = continuation_refinement_decision(4, Some(1.0), 0.999, 1e-12)
-        .expect_err("a 0.999 discrepancy ratio must terminate with a typed refusal");
-    match refusal {
-        AnchoredContinuationRefusal::ContractionPremiseViolated {
-            steps,
-            previous_discrepancy,
-            discrepancy,
-            observed_factor,
-            required_max_factor,
-        } => {
-            assert_eq!(steps, 4);
-            assert_eq!(previous_discrepancy.to_bits(), 1.0_f64.to_bits());
-            assert_eq!(discrepancy.to_bits(), 0.999_f64.to_bits());
-            assert_eq!(observed_factor.to_bits(), 0.999_f64.to_bits());
-            assert_eq!(required_max_factor.to_bits(), 0.5_f64.to_bits());
+/// A continuation path with a SCRIPTED endpoint sequence.
+///
+/// The ladder's stopping rule is a property of the sequence of endpoints, not of
+/// any one comparison, so the fixtures below drive the whole ladder rather than
+/// a single decision. Scripting the criterion values is what lets the #2612
+/// shape — an agreement that a further refinement leaves — be asserted without
+/// a nonconvex fixture that takes minutes to produce it.
+struct ScriptedContinuationPath {
+    /// Criterion value returned for the sweep at `2^k` steps, index `k`. The
+    /// last entry repeats for any deeper refinement.
+    criterion_by_refinement: Vec<f64>,
+    sweeps: std::cell::RefCell<Vec<usize>>,
+}
+
+impl ScriptedContinuationPath {
+    fn new(criterion_by_refinement: Vec<f64>) -> Self {
+        Self {
+            criterion_by_refinement,
+            sweeps: std::cell::RefCell::new(Vec::new()),
         }
-        other => panic!("slow contraction produced the wrong typed refusal: {other:?}"),
+    }
+
+    fn criterion_for(&self, steps: usize) -> f64 {
+        let index = steps.trailing_zeros() as usize;
+        let last = self.criterion_by_refinement.len() - 1;
+        self.criterion_by_refinement[index.min(last)]
     }
 }
 
+impl crate::fit::RefinedContinuationPath for ScriptedContinuationPath {
+    fn sweep(
+        &self,
+        steps: usize,
+    ) -> Result<crate::fit::SweptEndpoint, AnchoredContinuationRefusal> {
+        self.sweeps.borrow_mut().push(steps);
+        let criterion = self.criterion_for(steps);
+        Ok(crate::fit::SweptEndpoint {
+            warm_start: crate::assembly::ConstrainedWarmStart {
+                rho: array![0.0],
+                // The endpoint's state stands in for the mode; it tracks the
+                // criterion so the state discrepancy and the criterion
+                // agreement move together, as they do on a real path.
+                block_beta: vec![array![criterion]],
+                active_sets: vec![None],
+                cached_inner: None,
+            },
+            criterion_value: criterion,
+        })
+    }
+
+    fn resolves_steps(&self, refined_steps: usize) -> bool {
+        1.0 / refined_steps as f64 > f64::EPSILON
+    }
+
+    fn endpoint_discrepancy(
+        &self,
+        _steps: usize,
+        coarser: &crate::assembly::ConstrainedWarmStart,
+        finer: &crate::assembly::ConstrainedWarmStart,
+    ) -> Result<f64, AnchoredContinuationRefusal> {
+        Ok((coarser.block_beta[0][0] - finer.block_beta[0][0]).abs())
+    }
+
+    fn label(&self) -> &'static str {
+        "scripted"
+    }
+}
+
+fn scripted_options(outer_max_iter: usize) -> BlockwiseFitOptions {
+    BlockwiseFitOptions {
+        outer_max_iter,
+        // The ladder is judged in the criterion's own units, so this is the
+        // resolution the fixtures below are written against.
+        outer_rel_cost_tol: Some(1e-6),
+        ..double_well_options()
+    }
+}
+
+/// #2661's guarantee, asserted as the property it actually is: **the refinement
+/// loop terminates in bounded work**, whatever the sequence does.
+///
+/// The original form of this test asserted a per-refinement contraction ratio,
+/// which #2612 measured cannot read this ladder at all — the endpoint sequence
+/// is mode-valued, so its discrepancies alternate between `O(1)` and the
+/// corrector's floor and never exhibit a rate. The requirement #2661 stated
+/// ("each round doubles the number of full corrector solves, so accepting
+/// arbitrarily slow progress makes the loop operationally unbounded") is
+/// preserved exactly, and is now bounded as the resource it is.
 #[test]
-fn exact_half_contraction_remains_admissible_2661() {
-    let decision = continuation_refinement_decision(4, Some(1.0), 0.5, 1e-12)
-        .expect("the documented half-contraction boundary must remain admissible");
-    assert_eq!(decision, ContinuationRefinement::Refine);
+fn arbitrarily_slow_progress_still_terminates_in_bounded_work_2661() {
+    // A criterion that creeps toward its limit by a factor 0.999 per refinement:
+    // strictly improving, never agreeing to `1e-6`.
+    let script: Vec<f64> = (0..40).map(|k| 1.0 + 0.999_f64.powi(k)).collect();
+    let path = ScriptedContinuationPath::new(script);
+    let options = scripted_options(100);
+    let budget = crate::fit::continuation_refinement_budget(options.outer_max_iter);
+    let refusal = match crate::fit::certify_refined_continuation(&path, &options, false) {
+        Ok(certified) => panic!(
+            "a creeping criterion must terminate with a typed refusal, not a certificate at \
+             {} steps",
+            certified.certificate.steps
+        ),
+        Err(refusal) => refusal,
+    };
+    match refusal {
+        AnchoredContinuationRefusal::RefinementBudgetExhausted {
+            refinements,
+            max_refinements,
+            ..
+        } => {
+            assert_eq!(max_refinements, budget);
+            assert_eq!(refinements, budget);
+        }
+        other => panic!("a creeping criterion produced the wrong typed refusal: {other:?}"),
+    }
+    // The bound is on WORK, so the work is what is asserted: the ladder ran the
+    // budgeted number of refinements and not one sweep more.
+    assert_eq!(
+        *path.sweeps.borrow(),
+        (0..=budget).map(|k| 1usize << k).collect::<Vec<_>>(),
+        "the ladder must run exactly the sweeps its budget allows"
+    );
+}
+
+/// The bound is derived from the outer search's own budget, so it moves with it.
+#[test]
+fn the_refinement_budget_is_the_outer_searchs_corrector_budget_2661() {
+    for (outer_max_iter, expected) in [(64usize, 5usize), (100, 5), (128, 6), (1000, 8)] {
+        assert_eq!(
+            crate::fit::continuation_refinement_budget(outer_max_iter),
+            expected,
+            "a ladder through D refinements runs 2^(D+1)-1 correctors, which must fit in \
+             outer_max_iter={outer_max_iter}"
+        );
+        assert!(
+            (1usize << (expected + 1)) <= outer_max_iter,
+            "the derivation must hold at outer_max_iter={outer_max_iter}"
+        );
+    }
+    // Below the point where a verdict is reachable at all, the budget is floored
+    // at the fewest refinements that can produce one rather than disabling the
+    // ladder outright.
+    assert_eq!(crate::fit::continuation_refinement_budget(1), 3);
+    assert_eq!(crate::fit::continuation_refinement_budget(8), 3);
+}
+
+/// The #2612 shape, from the direction the penguins fixture cannot be run in
+/// under a second: **an agreement that a further refinement LEAVES must not be
+/// certified, and must not be refused either.**
+///
+/// Scripted from the measured stride-4 trail — two coarse sweeps landing on one
+/// mode, the next refinement landing on another, then a plateau — so the assert
+/// is on the exact sequence that used to produce
+/// `endpoint discrepancy violates the dyadic contraction premise:
+///  1.713372e0 / 3.328619e-5`.
+#[test]
+fn a_plateau_a_later_refinement_leaves_is_neither_certified_nor_refused_2612() {
+    // steps 1, 2, 4 : one mode        (an agreement at 2->4)
+    // steps 8, 16, 32: another mode   (disagreement at 8, then agreements)
+    let script = vec![10.607, 11.387, 11.387, 10.594, 10.594, 10.594];
+    let path = ScriptedContinuationPath::new(script);
+    let options = scripted_options(100);
+    let certified = crate::fit::certify_refined_continuation(&path, &options, false).expect(
+        "a ladder that changes branch and then settles must certify, not refuse: the coarse \
+         pair's agreement was never a discretization error, so it cannot be a contraction \
+         baseline",
+    );
+    // Certification must NOT have happened at the coarse plateau (4 steps): the
+    // whole point is that a further refinement left it.
+    assert_eq!(
+        certified.certificate.steps, 32,
+        "the ladder certified at the plateau a later refinement left"
+    );
+    assert!(
+        certified.certificate.consecutive_agreements >= 2,
+        "certification must rest on more than one refinement agreeing"
+    );
+    assert!(
+        certified.certificate.criterion_agreement <= certified.certificate.criterion_resolution,
+        "the certificate's own claim must hold: {:.3e} <= {:.3e}",
+        certified.certificate.criterion_agreement,
+        certified.certificate.criterion_resolution,
+    );
+    // And the state discrepancy at that point is NOT what certified it — on this
+    // script it is exactly zero, but on the real fixture it sits at `5.4e-5`
+    // against an `inner_tol` of `1e-5`, which is why it cannot be the verdict.
+    assert_eq!(
+        *path.sweeps.borrow(),
+        vec![1, 2, 4, 8, 16, 32],
+        "the ladder must have refined past the coarse plateau"
+    );
+}
+
+/// One agreement is not a certificate. Pinned separately so a future change that
+/// drops [`REQUIRED_CONSECUTIVE_AGREEMENTS`] to one has to argue with the
+/// measured counterexample rather than with a comment.
+#[test]
+fn a_single_agreement_does_not_certify_2612() {
+    let path = ScriptedContinuationPath::new(vec![10.607, 11.387, 11.387, 10.594, 10.594, 10.594]);
+    let options = scripted_options(100);
+    let certified = crate::fit::certify_refined_continuation(&path, &options, false)
+        .expect("this script settles");
+    assert!(
+        certified.certificate.steps > 4,
+        "a single agreement (2 -> 4) certified, which the measured stride-4 trail shows is \
+         wrong: the 8-step sweep leaves that mode"
+    );
+}
+
+/// The decision function is still the place the certificate is minted, so its
+/// contract is pinned directly too.
+#[test]
+fn the_decision_certifies_only_on_enough_consecutive_agreements_2612() {
+    let refine = continuation_refinement_decision(
+        crate::fit::ContinuationRefinementReading {
+            steps: 4,
+            discrepancy: 1e-9,
+            previous_discrepancy: Some(1.0),
+            criterion_agreement: 1e-12,
+            consecutive_agreements: 1,
+        },
+        1e-12,
+        1e-6,
+    )
+    .expect("a valid reading");
+    assert_eq!(
+        refine,
+        ContinuationRefinement::Refine,
+        "one agreement, however tight, is not a limit"
+    );
+    let certified = continuation_refinement_decision(
+        crate::fit::ContinuationRefinementReading {
+            steps: 8,
+            discrepancy: 1e-9,
+            previous_discrepancy: Some(1e-9),
+            criterion_agreement: 1e-12,
+            consecutive_agreements: 2,
+        },
+        1e-12,
+        1e-6,
+    )
+    .expect("a valid reading");
+    match certified {
+        ContinuationRefinement::Certified(certificate) => {
+            assert_eq!(certificate.steps, 8);
+            assert_eq!(certificate.consecutive_agreements, 2);
+            // The ratio is reported, and it is 1.0 here — a sequence that has
+            // stalled at the corrector's floor, which the old rule would have
+            // refused outright.
+            assert_eq!(certificate.observed_contraction_factor, Some(1.0));
+        }
+        other => panic!("two consecutive agreements did not certify: {other:?}"),
+    }
 }
 
 fn double_well_spec(initial_beta: f64) -> ParameterBlockSpec {
