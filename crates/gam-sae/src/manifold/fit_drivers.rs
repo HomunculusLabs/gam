@@ -2434,17 +2434,46 @@ impl SaeManifoldTerm {
         mut residual: Array1<f64>,
         penalized_gram_scale: &[f64],
     ) -> Result<f64, String> {
+        for basis in self.gauge_quotient_basis(penalized_gram_scale)? {
+            if basis.len() != residual.len() {
+                continue;
+            }
+            let coeff = residual.dot(&basis);
+            for i in 0..residual.len() {
+                residual[i] -= coeff * basis[i];
+            }
+        }
+        Ok(residual.iter().map(|v| v * v).sum::<f64>())
+    }
+
+    /// The ORTHONORMAL basis of the span every quotient measure removes, and
+    /// the SINGLE source of truth for it (#2762).
+    ///
+    /// This used to be inlined in [`Self::quotient_residual_norm_sq`], which
+    /// interleaved the Gram--Schmidt with the projection so the span existed
+    /// only as a side effect of measuring a residual against it. Nothing else
+    /// could name it — so the precondition that span's removal assumes
+    /// (`maxᵢ |gᵀvᵢ| ≤ tolerance`, documented at the projection site and never
+    /// checked) could not be evaluated, and the descent it hides could not be
+    /// taken. [`Self::descend_gauge_orbit`] minimizes the penalized objective
+    /// over exactly this basis, in exactly this order, so what is DESCENDED and
+    /// what is REMOVED are the same subspace by construction rather than by two
+    /// constructions that agree today.
+    ///
+    /// Order is load-bearing (Gram--Schmidt is order-dependent) and is the
+    /// historical one: closed-form chart gauges, then the penalized joint
+    /// decoder β-null, then the decoder column-span channel null (#1051/#1273 —
+    /// so the inner convergence measure and the outer-gradient deflation
+    /// quotient the SAME identified subspace).
+    pub(crate) fn gauge_quotient_basis(
+        &self,
+        penalized_gram_scale: &[f64],
+    ) -> Result<Vec<Array1<f64>>, String> {
         let mut orthonormal: Vec<Array1<f64>> = Vec::new();
         let gauges = self
             .dense_step_gauge_vectors()?
             .into_iter()
             .chain(self.joint_decoder_beta_null_directions(penalized_gram_scale)?)
-            // #1051/#1273: project out the decoder column-span null too, so the
-            // inner convergence measure and the outer-gradient deflation
-            // quotient the SAME identified subspace — otherwise a rank-deficient
-            // decoder whose only remaining motion is an unidentified ambient
-            // channel reads as converged by the step gate yet non-stationary by
-            // the gradient gate, burning the inner refine budget.
             .chain(self.decoder_channel_null_directions()?);
         for mut gauge in gauges {
             for basis in &orthonormal {
@@ -2461,13 +2490,9 @@ impl SaeManifoldTerm {
             for v in gauge.iter_mut() {
                 *v *= inv_norm;
             }
-            let coeff = residual.dot(&gauge);
-            for i in 0..residual.len() {
-                residual[i] -= coeff * gauge[i];
-            }
             orthonormal.push(gauge);
         }
-        Ok(residual.iter().map(|v| v * v).sum::<f64>())
+        Ok(orthonormal)
     }
 
     /// Quotient KKT-gradient norm² for the inner convergence gate (#1117): the
