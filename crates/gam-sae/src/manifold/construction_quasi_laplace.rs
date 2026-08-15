@@ -2269,10 +2269,67 @@ impl SaeManifoldTerm {
         } else {
             f64::INFINITY
         };
+
+        // THE AMBIENT CONTROL, and it is the one that decides what this refusal
+        // means. `g ≠ 0` on a differentiable objective makes `−g/‖g‖` a descent
+        // direction, so if NO step along it lowers `penalized_objective_total`,
+        // the assembled gradient is not the gradient of the scalar the line
+        // search descends — an objective↔gradient desync — and no amount of
+        // solver work can close a gap the two functions disagree about. The
+        // one-sided finite difference is reported beside the analytic slope so
+        // the two are compared rather than asserted.
+        let mut steepest = gradient.clone();
+        let steepest_norm = steepest.dot(&steepest).sqrt();
+        let ambient = if steepest_norm.is_finite() && steepest_norm > 0.0 {
+            for value in steepest.iter_mut() {
+                *value /= -steepest_norm;
+            }
+            let analytic_slope = gradient.dot(&steepest);
+            let mut ambient_best_drop = 0.0_f64;
+            let mut ambient_best_alpha = 0.0_f64;
+            let mut finite_difference = f64::NAN;
+            let mut alpha = 1.0e-8_f64;
+            while alpha <= 1.0e3 {
+                let applied = self
+                    .apply_newton_step(
+                        steepest.slice(s![..dense_len]),
+                        steepest.slice(s![dense_len..]),
+                        alpha,
+                    )
+                    .is_ok();
+                if applied && let Ok(trial) = self.penalized_objective_total(target, rho, registry, 1.0)
+                {
+                    if (alpha - 1.0e-6).abs() < 1.0e-18 && trial.is_finite() {
+                        finite_difference = (trial - base_objective) / alpha;
+                    }
+                    if trial.is_finite() && base_objective - trial > ambient_best_drop {
+                        ambient_best_drop = base_objective - trial;
+                        ambient_best_alpha = alpha;
+                    }
+                }
+                if self.restore_mutable_state(&snapshot).is_err() {
+                    break;
+                }
+                alpha *= 10.0;
+            }
+            let ratio = if analytic_slope != 0.0 {
+                finite_difference / analytic_slope
+            } else {
+                f64::NAN
+            };
+            format!(
+                "ambient_slope={analytic_slope:.6e}, ambient_fd_slope={finite_difference:.6e} \
+                 (fd/analytic {ratio:.6e}), ambient_best_objective_drop={ambient_best_drop:.6e} \
+                 at α={ambient_best_alpha:.3e}"
+            )
+        } else {
+            "ambient=degenerate".to_string()
+        };
+
         format!(
             "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, \
              orbit_best_objective_drop={best_decrease:.6e} at α={best_alpha:.3e} \
-             (objective {base_objective:.6e}, relative {relative:.6e})",
+             (objective {base_objective:.6e}, relative {relative:.6e}), {ambient}",
             orthonormal.len(),
         )
     }
