@@ -479,6 +479,9 @@ mod tests_gauge_frame_roundtrip_2720;
 mod tests_poincare_gauge_refusal_2720;
 
 #[cfg(test)]
+mod tests_trust_region_framed_2720;
+
+#[cfg(test)]
 mod tests_step_projection_2720;
 
 #[cfg(test)]

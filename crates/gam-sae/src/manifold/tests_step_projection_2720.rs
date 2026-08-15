@@ -283,7 +283,7 @@ fn step_projection_at_poincare_circle_stall_2720() {
         basis.len()
     );
 
-    let options = ArrowSolveOptions::automatic(n_rows);
+    let options = ArrowSolveOptions::automatic(sys.k);
     match solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options) {
         Ok((delta_t, delta_beta, _cache)) => {
             let coord_dim = sys.rows.first().map(|r| r.gt.len()).unwrap_or(0);
@@ -441,7 +441,7 @@ fn step_projection_at_periodic_native_stall_2720() {
     );
 
     // The solver's own entry, same options family the criterion uses.
-    let options = ArrowSolveOptions::automatic(n_rows);
+    let options = ArrowSolveOptions::automatic(sys.k);
     let solve = solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options);
     let (delta_t, delta_beta, _cache) = match solve {
         Ok(triple) => triple,
