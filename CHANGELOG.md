@@ -63,6 +63,86 @@
   `‖Π∥gauge g‖ 2.016e-1 → 7.859e-2`, unspent decrease in the removed span
   `1.090e-1 → 6.43e-3`, objective `1.949279e4 → 1.948573e4`.
 
+- **The smooth-term LR reference replayed `λ̂`'s selection on a grid `60×`
+  coarser than the selection it was replaying, and the law it produced was 23%
+  short exactly where `α = 0.05` is read (#2672).** The replay draws the tested
+  block, minimises the same REML criterion the outer search minimises, and reads
+  `W` at the `t` it picked. `SMOOTH_LR_SELECTION_GRID_BUDGET` is a TOTAL — 441
+  points however many scales the term has — so a default double-penalty `s(z)`
+  (`m = 2`, the shape every fixture on this issue fits) got 21 points per axis
+  over a window the `ρ` box opens to 60 wide: a spacing of `3.0` in `ln λ`,
+  against the `0.05` the one-dimensional lane next door commits to, and against
+  a CONTINUUM for the fit whose choice this is the reference for.
+
+  A grid that cannot find the criterion's minimum returns a law that is selected
+  LESS than the statistic it is the reference for, and the error is one-signed:
+  it under-disperses, the upper tail is too thin, the test over-rejects.
+  Measured on a whitened bending+ridge pair at the `ρ̂` separations a null-true
+  smooth actually reaches, 2048 draws:
+
+  ```text
+  arm             grid  per_axis  spacing   E[W(t̂)]      sd      q95    wall
+  grid only        441     21      3.000     2.1334   2.9094   7.1898   0.06s
+  grid only       1681     41      1.500     2.4212   3.3266   9.4427   0.21s
+  grid only       6561     81      0.750     2.4928   3.3656   9.2994   0.83s
+  grid only      25921    161      0.375     2.5192   3.3783   9.3892   3.30s
+  grid + descent   441     21      3.000     2.5258   3.3779   9.3278   0.20s
+  grid + descent   121     11      6.000     2.5258   3.3779   9.3278   0.18s
+  ```
+
+  `15%` short in the mean, `23%` short at `q95`. That is the residual this issue
+  was left holding after its four reference defects closed — pooled
+  `size@.05 = 0.0564` on the light grid and `0.0669` on the small-n one, both
+  anti-conservative, both inside their bands only because the bands are wide.
+  It is also `n`-INDEPENDENT, which is what the `..._versus_n` sweep's
+  flattening at `0.065` for `n ≥ 200` is once the small-n quadratic-expansion
+  error has decayed out of it.
+
+  **A bigger grid is not the fix.** `25921` points costs `3.3 s` per term and is
+  still at spacing `0.375`. The grid is the wrong instrument: it is a BRACKET,
+  and a selection is a DESCENT. Each draw now descends the criterion from its
+  own bracket node by a compass search that halves its step whenever a sweep
+  fails, to the same `0.05` floor the diagonal lane uses. That reaches the `161²`
+  law to `0.3%` from a bracket of 121 points — by making the grid SMALLER. The
+  bracket stays at 441 because its only remaining job is not to miss a basin.
+
+  **And the descent needed an evaluator the eigen route cannot be.**
+  `SelectionGeometry::at` returns the full eigensystem, which is right when 2048
+  draws share a point and wrong when one draw chose it. `SelectionFactor` prices
+  a point from two triangular factorizations of `r × r` objects — exactly, not
+  approximately, the same criterion and statistic:
+
+  ```text
+  C(t) = UᵀT(t)U = RᵀR,  R = qr(M(t)),  D = (I + C)⁻¹C,  v = Uᵀu
+  criterion = vᵀDv + log|I + C| − log|C|
+  statistic = ‖u‖² − ‖Dv‖²
+  ```
+
+  because `D`'s eigenvalues are the shares `f = e/(1 + e)` and
+  `w = 2f̄ − f̄² = 1 − f²`, and a direction outside `range(T)` has `f = 0`, so it
+  drops out of the first and carries its whole square into the second — which is
+  what the eigen route's `log(1 + 0) = 0` and `w = 1` say. The #2644 conditioning
+  split is kept rather than lost: `log|C|` comes from the triangular factor of
+  the SCALED ROOTS (`κ(C)` reaches `e^60` on a null-true double penalty, where an
+  assembled Cholesky has no small pivots left), while `log|I + C|` and `D` come
+  from the assembled `I + C`, which is benign — an absolute `ε‖C‖` in a mode near
+  zero moves `log(1 + e)` and `e/(1 + e)` by that much and no more. The whole
+  replay goes `0.06 s → 0.20 s` per term for it, against `3.3 s` for the grid
+  that would otherwise be needed.
+
+  Three contracts carry it, none of them the probe that found it:
+  `the_descent_reaches_a_grid_it_cannot_afford_2672` scores the shipped replay
+  against the `161²` grid on mean AND `q95` at 3%, stated as a CONTRAST so it
+  cannot pass by both arms drifting — the bracket alone must still miss `q95` by
+  more than 10%, and must miss DOWNWARD, because a coarser selection cannot
+  select more; `the_two_evaluators_price_a_point_identically_2672` pins the two
+  routes against each other on a DENSE information with two dense components at
+  separations to 40 (the descent compares its trials against a baseline the
+  bracket produced, so a gap between the routes is a search descending one
+  function while reporting another's value); and
+  `the_multiscale_replay_is_bit_identical_across_generations` is #1017 for the
+  lane that now searches rather than enumerates.
+
 - **The conditional-transformation-normal likelihood renormalized every row by
   the standard-normal mass between two FITTED endpoints, and that is what left
   the fit with no mode to find (#2600).** The row density was
