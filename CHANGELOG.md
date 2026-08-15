@@ -22,13 +22,29 @@
   definition of the face, so only the test can decide the face.
 
   The walk now carries the face. A rejected face names its
-  `least_independent_row` — the accepted row with the smallest `pivot/diagonal`,
-  i.e. the smallest squared sine to the span of the rows before it in the `Σ`
-  metric — and that row is excluded BY INDEX before the face is rebuilt at an
-  unchanged floor. Termination becomes structural: the excluded set grows by one
-  per pass and is a subset of the candidates, the first unexcluded row always
-  clears the floor, and the last face is a single row whose `1×1` lift is exact.
-  No floating-point comparison is inverted anywhere on that argument.
+  `least_independent_direction` — the accepted row with the smallest
+  `pivot/diagonal`, i.e. the smallest squared sine to the span of the rows
+  before it in the `Σ` metric — and that row is excluded BY INDEX before the
+  face is rebuilt at an unchanged floor. Termination becomes structural: the
+  excluded set only grows, never re-adds, and is a subset of the candidates; the
+  first unexcluded row always clears the floor; and the last face is a single
+  row whose `1×1` lift is exact. No floating-point comparison is inverted
+  anywhere on that argument.
+
+  What leaves is a **direction**, not a row, and that distinction is a
+  correctness requirement rather than a nicety. A row anti-parallel to an
+  accepted one is refused as a direction and keeps its wall as that row's upper
+  limit (#2523), so a two-sided bound reaches the moments as ONE retained row
+  carrying a finite `upper`. Dropping that row while leaving its partner in the
+  pool would let the next pass accept the partner in its place — with a full
+  half-line, because the row that carried the fold is gone — turning a two-sided
+  bound into a one-sided one, and on the wrong side: the walk is ordered by
+  ascending slack, so the row that leaves is the tighter wall.
+  `record_opposed_face_limit` therefore reports which accepted position it
+  folded into, the face carries those partners with its least independent row,
+  and `dropping_a_direction_takes_its_opposite_face_with_it_2714` asserts the
+  invariant on a system where every direction is two-sided: no retained row may
+  report an infinite upper limit, and no retained row may be a far wall.
 
   Excluding at the unchanged floor is also strictly less lossy than the old
   step, which tightened the floor for every surviving row as a side effect of

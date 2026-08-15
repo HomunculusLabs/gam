@@ -1416,16 +1416,20 @@ pub fn constrained_posterior_correction(
     // row whose `pivot/diagonal` is smallest — the most nearly dependent one,
     // which is both the row rule 2 was trying to reach and the row that
     // contributes least constraint information — and that row is EXCLUDED by
-    // index before the face is rebuilt at the unchanged floor.
+    // index, together with any opposite face folded into it, before the face is
+    // rebuilt at the unchanged floor. What leaves is a DIRECTION, not a row:
+    // promoting an excluded row's anti-parallel partner in its place would
+    // report the slacker of two walls as a one-sided bound.
     //
     // Termination is now structural rather than numerical. The excluded set
-    // grows by exactly one row per pass and is a subset of the candidates, so
-    // there are at most `candidates.len()` passes; the first unexcluded row
-    // always clears the floor (`accepted = 0` makes `pivot = diagonal` and the
-    // floor `ε·diagonal/1e-3`), so a nonempty unexcluded set always yields a
-    // nonempty face; and the last such face is a single row, whose `1×1` lift
-    // is exact and whose departure gate cannot fail. No float comparison is
-    // inverted anywhere on that argument.
+    // gains at least one row per pass, never re-adds one (an excluded row is
+    // skipped before it can be accepted or folded), and is a subset of the
+    // candidates — so there are at most `candidates.len()` passes; the first
+    // unexcluded row always clears the floor (`accepted = 0` makes
+    // `pivot = diagonal` and the floor `ε·diagonal/1e-3`), so a nonempty
+    // unexcluded set always yields a nonempty face; and the last such face is a
+    // single row, whose `1×1` lift is exact and whose departure gate cannot
+    // fail. No float comparison is inverted anywhere on that argument.
     //
     // Excluding at the UNCHANGED floor is also strictly less lossy than rule 2,
     // which tightened the floor for every surviving row as a side effect of
@@ -1481,20 +1485,22 @@ pub fn constrained_posterior_correction(
                     render_ladder(&ladder, candidates.len())
                 ));
             }
-            // Drop the most nearly dependent accepted row and rebuild. A face
-            // with two or more rows always has one, so the `else` is a
-            // statement about `assemble_retained_face`, not a fallback.
-            let Some(worst) = face.least_independent_row else {
+            // Drop the most nearly dependent accepted DIRECTION — that row and
+            // any opposite face folded into it — and rebuild. A face with two
+            // or more rows always names one, so the `else` is a statement about
+            // `assemble_retained_face`, not a fallback.
+            if face.least_independent_direction.is_empty() {
                 return Err(format!(
                     "the constraint face misses the identity that defines its lift \
                      (max|A G - I| = {departure:.6e} against \
                      {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}) over {} retained row(s), and \
-                     names no least-independent row to drop, after {faces_tried} face(s){}",
+                     names no least-independent direction to drop, after {faces_tried} \
+                     face(s){}",
                     face.rows.len(),
                     render_ladder(&ladder, candidates.len())
                 ));
-            };
-            excluded.push(worst);
+            }
+            excluded.extend_from_slice(&face.least_independent_direction);
             continue;
         }
 
@@ -1679,25 +1685,36 @@ struct RetainedFace {
     sigma_at: Array2<f64>,
     /// Upper limit per retained coordinate, `f64::INFINITY` for a half-line.
     upper: Vec<f64>,
-    /// The retained row whose `pivot/diagonal` is smallest, or `None` for an
-    /// empty face.
+    /// The retained row whose `pivot/diagonal` is smallest, together with every
+    /// refused row whose far wall was folded into it. Empty for an empty face.
     ///
-    /// `pivot/diagonal` is the squared sine of the angle between this row's
+    /// `pivot/diagonal` is the squared sine of the angle between a row's
     /// constraint normal and the span of the rows accepted before it, in the
     /// `Σ` metric, so the minimizer is the retained row that is most nearly
     /// dependent on the others — the one carrying the least constraint
-    /// information and the most of the face's ill-conditioning. It is the row
-    /// the retention walk drops when the assembled face's lift misses its own
+    /// information and the most of the face's ill-conditioning. It is what the
+    /// retention walk drops when the assembled face's lift misses its own
     /// identity, and it is reported BY INDEX so that decision is a set
     /// operation rather than the inversion of a floating-point comparison
     /// (#2714).
+    ///
+    /// The FOLDED rows travel with it because the walk drops a DIRECTION, not a
+    /// row. A row anti-parallel to an accepted one is refused as a direction and
+    /// keeps its wall as that row's upper limit (see
+    /// [`record_opposed_face_limit`]); if the accepted row is then dropped for
+    /// being nearly dependent, its opposite face is the same nearly dependent
+    /// direction and is no more liftable. Leaving it behind would let the next
+    /// pass accept it in the dropped row's place — with the SLACKER of the two
+    /// walls, since the walk is ordered by slack, and with nothing to fold its
+    /// own far wall into — turning a two-sided bound into a one-sided one on
+    /// the wrong side.
     ///
     /// The first accepted row has an empty forward-substitution column, hence
     /// `pivot == diagonal` and a ratio of exactly `1`, which is the maximum the
     /// ratio can take; combined with the walk's tie-break toward the later (and
     /// therefore slacker) row, that makes the tightest wall the one row a face
     /// of two or more can never drop.
-    least_independent_row: Option<usize>,
+    least_independent_direction: Vec<usize>,
 }
 
 /// Greedy pivoted-Cholesky rank filter on `W = A Σ Aᵀ`, walking the candidates
@@ -1732,6 +1749,9 @@ fn assemble_retained_face(
     let mut least_independent: Option<(usize, f64)> = None;
     let mut sigma_a_columns: Vec<Array1<f64>> = Vec::new();
     let mut upper: Vec<f64> = Vec::new();
+    // Per accepted position, the refused rows whose far wall was folded into
+    // it. Parallel to `rows` and `upper`.
+    let mut folded: Vec<Vec<usize>> = Vec::new();
     let mut w_accepted = Array2::<f64>::zeros((0, 0));
     let mut factor = Array2::<f64>::zeros((0, 0));
     for (row_index, _, sigma_row) in candidates {
@@ -1792,7 +1812,7 @@ fn assemble_retained_face(
             // row, so the accepted row's `slack/sd` is the smaller, which is
             // exactly the statement that its wall is the binding one. Those
             // still drop, unchanged.
-            record_opposed_face_limit(
+            if let Some(position) = record_opposed_face_limit(
                 *row_index,
                 &cross,
                 diagonal,
@@ -1804,7 +1824,9 @@ fn assemble_retained_face(
                     antiparallel_tolerance,
                 },
                 &mut upper,
-            )?;
+            )? {
+                folded[position].push(*row_index);
+            }
             continue;
         }
         let mut grown = Array2::<f64>::zeros((accepted + 1, accepted + 1));
@@ -1831,6 +1853,7 @@ fn assemble_retained_face(
         rows.push(*row_index);
         sigma_a_columns.push(sigma_row.clone());
         upper.push(f64::INFINITY);
+        folded.push(Vec::new());
         // The independence ratio of the row just accepted. `diagonal > 0` is
         // guaranteed by `constraint_face_candidates`, and `pivot > rank_floor > 0`
         // by the branch above, so the ratio is a finite positive number and the
@@ -1845,7 +1868,7 @@ fn assemble_retained_face(
         // TIGHTEST wall.
         let independence = pivot / diagonal;
         if least_independent.is_none_or(|(_, best)| independence <= best) {
-            least_independent = Some((*row_index, independence));
+            least_independent = Some((rows.len() - 1, independence));
         }
     }
     if rows.is_empty() {
@@ -1858,13 +1881,21 @@ fn assemble_retained_face(
     for (position, column) in sigma_a_columns.iter().enumerate() {
         sigma_at.column_mut(position).assign(column);
     }
+    let least_independent_direction = match least_independent {
+        Some((position, _)) => {
+            let mut direction = vec![rows[position]];
+            direction.extend_from_slice(&folded[position]);
+            direction
+        }
+        None => Vec::new(),
+    };
     Ok(Some(RetainedFace {
         rows,
         factor,
         w: w_accepted,
         sigma_at,
         upper,
-        least_independent_row: least_independent.map(|(row, _)| row),
+        least_independent_direction,
     }))
 }
 
@@ -1910,13 +1941,18 @@ struct AcceptedFace<'a> {
 /// they were before. That is a narrower repair than "every dependent row", and
 /// deliberately so: a row depending on two or more accepted normals at once cuts
 /// the face along a diagonal, which no per-coordinate limit can represent.
+///
+/// Returns the accepted POSITION the wall was folded into, so the caller can
+/// keep the pair together: the folded row is the opposite face of that accepted
+/// row's direction, and if the retention walk later drops the direction the far
+/// wall has to go with it rather than be promoted in its place (#2714).
 fn record_opposed_face_limit(
     row_index: usize,
     cross: &Array1<f64>,
     diagonal: f64,
     face: &AcceptedFace<'_>,
     upper: &mut [f64],
-) -> Result<(), String> {
+) -> Result<Option<usize>, String> {
     let mut opposed: Option<(usize, f64, f64)> = None;
     for position in 0..face.rows.len() {
         let w_kk = face.w_accepted[[position, position]];
@@ -1940,7 +1976,7 @@ fn record_opposed_face_limit(
         }
     }
     let Some((position, _, gamma)) = opposed else {
-        return Ok(());
+        return Ok(None);
     };
     let accepted_row = face.rows[position];
     let delta = (face.constraints.a.row(row_index).dot(face.unconstrained_center)
@@ -1961,7 +1997,7 @@ fn record_opposed_face_limit(
     if limit < upper[position] {
         upper[position] = limit;
     }
-    Ok(())
+    Ok(Some(position))
 }
 
 /// `max |A G - I|` over the retained rows.
@@ -3783,6 +3819,107 @@ mod tests {
             candidates.first().map(|(row, _, _)| row),
             "#2714: the walk dropped the tightest candidate row"
         );
+    }
+
+    /// #2714: the walk drops a DIRECTION, and a two-sided bound is one
+    /// direction.
+    ///
+    /// A row anti-parallel to an accepted one is refused as a direction and
+    /// keeps its wall as that row's upper limit (#2523), so a two-sided bound
+    /// reaches the moments as one retained row carrying a finite `upper`. If
+    /// the retention walk then drops that row for being nearly dependent and
+    /// leaves its partner in the candidate pool, the next pass accepts the
+    /// PARTNER in its place — with a full half-line and nothing to fold its own
+    /// far wall into, because the row that carried it is excluded. The bound
+    /// silently becomes one-sided, and on the wrong side: the walk is ordered
+    /// by ascending slack, so the row that leaves is the tighter wall.
+    ///
+    /// The fixture is the rank-deficient geometry with every row given an
+    /// opposite face, and the assertion is the invariant rather than one
+    /// hand-picked pair: NO retained row may report an infinite upper limit,
+    /// because every candidate direction in this system is two-sided.
+    #[test]
+    fn dropping_a_direction_takes_its_opposite_face_with_it_2714() {
+        const NODES: usize = 40;
+        const DIMENSION: usize = 5;
+        const SPACING: f64 = 2.0e-2;
+        // The far wall, in the same units as the near one. Every row's value at
+        // the centre is `1`, so `3` leaves a two-unit-wide feasible slab in
+        // every constraint-normal direction — wide enough that the region is
+        // not near-empty and narrow enough that the far wall is inside the
+        // resolution horizon and therefore a live candidate.
+        const FAR_WALL: f64 = 3.0;
+
+        let mut a = Array2::<f64>::zeros((2 * NODES, DIMENSION));
+        let mut b = Array1::<f64>::zeros(2 * NODES);
+        for node in 0..NODES {
+            let position = node as f64 * SPACING;
+            for power in 0..DIMENSION {
+                let entry = position.powi(power as i32);
+                a[[node, power]] = entry;
+                a[[NODES + node, power]] = -entry;
+            }
+            b[node] = 0.0;
+            b[NODES + node] = -FAR_WALL;
+        }
+        let constraints =
+            LinearInequalityConstraints::new(a, b).expect("two-sided Vandermonde slabs");
+        let covariance = Array2::<f64>::eye(DIMENSION);
+        let mut center = Array1::<f64>::zeros(DIMENSION);
+        center[0] = 1.0;
+
+        let sigma_at = covariance.dot(&constraints.a.t());
+        let candidates = constraint_face_candidates(sigma_at.view(), &center, &constraints)
+            .expect("candidate rows");
+        assert_eq!(
+            candidates.len(),
+            2 * NODES,
+            "#2714: both walls of every slab must be candidates, or the fixture is not \
+             two-sided where the walk runs"
+        );
+        let (unexcluded, unexcluded_admissible) =
+            face_at_exclusion(&candidates, &constraints, &center, &[])
+                .expect("the unexcluded face");
+        assert!(
+            !unexcluded_admissible,
+            "#2714: the unexcluded face {unexcluded:?} already satisfies its own lift identity, \
+             so no direction is ever dropped and this fixture asserts nothing"
+        );
+
+        let correction =
+            constrained_posterior_correction_from_covariance(&covariance, &center, &constraints)
+                .expect("a two-sided rank-deficient system must still produce a face")
+                .expect("an active face inside the horizon");
+
+        // Non-vacuity: the folding has to have happened at all.
+        assert_eq!(
+            correction.normal_upper_limits.len(),
+            correction.rows.len(),
+            "#2714: one upper limit per retained row"
+        );
+        for (position, &row) in correction.rows.iter().enumerate() {
+            assert!(
+                correction.normal_upper_limits[position].is_finite(),
+                "#2714: retained row {row} reports an infinite upper limit on a system where \
+                 EVERY direction is two-sided. Its opposite face was left in the candidate pool \
+                 when the direction that carried the fold was dropped, so a two-sided bound is \
+                 being reported as a half-line: rows {:?}, limits {:?}",
+                correction.rows,
+                correction.normal_upper_limits
+            );
+        }
+        // And the near wall is the one that survived: every retained row is a
+        // NEAR wall (index below `NODES`), never the far wall promoted in its
+        // place.
+        for &row in &correction.rows {
+            assert!(
+                row < NODES,
+                "#2714: the walk retained far-wall row {row}, which sits at slack {FAR_WALL} \
+                 against the near wall's 1 — the slacker of the pair replaced the binding one: \
+                 {:?}",
+                correction.rows
+            );
+        }
     }
 
     /// The measurement that kills the retention-floor step (#2714), stated as a
