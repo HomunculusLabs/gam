@@ -110,6 +110,30 @@
   family the walk searches — rather than the floor-indexed subfamily the
   previous oracle swept.
 
+  The module doc also stops conflating the two cuts. The PER-ROW retention
+  floor is nearly free — a row it refuses is within `θ < 5e-7` radians of the
+  span of the accepted ones, and the accepted row it is parallel to has the
+  smaller slack, so it imposes nothing new. The WHOLE-FACE check is not, and no
+  `O(θ)` argument covers it: it fires exactly when every row cleared the floor
+  and the face is still worse conditioned than any of its rows, and the
+  direction it then drops can sit at `pivot/diagonal = 1e-3`, i.e. `θ ≈ 0.03`
+  radians. That is a real constraint being dropped. The trade is still the
+  honest one — the moments are computed for a BOX, a face keeping mutually
+  dependent rows cuts the same region along diagonals, and the lift cannot be
+  formed at all at a numerically singular `W` — so the alternatives are a
+  subset-truncated posterior or none, not a subset-truncated posterior or an
+  exact one.
+
+  The walk also reports itself now, on both outcomes. A correction that had to
+  drop rows says so in one `log::info!` line — which rows survived is a fact
+  about the ANSWER, not about the solve, since the reported truncation is then
+  carried by a subset of the constraints the user wrote — and a terminal refusal
+  prints the last refused face's `W` at full precision, because the walk's
+  decisions are a function of `W` alone and reproducing one otherwise costs a
+  three-quarter-hour fit. The face dump fires only on the terminal paths:
+  dropping rows is the walk working, and a `q × q` matrix per rung would be a
+  megabyte of warnings for a correction that then succeeds.
+
   Reached by the #2714 witness because the fix for its titled defect let the fit
   get as far as final posterior assembly, where a monotonicity guard imposed at
   every observed exit time puts far more constraint rows than the time block has

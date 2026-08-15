@@ -101,15 +101,35 @@
 //! then checked as a whole, because per-row independence is necessary and not
 //! sufficient, and its least independent row is dropped until the check passes.
 //!
-//! What that costs is bounded and it is not a tightness judgement. A dropped
-//! row lies within `O(θ)` of the span of the retained ones — `θ` below `5e-7`
-//! radians at the retention floor — and the retained row it is nearly parallel
-//! to has the SMALLER standardized slack, because the walk is ordered by slack.
-//! Its wall is therefore the binding one, and the dropped row imposes no
-//! constraint the retained face does not already impose. The one exception is a
-//! row ANTI-parallel to an accepted one, which carries no new direction while
-//! genuinely halving the support; that one is kept, as the far wall of a
-//! two-sided bound, rather than dropped.
+//! The two halves of that cut cost different amounts, and it is worth being
+//! exact about which is which.
+//!
+//! * The PER-ROW floor is nearly free. A row it refuses lies within `O(θ)` of
+//!   the span of the rows already accepted, with `θ` below `5e-7` radians at
+//!   the floor, and the accepted row it is nearly parallel to has the SMALLER
+//!   standardized slack because the walk is ordered by slack — so its wall is
+//!   the binding one and the refused row imposes nothing new. The exception is
+//!   a row ANTI-parallel to an accepted one, which carries no new direction
+//!   while genuinely halving the support; that one is kept, as the far wall of
+//!   a two-sided bound, rather than dropped.
+//!
+//! * The WHOLE-FACE check is not free, and no `O(θ)` argument covers it. It
+//!   fires exactly when every row cleared the floor and the face is still worse
+//!   conditioned than any of its rows, and the direction it then drops can sit
+//!   at a genuinely resolvable angle — `pivot/diagonal = 1e-3` is `θ ≈ 0.03`
+//!   radians, not `5e-7`. What is dropped there is a real constraint, and the
+//!   reported truncation is the one carried by the retained face.
+//!
+//! That trade is deliberate and it is the honest one available. The moments are
+//! computed for a BOX in the retained coordinates; a face that kept mutually
+//! dependent rows would cut the same region along diagonals, which is a general
+//! polyhedron and not something `box_truncated_moments` computes — and the lift
+//! that carries the answer back out of those coordinates cannot be formed at
+//! all when `W` is numerically singular. The alternatives are therefore a
+//! subset-truncated posterior or none, not a subset-truncated posterior or an
+//! exact one. Which rows survived is reported (`log::info!`) whenever the
+//! whole-face check dropped anything, so the choice is visible on the fit that
+//! made it rather than inferable from this file.
 
 use gam_math::probability::{
     normal_cdf, normal_logsf, signed_probit_logcdf_and_mills_ratio, standard_normal_quantile,
@@ -1442,6 +1462,7 @@ pub fn constrained_posterior_correction(
     let mut faces_tried = 0usize;
     let mut ladder: Vec<LadderRung> = Vec::new();
     let mut excluded: Vec<usize> = Vec::new();
+    let mut last_refused: Option<RefusedFace> = None;
     while excluded.len() <= candidates.len() {
         let Some(face) = assemble_retained_face(
             &candidates,
@@ -1454,6 +1475,7 @@ pub fn constrained_posterior_correction(
             if first_pass {
                 return Ok(None);
             }
+            report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
             return Err(format!(
                 "no constraint face survives the accuracy its own lift must deliver: excluding \
                  {} of {} candidate row(s) at the retention floor {demanded_accuracy:.3e} left \
@@ -1475,8 +1497,12 @@ pub fn constrained_posterior_correction(
             departure,
         });
         if departure > ORTHANT_MOMENT_RELATIVE_TOLERANCE {
-            log_refused_face(&face, departure, excluded.len());
+            last_refused = Some(RefusedFace {
+                rows: face.rows.clone(),
+                w: face.w.clone(),
+            });
             if face.rows.len() == 1 {
+                report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
                 return Err(format!(
                     "a single retained constraint row still misses the identity that defines \
                      its lift: max|A G - I| = {departure:.6e} exceeds \
@@ -1487,9 +1513,10 @@ pub fn constrained_posterior_correction(
             }
             // Drop the most nearly dependent accepted DIRECTION — that row and
             // any opposite face folded into it — and rebuild. A face with two
-            // or more rows always names one, so the `else` is a statement about
-            // `assemble_retained_face`, not a fallback.
+            // or more rows always names one, so the empty case is a statement
+            // about `assemble_retained_face`, not a fallback.
             if face.least_independent_direction.is_empty() {
+                report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
                 return Err(format!(
                     "the constraint face misses the identity that defines its lift \
                      (max|A G - I| = {departure:.6e} against \
@@ -1522,6 +1549,22 @@ pub fn constrained_posterior_correction(
         gam_linalg::matrix::symmetrize_in_place(&mut removed);
         certify_removed_variance(&removed, &face.w)?;
 
+        if !excluded.is_empty() {
+            // The walk ran, so the reported truncation is carried by a SUBSET
+            // of the rows the user asked for. That is a fact about the answer,
+            // not about the solve — the dropped rows are within `O(θ)` of the
+            // span of the retained ones, but "within `O(θ)`" is a claim the
+            // reader is entitled to see stated on their own fit.
+            log::info!(
+                "[CONSTRAINED-FACE] {} of {} candidate constraint row(s) retained after \
+                 dropping {} nearly dependent direction(s) over {faces_tried} face(s); the \
+                 retained lift satisfies its identity to {departure:.3e}",
+                face.rows.len(),
+                candidates.len(),
+                excluded.len()
+            );
+        }
+
         return Ok(Some(ConstrainedPosteriorCorrection {
             lift,
             removed_normal_variance: removed,
@@ -1530,13 +1573,28 @@ pub fn constrained_posterior_correction(
             normal_upper_limits: face.upper,
         }));
     }
+    report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
     Err(format!(
         "the constraint-normal lift never reached the accuracy it is certified to: \
          {faces_tried} constraint face(s) were tried and every candidate row was excluded. \
-         The walk drops one accepted row per pass and a single-row face's lift is exact, \
-         so this says the single-row face was never reached — which it must be.{}",
+         The walk drops one accepted direction per pass and a single-row face's lift is \
+         exact, so this says the single-row face was never reached — which it must be.{}",
         render_ladder(&ladder, candidates.len())
     ))
+}
+
+/// Print the evidence a terminal refusal of the retention walk rests on: the
+/// last face it refused, at full precision, and the trail that got there.
+fn report_terminal_refusal(
+    last_refused: Option<&RefusedFace>,
+    ladder: &[LadderRung],
+    excluded: usize,
+) {
+    let Some(face) = last_refused else {
+        return;
+    };
+    let departure = ladder.last().map_or(f64::NAN, |rung| rung.departure);
+    log_refused_face(face, departure, excluded);
 }
 
 /// One rung of the retention walk: how many rows had been excluded when it ran,
@@ -1594,14 +1652,16 @@ fn render_ladder(ladder: &[LadderRung], candidates: usize) -> String {
     rendered
 }
 
-/// Emit the refused face itself, at full precision, on the diagnostic channel.
+/// Emit a refused face itself, at full precision, on the diagnostic channel.
 ///
-/// The retention walk's decisions are a function of `W` alone, so a refused
-/// rung is exactly reproducible from the rows it retained and the `W` it built
-/// — and NOT from the fit that produced them, which on the #2714 witness costs
-/// three quarters of an hour to reach this line. Printing the face turns a
-/// terminal refusal inside an hour-long fit into a unit fixture.
-fn log_refused_face(face: &RetainedFace, departure: f64, excluded: usize) {
+/// Called ONLY from the walk's terminal error paths, not per rung. Dropping
+/// rows is the walk working, not the walk failing — a `q × q` matrix printed on
+/// every rung would be a megabyte of warnings for a correction that then
+/// succeeds — while a terminal refusal is unreproducible without the face,
+/// because the walk's decisions are a function of `W` alone and the fit that
+/// produced `W` costs three quarters of an hour to reach this line on the
+/// #2714 witness. Printing it there turns that refusal into a unit fixture.
+fn log_refused_face(face: &RefusedFace, departure: f64, excluded: usize) {
     if !log::log_enabled!(log::Level::Warn) {
         return;
     }
@@ -1617,6 +1677,17 @@ fn log_refused_face(face: &RetainedFace, departure: f64, excluded: usize) {
          q={q} rows={:?} w=[{rendered}]",
         face.rows
     );
+}
+
+/// The last face the walk refused, kept so a terminal error can print it.
+///
+/// Only `rows` and `W` are retained: they are what makes the refusal
+/// reproducible, and keeping the whole [`RetainedFace`] alive across a pass
+/// would hold its `p × q` block and its factor for a walk that may run once per
+/// candidate row.
+struct RefusedFace {
+    rows: Vec<usize>,
+    w: Array2<f64>,
 }
 
 /// The constraint rows that can still move a moment, in the order the rank
