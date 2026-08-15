@@ -2700,30 +2700,39 @@ impl InnerObjectiveState {
         }
     }
 
-    /// The state of an objective carrying NO Jeffreys augmentation.
-    ///
-    /// For fixtures that assemble a [`BlockwiseInnerResult`] directly and have
-    /// no family to read the strength from. Every production site has one and
-    /// must use [`Self::new`], which cannot be handed the wrong number.
-    #[cfg(test)]
-    pub(crate) fn unaugmented(
-        block_log_lambdas: &[Array1<f64>],
-        joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
-    ) -> Self {
-        Self {
-            block: block_log_lambdas.to_vec(),
-            joint: joint_bundle
-                .map(|bundle| bundle.log_lambdas().to_vec())
-                .unwrap_or_default(),
-            jeffreys_strength: 0.0,
-        }
-    }
-
     /// The augmentation strength this state was recorded at. Read by the reuse
     /// gate's own diagnostics so a refusal can say WHICH half of the state
     /// differed.
     pub(crate) fn jeffreys_strength(&self) -> f64 {
         self.jeffreys_strength
+    }
+}
+
+/// Constructors that exist only for fixtures, kept out of the production impl
+/// so no production site can reach one.
+#[cfg(test)]
+mod test_support {
+    use super::{Array1, InnerObjectiveState};
+
+    impl InnerObjectiveState {
+        /// The state of an objective carrying NO Jeffreys augmentation.
+        ///
+        /// For fixtures that assemble a [`super::BlockwiseInnerResult`]
+        /// directly and have no family to read the strength from. Every
+        /// production site has one and must use [`InnerObjectiveState::new`],
+        /// which cannot be handed the wrong number.
+        pub(crate) fn unaugmented(
+            block_log_lambdas: &[Array1<f64>],
+            joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+        ) -> Self {
+            Self {
+                block: block_log_lambdas.to_vec(),
+                joint: joint_bundle
+                    .map(|bundle| bundle.log_lambdas().to_vec())
+                    .unwrap_or_default(),
+                jeffreys_strength: 0.0,
+            }
+        }
     }
 }
 

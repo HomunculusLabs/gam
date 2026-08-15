@@ -149,10 +149,21 @@ impl crate::fit::RefinedContinuationPath for ScriptedContinuationPath {
 
     fn endpoint_discrepancy(
         &self,
-        _steps: usize,
+        steps: usize,
         coarser: &crate::assembly::ConstrainedWarmStart,
         finer: &crate::assembly::ConstrainedWarmStart,
     ) -> Result<f64, AnchoredContinuationRefusal> {
+        // The scripted endpoints carry the criterion in their own state, so the
+        // discrepancy is a function of the two endpoints alone. `steps` is
+        // still the rung the ladder is asking about, and the ladder refines
+        // only by doubling — asserting that here is what keeps this stand-in
+        // honest about the contract it stands in for, rather than discarding
+        // the one input it does not otherwise read.
+        assert!(
+            steps.is_power_of_two(),
+            "the refinement ladder asked for an endpoint discrepancy at {steps} steps, which is \
+             not a doubling of the anchored sweep"
+        );
         Ok((coarser.block_beta[0][0] - finer.block_beta[0][0]).abs())
     }
 
