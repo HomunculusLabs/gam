@@ -84,9 +84,10 @@
 //! a refusal is a measurement about the geometry, a broken instrument is a
 //! bug in this file.
 //!
-//! Marked `#[ignore]` like the #2770 baseline: it runs inner solves and
-//! reports measurements rather than asserting a regression invariant.
-//! Run with: `cargo test -p gam-sae gauge_geometry -- --ignored --nocapture`
+//! Enforced (deterministic fixtures): the sweep's findings are asserted —
+//! periodic and duchon violate, linear is exempt, poincare refuses robustly.
+//! The `#[ignore]`d manual-diagnostic convention is banned by the repo's
+//! build-time scanner; this test now runs in the normal suite.
 //!
 //! ## Method
 //!
@@ -487,7 +488,6 @@ fn run_cell_2720(kind: &str, framed: bool) -> CellOutcome {
 /// and frame states. See module docs. The periodic/unframed cell is the
 /// instrument control.
 #[test]
-#[ignore = "manual diagnostic reproducer for #2720; run with --ignored --nocapture"]
 fn chart_gauge_orbit_violation_across_geometries_2720() {
     let kinds = ["periodic", "duchon", "poincare", "linear"];
 
@@ -578,5 +578,65 @@ fn chart_gauge_orbit_violation_across_geometries_2720() {
                 note.chars().take(160).collect::<String>()
             ),
         }
+    }
+
+    // ENFORCED findings (deterministic fixtures; measured at `9b9973f` and
+    // stable across runs): the sweep's three geometry conclusions, as bands
+    // robust to solver-path jitter but tight enough that a regression in
+    // any of them fails the suite:
+    //   1. periodic violates (2.33×) and duchon violates (3.63×) — the
+    //      violation is geometry-general, so BOTH must sit above tolerance;
+    //   2. linear is below tolerance (0.13×) — the exemption is real;
+    //   3. poincare refuses at BOTH budgets (robust refusal);
+    //   4. framing changes no verdict (framed == unframed max-ratio bands).
+    let measured = |label: &str| {
+        summary
+            .iter()
+            .find(|(l, _)| l == label)
+            .unwrap_or_else(|| panic!("[2720-geom] cell {label} missing from summary"))
+    };
+    for kind in ["periodic", "duchon"] {
+        for frame in ["unframed", "framed"] {
+            let (label, cell) = measured(&format!("{kind}/{frame}"));
+            let m = match cell {
+                CellOutcome::Measured(m) => *m,
+                CellOutcome::Refused { .. } => panic!(
+                    "[2720-geom] {label} refused — non-poincare kinds measured at both \
+                     frames when this sweep landed; a refusal now is an instrument change"
+                ),
+            };
+            assert!(
+                m.max_ratio > 1.0 && m.max_ratio < 10.0,
+                "[2720-geom] {label}: max|gᵀv|/tol = {:.2}× left the violation band \
+                 (periodic measured 2.33×, duchon 3.63×) — the geometry-generality \
+                 finding changed; re-measure before updating",
+                m.max_ratio
+            );
+        }
+    }
+    for frame in ["unframed", "framed"] {
+        let (_, cell) = measured(&format!("linear/{frame}"));
+        let m = match cell {
+            CellOutcome::Measured(m) => *m,
+            CellOutcome::Refused { .. } => panic!(
+                "[2720-geom] linear/{frame} refused — linear measured below tolerance \
+                 (0.13×) when this sweep landed"
+            ),
+        };
+        assert!(
+            m.max_ratio < 1.0,
+            "[2720-geom] linear/{frame}: max|gᵀv|/tol = {:.2}× rose above tolerance \
+             (measured 0.13×) — the linear exemption finding changed; re-measure",
+            m.max_ratio
+        );
+    }
+    for frame in ["unframed", "framed"] {
+        let (_, cell) = measured(&format!("poincare/{frame}"));
+        assert!(
+            matches!(cell, CellOutcome::Refused { .. }),
+            "[2720-geom] poincare/{frame}: no longer refuses — the robust-refusal \
+             finding changed (it refused at budgets 40 AND 400 when this sweep \
+             landed); if the solver improved, re-measure and update this pin"
+        );
     }
 }
