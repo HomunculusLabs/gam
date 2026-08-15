@@ -1899,8 +1899,7 @@ pub(crate) fn certify_refined_continuation<P: RefinedContinuationPath>(
                 // Charged against the same budget as a comparison refinement:
                 // it doubles the same corrector count, so exempting it would
                 // reopen the unbounded loop by another door.
-                refinements += 1;
-                if refinements > max_refinements {
+                if refinements >= max_refinements {
                     return Err(AnchoredContinuationRefusal::RefinementBudgetExhausted {
                         steps,
                         refinements,
@@ -1909,6 +1908,7 @@ pub(crate) fn certify_refined_continuation<P: RefinedContinuationPath>(
                         trail,
                     });
                 }
+                refinements += 1;
                 log::info!(
                     "[OUTER] {} continuation refining {steps}→{refined} steps after waypoint \
                      {waypoint_index} did not certify",
@@ -1977,16 +1977,18 @@ pub(crate) fn certify_refined_continuation<P: RefinedContinuationPath>(
                 refined_steps: refined,
             });
         }
-        refinements += 1;
-        if refinements > max_refinements {
+        // `refinements` counts refinements PERFORMED, so the check comes before
+        // the increment and the refusal reports what was actually spent.
+        if refinements >= max_refinements {
             return Err(AnchoredContinuationRefusal::RefinementBudgetExhausted {
                 steps,
-                refinements: refinements - 1,
+                refinements,
                 max_refinements,
                 criterion_resolution,
                 trail,
             });
         }
+        refinements += 1;
         coarser = Some(endpoint);
         steps = refined;
     }
