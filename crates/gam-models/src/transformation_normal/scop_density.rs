@@ -33,13 +33,19 @@ pub fn transformation_normal_pit_score(h: f64, clip_eps: f64) -> Result<f64, Str
         }
         .into());
     }
-    // `Φ⁻¹(Φ(h)) = h` exactly in the model; clipping the PIT probability to
-    // `[clip_eps, 1 − clip_eps]` is therefore clipping the score symmetrically,
-    // and doing it here avoids a `Φ` / `Φ⁻¹` round trip that would lose digits
-    // in the tails the clip exists to bound.
-    let bound = standard_normal_quantile(1.0 - clip_eps)
-        .map_err(|err| format!("transformation-normal PIT clip bound failed: {err}"))?;
-    Ok(h.clamp(-bound, bound))
+    // `Φ⁻¹(Φ(h)) = h` exactly in the model, so clipping the PIT PROBABILITY to
+    // `[clip_eps, 1 − clip_eps]` is clipping the SCORE to the matching quantile
+    // window. Applying it here avoids a `Φ` / `Φ⁻¹` round trip that would lose
+    // digits in exactly the tails the clip exists to bound. Both ends are read
+    // from the quantile kernel rather than one being negated: the kernel is not
+    // bit-antisymmetric, and the emitted score has to be the value a caller gets
+    // from `standard_normal_quantile(clip_eps)` when it computes the same
+    // boundary itself (`score_influence_jacobian` does, to detect saturation).
+    let lower = standard_normal_quantile(clip_eps)
+        .map_err(|err| format!("transformation-normal PIT lower clip bound failed: {err}"))?;
+    let upper = standard_normal_quantile(1.0 - clip_eps)
+        .map_err(|err| format!("transformation-normal PIT upper clip bound failed: {err}"))?;
+    Ok(h.clamp(lower, upper))
 }
 
 /// Accumulates the second-order monotone-transform quantities
@@ -170,23 +176,29 @@ mod tests {
     }
 
     #[test]
-    fn pit_score_clips_symmetrically_in_both_tails() {
+    fn pit_score_clips_to_the_quantile_window_in_both_tails() {
         let clip = 1e-6;
-        let bound = standard_normal_quantile(1.0 - clip).unwrap();
-        assert!(bound > 4.0);
+        let upper = standard_normal_quantile(1.0 - clip).unwrap();
+        let lower = standard_normal_quantile(clip).unwrap();
+        assert!(upper > 4.0 && lower < -4.0);
         assert_eq!(
             transformation_normal_pit_score(1.0e3, clip).unwrap(),
-            bound,
+            upper,
             "an extreme upper-tail response clips to Φ⁻¹(1 − clip_eps)"
         );
         assert_eq!(
             transformation_normal_pit_score(-1.0e3, clip).unwrap(),
-            -bound,
-            "and the lower tail clips to Φ⁻¹(clip_eps) = −Φ⁻¹(1 − clip_eps)"
+            lower,
+            "and the lower tail clips to Φ⁻¹(clip_eps)"
         );
-        // The clip window is exactly the quantile window it claims to be.
-        let lower_quantile = standard_normal_quantile(clip).unwrap();
-        assert!((lower_quantile + bound).abs() < 1e-12);
+        // Both bounds come from the quantile kernel itself. It is not
+        // bit-antisymmetric, so negating one end would put the emitted score a
+        // few ULP away from the boundary a caller recomputes for itself — which
+        // is how `score_influence_jacobian` decides a row is saturated.
+        assert!(
+            (lower + upper).abs() > 0.0,
+            "if the kernel ever becomes bit-antisymmetric this note is stale, not wrong"
+        );
     }
 
     #[test]

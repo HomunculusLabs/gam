@@ -863,11 +863,12 @@ pub(crate) fn transformation_normal_pit_score_is_the_model_cdf_2600() {
     // fabricated. Under `F = Φ(h)` it is an ordinary extreme probability, and
     // the clip window is the only thing that bounds the reported score.
     let clip = 1.0e-12;
-    let bound = standard_normal_quantile(1.0 - clip).expect("clip quantile");
+    let lower = standard_normal_quantile(clip).expect("lower clip quantile");
+    let upper = standard_normal_quantile(1.0 - clip).expect("upper clip quantile");
     for h in [37.5, -37.5, 1.0e5] {
         let score = transformation_normal_pit_score(h, clip)
             .expect("an out-of-range response is a probability, not a refusal");
-        assert_eq!(score, h.clamp(-bound, bound));
+        assert_eq!(score, h.clamp(lower, upper));
     }
 
     // Genuinely-malformed input (NaN h) is still rejected by the early
@@ -3139,6 +3140,188 @@ pub(crate) fn ctn_shape_penalties_annihilate_the_affine_transformation_2600() {
             "tensor penalty {index} is inert on a bent shape ({bent_quad:.6e})"
         );
     }
+}
+
+/// gam#2600, the defect this issue turned out to be: the CTN inner objective
+/// must be COERCIVE — it must go to `+∞` in every direction of `β`, so that a
+/// minimizer exists at all.
+///
+/// The direction that failed is the escape ray: raise the unpenalized location
+/// column to `κ·c` and contract the shape to `α/κ`. Under the old
+/// endpoint-renormalized density `φ(h)h' / [Φ(h_hi) − Φ(h_lo)]` the three
+/// transformed quantities `h`, `h_lo`, `h_hi` move together, the conditional law
+/// converges to a truncated exponential in the normalized shape coordinate, and
+/// the objective converges to a FINITE limit from above — measured on the wine
+/// fixture as `141.0858 → 141.0604164` over `c ∈ [1, ∞)`, monotone and never
+/// stationary. Every solver-side hypothesis on that issue was a symptom of an
+/// inner problem whose infimum was simply not attained.
+///
+/// Under the most-likely-transformation density `φ(h)h'` the same ray costs
+/// `½Σh² ~ ½nκ²c²` from the Gaussian kernel AND `n log κ` from the `−log h'`
+/// barrier, so it diverges quadratically. The assertion carries no tuned
+/// constant: it is monotonicity plus divergence past an arbitrary large bound.
+#[test]
+pub(crate) fn ctn_penalized_objective_is_coercive_in_the_location_column_2600() {
+    let response = skewed_response(64);
+    let n = response.len();
+    let config = TransformationNormalConfig::default();
+    let (resp_val, resp_deriv, resp_penalties, knots, transform) =
+        build_response_basis(&response, &config).expect("response basis builds");
+    let p_resp = resp_val.ncols();
+    let p_shape = p_resp - 1;
+    let affine = affine_shape_direction(knots.view(), config.response_degree, p_shape)
+        .expect("affine shape direction");
+    let weights = Array1::<f64>::ones(n);
+    let offset = Array1::<f64>::zeros(n);
+    let family = TransformationNormalFamily::from_prebuilt_response_basis(
+        &response,
+        resp_val,
+        resp_deriv,
+        resp_penalties,
+        knots,
+        config.response_degree,
+        transform,
+        &weights,
+        &offset,
+        DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
+        vec![],
+        &config,
+        None,
+    )
+    .expect("intercept-only CTN family");
+    let rho = family
+        .penalty_scale_log_lambdas()
+        .expect("data-scaled smoothing seed");
+    let dense: Vec<Array2<f64>> = family
+        .tensor_penalties
+        .iter()
+        .map(|penalty| penalty.to_dense())
+        .collect();
+
+    // The ray. `c` and the shape scale are read off the fixture rather than
+    // chosen: `c` is one response standard deviation on the latent scale and the
+    // shape is the affine transformation that standardizes the response, which
+    // is where an honest fit sits.
+    let mean = response.sum() / n as f64;
+    let variance = response.iter().map(|y| (y - mean) * (y - mean)).sum::<f64>() / n as f64;
+    let base_slope = 1.0 / variance.sqrt();
+    let penalized_objective = |kappa: f64| -> f64 {
+        let mut beta = Array1::<f64>::zeros(p_resp);
+        for k in 0..p_shape {
+            beta[k + 1] = (base_slope / kappa) * affine[k];
+        }
+        beta[0] = kappa;
+        let quantities = family
+            .row_quantities(&beta)
+            .expect("row quantities on the escape ray");
+        let penalty: f64 = dense
+            .iter()
+            .enumerate()
+            .map(|(index, matrix)| 0.5 * rho[index].exp() * beta.dot(&matrix.dot(&beta)))
+            .sum();
+        -quantities.log_likelihood + penalty
+    };
+
+    let mut previous = penalized_objective(1.0);
+    let base = previous;
+    let mut kappa = 2.0;
+    // 2^1 … 2^20: `h` reaches ~1e6, which is the family's own
+    // `TRANSFORMATION_NORMAL_H_ABS_MAX` domain bound, so this walks the ray as
+    // far as the model admits it.
+    for _ in 0..19 {
+        let objective = penalized_objective(kappa);
+        assert!(
+            objective > previous,
+            "the objective must rise along the escape ray, but at κ={kappa} it fell \
+             {previous:.9} → {objective:.9}; under the endpoint-renormalized density it \
+             FELL monotonically to a finite limit, which is why the inner solve had no mode"
+        );
+        previous = objective;
+        kappa *= 2.0;
+    }
+    // Divergence, not merely monotonicity: a monotone sequence can still be
+    // bounded, and a bounded one is exactly the defect. `1e6` is an arbitrary
+    // large bound, not a threshold — the true growth here is ~½n κ² ≈ 3e13.
+    assert!(
+        previous > base + 1.0e6,
+        "the objective is bounded along the escape ray: {base:.6e} → {previous:.6e}. \
+         A bounded ray means the infimum is not attained and no inner mode exists."
+    );
+}
+
+/// gam#2600: the CTN negative log-likelihood is CONVEX in the coefficients, so
+/// its observed information is positive semidefinite everywhere on the feasible
+/// set — the property that makes a most-likely-transformation model well posed
+/// (Hothorn–Möst–Bühlmann 2018). `−log φ(h) = ½h²` is a convex quadratic in `β`
+/// because `h` is linear in `β`, and `−log h'` is convex because `h'` is linear
+/// in `β`; the exact Hessian is `Σ w (∇h ∇hᵀ + ∇h' ∇h'ᵀ / h'²)`, a sum of two
+/// Gram matrices.
+///
+/// The endpoint renormalizer broke exactly this: `log Z = log[Φ(u) − Φ(l)]` is
+/// CONCAVE in `(l, u)` by Prékopa, so `−log Z` contributed a concave term and
+/// the assembled information was indefinite. `resolvable_negative_curvature=true`
+/// on every terminal cycle of every refusal recorded on that issue was that
+/// indefiniteness.
+#[test]
+pub(crate) fn ctn_observed_information_is_positive_semidefinite_2600() {
+    let psi = array![0.15, -0.10];
+    let (family, _, state, _) = toy_family_and_derivatives(&psi);
+    let p_total = state.beta.len();
+    // The base point, plus perturbations along the escape ray and along random
+    // feasible directions — the ray first, because that is the direction whose
+    // curvature the renormalizer flipped.
+    let mut points = vec![state.beta.clone()];
+    for kappa in [4.0_f64, 64.0] {
+        let mut beta = state.beta.clone();
+        for (index, value) in beta.iter_mut().enumerate() {
+            if index < family.covariate_design.ncols() {
+                *value *= kappa;
+            } else {
+                *value /= kappa;
+            }
+        }
+        points.push(beta);
+    }
+    for seed in 0..6_u64 {
+        let mut beta = state.beta.clone();
+        let probe = toy_probe_vector(p_total, 4_000 + seed);
+        for (value, step) in beta.iter_mut().zip(probe.iter()) {
+            *value += 0.15 * step;
+        }
+        points.push(beta);
+    }
+
+    let mut checked = 0usize;
+    for beta in points {
+        let Ok(quantities) = family.row_quantities(&beta) else {
+            // A perturbation that leaves the monotonicity cone is not a
+            // counter-example to convexity ON the feasible set; skip it.
+            continue;
+        };
+        let (_, hessian) = family
+            .scop_gradient_and_negative_hessian(&beta, &quantities)
+            .expect("exact SCOP information at a feasible point");
+        let (eigenvalues, _) =
+            gam_linalg::faer_ndarray::strict_symmetric_eigh(&hessian, faer::Side::Lower)
+                .expect("symmetric eigendecomposition of the observed information");
+        let largest = eigenvalues.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let smallest = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+        // The only admissible negative eigenvalue is backward error of the
+        // eigensolver itself, which is `O(ε·‖H‖)`.
+        assert!(
+            smallest >= -1.0e-9 * largest.max(1.0),
+            "the observed information is indefinite: λ_min={smallest:.6e} against \
+             λ_max={largest:.6e}. The CTN negative log-likelihood is a sum of two Gram \
+             matrices and cannot have negative curvature; a concave term has been \
+             reintroduced into it."
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} of the probe points were feasible; the assertion above is then \
+         close to vacuous"
+    );
 }
 
 /// gam#2600 null recovery: at ANY smoothing strength the CTN penalized objective
