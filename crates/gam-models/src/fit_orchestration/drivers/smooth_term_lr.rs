@@ -700,7 +700,12 @@ impl SmoothLrSelectionReplay {
         }
         let scales = geometry.roots.len();
         if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales) {
-            return match Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws) {
+            return match Self::generate_multiscale(
+                geometry,
+                log_scale_windows,
+                multiscale_draws,
+                SMOOTH_LR_SELECTION_GRID_BUDGET,
+            ) {
                 Ok(replay) => SmoothLrSelection::Replayed(replay),
                 // A closed multi-scale window is not the end of the story: the
                 // common-scale slice intersects the same windows and declines
@@ -882,6 +887,7 @@ impl SmoothLrSelectionReplay {
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
+        grid_budget: usize,
     ) -> Result<Self, SmoothLrSelectionDecline> {
         let scales = geometry.roots.len();
         if scales < 2 || scales > SMOOTH_LR_SELECTION_MAX_SCALES {
@@ -894,10 +900,7 @@ impl SmoothLrSelectionReplay {
         // with `m`. A scale whose own window is empty — its `λ̂` railed against
         // both walls at once — contributes a single node at the fitted point
         // rather than sinking the whole replay.
-        let per_axis = ((SMOOTH_LR_SELECTION_GRID_BUDGET as f64)
-            .powf(1.0 / scales as f64)
-            .floor() as usize)
-            .max(2);
+        let per_axis = ((grid_budget as f64).powf(1.0 / scales as f64).floor() as usize).max(2);
         let mut axes = Vec::<Vec<f64>>::with_capacity(scales);
         let mut movable = 0usize;
         for &(low, high) in log_scale_windows {
@@ -2786,8 +2789,9 @@ mod lr_null_reference_tests {
 #[cfg(test)]
 mod selection_replay_tests {
     use super::{
-        SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_MAX_SCALES, SelectionGeometry,
-        SmoothLrSelection, SmoothLrSelectionDecline, SmoothLrSelectionReplay,
+        SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_GRID_BUDGET,
+        SMOOTH_LR_SELECTION_MAX_SCALES, SelectionGeometry, SmoothLrSelection,
+        SmoothLrSelectionDecline, SmoothLrSelectionReplay,
     };
     use ndarray::Array2;
 
@@ -2977,6 +2981,7 @@ mod selection_replay_tests {
             &split_geometry,
             &[(-6.0, 6.0), (-6.0, 6.0)],
             2048,
+            SMOOTH_LR_SELECTION_GRID_BUDGET,
         )
         .expect("multiscale replay");
         // With `information = I` the generalized eigenvalues ARE the penalty's
@@ -3032,7 +3037,13 @@ mod selection_replay_tests {
         )
         .expect("single geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_err()
+            SmoothLrSelectionReplay::generate_multiscale(
+                &single,
+                &[(-6.0, 6.0)],
+                256,
+                SMOOTH_LR_SELECTION_GRID_BUDGET,
+            )
+            .is_err()
         );
         // More scales than the grid budget can resolve: declines rather than
         // gridding five axes at four points each — and the dispatcher then hands
@@ -3045,7 +3056,15 @@ mod selection_replay_tests {
             &vec![0.0; SMOOTH_LR_SELECTION_MAX_SCALES + 1],
         )
         .expect("crowded geometry");
-        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_err());
+        assert!(
+            SmoothLrSelectionReplay::generate_multiscale(
+                &crowded,
+                &windows,
+                256,
+                SMOOTH_LR_SELECTION_GRID_BUDGET,
+            )
+            .is_err()
+        );
         assert!(
             SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256)
                 .replay()
@@ -3060,14 +3079,23 @@ mod selection_replay_tests {
         )
         .expect("pair geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (2.0, 2.0)], 256)
-                == Err(SmoothLrSelectionDecline::WindowClosed)
+            SmoothLrSelectionReplay::generate_multiscale(
+                &pair,
+                &[(1.0, 1.0), (2.0, 2.0)],
+                256,
+                SMOOTH_LR_SELECTION_GRID_BUDGET,
+            ) == Err(SmoothLrSelectionDecline::WindowClosed)
         );
         // But ONE open axis is still a selection, and used to be discarded with
         // the closed one — the intersection of the two windows is empty.
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (-6.0, 6.0)], 256)
-                .is_ok(),
+            SmoothLrSelectionReplay::generate_multiscale(
+                &pair,
+                &[(1.0, 1.0), (-6.0, 6.0)],
+                256,
+                SMOOTH_LR_SELECTION_GRID_BUDGET,
+            )
+            .is_ok(),
             "a scale whose own window is open must still be replayed when a \
              SIBLING scale's window is closed"
         );
@@ -3100,6 +3128,89 @@ mod selection_replay_tests {
                 "a closed window must decline with a NAMED reason"
             );
         }
+    }
+
+    /// PROBE (#2672, not a contract): what the multi-scale grid's BUDGET costs
+    /// the law it generates.
+    ///
+    /// The one-dimensional lane grids `ln t` at a fixed `0.05`; the
+    /// multi-scale one spends a fixed TOTAL of `441` points, which at `m = 2`
+    /// over the box the solver leaves a railed `λ̂` is a spacing of about `3` in
+    /// `ln λ` — sixty times coarser. The replay's whole job is to reproduce a
+    /// selection the fit made with a continuum available, so a grid that cannot
+    /// resolve the criterion's minimum generates a law that is selected LESS
+    /// than the statistic it is the reference for. This prints the selected
+    /// law's mean, spread and upper tail against budget so the size of that
+    /// gap is a measurement rather than an assumption.
+    #[test]
+    fn zz_probe_multiscale_grid_budget_moves_the_selected_law_2672() {
+        let q = 6;
+        // The default `s(z)` shape: a bending penalty over the wiggly
+        // directions and a null-space ridge over the rest, fitted at the
+        // separation a null-true smooth actually reaches (`λ₁` up, `λ₂` down).
+        let mut bending = Array2::<f64>::zeros((q, q));
+        let mut ridge = Array2::<f64>::zeros((q, q));
+        for index in 0..q {
+            if index < 4 {
+                bending[[index, index]] = 1.0 + index as f64;
+            } else {
+                ridge[[index, index]] = 1.0;
+            }
+        }
+        for separation in [0.0_f64, 24.0, 42.0] {
+            let (rho_one, rho_two) = (0.5 * separation, -0.5 * separation);
+            let geometry = SelectionGeometry::whiten(
+                &Array2::eye(q),
+                &[bending.clone(), ridge.clone()],
+                &[rho_one, rho_two],
+            )
+            .expect("geometry");
+            let windows = [
+                (-30.0 - rho_one, 30.0 - rho_one),
+                (-30.0 - rho_two, 30.0 - rho_two),
+            ];
+            eprintln!(
+                "[zz2672-grid] separation={separation}  window0={:?} window1={:?}",
+                windows[0], windows[1]
+            );
+            for budget in [SMOOTH_LR_SELECTION_GRID_BUDGET, 1681, 6561, 25921] {
+                let replay = SmoothLrSelectionReplay::generate_multiscale(
+                    &geometry, &windows, 2048, budget,
+                )
+                .expect("multiscale replay");
+                let per_axis = (budget as f64).powf(0.5).floor() as usize;
+                let draws = replay.selection_sample.len() as f64;
+                let mean = replay.selection_sample.iter().sum::<f64>() / draws;
+                let variance = replay
+                    .selection_sample
+                    .iter()
+                    .map(|value| (value - mean) * (value - mean))
+                    .sum::<f64>()
+                    / draws;
+                let conditional_mean =
+                    replay.conditional_sample.iter().sum::<f64>() / draws;
+                let upper = |quantile: f64| {
+                    let mut sorted = replay.selection_sample.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+                    sorted[((quantile * draws) as usize).min(sorted.len() - 1)]
+                };
+                eprintln!(
+                    "[zz2672-grid]   budget={budget:>6} per_axis={per_axis:>3} \
+                     spacing={:>6.3}  E[W(t-hat)]={mean:.4} sd={:.4} \
+                     q95={:.4} q99={:.4}  (E[W|t-hat]={conditional_mean:.4})",
+                    (windows[0].1 - windows[0].0) / (per_axis as f64 - 1.0),
+                    variance.sqrt(),
+                    upper(0.95),
+                    upper(0.99),
+                );
+            }
+        }
+        eprintln!(
+            "[zz2672-grid] read: the selected law is generated by MINIMISING the \
+             criterion over the grid, so a finer grid can only lower each draw's \
+             criterion. A mean/tail that keeps moving as the budget rises is the \
+             shipped budget failing to reproduce the selection the fit made."
+        );
     }
 
     /// #2672: the criterion's log-determinant is priced from the stacked scaled
