@@ -178,10 +178,31 @@
   rejected because that matrix moves with `β` and `ρ` while every `Φ` derivative
   formula holds `Z_J` fixed; this does not read it live — it is measured once, at
   the unbiased probe's certified mode and its selected `λ`, and frozen for the
-  armed refit, which is the same construction at the same point that the arming
-  DECISION already uses. The certificate now returns its verdict **and the
-  subspace that verdict was taken on** as one object, because they are one
-  decision: publishing only the verdict is how the two came apart.
+  armed refit.
+
+  **The arming VERDICT is a different question and keeps its own answer.**
+  Handing the measured set to the verdict as well broke the three-arm oracle from
+  both sides — a genuinely separated design with `S_λ = 0` DISARMED, and widening
+  the metric's scale until it armed again took the calibration fixture to
+  `−0.0525` against a `0.05` bar. Threading that with a scale constant would be
+  choosing an estimand on a curve. So *"does this model need a proper prior?"*
+  stays a statement about STRUCTURE (`ker(S_λ)` and the gate's predicate on it,
+  byte-unchanged), and *"where does that prior belong?"* is the statement about
+  the fit's ARITHMETIC above.
+
+  **The threshold is taken in the CLR metric, because a threshold is a statement
+  about coordinates and the multinomial's are a gauge choice.** Relabelling
+  classes acts on `θ` by a non-orthogonal contrast change, so `H + S_λ`
+  transforms by congruence and its eigenvalues move; a kernel is
+  congruence-invariant and never had this problem. Measured cost of ignoring it:
+  `multinomial_fit_is_invariant_to_reference_class_1587` saw predicted-probability
+  drift `4.093e-3` across three labelings of one dataset against a `1e-3` bar,
+  with refit noise exactly `0`. Generalized eigenvalues against `G = (M/K) ⊗ I_P`
+  — the same `M` the reference-symmetric penalty is built from — are gauge
+  invariant, and `G`'s scale is derived rather than chosen: one observation's
+  Fisher block in the ALR active frame is `W_ab = p_a(δ_ab − p_b)`, which at the
+  most-informative point `p_c = 1/K` is exactly `(1/K)·M_ab`, so `M/K` IS one
+  maximally-informative observation's curvature per unit design.
 
 - **A cached inner mode was identified by the penalty's state, not the
   objective's, so the coefficient-mode continuation's corrector was disabled by
