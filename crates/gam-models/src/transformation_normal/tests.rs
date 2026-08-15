@@ -3105,6 +3105,90 @@ pub(crate) fn ctn_shape_penalties_annihilate_the_affine_transformation_2600() {
     }
 }
 
+/// gam#2600: the two exact-curvature entry points that carry no dense oracle of
+/// their own — the Hessian DIAGONAL and the projected directional TRACE — must
+/// agree with the dense assembly they are shortcuts for.
+///
+/// Both are row loops over the same per-row factors as
+/// `scop_gradient_and_negative_hessian` and `scop_hessian_directional_derivative`,
+/// and the endpoint-normalizer deletion edited all four. The operator tests
+/// cover `mul_vec`/`mul_mat` against dense; nothing covered these two, so a term
+/// dropped from a shortcut and not from the dense path (or the reverse) had no
+/// gate. This is that gate, and it is an identity, so it carries no tolerance
+/// beyond accumulation order.
+#[test]
+pub(crate) fn ctn_hessian_diagonal_and_projected_trace_match_dense_assembly_2600() {
+    let psi = array![0.15, -0.10];
+    let (family, _, state, _) = toy_family_and_derivatives(&psi);
+    let quantities = family
+        .row_quantities(&state.beta)
+        .expect("toy row quantities");
+    let p_total = state.beta.len();
+
+    // (1) The exact diagonal is the diagonal of the exact dense Hessian.
+    let (_, dense) = family
+        .scop_gradient_and_negative_hessian(&state.beta, &quantities)
+        .expect("dense SCOP information");
+    let diagonal = family
+        .scop_hessian_diagonal(&state.beta, &quantities)
+        .expect("SCOP information diagonal");
+    assert_eq!(diagonal.len(), p_total);
+    for index in 0..p_total {
+        let (got, want) = (diagonal[index], dense[[index, index]]);
+        assert!(
+            (got - want).abs() <= 1.0e-12 * want.abs().max(1.0),
+            "diagonal[{index}] = {got:.17e} against dense[{index},{index}] = {want:.17e}"
+        );
+    }
+
+    // (2) The projected directional trace is `tr(Fᵀ · dH[u] · F)`, assembled here
+    // from the dense directional derivative so the two routes cannot drift.
+    let direction = toy_probe_vector(p_total, 7_001);
+    let factor = {
+        let mut columns = Array2::<f64>::zeros((p_total, 3));
+        for column in 0..3 {
+            let probe = toy_probe_vector(p_total, 7_100 + column as u64);
+            for row in 0..p_total {
+                columns[[row, column]] = probe[row];
+            }
+        }
+        columns
+    };
+    let dense_dh = family
+        .scop_hessian_directional_derivative(&state.beta, &direction, &quantities)
+        .expect("dense SCOP dH");
+    let mut expected = 0.0;
+    for column in 0..factor.ncols() {
+        let f = factor.column(column);
+        for i in 0..p_total {
+            for j in 0..p_total {
+                expected += f[i] * dense_dh[[i, j]] * f[j];
+            }
+        }
+    }
+    let row_grams = family
+        .scop_projected_response_gram_table(factor.view())
+        .expect("projected response Gram table");
+    let got = family
+        .scop_hessian_directional_trace_from_response_grams(
+            &state.beta,
+            &direction,
+            &quantities,
+            row_grams.view(),
+        )
+        .expect("projected directional trace");
+    assert!(
+        (got - expected).abs() <= 1.0e-10 * expected.abs().max(1.0),
+        "projected trace {got:.17e} against dense assembly {expected:.17e}"
+    );
+    // The fixture has to have curvature in this direction, or both sides are 0.
+    assert!(
+        expected.abs() > 1.0e-6,
+        "the probe direction produces no directional curvature ({expected:.3e}); \
+         the comparison above would then be vacuous"
+    );
+}
+
 /// gam#2600, the defect this issue turned out to be: the CTN inner objective
 /// must be COERCIVE — it must go to `+∞` in every direction of `β`, so that a
 /// minimizer exists at all.
