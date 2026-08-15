@@ -3414,31 +3414,61 @@ mod tests {
         assert!(degenerate.is_under_identified() && degenerate.is_active());
     }
 
+    /// `jeffreys_subspace_from_penalty` returns `ker(S)`, and its three regimes
+    /// are pinned here because the middle one is the whole reason the function
+    /// takes an argument.
+    ///
+    /// This test previously asserted the OPPOSITE — that the span is the full
+    /// identity "regardless of penalty" — which was true when the aggregate was
+    /// consulted only to pick up the block dimension. gam#2612 gave the argument
+    /// meaning and left this assertion behind; it has been red on `main` ever
+    /// since (`MASTER_FAILURES.md`, `gam-solve ::
+    /// jeffreys_subspace::tests::full_span_is_identity_regardless_of_penalty`).
+    /// A test asserting a retired contract is worse than no test: it reads as
+    /// coverage of the live one.
+    ///
+    /// The zero-penalty row is not a degenerate case to tolerate — it is the
+    /// reason an unpenalised quasi-separated design still arms. `S = 0` reaches
+    /// nothing, so every direction is fair game, and the identity is returned
+    /// EXACTLY (no eigensolver rotation) so that historical callers are
+    /// byte-identical rather than merely equivalent.
     #[test]
-    pub(crate) fn full_span_is_identity_regardless_of_penalty() {
-        // The principled cure: Z_J is the FULL identifiable span (the entire
-        // reduced block), i.e. the identity, irrespective of the penalty's null
-        // space. Jeffreys is self-limiting, so this does not bias identified
-        // directions; it only bounds near-separating ones.
-        for s in [
-            Array2::<f64>::zeros((3, 3)), // pure parametric
-            {
-                let mut s = Array2::<f64>::zeros((3, 3));
-                s[[2, 2]] = 5.0; // rank-deficient (ker dim 2)
-                s
-            },
-            Array2::<f64>::eye(4) * 2.0, // full-rank penalty
+    pub(crate) fn the_penalty_kernel_span_is_the_directions_no_lambda_reaches() {
+        let rank_deficient = {
+            let mut s = Array2::<f64>::zeros((3, 3));
+            s[[2, 2]] = 5.0;
+            s
+        };
+        for (s, expected_dim, why) in [
+            (
+                Array2::<f64>::zeros((3, 3)),
+                3usize,
+                "S = 0 reaches nothing, so the span is the whole block",
+            ),
+            (
+                rank_deficient,
+                2usize,
+                "a rank-1 penalty on a 3-block leaves a 2-dimensional kernel",
+            ),
+            (
+                Array2::<f64>::eye(4) * 2.0,
+                0usize,
+                "a full-rank penalty reaches every direction, so nothing is left                  for the term to bound",
+            ),
         ] {
             let p = s.nrows();
             let z = jeffreys_subspace_from_penalty(s.view()).unwrap();
-            assert_eq!(z.span_dim(), p, "full span must equal the block dimension");
+            assert_eq!(z.span_dim(), expected_dim, "{why}");
             assert_eq!(z.columns.nrows(), p);
-            // Identity ⇒ orthonormal columns spanning the whole space.
+            // Orthonormal columns, whichever regime produced them.
             let gram = z.columns.t().dot(&z.columns);
-            for i in 0..p {
-                for j in 0..p {
+            for i in 0..z.span_dim() {
+                for j in 0..z.span_dim() {
                     let expected = if i == j { 1.0 } else { 0.0 };
-                    assert!((gram[[i, j]] - expected).abs() < 1e-12);
+                    assert!(
+                        (gram[[i, j]] - expected).abs() < 1e-12,
+                        "the span basis must be orthonormal ({why})"
+                    );
                 }
             }
         }
