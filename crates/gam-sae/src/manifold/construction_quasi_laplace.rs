@@ -1880,6 +1880,8 @@ impl SaeManifoldTerm {
                         f64::INFINITY
                     };
                     let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
+                    let orbit =
+                        self.gauge_orbit_descent_diagnostic(target, rho, registry, &lambda_smooth);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
@@ -1887,7 +1889,7 @@ impl SaeManifoldTerm {
                          quotient KKT gradient ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance \
                          {grad_tolerance:.6e} (‖Π∥gauge g‖={gauge_component:.6e}, \
                          gauge_share={gauge_share:.4}, \
-                         quotient_over_tol={quotient_over_tol:.3e}, {intensive}). Objective \
+                         quotient_over_tol={quotient_over_tol:.3e}, {intensive}, {orbit}). Objective \
                          stagnation and a finite deflated factor are diagnostic only; refusing to \
                          rank or differentiate an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
@@ -2108,6 +2110,170 @@ impl SaeManifoldTerm {
         format!(
             "intensive_scaled_max={scaled_max:.6e}, intensive_bound={bound:.6e}, \
              intensive_over_bound={ratio:.3e}"
+        )
+    }
+
+    /// #2762 PROBE — what the quotient removes, priced as objective motion.
+    ///
+    /// `quotient_residual_norm_sq` projects the KKT residual onto the complement
+    /// of the chart-gauge orbit + decoder nulls before the gate reads it, on the
+    /// premise that the penalized objective is flat along the removed span.
+    /// `quotient_gradient_norm_sq`'s own doc records that the premise is FALSE
+    /// (gam#2715/#2720: the orbit is a symmetry of the likelihood, not of the
+    /// posterior) and that the precondition `maxᵢ |gᵀvᵢ| ≤ tolerance` is
+    /// available at the projection site and never checked.
+    ///
+    /// This diagnostic checks it, and goes one step further: a nonzero `gᵀv` is
+    /// a first-order statement, and a first-order statement about a direction
+    /// with near-zero curvature does not say whether any FINITE motion along it
+    /// actually lowers the objective. So each removed direction is also walked
+    /// with a two-sided geometric line search on `penalized_objective_total` —
+    /// the exact scalar the inner solve descends — and the best realized
+    /// decrease is reported next to the first-order derivative.
+    ///
+    /// Diagnostic only: nothing here gates, accepts, or relaxes anything. It is
+    /// paid on the refusal path, which is already returning `Err`.
+    fn gauge_orbit_descent_diagnostic(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        lambda_smooth: &[f64],
+    ) -> String {
+        let system = match self.assemble_arrow_schur(target, rho, registry) {
+            Ok(system) => system,
+            Err(reason) => return format!("orbit=unresolved(assembly: {reason})"),
+        };
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let dense_len = n.saturating_mul(q);
+        let border_dim = self.factored_border_dim();
+        if system.rows.len() != n || system.row_offsets.len() != n + 1 || system.gb.len() != border_dim
+        {
+            return "orbit=unresolved(non-dense layout)".to_string();
+        }
+        let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+        for (row_index, row) in system.rows.iter().enumerate() {
+            let base = system.row_offsets[row_index];
+            let dim = system.row_dims[row_index];
+            if base + dim > dense_len || row.gt.len() < dim {
+                return "orbit=unresolved(row layout)".to_string();
+            }
+            for axis in 0..dim {
+                gradient[base + axis] = row.gt[axis];
+            }
+        }
+        for (index, &value) in system.gb.iter().enumerate() {
+            gradient[dense_len + index] = value;
+        }
+
+        // Same span, same order, same Gram--Schmidt as the projection the gate
+        // reads, so what is measured here is exactly what is removed there.
+        let gauges = match (
+            self.dense_step_gauge_vectors(),
+            self.joint_decoder_beta_null_directions(lambda_smooth),
+            self.decoder_channel_null_directions(),
+        ) {
+            (Ok(chart), Ok(beta_null), Ok(channel_null)) => chart
+                .into_iter()
+                .chain(beta_null)
+                .chain(channel_null)
+                .collect::<Vec<_>>(),
+            (Err(reason), _, _) | (_, Err(reason), _) | (_, _, Err(reason)) => {
+                return format!("orbit=unresolved(gauge basis: {reason})");
+            }
+        };
+        let mut orthonormal: Vec<Array1<f64>> = Vec::new();
+        for mut gauge in gauges {
+            if gauge.len() != gradient.len() {
+                continue;
+            }
+            for basis in &orthonormal {
+                let coeff = gauge.dot(basis);
+                for index in 0..gauge.len() {
+                    gauge[index] -= coeff * basis[index];
+                }
+            }
+            let norm_sq = gauge.iter().map(|value| value * value).sum::<f64>();
+            if norm_sq <= 1.0e-24 || !norm_sq.is_finite() {
+                continue;
+            }
+            let inv_norm = norm_sq.sqrt().recip();
+            for value in gauge.iter_mut() {
+                *value *= inv_norm;
+            }
+            orthonormal.push(gauge);
+        }
+        if orthonormal.is_empty() {
+            return "orbit=empty(no direction removed)".to_string();
+        }
+        let mut max_derivative = 0.0_f64;
+        for basis in &orthonormal {
+            max_derivative = max_derivative.max(gradient.dot(basis).abs());
+        }
+
+        // The steepest removed direction is the projection of `−g` onto the
+        // removed span: one line search on it bounds what the whole span offers.
+        let mut descent = Array1::<f64>::zeros(gradient.len());
+        for basis in &orthonormal {
+            let coeff = gradient.dot(basis);
+            for index in 0..descent.len() {
+                descent[index] -= coeff * basis[index];
+            }
+        }
+        let descent_norm = descent.dot(&descent).sqrt();
+        if !(descent_norm.is_finite() && descent_norm > 0.0) {
+            return format!(
+                "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, orbit_descent=degenerate",
+                orthonormal.len(),
+            );
+        }
+        for value in descent.iter_mut() {
+            *value /= descent_norm;
+        }
+        let base_objective = match self.penalized_objective_total(target, rho, registry, 1.0) {
+            Ok(value) => value,
+            Err(reason) => return format!("orbit=unresolved(objective: {reason})"),
+        };
+        let snapshot = self.snapshot_mutable_state();
+        let mut best_decrease = 0.0_f64;
+        let mut best_alpha = 0.0_f64;
+        let mut alpha = 1.0e-8_f64;
+        while alpha <= 1.0e3 {
+            let applied = self
+                .apply_newton_step(
+                    descent.slice(s![..dense_len]),
+                    descent.slice(s![dense_len..]),
+                    alpha,
+                )
+                .is_ok();
+            if applied
+                && let Ok(trial) = self.penalized_objective_total(target, rho, registry, 1.0)
+                && trial.is_finite()
+                && base_objective - trial > best_decrease
+            {
+                best_decrease = base_objective - trial;
+                best_alpha = alpha;
+            }
+            if self.restore_mutable_state(&snapshot).is_err() {
+                return format!(
+                    "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, \
+                     orbit_descent=unresolved(restore failed at α={alpha:.3e})",
+                    orthonormal.len(),
+                );
+            }
+            alpha *= 10.0;
+        }
+        let relative = if base_objective.abs() > 0.0 {
+            best_decrease / base_objective.abs()
+        } else {
+            f64::INFINITY
+        };
+        format!(
+            "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, \
+             orbit_best_objective_drop={best_decrease:.6e} at α={best_alpha:.3e} \
+             (objective {base_objective:.6e}, relative {relative:.6e})",
+            orthonormal.len(),
         )
     }
 
