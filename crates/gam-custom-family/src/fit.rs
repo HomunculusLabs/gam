@@ -1672,6 +1672,8 @@ trait RefinedContinuationPath {
         coarser: &ConstrainedWarmStart,
         finer: &ConstrainedWarmStart,
     ) -> Result<f64, AnchoredContinuationRefusal>;
+    /// What this path is a continuation IN, for the refinement trail below.
+    fn label(&self) -> &'static str;
 }
 
 fn certify_refined_continuation<P: RefinedContinuationPath>(
@@ -1707,6 +1709,27 @@ fn certify_refined_continuation<P: RefinedContinuationPath>(
         };
         if let Some(previous) = coarser.as_ref() {
             let discrepancy = path.endpoint_discrepancy(steps, previous, &endpoint)?;
+            // The refinement TRAIL, not just the pair the verdict is taken on.
+            //
+            // A contraction refusal reports `discrepancy / previous_discrepancy`,
+            // which is two numbers out of a sequence — and the two readings that
+            // sequence can carry are opposites. A discrepancy that decreases,
+            // decreases, then stalls at the corrector's own noise is a converged
+            // path whose ratio simply stopped halving; a discrepancy that
+            // decreases and then JUMPS by four orders is the path changing
+            // branch. Both print as "premise violated" with no way to tell them
+            // apart, and this lane has already spent one measurement doing so by
+            // hand (#2612: `1.713372e0 / 3.328619e-5`, a sign flip in eta, not a
+            // noise floor). One line per refinement makes the shape readable
+            // from the run record.
+            log::info!(
+                "[OUTER] {} continuation refinement: steps={steps} discrepancy={discrepancy:.6e} \
+                 previous={} inner_tolerance={inner_tolerance:.6e}",
+                path.label(),
+                previous_discrepancy
+                    .map(|value| format!("{value:.6e}"))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
             match continuation_refinement_decision(
                 steps,
                 previous_discrepancy,
@@ -1835,6 +1858,10 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     ) -> Result<f64, AnchoredContinuationRefusal> {
         continuation_endpoint_discrepancy(steps, coarser, finer)
     }
+
+    fn label(&self) -> &'static str {
+        "#2661 anchored"
+    }
 }
 
 /// Follow a family-declared coefficient-objective homotopy at one fixed `ρ`.
@@ -1939,6 +1966,38 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     objective: eval.objective,
                 });
             }
+            // The per-waypoint trail. The endpoint discrepancy compares two
+            // sweeps at their LAST waypoint only, so a path that changed branch
+            // partway is indistinguishable from one that landed differently by
+            // accumulation. `|eta|inf` is the coordinate the discrepancy is
+            // taken in, so the two readings are the same instrument.
+            log::info!(
+                "[OUTER] coefficient-objective homotopy: steps={steps} waypoint={step} \
+                 progress={progress:.6} objective={:.9e} |eta|inf={:.6e} \
+                 inner(loglik={} penalty={} cycles={} converged={})",
+                eval.objective,
+                waypoint_eta_sup_norm(self.specs, &eval.warm_start),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| format!("{:.9e}", inner.log_likelihood))
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| format!("{:.9e}", inner.penalty_value))
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| inner.cycles.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| inner.converged.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+            );
             carried = Some(eval.warm_start);
         }
         carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
@@ -1956,6 +2015,10 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     ) -> Result<f64, AnchoredContinuationRefusal> {
         coefficient_objective_endpoint_discrepancy(steps, self.specs, coarser, finer)
     }
+
+    fn label(&self) -> &'static str {
+        "coefficient-objective"
+    }
 }
 
 /// Compare two coefficient modes in the coordinates the model objective can
@@ -1970,6 +2033,24 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
 /// authoritative map from coefficients to family state, while the cached
 /// likelihood/penalty pair catches any objective-relevant penalty motion not
 /// visible in eta.
+/// `‖η‖∞` over every block of a waypoint, in the same linear-predictor
+/// coordinates [`coefficient_objective_endpoint_discrepancy`] compares. Purely
+/// diagnostic; a block whose design cannot be applied contributes nothing rather
+/// than turning a log line into a failure.
+fn waypoint_eta_sup_norm(specs: &[ParameterBlockSpec], warm: &ConstrainedWarmStart) -> f64 {
+    let mut worst = 0.0_f64;
+    for (beta, spec) in warm.block_beta.iter().zip(specs.iter()) {
+        if beta.len() != spec.solver_design().ncols() {
+            continue;
+        }
+        let eta = spec.solver_design().matrixvectormultiply(beta) + spec.solver_offset();
+        for value in eta.iter() {
+            worst = worst.max(value.abs());
+        }
+    }
+    worst
+}
+
 fn coefficient_objective_endpoint_discrepancy(
     steps: usize,
     specs: &[ParameterBlockSpec],
