@@ -1,5 +1,68 @@
 ## Unreleased
 
+- **The SAE inner solve had no mover for the block its own convergence measure
+  removes, so it declared a fixed point while holding 559 stall-resolutions of
+  objective decrease (#2762).** The chart-gauge orbit is an exact first-order
+  symmetry of the RECONSTRUCTION and not of the penalized objective — the ARD
+  prior on `t` and the smoothness prior on `β` are written on the chart
+  coordinates — so the data-fit Hessian contributes nothing along it and the only
+  curvature there is the priors'. A live gradient on near-zero curvature needs a
+  LONG step, and every globalization in this solver is a step-SHORTENING device:
+  Armijo backtracks, the LM gain ratio grows the ridge, the terminal polish's
+  damping ladder suppresses exactly the near-null modes. The orbit component of
+  the residual was therefore the one part of `g` no mover reduced — and
+  `quotient_residual_norm_sq` removes that same span from the convergence
+  measure, so it was not reported either.
+
+  Measured at the `zz2015_tiny_inner_crawl_terminates` refusal: `‖g‖ = 2.075e-1`
+  of which `‖Π∥gauge g‖ = 2.016e-1` — 94% of the residual ENERGY inside a
+  4-dimensional span, with `maxᵢ |gᵀvᵢ| = 1.535e-1` against a `1.782e-3`
+  tolerance (86x over the precondition the accept path assumes and never
+  checked). The discriminating control:
+
+  | direction | best objective drop | at α |
+  |---|---|---|
+  | steepest descent `−g/‖g‖` | `1.879e-4` | `1e-3` |
+  | the removed span | `1.090e-1` | `1.0` |
+
+  against a material floor of `1.949e-4`, with `fd/analytic = 0.9998913` — so the
+  assembled gradient IS the gradient of the scalar the line search descends, and
+  this was never a desync. Steepest descent lands BELOW the floor (the stall
+  detector was right); the removed span buys 580x more at a 1000x longer step,
+  because the 6% transverse component of `−g` is stiff enough to cap the ambient
+  line search three decades early.
+
+  The fix is plain block-coordinate descent on the objective's own parameter
+  space, not a new model: `descend_gauge_orbit` minimizes
+  `penalized_objective_total` over exactly the span `gauge_quotient_basis`
+  removes, and the Newton/MM movers keep the transverse block where they are
+  well-conditioned. Both blocks descend the same scalar the inner Armijo descends
+  and the KKT gradient differentiates, so the composition is monotone and a joint
+  fixed point is stationary in both. No estimand moves; the gauge coordinate
+  stops being arbitrary and starts being chosen by the objective, and at a state
+  this converges on `Π∥gauge g ≈ 0`, so the precondition the quotient measure's
+  removal assumes holds BY CONSTRUCTION rather than by assertion.
+
+  Every bound is derived: the sweep's far end is `inner_iterate_scale` (the same
+  trust radius the Newton step already clips against), its near end is
+  `material_floor / ‖Π_V g‖` (below which the first-order model itself predicts
+  less than the objective's resolution — a proof the sweep is complete, not a cap
+  on it), and the bracket is golden-sectioned to `√ε` relative width, the
+  information bound for locating a smooth minimum from f64 values alone. A round
+  commits only a decrease clearing the same material floor the Armijo and
+  proximal gates use, so a commit is never the ε-harvest that makes an inner map
+  non-idempotent.
+
+  The block is consulted at all THREE fixed-point claims — the joint fit's
+  no-strict-decrease exit, its objective-stall shortcut (whose own comment
+  already said it fires "on the gauge-orbit crawl … immediately", naming the
+  mechanism and treating it as a reason to stop), and the refine loop's stall
+  over whole rounds — each armed once per plateau on the doctrine this codebase
+  already uses for the terminal Newton polish. End to end on the repro:
+  `‖g‖ 2.075e-1 → 8.389e-2`, gate `27.67x → 16.42x` of tolerance,
+  `‖Π∥gauge g‖ 2.016e-1 → 7.859e-2`, unspent decrease in the removed span
+  `1.090e-1 → 6.43e-3`, objective `1.949279e4 → 1.948573e4`.
+
 - **The conditional-transformation-normal likelihood renormalized every row by
   the standard-normal mass between two FITTED endpoints, and that is what left
   the fit with no mode to find (#2600).** The row density was
