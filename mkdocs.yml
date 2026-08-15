@@ -144,3 +144,4 @@ nav:
     - GPU acceleration: gpu_acceleration.md
     - REML scaling: reml_scaling.md
   - Changelog: changelog.md
+  - Changelog archive: changelog-archive.md
