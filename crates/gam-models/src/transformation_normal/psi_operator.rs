@@ -1526,8 +1526,6 @@ impl ExactNewtonJointPsiWorkspace for TransformationNormalPsiWorkspace {
             alpha: Arc::clone(&entry.row_gamma),
             h: Arc::clone(&entry.row_h),
             h_prime: Arc::clone(&entry.row_h_prime),
-            h_lower: Arc::new(Array1::zeros(entry.row_h.len())),
-            h_upper: Arc::new(Array1::zeros(entry.row_h.len())),
             endpoint_q: Arc::clone(&entry.endpoint_q),
             log_likelihood: 0.0,
         };

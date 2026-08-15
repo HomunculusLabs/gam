@@ -533,20 +533,15 @@ fn transformation_normal_quantile_grid(
                     ));
                 }
             }
-            // Map the raw transform onto the calibrated N(0,1) latent scale via
-            // the finite-support PIT, normalized by this row's own support
-            // endpoints `h(y_lo|x_i)`, `h(y_hi|x_i)`. Those endpoints come from
-            // the chart evaluator's structural `lower`/`upper` bases (the
-            // I-splines are exactly 0 and exactly 1 at the boundary knots), not
-            // from re-evaluating the basis there, so `U − L` is exactly the
-            // represented support width. The PIT is computed in log-CDF space,
-            // so it stays well-conditioned even when the raw `h` window sits
-            // deep in a normal tail. It is strictly increasing in `h`, so the
-            // calibrated row inherits the monotonicity just verified.
-            let (h_lo, h_hi) = endpoints.expect("grid has at least one node");
+            // Map the raw transform onto the calibrated N(0,1) latent scale.
+            // gam#2600: the fitted model's CDF is `F = Φ(h)`, so the PIT score
+            // is `h` itself, clipped to the representable quantile window — it
+            // is strictly increasing in `h`, so the calibrated row inherits the
+            // monotonicity just verified, and it no longer refuses a grid node
+            // whose transform leaves the fitted support.
             let mut s_row = vec![0.0_f64; GRID];
             for k in 0..GRID {
-                s_row[k] = transformation_normal_pit_score(h_row[k], h_lo, h_hi, saved_ref.clip_eps)
+                s_row[k] = transformation_normal_pit_score(h_row[k], saved_ref.clip_eps)
                     .map_err(|err| {
                         format!(
                             "transformation-normal PIT calibration failed at row {i}, grid node {k}: {err}"
@@ -640,12 +635,7 @@ fn transformation_normal_observed_scores(
                 },
                 saved_ref.floors(response[row_index], offset[row_index]),
             );
-            transformation_normal_pit_score(
-                geometry.h,
-                geometry.lower,
-                geometry.upper,
-                saved_ref.clip_eps,
-            )
+            transformation_normal_pit_score(geometry.h, saved_ref.clip_eps)
             .map_err(|error| {
                 format!("transformation-normal observed score failed at row {row_index}: {error}")
             })

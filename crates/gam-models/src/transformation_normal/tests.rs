@@ -789,53 +789,8 @@ pub(crate) fn ctn_row_quantity_cache_matches_direct_formulas() {
         );
     }
 
-    let p_resp = family.response_val_basis.ncols();
-    let p_cov = family.covariate_design.ncols();
-    let beta_mat = state
-        .beta
-        .view()
-        .into_shape_with_order((p_resp, p_cov))
-        .expect("toy beta reshape");
-    let cov = family
-        .covariate_design
-        .try_row_chunk(0..family.n_obs())
-        .expect("toy covariate rows");
-    let mut h_lower = Array1::<f64>::zeros(cov.nrows());
-    let mut h_upper = Array1::<f64>::zeros(cov.nrows());
-    let mut alpha = vec![0.0; p_resp];
-    for i in 0..cov.nrows() {
-        let cov_row = cov.row(i);
-        for k in 0..p_resp {
-            alpha[k] = beta_mat.row(k).dot(&cov_row);
-        }
-        let mut lower = family.response_lower_basis[0] * alpha[0]
-            + family.offset[i]
-            + family.response_lower_floor_offset;
-        let mut upper = family.response_upper_basis[0] * alpha[0]
-            + family.offset[i]
-            + family.response_upper_floor_offset;
-        for k in 1..p_resp {
-            lower += family.response_lower_basis[k] * alpha[k];
-            upper += family.response_upper_basis[k] * alpha[k];
-        }
-        h_lower[i] = lower;
-        h_upper[i] = upper;
-    }
-
     let mut expected_ll = 0.0;
     for i in 0..direct_h.len() {
-        assert!(
-            (row.h_lower[i] - h_lower[i]).abs() <= 1.0e-14,
-            "h_lower[{i}] mismatch: cached={} direct={}",
-            row.h_lower[i],
-            h_lower[i]
-        );
-        assert!(
-            (row.h_upper[i] - h_upper[i]).abs() <= 1.0e-14,
-            "h_upper[{i}] mismatch: cached={} direct={}",
-            row.h_upper[i],
-            h_upper[i]
-        );
         let hp = direct_h_prime[i];
         // gam#2600: the row density is the most-likely-transformation density
         // log φ(h) + log h', with NO renormalization by the endpoint mass. log φ
@@ -892,40 +847,33 @@ pub(crate) fn ctn_endpoint_normalizer_is_structurally_untruncated_2600() {
 }
 
 #[test]
-pub(crate) fn transformation_normal_pit_score_uses_finite_support_normalizer() {
-    let center =
-        transformation_normal_pit_score(0.0, -2.0, 2.0, 1.0e-12).expect("symmetric PIT score");
-    assert!(center.abs() <= 1.0e-12);
+pub(crate) fn transformation_normal_pit_score_is_the_model_cdf_2600() {
+    // The fitted CDF is `F = Φ(h)`, so the PIT score is `Φ⁻¹(F) = h` — no
+    // endpoints anywhere in it, and in particular no dependence on where the
+    // fitted knot range happened to land.
+    let center = transformation_normal_pit_score(0.0, 1.0e-12).expect("symmetric PIT score");
+    assert_eq!(center, 0.0);
+    for h in [-3.25, -0.5, 0.75, 2.5] {
+        assert_eq!(transformation_normal_pit_score(h, 1.0e-12).unwrap(), h);
+    }
 
-    let positive_tail = transformation_normal_pit_score(37.5, 37.0, 38.0, 1.0e-12)
-        .expect("positive-tail PIT score");
-    assert!(positive_tail.is_finite());
+    // A far-tail transform value used to be a typed `OutsideCertifiedDomain`
+    // refusal whenever it left `[lower, upper]`, because the CONDITIONAL PIT
+    // saturates to exactly 0/1 there and a clamped answer would have been
+    // fabricated. Under `F = Φ(h)` it is an ordinary extreme probability, and
+    // the clip window is the only thing that bounds the reported score.
+    let clip = 1.0e-12;
+    let bound = standard_normal_quantile(1.0 - clip).expect("clip quantile");
+    for h in [37.5, -37.5, 1.0e5] {
+        let score = transformation_normal_pit_score(h, clip)
+            .expect("an out-of-range response is a probability, not a refusal");
+        assert_eq!(score, h.clamp(-bound, bound));
+    }
 
-    // Direct-α cutover (gam#2306): extrapolation meaningfully past an endpoint
-    // is a typed refusal, not a clamped tail quantile. `h = 2.1` sits 0.1 above
-    // `upper = 2.0` on a support of width 4.0 — orders of magnitude past the
-    // boundary-roundoff floor — so it is outside the certified positivity
-    // domain and must be refused, naming the value and the domain.
-    let above_upper = transformation_normal_pit_score(2.1, -2.0, 2.0, 1.0e-12)
-        .expect_err("extrapolation above upper endpoint must refuse, not clamp");
-    assert!(above_upper.contains("certified"));
-    assert!(above_upper.contains("outside the fitted domain"));
-    let below_lower = transformation_normal_pit_score(-2.1, -2.0, 2.0, 1.0e-12)
-        .expect_err("extrapolation below lower endpoint must refuse, not clamp");
-    assert!(below_lower.contains("certified"));
-    assert!(below_lower.contains("outside the fitted domain"));
-
-    // A sub-floor roundoff excursion at the endpoint is still tolerated (snapped
-    // to the boundary), since honest training-boundary rows land there.
-    let roundoff = transformation_normal_pit_score(2.0 + 8.0 * f64::EPSILON, -2.0, 2.0, 1.0e-12)
-        .expect("boundary roundoff must snap to the endpoint, not refuse");
-    assert!(roundoff.is_finite() && roundoff > 0.0);
-
-    // Genuinely-malformed input (NaN h) must still be rejected by the
-    // early `is_finite()` guard — the roundoff tolerance is for legitimate
-    // numerical noise at the boundary, not for non-finite values.
-    let nan_err = transformation_normal_pit_score(f64::NAN, -2.0, 2.0, 1.0e-12)
-        .expect_err("NaN h must still be rejected");
+    // Genuinely-malformed input (NaN h) is still rejected by the early
+    // `is_finite()` guard.
+    let nan_err =
+        transformation_normal_pit_score(f64::NAN, 1.0e-12).expect_err("NaN h must be rejected");
     assert!(nan_err.contains("finite"));
 }
 
@@ -968,10 +916,8 @@ pub(crate) fn ctn_row_quantity_cache_is_exact_beta_keyed() {
 pub(crate) fn ctn_row_quantities_reject_nonrepresentable_exact_derivatives() {
     let h = array![0.0];
     let h_prime = array![1.0e-100];
-    let h_lower = array![-8.0];
-    let h_upper = array![8.0];
     let weights = array![1.0];
-    let err = build_transformation_row_derived(&h, &h_prime, &h_lower, &h_upper, &weights)
+    let err = build_transformation_row_derived(&h, &h_prime, &weights)
         .expect_err("1/h'^4 overflows f64 and must not be clamped");
     assert!(
         err.contains("1/h'^4") && err.contains("outside the finite exact-derivative range"),

@@ -13,47 +13,6 @@
 //! Everything here is pure scalar math with no dependence on the family state,
 //! so it lives in its own seam.
 
-use crate::probability::{log1mexp_positive, normal_logcdf};
-
-use super::TransformationNormalError;
-
-/// Stable `log[Φ(upper) − Φ(lower)]` for `lower < upper`, evaluated via
-/// `normal_logcdf` and a `log1mexp` correction so the endpoint mass survives
-/// far-tail underflow.
-pub(crate) fn log_normal_cdf_diff(upper: f64, lower: f64) -> Result<f64, String> {
-    if !(upper.is_finite() && lower.is_finite()) {
-        return Err(TransformationNormalError::InvalidInput {
-            reason: format!("finite support endpoints required, got lower={lower}, upper={upper}"),
-        }
-        .into());
-    }
-    if upper <= lower {
-        return Err(TransformationNormalError::MonotonicityViolated { reason: format!(
-            "upper endpoint score must exceed lower endpoint score, got lower={lower:.6e}, upper={upper:.6e}"
-        ) }.into());
-    }
-    if lower > 0.0 {
-        return log_normal_cdf_diff(-lower, -upper);
-    }
-    let log_upper = normal_logcdf(upper);
-    let log_lower = normal_logcdf(lower);
-    let gap = log_upper - log_lower;
-    if !(gap.is_finite() && gap > 0.0) {
-        return Err(TransformationNormalError::NumericalFailure { reason: format!(
-            "normal CDF endpoint mass is not representable, lower={lower:.6e}, upper={upper:.6e}"
-        ) }.into());
-    }
-    let log_z = log_upper + log1mexp_positive(gap);
-    if !log_z.is_finite() {
-        return Err(TransformationNormalError::NumericalFailure {
-            reason: format!(
-                "normal CDF endpoint mass underflowed, lower={lower:.6e}, upper={upper:.6e}"
-            ),
-        }
-        .into());
-    }
-    Ok(log_z)
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LogNormalCdfDiffDerivatives {
