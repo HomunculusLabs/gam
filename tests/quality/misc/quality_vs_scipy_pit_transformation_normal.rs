@@ -3,11 +3,11 @@
 //! `scipy.stats.norm` serving only as the exact mathematical CDF ground truth.
 //!
 //! OBJECTIVE METRIC ASSERTED. gam's transformation-normal family learns a
-//! smooth, strictly monotone map `h(Y | x)` that pushes a bounded response onto
-//! the standard-normal scale. A correctly calibrated model has uniform
-//! probability-integral transform (PIT): if `h(Y | x) ~ N(0, 1)` truncated to
-//! the fitted finite support `[lower(x), upper(x)]`, then
-//! `u = (Φ(h) − Φ(lower)) / (Φ(upper) − Φ(lower)) ~ U(0, 1)`. The pass/fail
+//! smooth, strictly monotone map `h(Y | x)` that pushes the response onto the
+//! standard-normal scale. A correctly calibrated model has uniform
+//! probability-integral transform (PIT): the fitted density is the
+//! most-likely-transformation density `φ(h)·h'` (gam#2600), so the model's own
+//! CDF is `F(y | x) = Φ(h(y, x))` and `u = Φ(h) ~ U(0, 1)`. The pass/fail
 //! criterion is the **Kolmogorov–Smirnov distance of the HELD-OUT PITs from
 //! `U(0, 1)`** — computed on a deterministic 25 % test split the model never
 //! saw during fitting, so the uniformity claim is honest (no in-sample
@@ -321,20 +321,22 @@ fn transformation_normal_held_out_pit_is_uniform() {
     let span = resp_hi - resp_lo;
 
     // ---- (1) PRIMARY: held-out PIT uniformity via scipy normal CDF --------
-    // u_i = (Φ(h_i) − Φ(lower_i)) / (Φ(upper_i) − Φ(lower_i)) at the held-out
-    // (x_test, y_test) pairs. The transform is reconstructed from the fitted
-    // coefficients; scipy.stats.norm supplies the exact normal CDF and
-    // scipy.stats.kstest the KS distance of the held-out PITs from U(0, 1).
+    // u_i = Φ(h_i) at the held-out (x_test, y_test) pairs. gam#2600: the fitted
+    // density is the most-likely-transformation density φ(h)·h', so the model's
+    // own CDF is F(y | x) = Φ(h(y, x)) — a proper CDF on the whole real line —
+    // and Φ(h) is therefore THE probability-integral transform of this model.
+    // The transform is reconstructed from the fitted coefficients;
+    // scipy.stats.norm supplies the exact normal CDF and scipy.stats.kstest the
+    // KS distance of the held-out PITs from U(0, 1).
     //
-    // The finite-support normalizer `Φ(upper) − Φ(lower)` must be evaluated in
-    // LOG space — exactly as gam's production PIT path does via
-    // `log_normal_cdf_diff` (`families/transformation_normal/endpoint_normalizer.rs`).
-    // On held-out covariates the reconstructed `(lower, upper)` endpoints can
-    // land far out in a single normal tail (e.g. both > 8), where the naive
-    // linear-space difference `norm.cdf(upper) − norm.cdf(lower)` underflows to
-    // exactly 0.0, turning `(Fh − Flo) / 0` into a NaN PIT and a NaN KS
-    // statistic. `norm.logcdf` plus a tail-reflected `log1mexp` correction keeps
-    // the mass representable, so the PIT is finite for every held-out row.
+    // This used to be the CONDITIONAL PIT
+    // (Φ(h) − Φ(lower)) / (Φ(upper) − Φ(lower)) — the PIT of the law restricted
+    // to the fitted knot range — evaluated in log space because that ratio's
+    // denominator underflows whenever both endpoints land in one normal tail
+    // (issue #1078). Φ(h) has no denominator to underflow and no endpoint to
+    // saturate against, so the whole log-space reconstruction goes with it, and
+    // the assertion gets STRICTER: a per-row renormalizer can absorb misfit that
+    // a single global CDF cannot.
     let held = reconstruct_transform(&tn, &test_rows, &y_test);
     let r = run_python(
         &[
@@ -348,45 +350,12 @@ import numpy as np
 h = np.asarray(df["h"], dtype=float)
 lo = np.asarray(df["lower"], dtype=float)
 hi = np.asarray(df["upper"], dtype=float)
-# Endpoint order is a hard precondition of the finite-support PIT.
+# The fitted support endpoints are no longer part of the PIT, but their ORDER is
+# still a structural property of a monotone transform, so keep asserting it.
 assert np.all(hi > lo), "transformation endpoints out of order"
 
-def log1mexp(x):
-    # log(1 - exp(-x)) for x > 0, stable across the whole range (Mächler 2012):
-    # the expm1 form near 0, the log1p form in the tail.
-    x = np.asarray(x, dtype=float)
-    return np.where(x > np.log(2.0), np.log1p(-np.exp(-x)), np.log(-np.expm1(-x)))
-
-def log_normal_cdf_diff(upper, lower):
-    # Stable log[Φ(upper) − Φ(lower)] for upper > lower, mirroring gam's
-    # `log_normal_cdf_diff`: reflect to the lower tail when `lower > 0` so the
-    # dominant `logcdf` term never sits in the saturated upper tail, then apply
-    # the log1mexp correction. Vectorized over the held-out rows.
-    upper = np.asarray(upper, dtype=float)
-    lower = np.asarray(lower, dtype=float)
-    refl = lower > 0.0
-    up = np.where(refl, -lower, upper)
-    lo_ = np.where(refl, -upper, lower)
-    log_up = norm.logcdf(up)
-    log_lo = norm.logcdf(lo_)
-    gap = log_up - log_lo
-    assert np.all(np.isfinite(gap) & (gap > 0.0)), "endpoint mass not representable"
-    return log_up + log1mexp(gap)
-
-# u = exp( log[Φ(h)−Φ(lower)] − log[Φ(upper)−Φ(lower)] ), with h clamped into
-# the finite support (h≤lower → u=0, h≥upper → u=1), exactly as the production
-# `transformation_normal_pit_score` defines the PIT.
-h_in = np.clip(h, lo, hi)
-log_den = log_normal_cdf_diff(hi, lo)
-at_lo = h_in <= lo
-at_hi = h_in >= hi
-interior = ~(at_lo | at_hi)
-u = np.empty_like(h_in)
-u[at_lo] = 0.0
-u[at_hi] = 1.0
-if np.any(interior):
-    log_num = log_normal_cdf_diff(h_in[interior], lo[interior])
-    u[interior] = np.exp(log_num - log_den[interior])
+# u = Phi(h): the fitted model's own CDF at the held-out (x, y) pair.
+u = norm.cdf(h)
 assert np.all(np.isfinite(u)), "PIT produced non-finite values"
 u = np.clip(u, 1e-12, 1 - 1e-12)
 ks = kstest(u, "uniform")
@@ -403,13 +372,14 @@ emit("u_mean", [float(u.mean())])
     let u_max = r.scalar("u_max");
 
     // The held-out PIT and its KS distance must be FINITE before any uniformity
-    // claim is even meaningful. A NaN here is the concrete computation bug from
-    // issue #1078: the finite-support normalizer underflowed in linear space.
-    // The log-space PIT above must never reproduce it.
+    // claim is even meaningful. Issue #1078 was a NaN here, from the
+    // finite-support normalizer underflowing in linear space; gam#2600 removed
+    // that normalizer from the model, so the failure mode is gone rather than
+    // defended against, and this stays as the precondition it always was.
     assert!(
         ks.is_finite() && u_mean.is_finite() && u_min.is_finite() && u_max.is_finite(),
         "held-out PIT / KS is non-finite (KS={ks}, u_mean={u_mean}, \
-         u_range=[{u_min},{u_max}]) — finite-support normalizer underflow regressed"
+         u_range=[{u_min},{u_max}])"
     );
 
     // ---- (2) monotonicity: h' > 0 at 100 held-out support points ----------
