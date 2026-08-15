@@ -495,112 +495,252 @@ impl BetaPenaltyOp for DensePenaltyOp {
     }
 }
 
-/// Rank-1 PSD penalty operator `scale · v vᵀ` with a SPARSE carrier `v`
-/// (nonzero on only a few atom decoder blocks). Carries the SAE separation
-/// barrier's EXACT self-concordant curvature `∂²P/∂o² · (∂o/∂B)(∂o/∂B)ᵀ` into the
-/// matrix-free / framed penalty operator (#1038), where the per-atom scalar ridge
-/// cannot represent the cross-atom rank-1 coupling: on that path the missing
-/// curvature let the dictionary co-collapse (indefinite reduced Schur → non-PD →
-/// the criterion refines forever). `scale = d2 = ∂²P/∂o² ≥ 0` on the gated
-/// interior ⇒ this rank-1 is PSD, so adding it to any PSD penalty op keeps the
-/// operator PD. The carrier is expressed in whatever coordinate space the operator
-/// runs in (full-`B` on the non-frames path; factored border coords on the framed
-/// path, where the full-`B` `v` is projected `v_c = Φᵀ v` before construction —
-/// still a rank-1 because `Φ` is linear).
-pub struct SparseRankOnePenaltyOp {
-    /// Full β dimension `K` of the coordinate space the carrier lives in.
+/// Coupled-carrier PSD penalty operator
+///
+/// ```text
+///     P = Σ_{a,b} C[a,b] · v_a v_bᵀ
+/// ```
+///
+/// with a SMALL dense symmetric coupling `C` (`ne × ne`) and `ne` carriers
+/// `v_a`, each supported on a few contiguous runs of the ambient β vector
+/// (in practice: the two atom decoder blocks a co-firing edge touches).
+///
+/// This is the FACTORED form of a sum of rank-1 terms. Diagonalizing
+/// `C = Σ_r λ_r e_r e_rᵀ` and expanding `w_r = Σ_a e_r[a] v_a` gives the
+/// identical operator `Σ_r λ_r w_r w_rᵀ` — and that expansion is exactly what
+/// this type exists to avoid:
+///
+/// | | expanded `Σ_r λ_r w_r w_rᵀ` | factored (here) |
+/// |---|---|---|
+/// | build | `ne² · max‖v_a‖₀` | nothing to build |
+/// | store | `ne · ‖∪_a supp v_a‖₀` | `ne · max‖v_a‖₀ + ne²` |
+/// | matvec | `ne · ‖∪_a supp v_a‖₀` | `2·ne · max‖v_a‖₀ + ne²` |
+///
+/// Each `w_r` is dense over the UNION of the carriers' supports even though
+/// every `v_a` touches only two blocks, so the expansion trades a factor
+/// `ne · (#blocks)/2` in both storage and application for nothing — the operator
+/// is the same. On the SAE separation barrier (#2731) that expansion was the
+/// whole cost of the curved tier at `p=2048, charts=32`: `ne` grows with the
+/// number of REALIZED co-firing chart pairs, so `ne²·‖v_a‖₀` dominated the fit.
+///
+/// PSD-ness is the caller's contract: `C` must be symmetric positive
+/// semidefinite (the SAE barrier hands over `penalty_scale·|M|`, the matrix
+/// absolute value of the exact Gauss–Newton overlap-space Hessian), which makes
+/// `P` PSD for any carriers and so keeps any PSD penalty operator it is added to
+/// positive definite.
+///
+/// The carriers are expressed in whatever coordinate space the operator runs in
+/// (full-`B` on the non-frames path; factored border coordinates on the framed
+/// path, where each full-`B` `v_a` is projected `v_a ← Φᵀ v_a` before
+/// construction — the identity `Φᵀ(Σ C[a,b] v_a v_bᵀ)Φ = Σ C[a,b](Φᵀv_a)(Φᵀv_b)ᵀ`
+/// is what makes that legal, and it is why `C` needs no transformation).
+pub struct CoupledCarrierPenaltyOp {
+    /// Full β dimension `K` of the coordinate space the carriers live in.
     pub k: usize,
-    /// Nonnegative curvature scale `d2 = ∂²P/∂o²`.
-    pub scale: f64,
-    /// Sparse carrier `v`: `(global_index, value)` with every `index < k`.
-    pub carrier: Vec<(usize, f64)>,
+    /// Symmetric PSD coupling `C` (`ne × ne`), with any scalar prefactor
+    /// already folded in.
+    pub coupling: Array2<f64>,
+    /// `carriers[a]` — the runs `(global_start, values)` of `v_a`. Runs inside
+    /// one carrier are disjoint and every `global_start + values.len() <= k`.
+    pub carriers: Vec<Vec<(usize, Vec<f64>)>>,
 }
 
-impl BetaPenaltyOp for SparseRankOnePenaltyOp {
+/// Overlap of the ambient index ranges `[a_start, a_start+a_len)` and
+/// `[b_start, b_start+b_len)`, as `(offset into a, offset into b, length)`.
+#[inline]
+fn coupled_run_overlap(
+    a_start: usize,
+    a_len: usize,
+    b_start: usize,
+    b_len: usize,
+) -> Option<(usize, usize, usize)> {
+    let lo = a_start.max(b_start);
+    let hi = (a_start + a_len).min(b_start + b_len);
+    if hi <= lo {
+        None
+    } else {
+        Some((lo - a_start, lo - b_start, hi - lo))
+    }
+}
+
+impl CoupledCarrierPenaltyOp {
+    /// `out[a] = v_aᵀ x`.
+    fn carrier_dots(&self, x: &[f64]) -> Vec<f64> {
+        self.carriers
+            .iter()
+            .map(|runs| {
+                let mut acc = 0.0_f64;
+                for (start, values) in runs {
+                    let xs = &x[*start..*start + values.len()];
+                    for (value, xi) in values.iter().zip(xs) {
+                        acc += value * xi;
+                    }
+                }
+                acc
+            })
+            .collect()
+    }
+
+    /// `y += Σ_a coefficients[a] · v_a`.
+    fn scatter_carriers(&self, coefficients: &[f64], y: &mut [f64]) {
+        for (runs, &coefficient) in self.carriers.iter().zip(coefficients) {
+            if coefficient == 0.0 {
+                continue;
+            }
+            for (start, values) in runs {
+                let ys = &mut y[*start..*start + values.len()];
+                for (value, yi) in values.iter().zip(ys) {
+                    *yi += coefficient * value;
+                }
+            }
+        }
+    }
+
+    /// `y += P x`, shared by `matvec` and `gradient` (both are `P·vector`).
+    fn apply_add(&self, x: &[f64], y: &mut [f64]) {
+        let dots = self.carrier_dots(x);
+        let ne = self.carriers.len();
+        let mut coefficients = vec![0.0_f64; ne];
+        for a in 0..ne {
+            let mut acc = 0.0_f64;
+            for b in 0..ne {
+                acc += self.coupling[[a, b]] * dots[b];
+            }
+            coefficients[a] = acc;
+        }
+        self.scatter_carriers(&coefficients, y);
+    }
+
+    /// Visit every `(global row, global column, value)` of `C[a,b]·v_a v_bᵀ`
+    /// restricted to the ambient window `[window.start, window.end)` on BOTH
+    /// axes. The window is the whole space for `to_dense` and one block range
+    /// for `block`; emitting through one walk keeps the two consistent.
+    fn for_each_windowed_entry<F: FnMut(usize, usize, f64)>(
+        &self,
+        window: Range<usize>,
+        mut visit: F,
+    ) {
+        let ne = self.carriers.len();
+        let (lo, hi) = (window.start, window.end);
+        let span = hi.saturating_sub(lo);
+        for a in 0..ne {
+            for b in 0..ne {
+                let coupling = self.coupling[[a, b]];
+                if coupling == 0.0 {
+                    continue;
+                }
+                for (start_a, values_a) in &self.carriers[a] {
+                    let Some((skip_a, _, len_a)) =
+                        coupled_run_overlap(*start_a, values_a.len(), lo, span)
+                    else {
+                        continue;
+                    };
+                    for (start_b, values_b) in &self.carriers[b] {
+                        let Some((skip_b, _, len_b)) =
+                            coupled_run_overlap(*start_b, values_b.len(), lo, span)
+                        else {
+                            continue;
+                        };
+                        for i in 0..len_a {
+                            let row = start_a + skip_a + i;
+                            let scaled = coupling * values_a[skip_a + i];
+                            if scaled == 0.0 {
+                                continue;
+                            }
+                            for j in 0..len_b {
+                                visit(row, start_b + skip_b + j, scaled * values_b[skip_b + j]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl BetaPenaltyOp for CoupledCarrierPenaltyOp {
     fn dim(&self) -> usize {
         self.k
     }
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        // y += scale · v (vᵀ x)
-        let mut dot = 0.0_f64;
-        for &(idx, val) in &self.carrier {
-            dot += val * x[idx];
-        }
-        let s = self.scale * dot;
-        for &(idx, val) in &self.carrier {
-            y[idx] += s * val;
-        }
+        self.apply_add(x, y);
     }
 
     fn gradient(&self, beta: &[f64], out: &mut [f64]) {
-        let mut dot = 0.0_f64;
-        for &(idx, val) in &self.carrier {
-            dot += val * beta[idx];
-        }
-        let s = self.scale * dot;
-        for &(idx, val) in &self.carrier {
-            out[idx] += s * val;
-        }
+        self.apply_add(beta, out);
     }
 
     fn diagonal(&self, diag: &mut [f64]) {
-        for &(idx, val) in &self.carrier {
-            diag[idx] += self.scale * val * val;
+        // `diag(P)[i] = Σ_{a,b} C[a,b]·v_a[i]·v_b[i]` — accumulated over the
+        // OVERLAP of the two carriers' runs, so the cost is the shared support
+        // (each atom block, once per pair of edges touching it) rather than the
+        // full `ne × ‖∪ supp‖` the expanded form pays.
+        let ne = self.carriers.len();
+        for a in 0..ne {
+            for b in 0..ne {
+                let coupling = self.coupling[[a, b]];
+                if coupling == 0.0 {
+                    continue;
+                }
+                for (start_a, values_a) in &self.carriers[a] {
+                    for (start_b, values_b) in &self.carriers[b] {
+                        let Some((skip_a, skip_b, len)) = coupled_run_overlap(
+                            *start_a,
+                            values_a.len(),
+                            *start_b,
+                            values_b.len(),
+                        ) else {
+                            continue;
+                        };
+                        let base = start_a + skip_a;
+                        if base >= diag.len() {
+                            continue;
+                        }
+                        let len = len.min(diag.len() - base);
+                        for i in 0..len {
+                            diag[base + i] += coupling * values_a[skip_a + i] * values_b[skip_b + i];
+                        }
+                    }
+                }
+            }
         }
     }
 
     fn block(&self, id: BetaBlockId, offsets: &[Range<usize>], out: &mut Array2<f64>) {
-        // Only the intra-block sub-outer-product contributes to this block-Jacobi
-        // sub-block (the cross-block coupling is invisible to the preconditioner,
-        // exactly as for any operator with off-block entries).
-        let range = &offsets[id.0];
-        for &(gi, vi) in &self.carrier {
-            if gi < range.start || gi >= range.end {
-                continue;
-            }
-            let bi = gi - range.start;
-            for &(gj, vj) in &self.carrier {
-                if gj < range.start || gj >= range.end {
-                    continue;
-                }
-                out[[bi, gj - range.start]] += self.scale * vi * vj;
-            }
-        }
+        // Only the intra-block restriction reaches this block-Jacobi sub-block;
+        // the cross-block coupling is invisible to the preconditioner, exactly
+        // as for any operator with off-block entries.
+        let range = offsets[id.0].clone();
+        let start = range.start;
+        self.for_each_windowed_entry(range, |row, col, value| {
+            out[[row - start, col - start]] += value;
+        });
     }
 
     fn to_dense(&self) -> Array2<f64> {
         let mut out = Array2::<f64>::zeros((self.k, self.k));
-        for &(gi, vi) in &self.carrier {
-            for &(gj, vj) in &self.carrier {
-                out[[gi, gj]] += self.scale * vi * vj;
-            }
-        }
+        self.for_each_windowed_entry(0..self.k, |row, col, value| {
+            out[[row, col]] += value;
+        });
         out
     }
 
     fn fingerprint(&self, hasher: &mut Fingerprinter) {
-        hasher.write_str("sparse-rank-one-penalty-op-v1");
+        hasher.write_str("coupled-carrier-penalty-op-v1");
         hasher.write_usize(self.k);
-        hasher.write_f64(self.scale);
-        hasher.write_usize(self.carrier.len());
-        for &(idx, val) in &self.carrier {
-            hasher.write_usize(idx);
-            hasher.write_f64(val);
+        hasher.write_f64_array2(&self.coupling);
+        hasher.write_usize(self.carriers.len());
+        for runs in &self.carriers {
+            hasher.write_usize(runs.len());
+            for (start, values) in runs {
+                hasher.write_usize(*start);
+                hasher.write_usize(values.len());
+                for &value in values {
+                    hasher.write_f64(value);
+                }
+            }
         }
-    }
-
-    fn row_abs_sums(&self) -> Array1<f64> {
-        // Row `gi` of `scale·v vᵀ` is `scale·v_gi·vᵀ`, so its ∞-row sum is
-        // `scale·|v_gi|·Σ_j|v_j|`. Fold the sparse carrier directly — NEVER
-        // materialize the dense `K×K` (the SAE border critical path, #1017).
-        let mut out = Array1::<f64>::zeros(self.k);
-        let abs_sum: f64 = self.carrier.iter().map(|&(_, v)| v.abs()).sum();
-        let s = self.scale * abs_sum;
-        for &(gi, vi) in &self.carrier {
-            out[gi] += s * vi.abs();
-        }
-        out
     }
 }
 

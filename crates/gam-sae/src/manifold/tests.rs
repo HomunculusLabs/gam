@@ -6364,14 +6364,19 @@ pub(crate) fn sae_arrow_schur_beta_quadratic_model_matches_penalized_loss_change
     );
 }
 
-/// #1610/#1038 — the separation barrier's PSD curvature must survive the production
-/// matrix-free / framed β-tier IDENTICALLY to the dense path. The dense path writes
-/// the full curvature onto `sys.hbb`: a per-atom Levenberg scalar ridge `lev·I` PLUS
-/// the exact self-concordant rank-1 `d2·(∂o/∂B)(∂o/∂B)ᵀ`. The deferred path returns
-/// the SAME two pieces through separate channels — the scalar ridge via `atom_curv`
-/// (folded into the structured smooth op) and the rank-1 via `sep_rank1` (installed
-/// as a `SparseRankOnePenaltyOp`) — so assembly reconstructs the identical operator
-/// instead of silently dropping collapse-prevention curvature.
+/// #1610/#1038/#2731 — the separation barrier's PSD curvature must survive the
+/// production matrix-free / framed β-tier IDENTICALLY to the dense path. The dense
+/// path writes the full curvature onto `sys.hbb`: a per-atom Levenberg scalar ridge
+/// `lev·I` PLUS the exact Gauss–Newton `Σ_{a,b} C[a,b]·v_a v_bᵀ`. The deferred path
+/// returns the SAME two pieces through separate channels — the scalar ridge via
+/// `atom_curv` (folded into the structured smooth op) and the curvature via
+/// `sep_curvature` (installed as a `CoupledCarrierPenaltyOp`) — so assembly
+/// reconstructs the identical operator instead of silently dropping
+/// collapse-prevention curvature.
+///
+/// The reconstruction below reads the deferred channel through the SAME
+/// `as_full_beta_op` + `to_dense` route production installs, so a carrier layout
+/// that assembled correctly here but wrong in the operator could not pass.
 #[test]
 pub(crate) fn separation_barrier_deferred_curvature_matches_dense_hbb_1610() {
     let (term, _target, _rho) = small_two_atom_periodic_term();
@@ -6380,14 +6385,14 @@ pub(crate) fn separation_barrier_deferred_curvature_matches_dense_hbb_1610() {
     dense.gb = Array1::<f64>::zeros(beta_dim);
     dense.hbb = Array2::<f64>::zeros((beta_dim, beta_dim));
     let mut dense_atom_curv = vec![0.0_f64; term.k_atoms()];
-    let mut dense_rank1 = Vec::new();
+    let mut dense_curvature = Vec::new();
     assert!(
         term.add_sae_separation_barrier(
             &mut dense,
             1.0,
             true,
             &mut dense_atom_curv,
-            &mut dense_rank1
+            &mut dense_curvature
         ),
         "fixture must activate the co-collapse separation barrier on the dense path"
     );
@@ -6396,17 +6401,23 @@ pub(crate) fn separation_barrier_deferred_curvature_matches_dense_hbb_1610() {
         "dense path writes curvature directly to hbb, not the deferred atom accumulator"
     );
     assert!(
-        dense_rank1.is_empty(),
-        "dense path scatters the rank-1 straight into hbb, not the deferred carrier"
+        dense_curvature.is_empty(),
+        "dense path expands the curvature straight into hbb, not the deferred carrier"
     );
 
     let mut deferred = ArrowSchurSystem::new(0, 0, beta_dim);
     deferred.gb = Array1::<f64>::zeros(beta_dim);
     deferred.hbb = Array2::<f64>::zeros((0, 0));
     let mut atom_curv = vec![0.0_f64; term.k_atoms()];
-    let mut sep_rank1 = Vec::new();
+    let mut sep_curvature = Vec::new();
     assert!(
-        term.add_sae_separation_barrier(&mut deferred, 1.0, false, &mut atom_curv, &mut sep_rank1),
+        term.add_sae_separation_barrier(
+            &mut deferred,
+            1.0,
+            false,
+            &mut atom_curv,
+            &mut sep_curvature
+        ),
         "fixture must activate the co-collapse separation barrier on the deferred path"
     );
 
@@ -6419,11 +6430,12 @@ pub(crate) fn separation_barrier_deferred_curvature_matches_dense_hbb_1610() {
 
     let offsets = term.beta_offsets();
     // Reconstruct the deferred path's β-curvature operator from its two channels:
-    // the per-atom scalar ridge `atom_curv[k]·I` over atom k's block, plus every
-    // rank-1 carrier `scale·v vᵀ`. It must equal the dense `hbb` bit-for-bit.
+    // the per-atom scalar ridge `atom_curv[k]·I` over atom k's block, plus the
+    // factored `Σ_{a,b} C[a,b]·v_a v_bᵀ` read through the production operator.
+    // It must equal the dense `hbb`.
     assert!(
-        !sep_rank1.is_empty(),
-        "deferred path must export the exact self-concordant rank-1 curvature carrier"
+        !sep_curvature.is_empty(),
+        "deferred path must export the exact Gauss-Newton curvature carrier"
     );
     let mut deferred_hbb = Array2::<f64>::zeros((beta_dim, beta_dim));
     for atom_idx in 0..term.k_atoms() {
@@ -6441,18 +6453,22 @@ pub(crate) fn separation_barrier_deferred_curvature_matches_dense_hbb_1610() {
             deferred_hbb[[idx, idx]] += atom_curv[atom_idx];
         }
     }
-    for (scale, carrier) in &sep_rank1 {
-        for &(gi, vi) in carrier {
-            for &(gj, vj) in carrier {
-                deferred_hbb[[gi, gj]] += scale * vi * vj;
-            }
-        }
+    for curvature in &sep_curvature {
+        deferred_hbb += &curvature.as_full_beta_op(beta_dim, &offsets).to_dense();
     }
+    // The two routes reassociate the same f64 sum (the dense path contracts the
+    // component support with two GEMMs; the operator walks carrier pairs), so the
+    // bar is relative to the operator's own scale rather than absolute.
+    let scale = dense
+        .hbb
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let tolerance = 1.0e-12 * (1.0 + scale);
     for i in 0..beta_dim {
         for j in 0..beta_dim {
             assert!(
-                (dense.hbb[[i, j]] - deferred_hbb[[i, j]]).abs() <= 1.0e-12,
-                "dense hbb and reconstructed deferred (ridge + rank-1) curvature must \
+                (dense.hbb[[i, j]] - deferred_hbb[[i, j]]).abs() <= tolerance,
+                "dense hbb and reconstructed deferred (ridge + factored curvature) must \
                  match at ({i},{j}): dense={} deferred={}",
                 dense.hbb[[i, j]],
                 deferred_hbb[[i, j]]
