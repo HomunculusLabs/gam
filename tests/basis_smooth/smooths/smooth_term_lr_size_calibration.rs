@@ -998,10 +998,40 @@ fn gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672() {
 /// * `F` — `P(F_{a,ν} > W/(g·a))`, the two-moment shape with the profiled
 ///   scale's own variability folded in.
 ///
-/// If the `F` arm lands on nominal where the other two do not, the residual is
-/// the profiled scale and it is a defect in the reference for every
-/// scale-ESTIMATED family. If it does not, this hypothesis is dead and the
-/// reference is wrong for some other reason.
+/// The candidate FIX is scored here too, and it needs no driver change to
+/// evaluate because it is a function of published fields:
+///
+/// ```text
+/// p_scaled = p_shipped + [ P(F_{a,ν} > w/(κ·g·a)) − P(χ²_a > w/g) ]
+/// ```
+///
+/// — the shipped tail (exact spectrum + selection replay) plus the scale
+/// integration taken in the two-moment FAMILY, where it is a closed form:
+/// `E_V[P(χ²_a > wV/(νg))] = P(F_{a,ν} > w/(g·a))` exactly. The bracket is a
+/// control variate that is EXACT whenever the weights are equal, which is the
+/// shrunk regime this grid spends its time in, and it costs two closed-form
+/// evaluations rather than a quadrature over `V`.
+///
+/// `κ` is the DETERMINISTIC half of the same mechanism and is a property of
+/// gam's own convention rather than of the theory. `σ̂² = RSS/(n − edf_total)`,
+/// so the profiled log-likelihood is `−(n/2)·log(RSS/ν) − ν/2` and
+///
+/// ```text
+/// W = 2(ℓ_f − ℓ_0) = n·log(RSS_0/RSS_f) + n·log(ν_f/ν_0) + (ν_0 − ν_f)
+///                  ≈ (n/ν)·Q/(V/ν) − Δ·edf/ν
+/// ```
+///
+/// so the `log σ̂²` term in front carries `n` while the denominator gam divides
+/// by carries `ν`. Both `κ = 1` and `κ = n/ν` are scored, because which one is
+/// right is a statement about that convention and not about the statistic, and
+/// it should be read off a measurement rather than asserted.
+///
+/// If a candidate arm lands on nominal at `n = 30` AND stays there at
+/// `n = 200`, the mechanism and the convention are both pinned and the fix is
+/// the bracket above, in `SmoothLrReferenceDf::conditional_tail_with_bound`,
+/// for `ProfiledGaussian` only — the other estimated-dispersion families do not
+/// estimate through a residual sum of squares and this derivation does not
+/// reach them.
 #[test]
 fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
     init_parallelism();
@@ -1012,15 +1042,15 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
     let family = NullFamily::GaussianIdentity;
 
     eprintln!(
-        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped/two-moment/F | mean_W  mean_a \
-         mean_g  mean_nu | mean E[W(lhat)]  ratio",
+        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped / +F(k=1) / +F(k=n/nu) | \
+         two-moment / F(k=1) / F(k=n/nu) | mean_nu  mean_kappa  ratio",
         "n", "k", "used"
     );
     for &k in &ks {
         for &n in &ns {
-            let (mut shipped, mut moment, mut fisher) = (0usize, 0usize, 0usize);
-            let (mut used, mut sum_w, mut sum_a, mut sum_g, mut sum_nu, mut sum_predicted) =
-                (0usize, 0.0, 0.0, 0.0, 0.0, 0.0);
+            let mut counts = [0usize; 6];
+            let (mut used, mut sum_w, mut sum_nu, mut sum_kappa, mut sum_predicted) =
+                (0usize, 0.0, 0.0, 0.0, 0.0);
             let mut predicted_used = 0usize;
             for rep in 0..REPS {
                 let seed = mix_seed(family.label(), n, k, rep);
@@ -1049,11 +1079,19 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
                     continue;
                 };
                 let residual_df = (n as f64 - edf_total).max(1.0);
+                // `σ̂² = RSS/(n − edf_total)`, so the profiled log-likelihood is
+                // `−(n/2)·log(RSS/ν) − ν/2` and
+                //
+                //   W = 2(ℓ_f − ℓ_0) ≈ (n/ν)·Q/(V/ν) − Δ·edf/ν
+                //
+                // — the F shape carries a DETERMINISTIC inflation `κ = n/ν`
+                // alongside the random `V/ν`, because the denominator gam
+                // divides by is `ν` while the `log σ̂²` term in front is `n`.
+                let kappa = n as f64 / residual_df;
                 used += 1;
                 sum_w += r.statistic_lr;
-                sum_a += a;
-                sum_g += g;
                 sum_nu += residual_df;
+                sum_kappa += kappa;
                 if let Some(replay) = provenance.selection.replay() {
                     let mean = replay.selection_mean();
                     if mean.is_finite() {
@@ -1061,31 +1099,51 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
                         predicted_used += 1;
                     }
                 }
-                if r.p_value_corrected <= 0.05 {
-                    shipped += 1;
-                }
-                let chi2 = statrs::distribution::ChiSquared::new(a).expect("chi2");
-                use statrs::distribution::ContinuousCDF;
-                if (1.0 - chi2.cdf(r.statistic_corrected / g)).clamp(0.0, 1.0) <= 0.05 {
-                    moment += 1;
-                }
-                let f = statrs::distribution::FisherSnedecor::new(a, residual_df).expect("F");
-                if (1.0 - f.cdf(r.statistic_corrected / (g * a))).clamp(0.0, 1.0) <= 0.05 {
-                    fisher += 1;
+                let statistic = r.statistic_corrected;
+                let chi_square_tail = gam_math::probability::chi_square_sf(statistic / g, a);
+                let fisher_tail = |scale: f64| {
+                    gam_math::probability::fisher_snedecor_sf(
+                        statistic / (scale * g * a),
+                        a,
+                        residual_df,
+                    )
+                };
+                // THE CANDIDATE FIX, computable from published fields alone: the
+                // shipped tail (exact spectrum + selection replay) plus the
+                // scale integration taken in the two-moment FAMILY, where it is
+                // a closed form. `E_V[P(χ²_a > wV/(νg))] = P(F_{a,ν} > w/(g·a))`
+                // exactly, so the bracket is a control variate that is EXACT
+                // whenever the weights are equal — which is the shrunk regime
+                // this grid spends its time in.
+                let candidate =
+                    |scale: f64| (r.p_value_corrected + fisher_tail(scale) - chi_square_tail).clamp(0.0, 1.0);
+                let arms = [
+                    r.p_value_corrected,
+                    candidate(1.0),
+                    candidate(kappa),
+                    chi_square_tail,
+                    fisher_tail(1.0),
+                    fisher_tail(kappa),
+                ];
+                for (slot, p) in arms.iter().enumerate() {
+                    if *p <= 0.05 {
+                        counts[slot] += 1;
+                    }
                 }
             }
             let denominator = used.max(1) as f64;
+            let size = |slot: usize| counts[slot] as f64 / denominator;
             eprintln!(
-                "[zz2672-scale] {n:>5} {k:>3} {used:>5} |   {:.3} / {:.3} / {:.3}          \
-                 {:>6.3} {:>6.3} {:>6.3} {:>7.2} | {:>8.4}  {:>6.3}",
-                shipped as f64 / denominator,
-                moment as f64 / denominator,
-                fisher as f64 / denominator,
-                sum_w / denominator,
-                sum_a / denominator,
-                sum_g / denominator,
+                "[zz2672-scale] {n:>5} {k:>3} {used:>5} |   {:.3} / {:.3} / {:.3}   |   \
+                 {:.3} / {:.3} / {:.3}   | {:>7.2}  {:>7.4}  {:>6.3}",
+                size(0),
+                size(1),
+                size(2),
+                size(3),
+                size(4),
+                size(5),
                 sum_nu / denominator,
-                sum_predicted / predicted_used.max(1) as f64,
+                sum_kappa / denominator,
                 (sum_w / denominator) / (sum_predicted / predicted_used.max(1) as f64),
             );
         }
