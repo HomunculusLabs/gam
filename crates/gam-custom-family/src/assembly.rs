@@ -2836,3 +2836,31 @@ pub(crate) struct CachedInnerMode {
     /// coordinates.
     pub(crate) objective_state: InnerObjectiveState,
 }
+
+/// Fixture-only constructors for [`InnerObjectiveState`].
+#[cfg(test)]
+mod inner_objective_state_fixture_tests {
+    use super::*;
+
+    impl InnerObjectiveState {
+        /// The state of an objective carrying NO Jeffreys augmentation.
+        ///
+        /// For fixtures that assemble a [`BlockwiseInnerResult`] directly and
+        /// have no family to read the strength from. Every production site has
+        /// one and must use [`InnerObjectiveState::new`], which cannot be
+        /// handed the wrong number — which is why this constructor lives in a
+        /// `#[cfg(test)]` module rather than beside it.
+        pub(crate) fn unaugmented(
+            block_log_lambdas: &[Array1<f64>],
+            joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+        ) -> Self {
+            Self {
+                block: block_log_lambdas.to_vec(),
+                joint: joint_bundle
+                    .map(|bundle| bundle.log_lambdas().to_vec())
+                    .unwrap_or_default(),
+                jeffreys_strength: 0.0,
+            }
+        }
+    }
+}

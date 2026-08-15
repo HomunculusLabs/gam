@@ -186,25 +186,24 @@ mod tests {
     use super::*;
     use crate::transformation_normal::TRANSFORMATION_MONOTONICITY_EPS;
 
+    /// gam#2600: the replayed row density is the untruncated MLT density
+    /// `log φ(h) + log h'`. The endpoint bases and floors the row input carries
+    /// still define the certified support of the saved model, but they are no
+    /// longer a term of the likelihood — so this independent reconstruction
+    /// does not mention them, and the fixture below feeds deliberately
+    /// asymmetric ones (`[1.0, 0.1]` / `[1.0, 0.9]`, floors `−0.04` / `0.06`)
+    /// so that any endpoint contribution surviving in the production path shows
+    /// up here as a mismatch rather than cancelling.
     fn scalar_nll(alpha: [f64; 2]) -> f64 {
         let value = [1.0, 0.4];
         let derivative = [0.0, 0.7];
-        let lower_basis = [1.0, 0.1];
-        let upper_basis = [1.0, 0.9];
         let offset = -0.15;
         let floor = 0.02;
-        let lower_floor = -0.04;
-        let upper_floor = 0.06;
         let weight = 1.3;
         let h = value[0] * alpha[0] + value[1] * alpha[1] + offset + floor;
         let h_prime = TRANSFORMATION_MONOTONICITY_EPS
             + derivative[0] * alpha[0]
             + derivative[1] * alpha[1];
-        // gam#2600: the replayed row density is the untruncated MLT density
-        // log φ(h) + log h'. The endpoint bases and floors above are still part
-        // of the saved row state (they define the certified support) but they
-        // carry no normalizer term, so they do not enter here.
-        let _ = (lower_basis, upper_basis, lower_floor, upper_floor);
         weight * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln())
     }
 
