@@ -1,5 +1,51 @@
 ## Unreleased
 
+- **The constrained posterior's retention ladder searched a real number where
+  the object being chosen is a set of rows, and floating point stopped it
+  descending (#2714).** `assemble_retained_face` keeps a constraint row iff
+  `pivot > (k+1)·ε·diagonal/d`, and the ladder named the next face by the floor
+  at which its worst-conditioned accepted row drops, `d_r =
+  (k+1)·ε·diagonal_r/pivot_r`, on the argument that the retention test then
+  reads `pivot > pivot`. It does not. Both sides are ROUNDED quotients: the step
+  divides by `pivot`, the rebuilt floor divides that quotient back into the same
+  numerator, and the round trip lands strictly below `pivot` for a measurable
+  fraction of `(k, diagonal, pivot)` triples. The aimed-at row is then retained,
+  the rebuilt face is **bit-identical**, and the next step is recomputed from
+  unchanged inputs to the value the floor already holds — so
+  `assert!(next < demanded_accuracy)` fires and a library panics.
+
+  `the_floor_round_trip_retains_the_row_it_was_aimed_at_2714` measures the round
+  trip on its own, over the magnitudes a penalized posterior produces, and
+  asserts the sharper fact: **every retention is a stall**, because a
+  bit-identical face recomputes a bit-identical step. There is no rounding of
+  the quotient the other way that repairs this — the retention test *is* the
+  definition of the face, so only the test can decide the face.
+
+  The walk now carries the face. A rejected face names its
+  `least_independent_row` — the accepted row with the smallest `pivot/diagonal`,
+  i.e. the smallest squared sine to the span of the rows before it in the `Σ`
+  metric — and that row is excluded BY INDEX before the face is rebuilt at an
+  unchanged floor. Termination becomes structural: the excluded set grows by one
+  per pass and is a subset of the candidates, the first unexcluded row always
+  clears the floor, and the last face is a single row whose `1×1` lift is exact.
+  No floating-point comparison is inverted anywhere on that argument.
+
+  Excluding at the unchanged floor is also strictly less lossy than the old
+  step, which tightened the floor for every surviving row as a side effect of
+  dropping one: every face the floor ladder could reach is still reachable
+  (exclude precisely the rows that floor rejected, and each survivor clears the
+  looser floor a fortiori), while faces only a tighter floor would have
+  destroyed are kept. `the_walk_returns_the_largest_admissible_face_2714`
+  accordingly grades against brute force over EVERY exclusion set — the full
+  family the walk searches — rather than the floor-indexed subfamily the
+  previous oracle swept.
+
+  Reached by the #2714 witness because the fix for its titled defect let the fit
+  get as far as final posterior assembly, where a monotonicity guard imposed at
+  every observed exit time puts far more constraint rows than the time block has
+  coefficients: `W = A Σ Aᵀ` is then structurally rank-deficient and the ladder
+  is the only thing standing between the fit and a face it can lift.
+
 - **The Jeffreys/Firth span is MEASURED, not derived from a penalty's kernel
   (#2612).** Two derived spans have shipped here and both answer structurally
   what has to be measured. The FULL identifiable span says *the model bounds
