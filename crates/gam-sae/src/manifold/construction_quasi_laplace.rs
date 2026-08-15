@@ -892,6 +892,12 @@ impl SaeManifoldTerm {
         // round re-arms, so a plateau the polish cannot unlock refuses on its
         // second visit with the polish disarmed.
         let mut terminal_newton_polish_armed = true;
+        // #2762 — whether the gauge-orbit block descent is armed for the NEXT
+        // objective-stall fixed-point claim of THIS loop. Same discipline as the
+        // polish above and as the joint fit's own arming: consulting disarms,
+        // and only a materially-descending refine round re-arms, so a plateau
+        // the block cannot unlock refuses on its second visit.
+        let mut gauge_block_armed = true;
         loop {
             let mut sys = self
                 .assemble_arrow_schur(target, rho, registry)
@@ -1805,6 +1811,59 @@ impl SaeManifoldTerm {
                         continue;
                     }
                 }
+                // #2762 — THE THIRD FIXED-POINT CLAIM, and the one this issue's
+                // refusals are actually raised at.
+                //
+                // The two claims inside `run_joint_fit_arrow_schur` (its
+                // objective-stall shortcut and its no-strict-decrease exit) now
+                // consult the gauge-orbit block, but this loop makes its OWN
+                // fixed-point claim on top of theirs, over whole refine ROUNDS,
+                // and it makes it at a state the joint fit may never have left
+                // the block stationary at — the terminal refusal below reports
+                // `best_seen`, the ½λ²/scale-minimizing iterate, which is a
+                // different state from wherever the last joint fit stopped.
+                //
+                // Measured on `zz2015` after the two joint-fit sites landed: the
+                // refusal still carried `orbit_best_objective_drop = 6.426e-3`,
+                // relative `3.30e-7` — 33x the `1e-8` resolution this same branch
+                // calls "no meaningful change". A stall over refine rounds is a
+                // fixed point only if it is one in BOTH blocks, so ask the block
+                // here too, on the same arming discipline as the polish above: a
+                // materially-descending round re-arms it, so a plateau the block
+                // cannot unlock refuses on its second visit with both movers
+                // disarmed.
+                if gauge_block_armed {
+                    gauge_block_armed = false;
+                    let orbit = self.descend_gauge_orbit(
+                        target,
+                        rho_fixed,
+                        registry,
+                        &lambda_smooth,
+                        // Same bound as the joint fit's: the block returns at the
+                        // first round that cannot commit a material decrease, so
+                        // this caps a loop that terminates on its own. The refine
+                        // loop has no per-iteration counter to borrow, so the
+                        // block's own budget is the stall streak it is answering.
+                        SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS.max(1),
+                    )?;
+                    if orbit.moved() {
+                        *criterion_fixed_point = false;
+                        consecutive_objective_stalls = 0;
+                        saw_refine_progress = true;
+                        log::debug!(
+                            "SAE inner refine loop: gauge-orbit descent recovered {:.6e} over \
+                             {} round(s) at the objective-stall fixed point (span dim {}, \
+                             maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations) after \
+                             {total_inner_iter} inner iterations",
+                            orbit.objective_decrease,
+                            orbit.rounds,
+                            orbit.dimension,
+                            orbit.max_directional_derivative,
+                            orbit.evaluations,
+                        );
+                        continue;
+                    }
+                }
                 // Persistent objective-stall fixed point (`STALL_MIN_ROUNDS`
                 // consecutive stalled rounds) without KKT stationarity. Surface
                 // the typed refusal that the outer bridge treats as an infeasible
@@ -1901,6 +1960,7 @@ impl SaeManifoldTerm {
                 // re-arms the terminal polish for the next plateau (#2132).
                 consecutive_objective_stalls = 0;
                 terminal_newton_polish_armed = true;
+                gauge_block_armed = true;
             }
         }
     }
