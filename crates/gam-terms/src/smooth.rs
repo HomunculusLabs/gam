@@ -74,10 +74,13 @@ pub use self::structure_warnings::collect_smooth_structure_warnings;
 // (`spatial_optimization.rs`).
 mod term_design;
 pub use term_design::{
-    TermCollectionDerivativeDesign, apply_smooth_transform_to_design,
+    CollectionGaugedTerm, LocalTermRealization, RealizedCollectionGauge,
+    TermCollectionDerivativeDesign,
+    apply_smooth_transform_to_design,
     build_term_collection_derivative_design, build_term_collection_design,
     build_term_collection_design_inner, build_term_collection_design_with_policy,
-    orthogonality_relative_residual_for_design, smooth_intrinsic_parametric_feature_cols,
+    orthogonality_relative_residual_for_design, place_term_in_collection_gauge,
+    realize_smooth_collection_gauge, smooth_intrinsic_parametric_feature_cols,
     term_collection_has_anchored_bspline, term_collection_has_nonzero_anchor,
 };
 

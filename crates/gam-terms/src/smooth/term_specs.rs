@@ -827,6 +827,61 @@ pub struct ParametricResidualizationChart {
     pub correction: Array2<f64>,
 }
 
+/// Which construction `apply_global_smooth_identifiability` chose to make one
+/// term's realized block orthogonal to its constraint block.
+///
+/// Frozen with the block rather than re-decided per rebuild: the containment
+/// test that picks between them is a function of the realized design, hence of
+/// any basis parameter an outer search is moving, and a fit that re-decided it
+/// per trial would step the model DIMENSION mid-search (`Delete` costs a
+/// coefficient direction, `Residualize` costs none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothCollectionGaugeArm {
+    /// `X·Z`, `Z` spanning `null((XᵀC)ᵀ)` — free only under containment, and
+    /// then identical to the pre-`76a520c45` path.
+    Delete,
+    /// `X·T − C·R`, span-preserving — always licensed.
+    Residualize,
+}
+
+/// The COLLECTION's gauge for one smooth term: the realized constraint block it
+/// was made orthogonal to, and which construction did it.
+///
+/// # Why this is freezable, and why a term-local rebuild needs it
+///
+/// `C = [intercept | owned linear axes | owner smooths' realized blocks]` is a
+/// function of the data and of OTHER terms — never of this term's own basis
+/// parameters. So `C` is invariant along an outer search over this term's `ψ`
+/// (a length scale, a curvature, a measure-jet dial), while the two objects
+/// derived FROM it are not: `T` and `R` are both functions of the realized
+/// design, so both move with `ψ`.
+///
+/// That asymmetry is the whole content of gam#2747's second half. The spatial
+/// outer search rebuilds one term LOCALLY per trial and splices the result into
+/// the collection design; a term-local build cannot see `C`, so before this
+/// existed the splice replaced the design and its chart while leaving the
+/// collection's `R` behind, and the fit shipped `X(ψ̂)·Z − C·R(ψ₀)` — a block
+/// orthogonal to nothing, with `‖XᵀC‖/(‖X‖‖C‖)` measured at `4.15e-1` against
+/// the `1e-8` bar the same step asserts whenever it applies a transform.
+///
+/// Carrying the ψ-INDEPENDENT half forward and re-deriving the ψ-dependent half
+/// is therefore not an optimization — it is the only formulation under which
+/// the criterion an outer search minimizes and the model the fit ships are the
+/// same object.
+#[derive(Debug, Clone)]
+pub struct SmoothCollectionGauge {
+    /// Which construction the collection chose.
+    pub arm: SmoothCollectionGaugeArm,
+    /// `C`, `n × q`, exactly as `build_constraint_block` stacked it.
+    pub constraint_block: Array2<f64>,
+    /// Indices into the collection's smooth terms of the owner smooths whose
+    /// realized designs joined `C`, in stack order. Recorded for the same
+    /// reason [`ParametricResidualizationChart::owner_terms`] is.
+    pub owner_terms: Vec<usize>,
+    /// Whether the parametric block led `C`.
+    pub has_parametric_block: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmoothTerm {
     pub name: String,
@@ -886,6 +941,17 @@ pub struct SmoothTerm {
     /// rebuild subtracts the same correction instead of emitting a design the
     /// fitted coefficients do not match.
     pub parametric_residualization: Option<ParametricResidualizationChart>,
+    /// The ψ-INDEPENDENT half of the global step, exported so a TERM-LOCAL
+    /// rebuild can put its result back into this collection's gauge instead of
+    /// silently leaving it out (#2747). `None` when the collection applied no
+    /// global transform to this term, and therefore also on every replay — a
+    /// replay is already in the gauge by construction.
+    ///
+    /// This is deliberately NOT frozen onto `SmoothTermSpec`: it is a fit-time
+    /// object for fit-time rebuilds. Predict-time replay is served by
+    /// [`ParametricResidualizationChart`] / `frozen_global_orthogonality`,
+    /// which carry the ψ-DEPENDENT half the fit settled on.
+    pub collection_gauge: Option<SmoothCollectionGauge>,
 }
 
 impl SmoothTerm {
@@ -9714,6 +9780,9 @@ pub fn build_smooth_design_withworkspace_unvalidated(
             kronecker_factored: built.kronecker_factored.take(),
             joint_null_rotation: applied_rotation,
             unabsorbed_global_orthogonality: None,
+            // The RAW build precedes the global step, so it decides no gauge;
+            // `apply_global_smooth_identifiability` fills this in (#2747).
+            collection_gauge: None,
         });
 
         col_start = col_end;

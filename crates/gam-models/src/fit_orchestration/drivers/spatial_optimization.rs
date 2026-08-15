@@ -4712,7 +4712,6 @@ pub fn constant_curvature_term_indices(spec: &TermCollectionSpec) -> Vec<usize> 
 struct SingleSmoothTermRealization {
     design_local: DesignMatrix,
     term: SmoothTerm,
-    dropped_penaltyinfo: Vec<DroppedPenaltyBlockInfo>,
 }
 
 /// Wrap a fresh `LocalSmoothTermBuild` (produced by `build_single_local_smooth_term`)
@@ -4731,15 +4730,6 @@ fn wrap_local_build_as_realization(
     } else {
         None
     };
-
-    let dropped_penaltyinfo = local
-        .dropped_penalties
-        .iter()
-        .map(|info| DroppedPenaltyBlockInfo {
-            termname: Some(termspec.name.clone()),
-            penalty: info.clone(),
-        })
-        .collect();
 
     // Stage-2 joint-null absorption rotation, same logic as the main
     // aggregation loop in `build_smooth_design_withworkspace_unvalidated`:
@@ -4788,7 +4778,11 @@ fn wrap_local_build_as_realization(
     };
 
     let smooth_term = SmoothTerm {
-            parametric_residualization: None,
+        parametric_residualization: None,
+        // A single-term realization decides no gauge. The caller splices this
+        // into a collection design and re-applies THAT collection's gauge
+        // (#2747); it must never claim one of its own.
+        collection_gauge: None,
         name: termspec.name.clone(),
         coeff_range: 0..p_local,
         shape: termspec.shape,
@@ -4807,7 +4801,6 @@ fn wrap_local_build_as_realization(
     Ok(SingleSmoothTermRealization {
         design_local: local.design,
         term: smooth_term,
-        dropped_penaltyinfo,
     })
 }
 
@@ -5952,11 +5945,7 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         realization: SingleSmoothTermRealization,
     ) -> Result<(), String> {
         let t_replace = std::time::Instant::now();
-        let SingleSmoothTermRealization {
-            design_local,
-            term,
-            dropped_penaltyinfo,
-        } = realization;
+        let SingleSmoothTermRealization { design_local, term } = realization;
         let SmoothTerm {
             name,
             active_penalties,
@@ -5967,6 +5956,90 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             joint_null_rotation,
             ..
         } = term;
+        // THE GAUGE IS THE COLLECTION'S (#2747). This rebuild is TERM-LOCAL, so
+        // it cannot see the constraint block `[1 | owned linear axes | owner
+        // smooths]` the collection made this term orthogonal to — the same
+        // blindness the penalty-topology note below records for #2750, on the
+        // design instead of on the penalty set.
+        //
+        // Before this, the splice wrote a term-local design and chart into the
+        // slot while leaving the collection's `R` behind, and `R` is a function
+        // of the design, hence of the ψ this realizer exists to move. The fit
+        // then shipped `X(ψ̂)·Z − C·R(ψ₀)`: measured at `‖XᵀC‖/(‖X‖‖C‖) =
+        // 4.15e-1` on `y ~ x1 + matern(x1, x2)` against the `1e-8` bar the
+        // global step asserts whenever it applies a transform, with `2.39e-14`
+        // for the same spec and rows when the pair is derived rather than
+        // replayed. The κ search was therefore also minimizing a criterion for
+        // a model the fit did not ship.
+        //
+        // `C` and the arm are ψ-INDEPENDENT and travel on the term; `T` and `R`
+        // are re-derived here, through the entry point the collection build
+        // itself uses.
+        let collection_gauge = self
+            .design
+            .smooth
+            .terms
+            .get(term_idx)
+            .and_then(|target| target.collection_gauge.clone());
+        let (
+            design_local,
+            metadata,
+            active_penalties,
+            dropped_penalties,
+            linear_constraints_local,
+            joint_null_rotation,
+            regauged_residualization,
+        ) = match collection_gauge {
+            Some(gauge) => {
+                let placed = gam_terms::smooth::place_term_in_collection_gauge(
+                    &gauge,
+                    gam_terms::smooth::LocalTermRealization {
+                        design: design_local,
+                        metadata: &metadata,
+                        active_penalties: &active_penalties,
+                        dropped_penalties,
+                        linear_constraints_local: linear_constraints_local.as_ref(),
+                        joint_null_rotation: joint_null_rotation.as_ref(),
+                        termname: &name,
+                    },
+                )
+                .map_err(|e| {
+                    format!(
+                        "term '{name}' could not be returned to its collection's identifiability gauge after an incremental rebuild: {e}"
+                    )
+                })?;
+                (
+                    placed.design,
+                    placed.metadata,
+                    placed.active_penalties,
+                    placed.dropped_penalties,
+                    placed.linear_constraints_local,
+                    // Folded into `metadata` above, exactly as a collection-built
+                    // term reports it.
+                    None,
+                    Some(placed.parametric_residualization),
+                )
+            }
+            None => (
+                design_local,
+                metadata,
+                active_penalties,
+                dropped_penalties,
+                linear_constraints_local,
+                joint_null_rotation,
+                None,
+            ),
+        };
+        // The gauge can add drops (a penalty that becomes vacuous under the
+        // congruence), so the per-term dropped-block report is restated from the
+        // post-gauge set rather than from the local build's.
+        let dropped_penaltyinfo: Vec<DroppedPenaltyBlockInfo> = dropped_penalties
+            .iter()
+            .map(|info| DroppedPenaltyBlockInfo {
+                termname: Some(name.clone()),
+                penalty: info.clone(),
+            })
+            .collect();
         let coeff_range = self
             .design
             .smooth
@@ -6162,6 +6235,12 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         target_term.lower_bounds_local = lower_bounds_local;
         target_term.linear_constraints_local = linear_constraints_local;
         target_term.joint_null_rotation = joint_null_rotation;
+        // `R` moves with the design it was derived from, or the freeze ships a
+        // pair that describes two different models (#2747). `None` on the
+        // `Delete` arm is the right answer there, not a missing one.
+        if let Some(chart) = regauged_residualization {
+            target_term.parametric_residualization = chart;
+        }
         self.dropped_penaltyinfo_by_term[term_idx] = dropped_penaltyinfo;
         log::info!(
             "[STAGE] smooth basis rebuild (term {}, '{}', cols={}): {:.3}s",

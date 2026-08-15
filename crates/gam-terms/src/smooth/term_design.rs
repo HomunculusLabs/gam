@@ -929,6 +929,235 @@ enum GlobalIdentifiabilityPlan {
     Residualize { block: Array2<f64> },
 }
 
+impl GlobalIdentifiabilityPlan {
+    /// The frozen, ψ-independent half of this plan, for export onto the term.
+    fn as_gauge(
+        &self,
+        owner_terms: &[usize],
+        has_parametric_block: bool,
+    ) -> Option<SmoothCollectionGauge> {
+        let (arm, block) = match self {
+            Self::Absent => return None,
+            Self::Delete { block } => (SmoothCollectionGaugeArm::Delete, block),
+            Self::Residualize { block } => (SmoothCollectionGaugeArm::Residualize, block),
+        };
+        Some(SmoothCollectionGauge {
+            arm,
+            constraint_block: block.clone(),
+            owner_terms: owner_terms.to_vec(),
+            has_parametric_block,
+        })
+    }
+}
+
+/// One smooth term's realized block, put into a COLLECTION gauge.
+pub struct RealizedCollectionGauge {
+    /// `X·Z` (Delete) or `X·T − C·R` (Residualize).
+    pub design: DesignMatrix,
+    /// The coefficient transform this realization applied, for composition into
+    /// the term's basis metadata by the caller.
+    pub coefficient_transform: Array2<f64>,
+    /// The row-space half, present only on the `Residualize` arm.
+    pub residualization: Option<crate::basis::ParametricResidualization>,
+}
+
+/// Put a freshly built TERM-LOCAL design into a collection's gauge (#2747).
+///
+/// This is the single owner of "make this term's realized block orthogonal to
+/// `C`". `apply_global_smooth_identifiability` calls it once the collection has
+/// DECIDED the gauge; the spatial outer search's incremental single-term
+/// realizer calls it with the gauge the collection already decided, so a spliced
+/// realization is in the collection's gauge by construction rather than by luck.
+///
+/// The split of labour is the point. `C` and the arm are frozen because they are
+/// ψ-independent; `T` and `R` are re-derived here because they are not. Freezing
+/// the second pair across a ψ move is exactly the defect this function exists to
+/// make unrepresentable: the pair would then belong to a design that no longer
+/// exists.
+///
+/// The orthogonality the whole step is for is asserted here, at the same
+/// relative bar the collection has always used, so neither caller can produce a
+/// block that fails it and report success.
+pub fn realize_smooth_collection_gauge(
+    design_local: DesignMatrix,
+    gauge: &SmoothCollectionGauge,
+    termname: &str,
+) -> Result<RealizedCollectionGauge, BasisError> {
+    let block = gauge.constraint_block.view();
+    if block.nrows() != design_local.nrows() {
+        gam_problem::bail_dim_basis!(
+            "collection gauge row mismatch for term '{termname}': the design has {} rows and the frozen constraint block has {}",
+            design_local.nrows(),
+            block.nrows()
+        );
+    }
+    let (design, coefficient_transform, residualization) = match gauge.arm {
+        SmoothCollectionGaugeArm::Delete => {
+            let z = match orthogonality_transform_for_design(&design_local, block, None) {
+                Ok(z) => z,
+                // Mirrors the collection's own fallback: a constraint block that
+                // is entirely owner columns can collapse the nullspace, and an
+                // empty chart (rather than a refusal) is what that has always
+                // produced.
+                Err(BasisError::ConstraintNullspaceCollapsed { .. })
+                    if !gauge.owner_terms.is_empty() =>
+                {
+                    Array2::zeros((design_local.ncols(), 0))
+                }
+                Err(err) => return Err(err),
+            };
+            let design = apply_smooth_transform_to_design(design_local, &z, termname)?;
+            (design, z, None)
+        }
+        SmoothCollectionGaugeArm::Residualize => {
+            let plan = crate::basis::parametric_residualization_for_design(
+                &design_local,
+                block,
+                None, // fixed subspace: do not use iteration-varying PIRLS weights
+            )?;
+            let transform = plan.coefficient_transform.clone();
+            let design = apply_smooth_transform_to_design(design_local, &transform, termname)?;
+            let design = subtract_row_space_correction(
+                design,
+                block,
+                plan.row_space_correction.view(),
+                termname,
+            )?;
+            (design, transform, Some(plan))
+        }
+    };
+    assert_orthogonal_to_constraint_block(&design, block, termname)?;
+    Ok(RealizedCollectionGauge {
+        design,
+        coefficient_transform,
+        residualization,
+    })
+}
+
+/// One smooth term as a TERM-LOCAL build leaves it, on its way into a
+/// collection gauge. Grouped rather than passed loose because these seven are
+/// one object — a realization — and splitting them across a call boundary is
+/// how the design and its chart came apart in the first place (#2747).
+pub struct LocalTermRealization<'a> {
+    /// The rebuilt block, with the basis chart and any joint-null `Q` applied.
+    pub design: DesignMatrix,
+    /// The local build's metadata; the gauge's transform is composed into it.
+    pub metadata: &'a BasisMetadata,
+    pub active_penalties: &'a [ActivePenalty],
+    pub dropped_penalties: Vec<DroppedPenaltyInfo>,
+    pub linear_constraints_local: Option<&'a gam_problem::LinearInequalityConstraints>,
+    /// The rotation the local build applied to `design` and reported
+    /// separately. It is folded into the returned metadata.
+    pub joint_null_rotation: Option<&'a crate::basis::JointNullRotation>,
+    pub termname: &'a str,
+}
+
+/// One smooth term, rebuilt TERM-LOCALLY and put back into a collection gauge.
+pub struct CollectionGaugedTerm {
+    pub design: DesignMatrix,
+    pub metadata: BasisMetadata,
+    pub active_penalties: Vec<ActivePenalty>,
+    pub dropped_penalties: Vec<DroppedPenaltyInfo>,
+    pub linear_constraints_local: Option<gam_problem::LinearInequalityConstraints>,
+    pub parametric_residualization: Option<ParametricResidualizationChart>,
+}
+
+/// Put a TERM-LOCAL rebuild back into the gauge its collection decided (#2747).
+///
+/// This is the whole per-term tail of `apply_global_smooth_identifiability`,
+/// available to a caller that holds ONE term rather than a collection: the
+/// design through [`realize_smooth_collection_gauge`], the penalties through
+/// [`penalty_candidates_under_collection_gauge`], the local inequality rows
+/// through the same congruence, and the coefficient transform composed into the
+/// basis metadata so a later freeze carries it.
+///
+/// # Why the joint-null rotation is consumed here
+///
+/// A term-local build applies `Q` to its design and reports it separately; a
+/// collection-built term reports `None` and carries `Q · T` inside its metadata,
+/// because a chart split across two fields has an ORDER, and the two fields do
+/// not record it. Coming out of this function a term is in the collection's
+/// convention, which is what makes it substitutable for one.
+///
+/// The caller must therefore clear the term's `joint_null_rotation`; the value
+/// it passes in is folded in here.
+pub fn place_term_in_collection_gauge(
+    gauge: &SmoothCollectionGauge,
+    local: LocalTermRealization<'_>,
+) -> Result<CollectionGaugedTerm, BasisError> {
+    let LocalTermRealization {
+        design,
+        metadata,
+        active_penalties,
+        dropped_penalties,
+        linear_constraints_local,
+        joint_null_rotation,
+        termname,
+    } = local;
+    let realized = realize_smooth_collection_gauge(design, gauge, termname)?;
+    let coefficient_gauge =
+        gam_problem::Gauge::from_block_transforms(&[realized.coefficient_transform.clone()]);
+    let candidates = penalty_candidates_under_collection_gauge(
+        active_penalties,
+        Some(&coefficient_gauge),
+        termname,
+    )?;
+    let filtered = filter_penalty_candidates(candidates)?;
+    let mut dropped_penalties = dropped_penalties;
+    dropped_penalties.extend(filtered.dropped);
+    let linear_constraints_local = linear_constraints_local.map(|lin| {
+        gam_problem::LinearInequalityConstraints {
+            a: lin.a.dot(&coefficient_gauge.block_transform(0)),
+            b: lin.b.clone(),
+        }
+    });
+    let realized_transform = match joint_null_rotation {
+        Some(rotation) => {
+            gam_linalg::faer_ndarray::fast_ab(&rotation.rotation, &realized.coefficient_transform)
+        }
+        None => realized.coefficient_transform.clone(),
+    };
+    let metadata = with_identifiability_transform(metadata, Some(&realized_transform))?;
+    let parametric_residualization =
+        realized
+            .residualization
+            .as_ref()
+            .map(|plan| ParametricResidualizationChart {
+                owner_terms: gauge.owner_terms.clone(),
+                has_parametric_block: gauge.has_parametric_block,
+                correction: plan.row_space_correction.clone(),
+            });
+    Ok(CollectionGaugedTerm {
+        design: realized.design,
+        metadata,
+        active_penalties: filtered.active,
+        dropped_penalties,
+        linear_constraints_local,
+        parametric_residualization,
+    })
+}
+
+/// Largest relative residual tolerated before a constrained design is rejected
+/// as not orthogonal to its constraint block.
+const ORTHOGONALITY_REL_RESIDUAL_TOL: f64 = 1e-8;
+
+fn assert_orthogonal_to_constraint_block(
+    design: &DesignMatrix,
+    constraint: ArrayView2<'_, f64>,
+    termname: &str,
+) -> Result<(), BasisError> {
+    let rel = orthogonality_relative_residual_for_design(design, constraint)?;
+    if rel > ORTHOGONALITY_REL_RESIDUAL_TOL {
+        gam_problem::bail_invalid_basis!(
+            "smooth orthogonality residual too large for term '{}': {:.3e} > {:.1e}",
+            termname,
+            rel,
+            ORTHOGONALITY_REL_RESIDUAL_TOL
+        );
+    }
+    Ok(())
+}
+
 /// `X − C·R`, keeping `X`'s storage decision: the two are stacked into one
 /// [`gam_linalg::matrix::BlockDesignOperator`] and the subtraction becomes the
 /// sign of `R` inside a single coefficient transform, so a lazy design stays
@@ -1157,6 +1386,7 @@ fn apply_global_smooth_identifiability(
     let mut local_unabsorbed_z = vec![None::<Array2<f64>>; smooth.terms.len()];
     let mut local_residualization =
         vec![None::<ParametricResidualizationChart>; smooth.terms.len()];
+    let mut local_collection_gauge = vec![None::<SmoothCollectionGauge>; smooth.terms.len()];
 
     let SmoothStructureAnalysis {
         ownership_order,
@@ -1164,7 +1394,7 @@ fn apply_global_smooth_identifiability(
         ..
     } = analyze_smooth_ownership(smoothspecs);
 
-    use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+    use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
     for &idx in &ownership_order {
         let term = &smooth.terms[idx];
@@ -1329,301 +1559,88 @@ fn apply_global_smooth_identifiability(
                     GlobalIdentifiabilityPlan::Residualize { block: raw }
                 }
             };
-        let c_local = match &plan {
-            GlobalIdentifiabilityPlan::Absent => None,
-            GlobalIdentifiabilityPlan::Delete { block }
-            | GlobalIdentifiabilityPlan::Residualize { block } => Some(block.clone()),
-        };
-        // The residualization correction `R`, when this term takes that arm. It
-        // is TRAINING-ROW data exactly as the transform beside it is (#978), so
-        // a rebuild replays the frozen one and never re-derives it; only `C`
-        // itself is rebuilt at the new rows, which is what `C` is.
+        // The COLLECTION's half of this decision, frozen for export: `C` and the
+        // arm, both of which are functions of the data and of OTHER terms and
+        // therefore invariant under any move of THIS term's basis parameters.
+        // The pair derived from them — `T` and `R` — is not, which is why the
+        // gauge carries neither (#2747).
+        let collection_gauge = plan.as_gauge(&owner_indices, parametric_block.is_some());
         let mut residualization: Option<crate::basis::ParametricResidualization> = None;
-        let z_opt = if let Some(z) = replay_z {
-            if design_local.ncols() != z.nrows() {
-                gam_problem::bail_dim_basis!(
-                    "frozen global-orthogonality transform mismatch for term '{}': rebuilt design has {} columns but the persisted fit-time transform has {} rows",
-                    term.name,
-                    design_local.ncols(),
-                    z.nrows()
-                );
-            }
-            Some(z.clone())
-        } else if skip_global_transform {
-            None
-        } else if let GlobalIdentifiabilityPlan::Residualize { block } = &plan {
-            let plan = crate::basis::parametric_residualization_for_design(
-                &design_local,
-                block.view(),
-                None, // fixed subspace: do not use iteration-varying PIRLS weights
-            )?;
-            let transform = plan.coefficient_transform.clone();
-            residualization = Some(plan);
-            Some(transform)
+        let (design_constrained, z_opt) = if let Some(gauge) = collection_gauge.as_ref() {
+            // This term takes a gauge, so it is realized through the one entry
+            // point that knows how — the same one the outer search's incremental
+            // realizer uses, so the two cannot drift.
+            //
+            // `replay_z`, `skip_global_transform` and a frozen chart all force
+            // `plan = Absent` upstream, so reaching here means the collection is
+            // DERIVING the gauge on these rows, and nothing frozen is in play.
+            let realized = realize_smooth_collection_gauge(design_local, gauge, &term.name)?;
+            residualization = realized.residualization;
+            (realized.design, Some(realized.coefficient_transform))
         } else {
-            match maybe_smooth_identifiability_transform(
-                termspec,
-                &design_local,
-                c_local.as_ref().map(|mat| mat.view()),
-            ) {
-                Ok(z_opt) => z_opt,
-                Err(BasisError::ConstraintNullspaceCollapsed { .. })
-                    if !owner_blocks.is_empty() =>
-                {
-                    Some(Array2::zeros((design_local.ncols(), 0)))
+            // No gauge: either there is nothing to be orthogonal to, or this is
+            // a REPLAY, where the fit already decided both halves and only `C`
+            // is rebuilt at the new rows.
+            let z_opt = if let Some(z) = replay_z {
+                if design_local.ncols() != z.nrows() {
+                    gam_problem::bail_dim_basis!(
+                        "frozen global-orthogonality transform mismatch for term '{}': rebuilt design has {} columns but the persisted fit-time transform has {} rows",
+                        term.name,
+                        design_local.ncols(),
+                        z.nrows()
+                    );
                 }
-                Err(err) => return Err(err),
-            }
+                Some(z.clone())
+            } else if skip_global_transform {
+                None
+            } else {
+                // No constraint block by construction (`plan` is `Absent`), so
+                // this can only return the basis's own frozen chart or nothing.
+                maybe_smooth_identifiability_transform(termspec, &design_local, None)?
+            };
+            let design_transformed = match z_opt.as_ref() {
+                Some(z) => apply_smooth_transform_to_design(design_local, z, &term.name)?,
+                None => design_local,
+            };
+            let design_constrained = match replay_correction {
+                Some(chart) => {
+                    // Predict-time replay. `C` is rebuilt at the NEW rows — the
+                    // parametric half from the same spec-deterministic recipe the
+                    // fit used, the owner half from the terms the chart NAMES —
+                    // and only the correction itself is frozen.
+                    let block = build_constraint_block(
+                        data.nrows(),
+                        parametric_block.as_ref(),
+                        &replay_owner_blocks,
+                    )?;
+                    if block.ncols() != chart.correction.nrows() {
+                        gam_problem::bail_dim_basis!(
+                            "frozen parametric residualization mismatch for term '{}': rebuilt constraint block has {} columns but the persisted fit-time correction has {} rows",
+                            term.name,
+                            block.ncols(),
+                            chart.correction.nrows()
+                        );
+                    }
+                    subtract_row_space_correction(
+                        design_transformed,
+                        block.view(),
+                        chart.correction.view(),
+                        &term.name,
+                    )?
+                }
+                None => design_transformed,
+            };
+            (design_constrained, z_opt)
         };
         let coefficient_gauge = z_opt
             .as_ref()
             .map(|z| gam_problem::Gauge::from_block_transforms(&[z.clone()]));
-        // A frozen chart replays the same two objects the fit produced: the
-        // coefficient transform (which the basis metadata already carries, so
-        // `design_local` arrives with it applied) and the row-space correction.
-        let design_transformed = if let Some(gauge) = coefficient_gauge.as_ref() {
-            apply_smooth_transform_to_design(design_local, &gauge.block_transform(0), &term.name)?
-        } else {
-            design_local
-        };
-        let design_constrained = match (residualization.as_ref(), replay_correction) {
-            (Some(plan), _) => {
-                let Some(block) = c_local.as_ref() else {
-                    gam_problem::bail_invalid_basis!(
-                        "term '{}' produced a parametric residualization with no constraint block",
-                        term.name
-                    );
-                };
-                subtract_row_space_correction(
-                    design_transformed,
-                    block.view(),
-                    plan.row_space_correction.view(),
-                    &term.name,
-                )?
-            }
-            (None, Some(chart)) => {
-                // Predict-time replay. `C` is rebuilt at the NEW rows — the
-                // parametric half from the same spec-deterministic recipe the
-                // fit used, the owner half from the terms the chart NAMES — and
-                // only the correction itself is frozen.
-                let block = build_constraint_block(
-                    data.nrows(),
-                    parametric_block.as_ref(),
-                    &replay_owner_blocks,
-                )?;
-                if block.ncols() != chart.correction.nrows() {
-                    gam_problem::bail_dim_basis!(
-                        "frozen parametric residualization mismatch for term '{}': rebuilt constraint block has {} columns but the persisted fit-time correction has {} rows",
-                        term.name,
-                        block.ncols(),
-                        chart.correction.nrows()
-                    );
-                }
-                subtract_row_space_correction(
-                    design_transformed,
-                    block.view(),
-                    chart.correction.view(),
-                    &term.name,
-                )?
-            }
-            (None, None) => design_transformed,
-        };
 
-        if let Some(c_ref) = c_local.as_ref() {
-            let rel =
-                orthogonality_relative_residual_for_design(&design_constrained, c_ref.view())?;
-            // Largest relative residual tolerated before the constrained design
-            // is rejected as not orthogonal to its sum-to-zero constraint rows.
-            const ORTHOGONALITY_REL_RESIDUAL_TOL: f64 = 1e-8;
-            let tol = ORTHOGONALITY_REL_RESIDUAL_TOL;
-            if rel > tol {
-                gam_problem::bail_invalid_basis!(
-                    "smooth orthogonality residual too large for term '{}': {:.3e} > {:.1e}",
-                    term.name,
-                    rel,
-                    tol
-                );
-            }
-        }
-
-        let penalty_candidates = term
-            .active_penalties
-            .par_iter()
-            .map(|penalty| -> Result<PenaltyCandidate, BasisError> {
-                let raw = ConstructiveQuadratic::try_from_dense_psd(
-                    penalty.matrix.clone(),
-                    "global smooth source penalty",
-                )?;
-                // Re-attach the structural null frame the basis factory
-                // declared (#2445): `try_from_dense_psd` sees only the dense
-                // matrix, and the declaration must survive this chokepoint so
-                // the double-penalty rebuild below decides topology from the
-                // carried theorem, not from a rank test on a matrix carrying
-                // the Duchon conditioning ridge. `.restricted` transports it
-                // through the global gauge.
-                let raw = match penalty.info.structural_null_frame.as_ref() {
-                    Some(frame) => raw.with_structural_null_frame(
-                        frame.clone(),
-                        "global smooth source penalty structural frame",
-                    )?,
-                    None => raw,
-                };
-                let restricted = if let Some(gauge) = coefficient_gauge.as_ref() {
-                    raw.restricted(gauge, "global smooth identifiability restriction")?
-                } else {
-                    raw
-                };
-                let (_, c_new) = normalize_penalty_in_constrained_space(restricted.dense());
-                let matrix = restricted.scaled(1.0 / c_new, "normalized global smooth penalty")?;
-                Ok(PenaltyCandidate {
-                    matrix,
-                    source: penalty.info.source.clone(),
-                    normalization_scale: penalty.info.normalization_scale * c_new,
-                    kronecker_factors: None,
-                    op: None,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // #1476-class fix (central, basis-agnostic): when a non-trivial GLOBAL
-        // identifiability/orthogonalization transform `z_opt` was applied above,
-        // it congruence-restricts EVERY penalty — including a Marra & Wood double-
-        // penalty null-space shrinkage ridge (`DoublePenaltyNullspace`). A merely-
-        // restricted ridge `Zᵀ (Z_null Z_nullᵀ) Z` is NOT the projector onto the
-        // null space of the *constrained* bending penalty `Zᵀ S_bend Z`: the
-        // sum-to-zero / parametric-orthogonalization `Z` is not norm-preserving and
-        // typically DROPS the constant direction, so the restricted ridge is
-        // neither idempotent nor aligned with `null(Zᵀ S_bend Z)` and shrinks
-        // penalized directions (the #1266/#1476 flat-collapse / EDF mis-allocation
-        // class). This is the single chokepoint every basis flows through, so
-        // rebuild the ridge here from the null space of the constrained `Primary`
-        // penalty, exactly as the 1-D B-spline / tensor / thin-plate paths do in
-        // their own local builds. (Idempotent with those local rebuilds: when no
-        // further `Primary`-null directions survive, the rebuilt ridge equals the
-        // local one; when this global `Z` removes more, only this rebuild is
-        // correct.) Scoped to `coefficient_gauge.is_some()`: with no global
-        // transform the penalties are untouched and the basis-local ridge already
-        // lives in the fit chart.
-        let mut penalty_candidates = penalty_candidates;
-        if coefficient_gauge.is_some()
-            && penalty_candidates
-                .iter()
-                .any(|c| matches!(c.source, PenaltySource::DoublePenaltyNullspace))
-        {
-            // Nonzero-row support of a (symmetric) penalty matrix: the coefficient
-            // range it actually penalizes. A per-level `by=factor` smooth emits one
-            // `Primary`+`DoublePenaltyNullspace` pair PER LEVEL, each confined to
-            // that level's disjoint `[off..off+p]` diagonal block (#1427), so a
-            // ridge must be rebuilt from the Primary sharing ITS support — not the
-            // first global Primary, and not the summed bending (which would collapse
-            // the independent per-level λ). For a single smooth term there is one
-            // Primary spanning the whole block and this reduces to the simple case.
-            const SUPPORT_TOL: f64 = 0.0;
-            let support_rows = |m: &Array2<f64>| -> (usize, usize) {
-                let n = m.nrows();
-                let mut lo = n;
-                let mut hi = 0usize;
-                for i in 0..n {
-                    let any = (0..m.ncols()).any(|j| m[[i, j]].abs() > SUPPORT_TOL);
-                    if any {
-                        lo = lo.min(i);
-                        hi = hi.max(i + 1);
-                    }
-                }
-                (lo, hi)
-            };
-            // Snapshot each Primary's support + a clone of its matrix (immutable
-            // borrow released before we mutate the ridges below).
-            let primaries: Vec<((usize, usize), ConstructiveQuadratic)> = penalty_candidates
-                .iter()
-                .filter(|c| matches!(c.source, PenaltySource::Primary))
-                .map(|c| -> Result<_, BasisError> {
-                    Ok((
-                        support_rows(&c.matrix),
-                        c.matrix
-                            .scaled(c.normalization_scale, "physical global smooth primary")?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for candidate in &mut penalty_candidates {
-                if !matches!(candidate.source, PenaltySource::DoublePenaltyNullspace) {
-                    continue;
-                }
-                let q = candidate.matrix.nrows();
-                let (rlo, rhi) = support_rows(&candidate.matrix);
-                // The Primary whose support CONTAINS this ridge's support (the
-                // co-located bending block). Falls back to the unique Primary when
-                // the ridge is (numerically) empty.
-                let owner = primaries
-                    .iter()
-                    .find(|((plo, phi), _)| *plo <= rlo && rhi <= *phi)
-                    .or_else(|| (primaries.len() == 1).then(|| &primaries[0]))
-                    .ok_or_else(|| {
-                        BasisError::InvalidInput(format!(
-                            "double-penalty ridge for smooth '{}' has no co-located primary penalty",
-                            term.name
-                        ))
-                    })?;
-                let ((plo, phi), s_full) = owner;
-                // Rebuild from the physical Primary and ridge submatrices. Rank
-                // revelation on the Primary's retained energy factor preserves
-                // the structural null space through this global chart, while the
-                // restricted ridge supplies the function-metric action. No signed
-                // spectrum of a rounded dense congruence is classified (#2318).
-                let block = ConstructiveQuadratic::from_energy_factor(
-                    s_full.factor().slice(s![.., *plo..*phi]).to_owned(),
-                    "owned global smooth primary block",
-                )?;
-                // The support-block extraction rebuilds the quadratic from a
-                // sliced factor, so re-attach the declared structural frame
-                // restricted to the same block (it is `None` when the frame
-                // has support outside the block, and the rebuild then falls
-                // back to measuring — never guesses).
-                let block = match s_full.structural_null_frame_block(*plo, *phi) {
-                    Some(frame) => block.with_structural_null_frame(
-                        frame,
-                        "owned global smooth primary block structural frame",
-                    )?,
-                    None => block,
-                };
-                let ridge_full = candidate.matrix.scaled(
-                    candidate.normalization_scale,
-                    "physical global smooth null ridge",
-                )?;
-                let ridge_block = ConstructiveQuadratic::from_energy_factor(
-                    ridge_full.factor().slice(s![.., *plo..*phi]).to_owned(),
-                    "owned global smooth null-ridge block",
-                )?;
-                let rebuilt_block =
-                    crate::basis::rebuild_metric_consistent_ridge(&block, &ridge_block)?;
-                match rebuilt_block {
-                    Some(ridge_block) => {
-                        let mut full_factor =
-                            Array2::<f64>::zeros((ridge_block.factor().nrows(), q));
-                        full_factor
-                            .slice_mut(s![.., *plo..*phi])
-                            .assign(ridge_block.factor());
-                        let full = ConstructiveQuadratic::from_energy_factor(
-                            full_factor,
-                            "embedded global smooth null ridge",
-                        )?;
-                        let (_, scale) = normalize_penalty_in_constrained_space(full.dense());
-                        candidate.matrix = full
-                            .scaled(1.0 / scale, "normalized embedded global smooth null ridge")?;
-                        candidate.normalization_scale = scale;
-                        candidate.kronecker_factors = None;
-                        candidate.op = None;
-                    }
-                    // Constrained bending block is full rank: no null space to
-                    // shrink. Zero the ridge; the filter drops it.
-                    None => {
-                        candidate.matrix = ConstructiveQuadratic::zero(q);
-                        candidate.normalization_scale = 1.0;
-                        candidate.kronecker_factors = None;
-                        candidate.op = None;
-                    }
-                }
-            }
-        }
+        let penalty_candidates = penalty_candidates_under_collection_gauge(
+            &term.active_penalties,
+            coefficient_gauge.as_ref(),
+            &term.name,
+        )?;
         let filtered = filter_penalty_candidates(penalty_candidates)?;
         let linear_constraints_constrained =
             if let Some(lin_local) = term.linear_constraints_local.as_ref() {
@@ -1649,6 +1666,7 @@ fn apply_global_smooth_identifiability(
                 correction: plan.row_space_correction.clone(),
             })
             .or_else(|| replay_correction.cloned());
+        local_collection_gauge[idx] = collection_gauge;
         local_dims[idx] = design_constrained.ncols();
         local_designs[idx] = Some(design_constrained);
         local_active_penalties[idx] = filtered.active;
@@ -1760,6 +1778,9 @@ fn apply_global_smooth_identifiability(
             // absorb; the freeze persists it onto the spec for replay (#978).
             unabsorbed_global_orthogonality: local_unabsorbed_z[idx].clone(),
             parametric_residualization: local_residualization[idx].clone(),
+            // The gauge this collection decided, so a term-local rebuild at a
+            // new basis parameter can put its result back into it (#2747).
+            collection_gauge: local_collection_gauge[idx].clone(),
         });
         if let Some(lin_local) = &local_linear_constraints[idx] {
             for r in 0..lin_local.a.nrows() {
@@ -2016,6 +2037,204 @@ fn frozen_global_orthogonality(termspec: &SmoothTermSpec) -> Option<&Array2<f64>
         SmoothBasisSpec::FactorSmooth { spec } => spec.frozen_global_orthogonality.as_ref(),
         _ => None,
     }
+}
+
+/// Transport one smooth term's active penalties through the COLLECTION gauge.
+///
+/// Extracted from `apply_global_smooth_identifiability` (#2747) so that the
+/// collection build and the outer search's incremental single-term realizer
+/// apply the same congruence and the same double-penalty rebuild. Two callers
+/// of one gauge is the point: a term realization spliced back into a collection
+/// design has to be in that collection's gauge, and a second implementation of
+/// "restrict a penalty through `Z`" is a second answer to one question.
+///
+/// `coefficient_gauge` is `None` exactly when no global transform was applied,
+/// in which case the penalties are passed through with their declared
+/// structural frames re-attached and nothing else moved.
+fn penalty_candidates_under_collection_gauge(
+    active_penalties: &[ActivePenalty],
+    coefficient_gauge: Option<&gam_problem::Gauge>,
+    term_name: &str,
+) -> Result<Vec<PenaltyCandidate>, BasisError> {
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    let penalty_candidates = active_penalties
+        .par_iter()
+        .map(|penalty| -> Result<PenaltyCandidate, BasisError> {
+            let raw = ConstructiveQuadratic::try_from_dense_psd(
+                penalty.matrix.clone(),
+                "global smooth source penalty",
+            )?;
+            // Re-attach the structural null frame the basis factory
+            // declared (#2445): `try_from_dense_psd` sees only the dense
+            // matrix, and the declaration must survive this chokepoint so
+            // the double-penalty rebuild below decides topology from the
+            // carried theorem, not from a rank test on a matrix carrying
+            // the Duchon conditioning ridge. `.restricted` transports it
+            // through the global gauge.
+            let raw = match penalty.info.structural_null_frame.as_ref() {
+                Some(frame) => raw.with_structural_null_frame(
+                    frame.clone(),
+                    "global smooth source penalty structural frame",
+                )?,
+                None => raw,
+            };
+            let restricted = if let Some(gauge) = coefficient_gauge {
+                raw.restricted(gauge, "global smooth identifiability restriction")?
+            } else {
+                raw
+            };
+            let (_, c_new) = normalize_penalty_in_constrained_space(restricted.dense());
+            let matrix = restricted.scaled(1.0 / c_new, "normalized global smooth penalty")?;
+            Ok(PenaltyCandidate {
+                matrix,
+                source: penalty.info.source.clone(),
+                normalization_scale: penalty.info.normalization_scale * c_new,
+                kronecker_factors: None,
+                op: None,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // #1476-class fix (central, basis-agnostic): when a non-trivial GLOBAL
+    // identifiability/orthogonalization transform `z_opt` was applied above,
+    // it congruence-restricts EVERY penalty — including a Marra & Wood double-
+    // penalty null-space shrinkage ridge (`DoublePenaltyNullspace`). A merely-
+    // restricted ridge `Zᵀ (Z_null Z_nullᵀ) Z` is NOT the projector onto the
+    // null space of the *constrained* bending penalty `Zᵀ S_bend Z`: the
+    // sum-to-zero / parametric-orthogonalization `Z` is not norm-preserving and
+    // typically DROPS the constant direction, so the restricted ridge is
+    // neither idempotent nor aligned with `null(Zᵀ S_bend Z)` and shrinks
+    // penalized directions (the #1266/#1476 flat-collapse / EDF mis-allocation
+    // class). This is the single chokepoint every basis flows through, so
+    // rebuild the ridge here from the null space of the constrained `Primary`
+    // penalty, exactly as the 1-D B-spline / tensor / thin-plate paths do in
+    // their own local builds. (Idempotent with those local rebuilds: when no
+    // further `Primary`-null directions survive, the rebuilt ridge equals the
+    // local one; when this global `Z` removes more, only this rebuild is
+    // correct.) Scoped to `coefficient_gauge.is_some()`: with no global
+    // transform the penalties are untouched and the basis-local ridge already
+    // lives in the fit chart.
+    let mut penalty_candidates = penalty_candidates;
+    if coefficient_gauge.is_some()
+        && penalty_candidates
+            .iter()
+            .any(|c| matches!(c.source, PenaltySource::DoublePenaltyNullspace))
+    {
+        // Nonzero-row support of a (symmetric) penalty matrix: the coefficient
+        // range it actually penalizes. A per-level `by=factor` smooth emits one
+        // `Primary`+`DoublePenaltyNullspace` pair PER LEVEL, each confined to
+        // that level's disjoint `[off..off+p]` diagonal block (#1427), so a
+        // ridge must be rebuilt from the Primary sharing ITS support — not the
+        // first global Primary, and not the summed bending (which would collapse
+        // the independent per-level λ). For a single smooth term there is one
+        // Primary spanning the whole block and this reduces to the simple case.
+        const SUPPORT_TOL: f64 = 0.0;
+        let support_rows = |m: &Array2<f64>| -> (usize, usize) {
+            let n = m.nrows();
+            let mut lo = n;
+            let mut hi = 0usize;
+            for i in 0..n {
+                let any = (0..m.ncols()).any(|j| m[[i, j]].abs() > SUPPORT_TOL);
+                if any {
+                    lo = lo.min(i);
+                    hi = hi.max(i + 1);
+                }
+            }
+            (lo, hi)
+        };
+        // Snapshot each Primary's support + a clone of its matrix (immutable
+        // borrow released before we mutate the ridges below).
+        let primaries: Vec<((usize, usize), ConstructiveQuadratic)> = penalty_candidates
+            .iter()
+            .filter(|c| matches!(c.source, PenaltySource::Primary))
+            .map(|c| -> Result<_, BasisError> {
+                Ok((
+                    support_rows(&c.matrix),
+                    c.matrix
+                        .scaled(c.normalization_scale, "physical global smooth primary")?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for candidate in &mut penalty_candidates {
+            if !matches!(candidate.source, PenaltySource::DoublePenaltyNullspace) {
+                continue;
+            }
+            let q = candidate.matrix.nrows();
+            let (rlo, rhi) = support_rows(&candidate.matrix);
+            // The Primary whose support CONTAINS this ridge's support (the
+            // co-located bending block). Falls back to the unique Primary when
+            // the ridge is (numerically) empty.
+            let owner = primaries
+                .iter()
+                .find(|((plo, phi), _)| *plo <= rlo && rhi <= *phi)
+                .or_else(|| (primaries.len() == 1).then(|| &primaries[0]))
+                .ok_or_else(|| {
+                    BasisError::InvalidInput(format!(
+                        "double-penalty ridge for smooth '{}' has no co-located primary penalty",
+                        term_name
+                    ))
+                })?;
+            let ((plo, phi), s_full) = owner;
+            // Rebuild from the physical Primary and ridge submatrices. Rank
+            // revelation on the Primary's retained energy factor preserves
+            // the structural null space through this global chart, while the
+            // restricted ridge supplies the function-metric action. No signed
+            // spectrum of a rounded dense congruence is classified (#2318).
+            let block = ConstructiveQuadratic::from_energy_factor(
+                s_full.factor().slice(s![.., *plo..*phi]).to_owned(),
+                "owned global smooth primary block",
+            )?;
+            // The support-block extraction rebuilds the quadratic from a
+            // sliced factor, so re-attach the declared structural frame
+            // restricted to the same block (it is `None` when the frame
+            // has support outside the block, and the rebuild then falls
+            // back to measuring — never guesses).
+            let block = match s_full.structural_null_frame_block(*plo, *phi) {
+                Some(frame) => block.with_structural_null_frame(
+                    frame,
+                    "owned global smooth primary block structural frame",
+                )?,
+                None => block,
+            };
+            let ridge_full = candidate.matrix.scaled(
+                candidate.normalization_scale,
+                "physical global smooth null ridge",
+            )?;
+            let ridge_block = ConstructiveQuadratic::from_energy_factor(
+                ridge_full.factor().slice(s![.., *plo..*phi]).to_owned(),
+                "owned global smooth null-ridge block",
+            )?;
+            let rebuilt_block =
+                crate::basis::rebuild_metric_consistent_ridge(&block, &ridge_block)?;
+            match rebuilt_block {
+                Some(ridge_block) => {
+                    let mut full_factor =
+                        Array2::<f64>::zeros((ridge_block.factor().nrows(), q));
+                    full_factor
+                        .slice_mut(s![.., *plo..*phi])
+                        .assign(ridge_block.factor());
+                    let full = ConstructiveQuadratic::from_energy_factor(
+                        full_factor,
+                        "embedded global smooth null ridge",
+                    )?;
+                    let (_, scale) = normalize_penalty_in_constrained_space(full.dense());
+                    candidate.matrix = full
+                        .scaled(1.0 / scale, "normalized embedded global smooth null ridge")?;
+                    candidate.normalization_scale = scale;
+                    candidate.kronecker_factors = None;
+                    candidate.op = None;
+                }
+                // Constrained bending block is full rank: no null space to
+                // shrink. Zero the ridge; the filter drops it.
+                None => {
+                    candidate.matrix = ConstructiveQuadratic::zero(q);
+                    candidate.normalization_scale = 1.0;
+                    candidate.kronecker_factors = None;
+                    candidate.op = None;
+                }
+            }
+        }
+    }
+    Ok(penalty_candidates)
 }
 
 fn maybe_smooth_identifiability_transform(
