@@ -184,7 +184,7 @@ pub fn transformation_normal_alo_row_geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformation_normal::{TRANSFORMATION_MONOTONICITY_EPS, log_normal_cdf_diff};
+    use crate::transformation_normal::TRANSFORMATION_MONOTONICITY_EPS;
 
     fn scalar_nll(alpha: [f64; 2]) -> f64 {
         let value = [1.0, 0.4];
@@ -200,13 +200,12 @@ mod tests {
         let h_prime = TRANSFORMATION_MONOTONICITY_EPS
             + derivative[0] * alpha[0]
             + derivative[1] * alpha[1];
-        let lower =
-            lower_basis[0] * alpha[0] + lower_basis[1] * alpha[1] + offset + lower_floor;
-        let upper =
-            upper_basis[0] * alpha[0] + upper_basis[1] * alpha[1] + offset + upper_floor;
-        weight
-            * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln()
-                + log_normal_cdf_diff(upper, lower).expect("finite endpoint mass"))
+        // gam#2600: the replayed row density is the untruncated MLT density
+        // log φ(h) + log h'. The endpoint bases and floors above are still part
+        // of the saved row state (they define the certified support) but they
+        // carry no normalizer term, so they do not enter here.
+        let _ = (lower_basis, upper_basis, lower_floor, upper_floor);
+        weight * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln())
     }
 
     #[test]
