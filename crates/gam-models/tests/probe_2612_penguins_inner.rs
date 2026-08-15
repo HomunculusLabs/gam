@@ -362,3 +362,32 @@ fn zz_probe_2612_penguins_stride3_inner_trail() {
         },
     );
 }
+
+/// The stride-4 split, which is the one the FAILING acceptance arm
+/// (`gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet`) uses.
+/// Its sibling above is the stride-3 `_on_real_data` arm, which CI records as a
+/// TIMEOUT rather than a FAIL — so the two arms need separate trails, because a
+/// verdict that was never reached is not the same finding as one that was.
+#[test]
+fn zz_probe_2612_penguins_stride4_inner_trail() {
+    init();
+    let (train, test, species) = penguins_split(4);
+    run(
+        "D penguins stride-4",
+        &train,
+        PENGUINS_FORMULA,
+        &test,
+        |model| {
+            species
+                .iter()
+                .map(|name| {
+                    model
+                        .class_levels
+                        .iter()
+                        .position(|level| level == name)
+                        .expect("species level present")
+                })
+                .collect()
+        },
+    );
+}
