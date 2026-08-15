@@ -51,7 +51,7 @@ use csv::StringRecord;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand_distr::{Bernoulli, Distribution, Poisson};
+use rand_distr::{Bernoulli, Distribution, Normal, Poisson};
 
 /// Which null family/DGP a replicate is drawn from. In every case the smooth's
 /// covariate `z ~ U(0,1)` has NO effect on the mean — the smooth `s(z)` is
@@ -62,6 +62,19 @@ enum NullFamily {
     PoissonLog,
     /// `y ~ Bernoulli(logit⁻¹(−0.2 + 0.9 x))`, logit link.
     BernoulliLogit,
+    /// `y ~ N(0.3 + 0.8 x, 0.5²)`, identity link — the family whose
+    /// log-likelihood IS the quadratic every other lane here expands to.
+    ///
+    /// It exists as a DISCRIMINATOR, not for coverage. The reference and the
+    /// Lawley factor are both second-order expansions of the log-likelihood
+    /// about the penalized fit, so on Poisson and Bernoulli a size miss has two
+    /// readings that no amount of replication separates: the reference is wrong,
+    /// or the expansion is. On a Gaussian response the expansion is exact in `β`
+    /// — `ℓ` is a quadratic, `Δε` is zero to the order Lawley works at — and the
+    /// only inexactness left is the profiled `σ̂`. So a Gaussian cell that lands
+    /// on nominal says the reference is right and the residual elsewhere is the
+    /// expansion; a Gaussian cell that misses says it is not, and by how much.
+    GaussianIdentity,
 }
 
 impl NullFamily {
@@ -69,12 +82,14 @@ impl NullFamily {
         match self {
             NullFamily::PoissonLog => "poisson",
             NullFamily::BernoulliLogit => "binomial",
+            NullFamily::GaussianIdentity => "gaussian",
         }
     }
     fn label(self) -> &'static str {
         match self {
             NullFamily::PoissonLog => "poisson/log",
             NullFamily::BernoulliLogit => "bernoulli/logit",
+            NullFamily::GaussianIdentity => "gaussian/identity",
         }
     }
 }
@@ -99,6 +114,10 @@ fn null_replicate(family: NullFamily, n: usize, seed: u64) -> gam::data::Encoded
                 let mu = 1.0 / (1.0 + (-eta).exp());
                 let bit = Bernoulli::new(mu).expect("bernoulli p").sample(&mut rng);
                 if bit { 1.0 } else { 0.0 }
+            }
+            NullFamily::GaussianIdentity => {
+                let mean = 0.3 + 0.8 * x; // no z term — the smooth is null-true.
+                Normal::new(mean, 0.5).expect("normal").sample(&mut rng)
             }
         };
         rows.push(StringRecord::from(vec![
@@ -864,6 +883,84 @@ fn zz_measure_bernoulli_wide_basis_size_versus_n_2672() {
         size_se(0.05, REPS),
         size_se(0.01, REPS)
     );
+}
+
+/// #2672: THE DISCRIMINATOR. On a family whose log-likelihood is exactly the
+/// quadratic every other lane expands to, the smooth-term LR test must be the
+/// right size — and if it is not, the reference is wrong and no amount of `n`
+/// will fix it.
+///
+/// The grid's residual after the selection replay's descent landed is confined
+/// to `bernoulli/logit, k = 12`, at `0.119` against a nominal `0.05` on `n ∈
+/// {30, 50}` while every other cell averages `0.046`. That has two readings with
+/// opposite consequences:
+///
+/// * the REFERENCE is still wrong for a wide basis on a binary response — a
+///   defect, and one that will not decay with `n`;
+/// * the QUADRATIC EXPANSION is wrong there — the reference and the Lawley
+///   factor are both second-order expansions of `ℓ` about the penalized fit, and
+///   30 Bernoulli trials against an 11-column smooth is the worst case for one.
+///
+/// `zz_measure_bernoulli_wide_basis_size_versus_n_2672` separates them with `n`,
+/// which takes the sweep out to `n = 400` before the MC error resolves anything.
+/// A Gaussian response separates them at `n = 30`: `ℓ` is a quadratic in `β`
+/// EXACTLY, so the expansion is not an approximation and the only inexactness
+/// left is the profiled `σ̂`. Same `n`, same `k`, same basis, same replicate
+/// count, same driver.
+///
+/// This is a CONTRACT and not a `zz_` diagnostic, because "the reference is
+/// right where nothing is being approximated" is a claim the reference has to
+/// keep. The band is the same one the rest of this file uses — `3·SE` plus half
+/// the cell's own first-order distortion — evaluated per cell and pooled.
+#[test]
+fn gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672() {
+    init_parallelism();
+
+    const REPS: usize = 120;
+    let ns = [30usize, 50];
+    let ks = [6usize, 12];
+
+    let mut cells = Vec::<CellResult>::new();
+    for &k in &ks {
+        for &n in &ns {
+            let mut counts = SizeCounts::default();
+            let mut refused = 0usize;
+            let mut first_refusal: Option<String> = None;
+            for rep in 0..REPS {
+                let seed = mix_seed(NullFamily::GaussianIdentity.label(), n, k, rep);
+                let data = null_replicate(NullFamily::GaussianIdentity, n, seed);
+                match run_one(NullFamily::GaussianIdentity, k, &data) {
+                    Ok(Some(r)) => counts.ingest(&r),
+                    Ok(None) => {}
+                    Err(message) => {
+                        refused += 1;
+                        first_refusal.get_or_insert(message);
+                    }
+                }
+            }
+            if let Some(message) = first_refusal.as_ref() {
+                eprintln!(
+                    "[#2672 gaussian] n={n} k={k}: {refused}/{REPS} replicate fits REFUSED \
+                     and contribute no calibration datum. First: {message}"
+                );
+            }
+            cells.push(CellResult {
+                n,
+                k,
+                label: NullFamily::GaussianIdentity.label(),
+                used: counts.used,
+                refused,
+                est_applied: counts.est_lambda_applied,
+                size_first_05: counts.size(counts.rej_first_05),
+                size_fixed_05: counts.size(counts.rej_fixed_05),
+                size_est_05: counts.size(counts.rej_est_05),
+                size_first_01: counts.size(counts.rej_first_01),
+                size_est_01: counts.size(counts.rej_est_01),
+            });
+        }
+    }
+
+    assert_grid_calibration(&cells, REPS, "gaussian");
 }
 
 /// Deterministic per-cell, per-replicate seed so the grid is fully reproducible
