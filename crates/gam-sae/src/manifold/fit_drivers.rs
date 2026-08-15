@@ -93,6 +93,37 @@ pub(crate) enum StateMoveSite {
     ExitBlockSweep,
     /// AFTER the loop: the exit objective warranty restored a banked state (#2228).
     ExitWarrantyRestore,
+    /// The gauge-orbit block descent committed a decrease, inside the loop
+    /// (#2762). Reached only after the Newton line search AND the proximal
+    /// correction both failed to find one, so it is the same "a real objective
+    /// improvement was still available" statement as `ProximalCorrectionStep`,
+    /// in the block where the Newton model is structurally unable to look.
+    GaugeOrbitDescent,
+}
+
+/// What one [`SaeManifoldTerm::descend_gauge_orbit`] call did (#2762). All
+/// fields are measurements, not requests: `rounds == 0` with a large
+/// `max_directional_derivative` is the honest report that the removed span
+/// carries live slope no FINITE motion along it can cash in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct GaugeOrbitDescent {
+    /// Rounds that committed a decrease clearing the material floor.
+    pub(crate) rounds: usize,
+    /// Total penalized-objective decrease committed across those rounds.
+    pub(crate) objective_decrease: f64,
+    /// Dimension of the removed span at the last round examined.
+    pub(crate) dimension: usize,
+    /// `maxᵢ |gᵀvᵢ|` over the removed span at the last round examined — the
+    /// precondition `quotient_residual_norm_sq`'s removal assumes.
+    pub(crate) max_directional_derivative: f64,
+    /// Objective evaluations spent. Each is one `penalized_objective_total`.
+    pub(crate) evaluations: usize,
+}
+
+impl GaugeOrbitDescent {
+    pub(crate) fn moved(&self) -> bool {
+        self.rounds > 0 && self.objective_decrease > 0.0
+    }
 }
 
 impl StateMoveSite {
@@ -129,6 +160,13 @@ impl StateMoveSite {
                 "the pass moved state at the exit-warranty RESTORE, AFTER the loop - a \
                  restore, so the state may be bit-identical to entry and the refusal may be \
                  rejecting an idempotent pass"
+            }
+            Self::GaugeOrbitDescent => {
+                "the pass moved state at the GAUGE-ORBIT block descent, inside the loop - it \
+                 committed a decrease clearing the evidence MATERIAL floor in the span the \
+                 convergence measure removes, so a real objective improvement was still \
+                 available at the state being certified, in the block the Newton model cannot \
+                 look in"
             }
         }
     }
@@ -2493,6 +2531,244 @@ impl SaeManifoldTerm {
             orthonormal.push(gauge);
         }
         Ok(orthonormal)
+    }
+
+    /// #2762 — MINIMIZE the penalized objective over the span every quotient
+    /// measure removes, instead of removing it and hoping it was flat.
+    ///
+    /// # Why this block exists at all
+    ///
+    /// The chart-gauge orbit is an exact first-order symmetry of the
+    /// RECONSTRUCTION (measured reconstruction-invariant to `~1e-16` relative
+    /// over 1333 constructions) and NOT of the penalized objective: the ARD
+    /// prior on `t` and the smoothness prior on `β` are written on the chart
+    /// coordinates, so a reparametrisation moves them. That asymmetry is what
+    /// makes this subspace pathological for every mover in the inner solve, and
+    /// it is a curvature statement, not a bookkeeping one:
+    ///
+    /// * the data-fit Hessian contributes NOTHING along the orbit, so the only
+    ///   curvature there is the priors' — tiny next to the transverse block;
+    /// * a direction with tiny curvature and a live gradient needs a LONG step;
+    /// * and every globalization in this solver is a step-SHORTENING device.
+    ///   Armijo backtracks, the LM gain ratio grows the ridge, the terminal
+    ///   polish's damping ladder suppresses exactly the near-null modes. None of
+    ///   them can take a long step, so the orbit component of the residual is
+    ///   the one part of `g` no mover reduces.
+    ///
+    /// Measured at the `zz2015_tiny_inner_crawl_terminates` refusal (#2762),
+    /// `‖g‖ = 2.075e-1` of which `‖Π∥gauge g‖ = 2.016e-1` — 94% of the residual
+    /// ENERGY inside a 4-dimensional span:
+    ///
+    /// | direction | best objective drop | at α |
+    /// |---|---|---|
+    /// | steepest descent `−g/‖g‖` | `1.879e-4` | `1e-3` |
+    /// | the removed span | `1.090e-1` | `1.0` |
+    ///
+    /// against a material floor of `1.949e-4`. Steepest descent lands BELOW the
+    /// floor — the stall detector was right — while the orbit buys 580x more at
+    /// a 1000x longer step, because the 6% transverse component of `−g` is stiff
+    /// enough to cap the ambient line search three decades early. The solve then
+    /// refuses at `intensive_over_bound = 5.8e3` having declared an objective
+    /// stall while holding 559 stall-resolutions of realizable decrease.
+    ///
+    /// # What this does, and why it changes no estimand
+    ///
+    /// It is plain block-coordinate descent on the objective's own parameter
+    /// space: minimize `f` over the removed span, let the Newton/MM movers have
+    /// the transverse block where they are well-conditioned. Both blocks
+    /// decrease the SAME scalar (`penalized_objective_total`, the exact function
+    /// the inner Armijo line search descends and the KKT gradient
+    /// differentiates), so the composition is monotone and a joint fixed point
+    /// is stationary in both — which is full stationarity. Nothing about the
+    /// model, the priors, or the likelihood changes; the gauge coordinate stops
+    /// being arbitrary and starts being CHOSEN by the objective.
+    ///
+    /// The consequence for the gate is the point of the exercise: at a state
+    /// this has converged on, `Π∥gauge g ≈ 0`, so the quotient norm and the raw
+    /// norm agree and the precondition `quotient_residual_norm_sq`'s removal
+    /// assumes holds BY CONSTRUCTION rather than by assertion.
+    ///
+    /// # The line search, and why every bound in it is derived
+    ///
+    /// Along `d̂ = −Π_V g/‖Π_V g‖` the objective is swept geometrically between
+    /// two ENDPOINTS THE STATE ITSELF SUPPLIES, not between chosen constants:
+    ///
+    /// * the far end is [`Self::inner_iterate_scale`] — one step may not move
+    ///   the iterate further than the iterate's own magnitude, the same
+    ///   scale-free trust radius the Newton step already clips against and the
+    ///   same one the KKT tolerance is measured in;
+    /// * the near end is `material_floor / ‖Π_V g‖`, below which the FIRST-ORDER
+    ///   model itself predicts less than the objective's own resolution — so no
+    ///   shorter step could be committed even if it were exact. That is a proof
+    ///   that the sweep is complete, not a cap on it.
+    ///
+    /// The best bracket is then refined once by the parabola through
+    /// `(α/2, α, 2α)`, which is exact for a quadratic and is accepted only if it
+    /// measures better. A round commits only a decrease clearing the material
+    /// floor `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL · (1 + |f|)` — the same
+    /// floor the evidence lane's Armijo and proximal gates use — so a committed
+    /// move is never the ε-harvest that makes an inner map non-idempotent, and
+    /// rounds are strictly decreasing in `f` and therefore finite.
+    ///
+    /// Every rejected trial restores the snapshot bit-for-bit; a round that
+    /// commits nothing leaves the state exactly as it found it.
+    pub(crate) fn descend_gauge_orbit(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        penalized_gram_scale: &[f64],
+        max_rounds: usize,
+    ) -> Result<GaugeOrbitDescent, String> {
+        let mut outcome = GaugeOrbitDescent::default();
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let dense_len = n.saturating_mul(q);
+        let border_dim = self.factored_border_dim();
+        if dense_len + border_dim == 0 {
+            return Ok(outcome);
+        }
+        for _ in 0..max_rounds {
+            let system = match self.assemble_arrow_schur(target, rho, registry) {
+                Ok(system) => system,
+                Err(_) => return Ok(outcome),
+            };
+            if system.rows.len() != n
+                || system.row_offsets.len() != n + 1
+                || system.gb.len() != border_dim
+            {
+                return Ok(outcome);
+            }
+            let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+            for (row_index, row) in system.rows.iter().enumerate() {
+                let base = system.row_offsets[row_index];
+                let dim = system.row_dims[row_index];
+                if base + dim > dense_len || row.gt.len() < dim {
+                    return Ok(outcome);
+                }
+                for axis in 0..dim {
+                    gradient[base + axis] = row.gt[axis];
+                }
+            }
+            for (index, &value) in system.gb.iter().enumerate() {
+                gradient[dense_len + index] = value;
+            }
+            drop(system);
+            if !gradient.iter().all(|value| value.is_finite()) {
+                return Ok(outcome);
+            }
+
+            let basis = self.gauge_quotient_basis(penalized_gram_scale)?;
+            outcome.dimension = basis.len();
+            let mut direction = Array1::<f64>::zeros(gradient.len());
+            let mut max_directional = 0.0_f64;
+            for vector in &basis {
+                if vector.len() != gradient.len() {
+                    continue;
+                }
+                let coeff = gradient.dot(vector);
+                max_directional = max_directional.max(coeff.abs());
+                for index in 0..direction.len() {
+                    direction[index] -= coeff * vector[index];
+                }
+            }
+            outcome.max_directional_derivative = max_directional;
+            let slope = direction.dot(&direction).sqrt();
+            if !(slope.is_finite() && slope > 0.0) {
+                return Ok(outcome);
+            }
+            for value in direction.iter_mut() {
+                *value /= slope;
+            }
+
+            let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
+            if !base_objective.is_finite() {
+                return Ok(outcome);
+            }
+            let material_floor =
+                SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + base_objective.abs());
+            // Both ends of the sweep come from the state: the far end is the
+            // iterate's own magnitude, the near end is where the first-order
+            // model stops predicting a committable decrease.
+            let far_alpha = self.inner_iterate_scale();
+            let near_alpha = material_floor / slope;
+            if !(far_alpha.is_finite() && far_alpha > 0.0 && near_alpha.is_finite()) {
+                return Ok(outcome);
+            }
+            let snapshot = self.snapshot_mutable_state();
+            let evaluate = |term: &mut Self, alpha: f64| -> f64 {
+                if !(alpha.is_finite() && alpha > 0.0) {
+                    return f64::INFINITY;
+                }
+                let value = term
+                    .apply_newton_step(
+                        direction.slice(s![..dense_len]),
+                        direction.slice(s![dense_len..]),
+                        alpha,
+                    )
+                    .and_then(|()| term.penalized_objective_total(target, rho, registry, 1.0))
+                    .unwrap_or(f64::INFINITY);
+                if term.restore_mutable_state(&snapshot).is_err() {
+                    return f64::INFINITY;
+                }
+                if value.is_finite() { value } else { f64::INFINITY }
+            };
+
+            let mut best_alpha = 0.0_f64;
+            let mut best_value = base_objective;
+            let mut alpha = far_alpha;
+            while alpha >= near_alpha {
+                outcome.evaluations += 1;
+                let value = evaluate(self, alpha);
+                if value < best_value {
+                    best_value = value;
+                    best_alpha = alpha;
+                }
+                alpha *= 0.5;
+            }
+            if best_alpha > 0.0 {
+                // One parabolic refinement through the bracketing triple. Exact
+                // for a quadratic, and taken only if it measures better.
+                let low = evaluate(self, best_alpha * 0.5);
+                let high = evaluate(self, best_alpha * 2.0);
+                outcome.evaluations += 2;
+                let denominator = low - 2.0 * best_value + high;
+                if denominator > 0.0 {
+                    let refined = best_alpha * (1.0 + 0.75 * (low - high) / denominator);
+                    if refined.is_finite() && refined > 0.0 {
+                        outcome.evaluations += 1;
+                        let value = evaluate(self, refined);
+                        if value < best_value {
+                            best_value = value;
+                            best_alpha = refined;
+                        }
+                    }
+                }
+            }
+
+            let decrease = base_objective - best_value;
+            if !(best_alpha > 0.0 && decrease > material_floor) {
+                self.restore_mutable_state(&snapshot)
+                    .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+                return Ok(outcome);
+            }
+            self.apply_newton_step(
+                direction.slice(s![..dense_len]),
+                direction.slice(s![dense_len..]),
+                best_alpha,
+            )
+            .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+            outcome.rounds += 1;
+            outcome.objective_decrease += decrease;
+            log::debug!(
+                "SAE gauge-orbit descent: round {} committed {decrease:.6e} at α={best_alpha:.6e} \
+                 (objective {base_objective:.9e} → {best_value:.9e}, span dim {}, \
+                 maxᵢ|gᵀvᵢ|={max_directional:.6e}, floor {material_floor:.6e})",
+                outcome.rounds,
+                outcome.dimension,
+            );
+        }
+        Ok(outcome)
     }
 
     /// Quotient KKT-gradient norm² for the inner convergence gate (#1117): the
@@ -7287,6 +7563,57 @@ impl SaeManifoldTerm {
                     );
                     self.restore_mutable_state(&snapshot)?;
                     self.reclaim_arrow_assembly_workspace(&mut sys);
+                    // #2762 — THE BLOCK THE NEWTON MODEL CANNOT LOOK IN.
+                    //
+                    // Both movers have now failed to find a decrease along a
+                    // Newton direction. That is a statement about the Newton
+                    // model, not about the objective: the chart-gauge orbit
+                    // carries no data-fit curvature at all (it is an exact
+                    // symmetry of the reconstruction), so the residual there
+                    // needs a LONG step, and both movers above — Armijo
+                    // backtracking and the proximal ridge escalation — can only
+                    // SHORTEN one. The measurement that forced this is on
+                    // `descend_gauge_orbit`: at the `zz2015` refusal the best
+                    // ambient step bought `1.879e-4` against a `1.949e-4` floor
+                    // (correctly a stall) while the removed span bought
+                    // `1.090e-1` at a 1000x longer step.
+                    //
+                    // So before this loop concludes there is no strict decrease
+                    // left, minimize the objective over exactly the span the
+                    // convergence measure removes. It commits only a decrease
+                    // clearing the same material floor as the two gates above,
+                    // and a state it converges on satisfies the precondition the
+                    // quotient measure's removal assumes.
+                    let orbit = self.descend_gauge_orbit(
+                        target,
+                        rho,
+                        analytic_penalties,
+                        &rho.lambda_smooth_vec()?,
+                        // ONE block-descent step per outer iteration: this is
+                        // alternating minimization, not a nested solve, and the
+                        // alternation's budget is the outer loop's own
+                        // `max_iter`. No second budget is introduced, and no
+                        // constant is chosen — `continue` below spends an outer
+                        // iteration for it exactly as an accepted Newton step
+                        // does.
+                        1,
+                    )?;
+                    if orbit.moved() {
+                        state_moved = true;
+                        moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
+                        log::debug!(
+                            "run_joint_fit_arrow_schur: gauge-orbit descent recovered \
+                             {:.6e} over {} round(s) at iteration {outer_iteration} \
+                             (span dim {}, maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations) \
+                             where both Newton movers found none",
+                            orbit.objective_decrease,
+                            orbit.rounds,
+                            orbit.dimension,
+                            orbit.max_directional_derivative,
+                            orbit.evaluations,
+                        );
+                        continue;
+                    }
                     termination = JointFitTermination::NoStrictDecrease;
                     break;
                 }
