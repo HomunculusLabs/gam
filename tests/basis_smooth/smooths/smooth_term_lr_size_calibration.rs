@@ -44,7 +44,8 @@ use gam::smooth::{
     smooth_term_lr_inference_forspec,
 };
 use gam::{
-    FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
+    FitConfig, FitRequest, FitResult, encode_recordswith_inferred_schema, fit_from_formula,
+    init_parallelism, materialize,
 };
 
 use csv::StringRecord;
@@ -961,6 +962,140 @@ fn gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672() {
     }
 
     assert_grid_calibration(&cells, REPS, "gaussian");
+}
+
+/// DIAGNOSTIC (not a contract, #2672): is the Gaussian arm's anti-conservatism
+/// the PROFILED SCALE?
+///
+/// `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672` reads
+/// `size@.05 = 0.0792` pooled over 480 replicates against nominal `0.05`
+/// (pooled s.e. `0.00995`, so `2.9` s.e.), with `first == fixed == est` in every
+/// cell — the Lawley factor is inert on a Gaussian, exactly as its own theory
+/// says, so the whole miss belongs to the REFERENCE.
+///
+/// The mechanism this measures: `σ` is PROFILED, and the reference is the
+/// known-scale law. With `σ̂² = RSS/n` from the same data,
+///
+/// ```text
+/// W = 2(ℓ_full − ℓ_null) = n·log(RSS_null/RSS_full) ≈ Q · n/RSS_full·σ²
+///                        ≈ Q / (V/ν),    Q = Σ_j w_j χ²_1,  V ~ χ²_ν
+/// ```
+///
+/// with `ν = n − edf_total` the residual degrees of freedom. The reference
+/// scores `Q`, the statistic is `Q` divided by an independent `V/ν` whose mean
+/// is one and whose spread is `√(2/ν)`. Both the mean shift `ν/(ν−2)` and the
+/// extra spread push the test anti-conservative, and both are `O(1/ν)` — which
+/// is why this is invisible at `n = 1000` and worth `0.03` in size at `n = 30`.
+/// It is the same reason mgcv's smooth-term p-values use an `F` reference when
+/// the scale is estimated and a `χ²` when it is known.
+///
+/// The arms, scored on ONE set of fits so nothing but the reference differs:
+///
+/// * `shipped` — what the driver publishes today.
+/// * `two-moment` — `P(χ²_a > W/g)` from the published `(a, g)`, the same shape
+///   with the exact spectrum and the selection replay removed, so the `F` arm
+///   below has a same-family comparison.
+/// * `F` — `P(F_{a,ν} > W/(g·a))`, the two-moment shape with the profiled
+///   scale's own variability folded in.
+///
+/// If the `F` arm lands on nominal where the other two do not, the residual is
+/// the profiled scale and it is a defect in the reference for every
+/// scale-ESTIMATED family. If it does not, this hypothesis is dead and the
+/// reference is wrong for some other reason.
+#[test]
+fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
+    init_parallelism();
+
+    const REPS: usize = 200;
+    let ns = [30usize, 50, 100, 200];
+    let ks = [6usize, 12];
+    let family = NullFamily::GaussianIdentity;
+
+    eprintln!(
+        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped/two-moment/F | mean_W  mean_a \
+         mean_g  mean_nu | mean E[W(lhat)]  ratio",
+        "n", "k", "used"
+    );
+    for &k in &ks {
+        for &n in &ns {
+            let (mut shipped, mut moment, mut fisher) = (0usize, 0usize, 0usize);
+            let (mut used, mut sum_w, mut sum_a, mut sum_g, mut sum_nu, mut sum_predicted) =
+                (0usize, 0.0, 0.0, 0.0, 0.0, 0.0);
+            let mut predicted_used = 0usize;
+            for rep in 0..REPS {
+                let seed = mix_seed(family.label(), n, k, rep);
+                let data = null_replicate(family, n, seed);
+                let Ok(Some(r)) = run_one(family, k, &data) else {
+                    continue;
+                };
+                let provenance = &r.ref_df_provenance;
+                let (a, g) = (provenance.chi_square_df, provenance.scale);
+                if !(r.statistic_lr.is_finite() && a.is_finite() && a > 0.0 && g > 0.0) {
+                    continue;
+                }
+                // The residual degrees of freedom the profiled `σ̂` actually
+                // has, from the same fit seen through the ordinary entry point.
+                let cfg = FitConfig {
+                    family: Some(family.family_name().to_string()),
+                    ..FitConfig::default()
+                };
+                let formula = format!("y ~ x + s(z, k={k})");
+                let FitResult::Standard(standard) =
+                    fit_from_formula(&formula, &data, &cfg).expect("fit")
+                else {
+                    panic!("expected a standard fit");
+                };
+                let Some(edf_total) = standard.fit.edf_total() else {
+                    continue;
+                };
+                let residual_df = (n as f64 - edf_total).max(1.0);
+                used += 1;
+                sum_w += r.statistic_lr;
+                sum_a += a;
+                sum_g += g;
+                sum_nu += residual_df;
+                if let Some(replay) = provenance.selection.replay() {
+                    let mean = replay.selection_mean();
+                    if mean.is_finite() {
+                        sum_predicted += mean;
+                        predicted_used += 1;
+                    }
+                }
+                if r.p_value_corrected <= 0.05 {
+                    shipped += 1;
+                }
+                let chi2 = statrs::distribution::ChiSquared::new(a).expect("chi2");
+                use statrs::distribution::ContinuousCDF;
+                if (1.0 - chi2.cdf(r.statistic_corrected / g)).clamp(0.0, 1.0) <= 0.05 {
+                    moment += 1;
+                }
+                let f = statrs::distribution::FisherSnedecor::new(a, residual_df).expect("F");
+                if (1.0 - f.cdf(r.statistic_corrected / (g * a))).clamp(0.0, 1.0) <= 0.05 {
+                    fisher += 1;
+                }
+            }
+            let denominator = used.max(1) as f64;
+            eprintln!(
+                "[zz2672-scale] {n:>5} {k:>3} {used:>5} |   {:.3} / {:.3} / {:.3}          \
+                 {:>6.3} {:>6.3} {:>6.3} {:>7.2} | {:>8.4}  {:>6.3}",
+                shipped as f64 / denominator,
+                moment as f64 / denominator,
+                fisher as f64 / denominator,
+                sum_w / denominator,
+                sum_a / denominator,
+                sum_g / denominator,
+                sum_nu / denominator,
+                sum_predicted / predicted_used.max(1) as f64,
+                (sum_w / denominator) / (sum_predicted / predicted_used.max(1) as f64),
+            );
+        }
+    }
+    eprintln!(
+        "[zz2672-scale] read: nominal 0.05, MC s.e. {:.4} per cell at {REPS} reps. \
+         `ratio` is mean(W) against the mean of the law the p-value is read from — \
+         under the profiled scale it should sit near ν/(ν−2), not at one.",
+        size_se(0.05, REPS)
+    );
 }
 
 /// Deterministic per-cell, per-replicate seed so the grid is fully reproducible
