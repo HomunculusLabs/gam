@@ -20,20 +20,20 @@ const ARD_SPREAD_FLOOR: f64 = 1.0e-12;
 /// Why one bounded joint-fit chunk returned. Ordinary fits may use the two
 /// heuristic exits; evidence is certified only by [`Self::NoStrictDecrease`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JointFitTermination {
+pub(crate) enum JointFitTermination {
     Frozen,
     Heuristic,
     NoStrictDecrease,
     IterationGrantExhausted,
 }
 
-struct JointFitOutcome {
-    loss: SaeManifoldLoss,
-    termination: JointFitTermination,
-    state_moved: bool,
+pub(crate) struct JointFitOutcome {
+    pub(crate) loss: SaeManifoldLoss,
+    pub(crate) termination: JointFitTermination,
+    pub(crate) state_moved: bool,
     /// The FIRST site that moved state, for the evidence lane's refusal
     /// to name (see [`StateMoveSite`]).
-    moved_at: Option<StateMoveSite>,
+    pub(crate) moved_at: Option<StateMoveSite>,
 }
 
 pub(crate) struct EvidenceJointFitOutcome {
@@ -2727,22 +2727,58 @@ impl SaeManifoldTerm {
                 alpha *= 0.5;
             }
             if best_alpha > 0.0 {
-                // One parabolic refinement through the bracketing triple. Exact
-                // for a quadratic, and taken only if it measures better.
-                let low = evaluate(self, best_alpha * 0.5);
-                let high = evaluate(self, best_alpha * 2.0);
+                // GOLDEN-SECTION REFINEMENT of the bracket the halving grid
+                // located, run to the limit of what f64 function VALUES can
+                // resolve.
+                //
+                // A grid minimum plus one parabolic step is not enough here, and
+                // the trail says so: with that refinement the block committed a
+                // decrease on 603 consecutive calls and `maxᵢ|gᵀvᵢ|` never fell
+                // below `1.33e-1` — the round kept leaving slope behind because
+                // it stopped at a grid point, so the next round re-descended the
+                // same trough. A block step that does not leave its block
+                // stationary is not a block step.
+                //
+                // The bracket is `[α/2, 2α]` around the grid minimum and shrinks
+                // by the golden ratio, which is the optimal derivative-free
+                // contraction. It stops at `√ε` RELATIVE width: a smooth
+                // function's minimum cannot be located more precisely than that
+                // from values alone (near the minimum `f` varies quadratically,
+                // so a displacement of `√ε·α` changes `f` by `ε`-level noise) —
+                // an information bound of the f64 evaluation, not a chosen
+                // iteration count.
+                const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_894_9;
+                let mut low = best_alpha * 0.5;
+                let mut high = best_alpha * 2.0;
+                let resolution = f64::EPSILON.sqrt() * best_alpha;
+                let mut inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
+                let mut inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
+                let mut value_low = evaluate(self, inner_low);
+                let mut value_high = evaluate(self, inner_high);
                 outcome.evaluations += 2;
-                let denominator = low - 2.0 * best_value + high;
-                if denominator > 0.0 {
-                    let refined = best_alpha * (1.0 + 0.75 * (low - high) / denominator);
-                    if refined.is_finite() && refined > 0.0 {
-                        outcome.evaluations += 1;
-                        let value = evaluate(self, refined);
-                        if value < best_value {
-                            best_value = value;
-                            best_alpha = refined;
-                        }
+                while high - low > resolution {
+                    if value_low <= value_high {
+                        high = inner_high;
+                        inner_high = inner_low;
+                        value_high = value_low;
+                        inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
+                        value_low = evaluate(self, inner_low);
+                    } else {
+                        low = inner_low;
+                        inner_low = inner_high;
+                        value_low = value_high;
+                        inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
+                        value_high = evaluate(self, inner_high);
                     }
+                    outcome.evaluations += 1;
+                }
+                if value_low < best_value {
+                    best_value = value_low;
+                    best_alpha = inner_low;
+                }
+                if value_high < best_value {
+                    best_value = value_high;
+                    best_alpha = inner_high;
                 }
             }
 
@@ -6501,7 +6537,7 @@ impl SaeManifoldTerm {
         })
     }
 
-    fn run_joint_fit_arrow_schur_with_termination_policy(
+    pub(crate) fn run_joint_fit_arrow_schur_with_termination_policy(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &mut SaeManifoldRho,
@@ -6853,6 +6889,14 @@ impl SaeManifoldTerm {
         let mut lm_ridge_t = ridge_ext_coord;
         let mut lm_ridge_b = ridge_beta;
         let mut termination = JointFitTermination::IterationGrantExhausted;
+        // #2762 — whether the gauge-orbit block descent is armed for the NEXT
+        // objective-stall plateau in the ORDINARY lane. Same arm/disarm doctrine
+        // as `terminal_newton_polish_armed` in the evidence refine loop:
+        // consulting the block disarms it, and only a materially-descending
+        // Newton or proximal step re-arms, so a long fit that alternates real
+        // descent with plateaus gets one block consultation per plateau rather
+        // than an unbounded alternation.
+        let mut gauge_block_armed = true;
         let mut state_moved = false;
         // FIRST site to move state — `termination` is set only inside the Newton
         // loop, so without this the out-of-loop sites are unattributable.
@@ -7283,10 +7327,71 @@ impl SaeManifoldTerm {
                     consecutive_objective_stalls += 1;
                     if consecutive_objective_stalls >= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS
                     {
+                        // #2762 — THE SAME BLOCK, AT THE OTHER FIXED-POINT CLAIM.
+                        //
+                        // This comment used to say the shortcut fires "on the
+                        // gauge-orbit crawl ... immediately (constant EV ⇒
+                        // vanishing objective decrease)" — naming the exact
+                        // mechanism and then treating it as a reason to STOP.
+                        // The objective stops moving here because the movers can
+                        // only shorten a step and the remaining decrease lives in
+                        // a near-null block that needs a long one; measured on the
+                        // seeded two-circle fixture, this exit left `7.66e-2` of
+                        // penalized objective — relative `2.3e-3`, five orders
+                        // above the `1e-8` resolution this very branch calls "no
+                        // meaningful change" — recoverable in the removed span.
+                        //
+                        // A stall is only a fixed point if it is a fixed point of
+                        // BOTH blocks, so ask the other one before concluding.
+                        //
+                        // ARMED ONCE PER PLATEAU, on the same doctrine this file
+                        // already uses for the terminal Newton polish: consulting
+                        // the block disarms it, and only a materially-descending
+                        // NEWTON or proximal step re-arms. Without that, the
+                        // block's own decrease breaks the stall streak that
+                        // summoned it, the streak re-forms, and the ordinary
+                        // lane's cheap approximation becomes a budget-limited
+                        // grind — measured on the seeded two-circle fixture as
+                        // `IterationGrantExhausted` at 256 iterations where the
+                        // shipped exit is a bounded heuristic. One consultation
+                        // per plateau is what makes the exit state gauge-
+                        // minimized without changing what the exit MEANS.
+                        let orbit = if gauge_block_armed {
+                            gauge_block_armed = false;
+                            self.descend_gauge_orbit(
+                                target,
+                                rho,
+                                analytic_penalties,
+                                &rho.lambda_smooth_vec()?,
+                                max_iter.saturating_sub(outer_iteration).max(1),
+                            )?
+                        } else {
+                            GaugeOrbitDescent::default()
+                        };
+                        if orbit.moved() {
+                            state_moved = true;
+                            moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
+                            consecutive_objective_stalls = 0;
+                            previous_full_iterate_objective = f64::NAN;
+                            log::debug!(
+                                "run_joint_fit_arrow_schur: gauge-orbit descent recovered \
+                                 {:.6e} over {} round(s) at the objective-stall shortcut, \
+                                 iteration {outer_iteration} (span dim {}, \
+                                 maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations)",
+                                orbit.objective_decrease,
+                                orbit.rounds,
+                                orbit.dimension,
+                                orbit.max_directional_derivative,
+                                orbit.evaluations,
+                            );
+                            self.reclaim_arrow_assembly_workspace(&mut sys);
+                            continue;
+                        }
                         // The ordinary bounded fit has reached its documented
-                        // objective-stall approximation. The pre-step state is
-                        // unperturbed (the snapshot was taken from it), so no
-                        // restore is needed.
+                        // objective-stall approximation, now in both blocks. The
+                        // pre-step state is unperturbed (the snapshot was taken
+                        // from it, and a descent that commits nothing restores
+                        // it), so no restore is needed.
                         termination = JointFitTermination::Heuristic;
                         self.reclaim_arrow_assembly_workspace(&mut sys);
                         break;
@@ -7403,6 +7508,9 @@ impl SaeManifoldTerm {
             if let Some(step) = accepted_step {
                 state_moved = true;
                 moved_at.get_or_insert(StateMoveSite::AcceptedNewtonStep);
+                // Genuine transverse progress: the next plateau is a new one, so
+                // the gauge block is worth asking again (#2762).
+                gauge_block_armed = true;
                 // #2267 — A NEWTON STEP'S NATURAL LENGTH IS ONE.
                 //
                 // `backtracking_line_search` only ever CONTRACTS from its initial
@@ -7589,14 +7697,18 @@ impl SaeManifoldTerm {
                         rho,
                         analytic_penalties,
                         &rho.lambda_smooth_vec()?,
-                        // ONE block-descent step per outer iteration: this is
-                        // alternating minimization, not a nested solve, and the
-                        // alternation's budget is the outer loop's own
-                        // `max_iter`. No second budget is introduced, and no
-                        // constant is chosen — `continue` below spends an outer
-                        // iteration for it exactly as an accepted Newton step
-                        // does.
-                        1,
+                        // RUN THE BLOCK TO ITS OWN STATIONARITY, not one step of
+                        // it. `descend_gauge_orbit` returns at the first round
+                        // that cannot commit a material decrease, so this is a
+                        // bound, not a schedule — and the bound is the outer
+                        // loop's OWN remaining budget, so no second budget and
+                        // no constant enter. Measured on `zz2015` with a
+                        // one-round schedule: each round cost a full Newton
+                        // solve + line search + proximal correction to
+                        // rediscover that the transverse block had nothing,
+                        // which is the expensive half of an iteration spent to
+                        // learn something the previous round already proved.
+                        max_iter.saturating_sub(outer_iteration).max(1),
                     )?;
                     if orbit.moved() {
                         state_moved = true;
@@ -7619,6 +7731,7 @@ impl SaeManifoldTerm {
                 }
                 state_moved = true;
                 moved_at.get_or_insert(StateMoveSite::ProximalCorrectionStep);
+                gauge_block_armed = true;
             }
             // Affine gauge canonicalization is a representation change, but the
             // decoder smoothness term is part of the optimized objective — a

@@ -454,6 +454,9 @@ mod tests_outer_quasi_laplace_probe_budget_2080;
 mod lambda_smooth_1556_tests;
 
 #[cfg(test)]
+mod tests_gauge_orbit_descent_2762;
+
+#[cfg(test)]
 mod tests_behavior_column_equilibration_2015;
 #[cfg(test)]
 mod tests_behavior_isometry_2015;

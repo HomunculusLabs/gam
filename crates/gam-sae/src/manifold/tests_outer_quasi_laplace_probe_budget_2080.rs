@@ -122,7 +122,7 @@ pub(super) fn independent_two_circle_phases(n: usize, row: usize) -> (f64, f64) 
     )
 }
 
-fn two_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
+pub(super) fn two_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
     let mut fa = Array2::<f64>::zeros((2, p));
     let mut fb = Array2::<f64>::zeros((2, p));
     for j in 0..p {
