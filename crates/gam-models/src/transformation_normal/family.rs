@@ -196,15 +196,14 @@ pub(crate) fn build_transformation_row_derived(
             let weighted_h = w_i * h_i;
             let weighted_inv_h_prime = w_i * inv_h_prime;
             let weighted_inv_h_prime_sq = w_i * inv_h_prime_sq;
-            let q = log_normal_cdf_diff_derivatives(h_upper[i], h_lower[i]).map_err(|e| {
-                format!("TransformationNormalFamily row_quantities: row {i} invalid endpoint normalizer: {e}")
-            })?;
+            // gam#2600: the most-likely-transformation density, log φ(h) + log h',
+            // with NO renormalization by the mass between the fitted endpoints.
+            // `log Z ≡ 0` and every endpoint derivative vanishes, so the whole
+            // endpoint chain below contributes nothing. The −½ln(2π) constant is
+            // kept so the reported absolute log-likelihood (and AIC) is comparable
+            // to mlt/tram; it is coefficient-independent.
+            let q = LogNormalCdfDiffDerivatives::untruncated();
             let log_z = q.log_z;
-            // Full truncated-normal density log φ(h) + log h' − log Z, including
-            // the −½ln(2π) normalizer so the reported absolute log-likelihood
-            // (and AIC) is comparable to reference tools (mlt/tram). The constant
-            // is coefficient-independent: scores, Hessians, and PIT residuals
-            // are unchanged.
             let row_ll = w_i
                 * (-0.5 * h_i * h_i - 0.5 * (2.0 * std::f64::consts::PI).ln() + hp.ln() - log_z);
             // Fast path: a single short-circuited finiteness check. Only

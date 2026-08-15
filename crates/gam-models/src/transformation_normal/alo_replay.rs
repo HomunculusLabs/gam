@@ -1,5 +1,5 @@
 use super::chart::{CtnRowBases, CtnRowFloors, ctn_component_sensitivity, ctn_row_geometry};
-use super::log_normal_cdf_diff_derivatives;
+use super::LogNormalCdfDiffDerivatives;
 use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -124,7 +124,9 @@ pub fn transformation_normal_alo_row_geometry(
             "transformation-normal ALO row derivative must be positive, got {h_prime}"
         ));
     }
-    let endpoint = log_normal_cdf_diff_derivatives(upper, lower)?;
+    // gam#2600: the fitted likelihood is the untruncated MLT density, so the
+    // ALO replay must use the same normalizer (`log Z ≡ 0`, all derivatives 0).
+    let endpoint = LogNormalCdfDiffDerivatives::untruncated();
     let weight = input.prior_weight;
     let negative_log_likelihood = weight
         * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln() + endpoint.log_z);
