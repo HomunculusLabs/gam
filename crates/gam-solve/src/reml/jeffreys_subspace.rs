@@ -8,15 +8,31 @@
 //! would double-regularize and bias the smooth fit. This module produces the
 //! orthonormal basis `Z_J` of that span for one parameter block.
 //!
-//! The under-identified span is the FULL identifiable coefficient span of the
-//! (post-rank-deficiency-removal) reduced block — `Z_J = I_p` — NOT the penalty
-//! null space `ker(S)`. The Jeffreys penalty is self-limiting (its `O(1)` score
-//! is dominated by the data's `O(n)` Fisher information), so on a data-identified
-//! direction (penalized OR not) its only effect is the `O(1/n)` Firth bias
-//! correction; it bites only where the information is near-singular. Using the
-//! full span — rather than scoping to `ker(S)` — lets it reach a near-separation
-//! on a penalized spline direction too (the residual BMS-probit pathology). The
-//! aggregate penalty is consulted only to pick up the block dimension `p`.
+//! Three answers to "which directions" have shipped here, and a reader needs to
+//! know which one is live for which caller, because the module has carried two
+//! contradictory rationales at once:
+//!
+//!   1. **The FULL identifiable span** (`Z_J = I_p`), justified by the penalty
+//!      being self-limiting: its `O(1)` score is dominated by the data's `O(n)`
+//!      Fisher information, so on a data-identified direction its only effect is
+//!      the `O(1/n)` Firth bias correction. This is still the DEFAULT, and it is
+//!      what reaches a near-separation on a penalized spline direction (the
+//!      residual BMS-probit pathology). Its premise fails wherever the data's
+//!      information is not `O(n)` in any direction — a quasi-separated softmax
+//!      has `W = diag(p) − ppᵀ ≈ 0.005` per row (gam#2612).
+//!   2. **`ker(S_aggregate)`** ([`jeffreys_subspace_from_penalty`]), for a family
+//!      that states its aggregate: penalized directions already carry a proper
+//!      wiggliness prior, so a second one there is a duplicate. True for any
+//!      `λ > 0`, and false in MAGNITUDE when the selected `λ` rails at its floor
+//!      (gam#2612).
+//!   3. **The MEASURED span** ([`under_identified_subspace`]): the directions
+//!      whose `H + S_λ` curvature is under one observation-equivalent, at the
+//!      smoothing actually selected. This is what (1) and (2) each approximate
+//!      from one side, and it is what a caller with a certified mode should use.
+//!
+//! Everything here is pure linear algebra; the caller owns the constancy
+//! contract, since `Z_J` must not move while `Φ`'s derivative tower is being
+//! differentiated.
 //!
 //! Both tiers of the robustness machinery consume the SAME `Z_J`:
 //!   * Tier A (single-eta GLM via `FirthDenseOperator`) scopes the Fisher
@@ -1103,6 +1119,11 @@ pub fn under_identified_subspace(a: ArrayView2<'_, f64>) -> Result<Array2<f64>, 
     let (eigenvalues, eigenvectors) = symmetric.eigh(Side::Lower).map_err(|e| {
         format!("under_identified_subspace: curvature eigendecomposition failed: {e}")
     })?;
+    // Written as the NEGATION of "is bounded" rather than as `< threshold` so a
+    // non-finite eigenvalue lands in the span rather than out of it. A curvature
+    // this function cannot read is not a curvature that bounds anything, and the
+    // safe direction for a prior's support is to include the direction it cannot
+    // vouch for.
     let columns_wanted: Vec<usize> = (0..eigenvalues.len())
         .filter(|&i| !(eigenvalues[i] >= CONDITIONING_GATE_ABSOLUTE))
         .collect();
@@ -2965,6 +2986,78 @@ where
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// The measured span is what the gate's own threshold says, on the nose:
+    /// strictly below one observation-equivalent is in, at or above is out.
+    #[test]
+    fn the_measured_span_is_the_directions_under_one_observation_equivalent_2612() {
+        // Diagonal, so the eigenvectors ARE the axes and the answer is readable.
+        let curvature = array![
+            [5.0e-5, 0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, CONDITIONING_GATE_ABSOLUTE, 0.0],
+            [0.0, 0.0, 0.0, 2298.0],
+        ];
+        let span = under_identified_subspace(curvature.view()).expect("diagonal curvature");
+        assert_eq!(
+            span.ncols(),
+            2,
+            "exactly the two axes under one observation-equivalent belong in the span; the axis              AT the threshold and the 2298 one do not"
+        );
+        // Which two, checked by the mass each column puts on each axis.
+        let mut mass = [0.0_f64; 4];
+        for column in 0..span.ncols() {
+            for axis in 0..4 {
+                mass[axis] += span[[axis, column]] * span[[axis, column]];
+            }
+        }
+        assert!(
+            mass[0] > 0.99 && mass[1] > 0.99,
+            "the span must be the 5e-5 and 0.5 axes, got axis masses {mass:?}"
+        );
+        assert!(
+            mass[2] < 1e-12 && mass[3] < 1e-12,
+            "a direction the model bounds must not be in the span, got axis masses {mass:?}"
+        );
+    }
+
+    /// A model that bounds every direction gets no span, which is the caller's
+    /// signal to leave the prior disarmed.
+    #[test]
+    fn a_bounded_curvature_has_an_empty_measured_span_2612() {
+        let curvature = array![[3.0, 0.4], [0.4, 7.0]];
+        let span = under_identified_subspace(curvature.view()).expect("bounded curvature");
+        assert_eq!(span.ncols(), 0);
+    }
+
+    /// The measured span and `ker(S_λ)` are DIFFERENT sets, and this is the
+    /// fixture that says so in both directions at once — which is the whole
+    /// content of #2612's span repair.
+    ///
+    /// Axis 0 is unpenalized and well determined by the data (an intercept the
+    /// rows pin): in `ker(S_λ)`, NOT under-identified. Axis 1 is penalized but
+    /// its `λ` railed at the floor, so the model bounds it with `8e-4`
+    /// pseudo-observations: NOT in `ker(S_λ)`, and under-identified.
+    #[test]
+    fn the_measured_span_and_the_penalty_kernel_disagree_in_both_directions_2612() {
+        let penalty = array![[0.0, 0.0], [0.0, 2.0e-4]];
+        let information = array![[40.0, 0.0], [0.0, 1.0e-6]];
+        let penalized = &information + &penalty;
+
+        let kernel = jeffreys_subspace_from_penalty(penalty.view()).expect("kernel");
+        assert_eq!(kernel.span_dim(), 1, "ker(S_lambda) is the unpenalized axis");
+        assert!(
+            kernel.columns[[0, 0]].abs() > 0.99,
+            "and that axis is axis 0, the one the DATA determines"
+        );
+
+        let measured = under_identified_subspace(penalized.view()).expect("measured");
+        assert_eq!(measured.ncols(), 1, "one direction is under-identified");
+        assert!(
+            measured[[1, 0]].abs() > 0.99,
+            "and it is axis 1 — penalized, railed, and bounded by 2e-4: the direction the kernel              route cannot reach and the full-span route reaches only by also arming axis 0"
+        );
+    }
 
     #[test]
     fn fused_ambient_eigenbasis_congruence_matches_two_stage_definition_2612() {

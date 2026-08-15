@@ -1449,6 +1449,14 @@ pub trait CustomFamily {
     ///
     /// # The contract
     ///
+    /// SUPERSEDED, for a family that can measure its span, by
+    /// [`Self::jeffreys_span_basis`] — which answers the question this route only
+    /// approximates. Read that method's doc before adding a caller here: a
+    /// kernel says which directions no `λ` could EVER reach, and the term needs
+    /// the directions the model does not bound at the `λ` it actually selected.
+    /// This route remains correct and remains the default for a family that has
+    /// no certified mode to measure at.
+    ///
     /// Return the `Σ_t M_t` of the family's own joint penalty specs (any
     /// POSITIVE combination has the same kernel, so the returned matrix is
     /// λ-free and therefore constant in both `β` and `ρ` — which is what keeps

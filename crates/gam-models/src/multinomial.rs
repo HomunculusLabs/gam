@@ -712,9 +712,11 @@ fn multinomial_formula_penalized_separation_evidence(
         unreached.ncols(),
         reduced_penalized.nrows(),
     );
-    // Every direction is penalised: the model's own prior is proper everywhere,
-    // and whatever width is left belongs to the posterior the predictive
-    // integrates exactly.
+    // Every direction carries at least one observation-equivalent of curvature:
+    // the model bounds all of them, and whatever width is left belongs to the
+    // posterior the predictive integrates exactly. Nothing for a proper prior to
+    // do, so the term stays disarmed — this is the exit that keeps a fit on
+    // non-separated data byte-unchanged.
     if unreached.ncols() == 0 {
         return Ok(None);
     }

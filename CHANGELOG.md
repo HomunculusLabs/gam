@@ -1,5 +1,43 @@
 ## Unreleased
 
+- **The Jeffreys/Firth span is MEASURED, not derived from a penalty's kernel
+  (#2612).** Two derived spans have shipped here and both answer structurally
+  what has to be measured. The FULL identifiable span says *the model bounds
+  nothing*, justified by "the Jeffreys score is `O(1)` against the data's `O(n)`
+  Fisher information" — a premise that fails on a quasi-separated softmax, where
+  `W = diag(p) − ppᵀ ≈ 0.005` per row, so the term acts at full strength on
+  directions the penalty bounds up to `2298` (measured cost: mean argmax
+  probability `0.828` against held-out accuracy `0.965`). `ker(S_λ)` says *the
+  model bounds `range(S)`*, justified by `(H + S_λ)v = Hv + λSv` — true for any
+  `λ > 0` and false in MAGNITUDE when `λ` rails at its floor. Measured at the
+  penguins stride-4 unbiased mode:
+
+  ```text
+    ker(S_λ):                  2 of 74 directions, λ_min(H + S_λ) = 1.9e-3
+    whole identifiable span:                       λ_min(H + S_λ) = 5.1e-5
+  ```
+
+  The worst-bounded direction — five orders below one observation-equivalent —
+  is **not** in the kernel. It is a `range(S)` direction whose selected `λ`
+  railed at `MULTINOMIAL_FORMULA_PRIOR_PSEUDO_OBS = 8e-4` pseudo-observations,
+  and `8e-4` pseudo-observations is not a prior. Left unarmed the coefficient
+  runs to `|η|∞ ≈ 45`, and the posterior-mean predictive refuses to publish
+  because the posterior at that width is not describable by either Laplace
+  expansion.
+
+  The span is now `{v : vᵀ(H + S_λ)v < CONDITIONING_GATE_ABSOLUTE}` — the same
+  one-observation-equivalent criterion that already decides the term's WEIGHT,
+  now also deciding its SUPPORT. It contains the separating members of `ker(S_λ)`
+  and excludes its well-determined ones, so it is strictly better than either
+  endpoint on both sides. Reading `H + S_λ`'s deficient subspace was previously
+  rejected because that matrix moves with `β` and `ρ` while every `Φ` derivative
+  formula holds `Z_J` fixed; this does not read it live — it is measured once, at
+  the unbiased probe's certified mode and its selected `λ`, and frozen for the
+  armed refit, which is the same construction at the same point that the arming
+  DECISION already uses. The certificate now returns its verdict **and the
+  subspace that verdict was taken on** as one object, because they are one
+  decision: publishing only the verdict is how the two came apart.
+
 - **A cached inner mode was identified by the penalty's state, not the
   objective's, so the coefficient-mode continuation's corrector was disabled by
   its own refinement (#2612).** `InnerPenaltyState` carried the per-block and
