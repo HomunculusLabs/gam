@@ -81,8 +81,35 @@
 //! standardized slack `s_j = (a_jᵀβ_unc − b_j)/sd_j` and its contribution
 //! varies smoothly with it, so a row at slack `1e-9` and a row at slack `0`
 //! give nearly the same answer instead of differing by a full `σ²`. The only
-//! cut is dropping rows whose truncated mass `Φ̄(s_j)` is below double-precision
-//! resolution, a bound read off `f64::EPSILON` rather than tuned.
+//! cut on TIGHTNESS is dropping rows whose truncated mass `Φ̄(s_j)` is below
+//! double-precision resolution, a bound read off `f64::EPSILON` rather than
+//! tuned.
+//!
+//! # Which rows the answer is built from
+//!
+//! There is a second cut, and it is about independence rather than tightness. A
+//! shape constraint is normally imposed at every data row — a monotone survival
+//! baseline arrives as one derivative-guard row per observed exit time — so the
+//! system can carry far more rows than the coefficient block has columns, and
+//! `W = A Σ Aᵀ` is then rank-deficient by construction. Its `q × q` inverse is
+//! not a quantity double precision has.
+//!
+//! So the correction is built on a RETAINED FACE. Rows are walked in ascending
+//! standardized slack and one joins only while its constraint normal is
+//! independent enough of those already accepted for the lift `G = Σ Aᵀ W⁻¹` to
+//! be solved to the accuracy the moments are reported to; the assembled face is
+//! then checked as a whole, because per-row independence is necessary and not
+//! sufficient, and its least independent row is dropped until the check passes.
+//!
+//! What that costs is bounded and it is not a tightness judgement. A dropped
+//! row lies within `O(θ)` of the span of the retained ones — `θ` below `5e-7`
+//! radians at the retention floor — and the retained row it is nearly parallel
+//! to has the SMALLER standardized slack, because the walk is ordered by slack.
+//! Its wall is therefore the binding one, and the dropped row imposes no
+//! constraint the retained face does not already impose. The one exception is a
+//! row ANTI-parallel to an accepted one, which carries no new direction while
+//! genuinely halving the support; that one is kept, as the far wall of a
+//! two-sided bound, rather than dropped.
 
 use gam_math::probability::{
     normal_cdf, normal_logsf, signed_probit_logcdf_and_mills_ratio, standard_normal_quantile,
@@ -1523,13 +1550,39 @@ struct LadderRung {
 }
 
 /// Render the ladder trail for a terminal message, newest rung last.
+///
+/// The walk can take one pass per candidate row, and a message carrying two
+/// hundred rungs is one nobody reads, so the ends are printed and the middle is
+/// counted. The ends are what carry the diagnosis: the first rung is the face
+/// the retention floor produced on its own and the last is the one the walk
+/// died on. The middle is not summarizable beyond its count — the RETAINED
+/// count is not monotone, because excluding a nearly dependent row raises the
+/// pivots of the rows after it and can admit ones the floor had refused — but
+/// the `excluded` column is, and it is the walk's actual index.
 fn render_ladder(ladder: &[LadderRung], candidates: usize) -> String {
+    const SHOWN_AT_EACH_END: usize = 4;
     let mut rendered = format!(" [walk over {candidates} candidate row(s):");
-    for rung in ladder {
-        rendered.push_str(&format!(
+    let render_rung = |rung: &LadderRung, into: &mut String| {
+        into.push_str(&format!(
             " (excluded={} retained={} departure={:.3e})",
             rung.excluded, rung.retained, rung.departure
         ));
+    };
+    if ladder.len() <= 2 * SHOWN_AT_EACH_END + 1 {
+        for rung in ladder {
+            render_rung(rung, &mut rendered);
+        }
+    } else {
+        for rung in &ladder[..SHOWN_AT_EACH_END] {
+            render_rung(rung, &mut rendered);
+        }
+        rendered.push_str(&format!(
+            " ... {} further rung(s) ...",
+            ladder.len() - 2 * SHOWN_AT_EACH_END
+        ));
+        for rung in &ladder[ladder.len() - SHOWN_AT_EACH_END..] {
+            render_rung(rung, &mut rendered);
+        }
     }
     rendered.push(']');
     rendered
@@ -1639,9 +1692,11 @@ struct RetainedFace {
     /// operation rather than the inversion of a floating-point comparison
     /// (#2714).
     ///
-    /// The first accepted row has `pivot == diagonal` and therefore ratio `1`,
-    /// so it is never the minimizer of a face with two or more rows: a face
-    /// that fails its identity always has a row that is not its own first.
+    /// The first accepted row has an empty forward-substitution column, hence
+    /// `pivot == diagonal` and a ratio of exactly `1`, which is the maximum the
+    /// ratio can take; combined with the walk's tie-break toward the later (and
+    /// therefore slacker) row, that makes the tightest wall the one row a face
+    /// of two or more can never drop.
     least_independent_row: Option<usize>,
 }
 
@@ -1780,8 +1835,16 @@ fn assemble_retained_face(
         // guaranteed by `constraint_face_candidates`, and `pivot > rank_floor > 0`
         // by the branch above, so the ratio is a finite positive number and the
         // comparison never sees a NaN.
+        //
+        // `<=` keeps the LAST minimizer, and the rows arrive in ascending slack
+        // order, so a tie is broken toward the slacker row. That matters at the
+        // one tie that is structural rather than accidental: the first accepted
+        // row has an empty `new_column`, hence `pivot == diagonal` and a ratio
+        // of exactly `1`, so on a face whose rows are all mutually orthogonal
+        // in the `Σ` metric every ratio is `1` and a `<` rule would drop the
+        // TIGHTEST wall.
         let independence = pivot / diagonal;
-        if least_independent.is_none_or(|(_, best)| independence < best) {
+        if least_independent.is_none_or(|(_, best)| independence <= best) {
             least_independent = Some((*row_index, independence));
         }
     }
@@ -3537,7 +3600,7 @@ mod tests {
             .expect("candidate rows");
         let candidate_rows: Vec<usize> = candidates.iter().map(|(row, _, _)| *row).collect();
 
-        let mut best: Option<Vec<usize>> = None;
+        let mut admissible_faces: Vec<Vec<usize>> = Vec::new();
         let mut distinct_faces: Vec<Vec<usize>> = Vec::new();
         for mask in 0..(1u32 << candidate_rows.len()) {
             let excluded: Vec<usize> = candidate_rows
@@ -3554,11 +3617,15 @@ mod tests {
             if !distinct_faces.contains(&rows) {
                 distinct_faces.push(rows.clone());
             }
-            if admissible && best.as_ref().is_none_or(|kept| rows.len() > kept.len()) {
-                best = Some(rows);
+            if admissible && !admissible_faces.contains(&rows) {
+                admissible_faces.push(rows);
             }
         }
-        let best = best.expect("some exclusion set must yield a face satisfying its own identity");
+        let largest = admissible_faces
+            .iter()
+            .map(Vec::len)
+            .max()
+            .expect("some exclusion set must yield a face satisfying its own identity");
 
         // Non-vacuity: the fixture has to make the walk WORK. If the unexcluded
         // face were already admissible, or if only one face existed, this test
@@ -3578,18 +3645,143 @@ mod tests {
              so the walk is not exercised"
         );
         assert!(
-            unexcluded.len() > best.len(),
-            "#2714: the unexcluded face {unexcluded:?} is no larger than the answer {best:?}, so \
-             nothing had to be dropped"
+            unexcluded.len() > largest,
+            "#2714: the unexcluded face {unexcluded:?} is no larger than the {largest}-row \
+             answer, so nothing had to be dropped"
         );
 
+        // The walk's face must BE one of the admissible faces — this is what
+        // says it returned a face it can actually lift — and it must be one of
+        // the largest, which is what says it stopped dropping as soon as it
+        // could. Asserting membership plus size rather than equality with one
+        // enumerated face is deliberate: several distinct faces reach the
+        // maximum, so an equality would be pinning the oracle's enumeration
+        // order, not a property of the walk.
+        assert!(
+            admissible_faces.contains(&correction.rows),
+            "#2714: the walk returned {:?}, which is not among the {} faces whose lift satisfies \
+             its own identity: {admissible_faces:?}",
+            correction.rows,
+            admissible_faces.len()
+        );
         assert_eq!(
-            correction.rows, best,
-            "#2714: the walk returned {:?} where the largest face satisfying its own lift \
-             identity is {best:?}. Dropping the least independent accepted row is the step that \
-             reaches it; stepping a retention floor cannot, because the floor is a proxy for \
-             the face and the proxy is not injective.",
+            correction.rows.len(),
+            largest,
+            "#2714: the walk returned the {}-row face {:?} where an admissible face of {largest} \
+             rows exists. Dropping the least independent accepted row is the step that reaches \
+             the largest one; stepping a retention floor cannot, because the floor is a proxy \
+             for the face and the proxy is not injective.",
+            correction.rows.len(),
             correction.rows
+        );
+        // And among the largest, the one the SLACK ordering asks for: the walk
+        // opens on the tightest candidate row and only ever drops rows that are
+        // nearly dependent on rows already accepted, so the binding wall cannot
+        // be the row that leaves. An enumeration over exclusion sets has no
+        // such preference — on this fixture it also reaches a maximum-size face
+        // that drops the tightest row — so this is the assertion that separates
+        // the walk from "any largest face".
+        assert_eq!(
+            correction.rows.first(),
+            candidate_rows.first(),
+            "#2714: the walk returned {:?}, which does not retain the tightest candidate row \
+             {:?}. The slack ordering is the reason a dropped row imposes no constraint the \
+             retained ones do not; dropping the binding wall would relax the posterior by a \
+             multiple of its own standard deviation.",
+            correction.rows,
+            candidate_rows.first()
+        );
+    }
+
+    /// The production entry point on the geometry #2714's witness actually has:
+    /// far MORE constraint rows than the coefficient block has columns, so
+    /// `W = A Σ Aᵀ` is structurally rank-deficient and the retention walk is the
+    /// only thing between the fit and a face it can lift.
+    ///
+    /// A shape-constrained survival fit imposes its monotonicity guard at every
+    /// observed exit time — one constraint row per data row, on a time block of
+    /// a few coefficients — and the rows are near-collinear because adjacent
+    /// times give near-identical derivative-basis rows. This fixture is that
+    /// shape with the data removed: 40 Vandermonde rows at closely spaced nodes
+    /// on 5 columns, identity covariance, every row within the resolution
+    /// horizon of its wall. Nothing here is a recorded spectrum; the geometry
+    /// is written down and the numbers follow from it.
+    ///
+    /// The old retention ladder PANICS on this input. Its step
+    /// `d ← max_r (k+1)·ε·diagonal_r/pivot_r` retains the row it was aimed at
+    /// on pass 26, rebuilds a bit-identical face, recomputes the same step, and
+    /// trips `assert!(next < demanded_accuracy)` — which is why this test's
+    /// primary assertion is that the call RETURNS. `constrained_posterior_correction`
+    /// is reached from the terminal geometry of every constrained fit, so a
+    /// panic there is a panic in a library, on data.
+    #[test]
+    fn a_rank_deficient_constraint_system_still_yields_a_liftable_face_2714() {
+        const ROWS: usize = 40;
+        const DIMENSION: usize = 5;
+        const SPACING: f64 = 2.0e-2;
+
+        let mut a = Array2::<f64>::zeros((ROWS, DIMENSION));
+        for row in 0..ROWS {
+            let node = row as f64 * SPACING;
+            for power in 0..DIMENSION {
+                a[[row, power]] = node.powi(power as i32);
+            }
+        }
+        let constraints = LinearInequalityConstraints::new(a, Array1::<f64>::zeros(ROWS))
+            .expect("clustered Vandermonde rows");
+        let covariance = Array2::<f64>::eye(DIMENSION);
+        // Every row's value at the centre is its constant term, so every row
+        // sits one unit above its wall in unscaled units and inside the
+        // resolution horizon once divided by its own spread: all 40 are
+        // candidates, against 5 columns.
+        let mut center = Array1::<f64>::zeros(DIMENSION);
+        center[0] = 1.0;
+
+        let sigma_at = covariance.dot(&constraints.a.t());
+        let candidates = constraint_face_candidates(sigma_at.view(), &center, &constraints)
+            .expect("candidate rows");
+        assert!(
+            candidates.len() > DIMENSION,
+            "#2714: the fixture must be rank-deficient to exercise the walk, and it offers only \
+             {} candidate row(s) against {DIMENSION} columns",
+            candidates.len()
+        );
+        let (unexcluded, unexcluded_admissible) =
+            face_at_exclusion(&candidates, &constraints, &center, &[])
+                .expect("the unexcluded face");
+        assert!(
+            !unexcluded_admissible,
+            "#2714: the unexcluded face {unexcluded:?} already satisfies its own lift identity, \
+             so the walk never runs and this fixture asserts nothing"
+        );
+
+        let correction =
+            constrained_posterior_correction_from_covariance(&covariance, &center, &constraints)
+                .expect("a rank-deficient constraint system must still produce a face")
+                .expect("an active face inside the horizon");
+
+        // The face it settled on has to satisfy the identity that DEFINES the
+        // lift, recomputed here from the returned `lift` rather than from the
+        // walk's own bookkeeping.
+        let departure = lift_identity_departure(&correction.lift, &constraints, &correction.rows)
+            .expect("identity departure of the returned lift");
+        assert!(
+            departure <= ORTHANT_MOMENT_RELATIVE_TOLERANCE,
+            "#2714: the returned {}-row face {:?} misses the identity that defines its lift by \
+             {departure:.6e}, above {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}",
+            correction.rows.len(),
+            correction.rows
+        );
+        assert!(
+            correction.rows.len() < unexcluded.len(),
+            "#2714: the walk returned {:?}, which is not smaller than the inadmissible \
+             unexcluded face {unexcluded:?} — so it accepted a face it had already rejected",
+            correction.rows
+        );
+        assert_eq!(
+            correction.rows.first(),
+            candidates.first().map(|(row, _, _)| row),
+            "#2714: the walk dropped the tightest candidate row"
         );
     }
 

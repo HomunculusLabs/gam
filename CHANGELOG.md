@@ -43,8 +43,13 @@
   Reached by the #2714 witness because the fix for its titled defect let the fit
   get as far as final posterior assembly, where a monotonicity guard imposed at
   every observed exit time puts far more constraint rows than the time block has
-  coefficients: `W = A Σ Aᵀ` is then structurally rank-deficient and the ladder
-  is the only thing standing between the fit and a face it can lift.
+  coefficients: `W = A Σ Aᵀ` is then structurally rank-deficient and the walk is
+  the only thing standing between the fit and a face it can lift. That geometry
+  now has a unit fixture of its own —
+  `a_rank_deficient_constraint_system_still_yields_a_liftable_face_2714`, 40
+  Vandermonde rows at closely spaced nodes on 5 columns, which is the shape with
+  the data removed. It panics on the old ladder at pass 26 and returns a
+  5-row face whose lift misses its identity by `1e-6` on the new walk.
 
 - **The Jeffreys/Firth span is MEASURED, not derived from a penalty's kernel
   (#2612).** Two derived spans have shipped here and both answer structurally
