@@ -2,7 +2,7 @@ name: Build and Release All
 
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "41 */6 * * *"
   workflow_dispatch:
 
 # #2443/#2437: the every-2h schedule is the release-artifact record for the
