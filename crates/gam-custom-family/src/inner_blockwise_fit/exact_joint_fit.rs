@@ -60,7 +60,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         mut cached_joint_gradient,
         mut cached_joint_workspace,
         mut cached_joint_hessian_source,
-        penalty_state,
+        objective_state,
         joint_workspace_requested,
         matrix_free_joint_requested,
         total_joint_n,
@@ -6237,7 +6237,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             joint_workspace: cached_joint_workspace.clone(),
             kkt_residual: Some(kkt_residual),
             active_constraints,
-            penalty_state,
+            objective_state,
         });
     }
     if cycles_done >= inner_max_cycles {
@@ -6457,7 +6457,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             joint_workspace: cached_joint_workspace.clone(),
             kkt_residual: None,
             active_constraints,
-            penalty_state,
+            objective_state,
         });
     }
     {
@@ -6538,7 +6538,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             joint_workspace: cached_joint_workspace.clone(),
             kkt_residual: None,
             active_constraints,
-            penalty_state,
+            objective_state,
         });
     }
 }

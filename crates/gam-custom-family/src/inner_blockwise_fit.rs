@@ -38,7 +38,7 @@ struct ExactJointFitContext<'a, F> {
     cached_joint_gradient: Option<Array1<f64>>,
     cached_joint_workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
     cached_joint_hessian_source: Option<JointHessianSource>,
-    penalty_state: crate::assembly::InnerPenaltyState,
+    objective_state: crate::assembly::InnerObjectiveState,
     joint_workspace_requested: bool,
     matrix_free_joint_requested: bool,
     total_joint_n: usize,
@@ -2858,16 +2858,37 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         }
         assert_eq!(bundle.specs().len(), bundle.log_lambdas().len());
     }
-    let penalty_state = crate::assembly::InnerPenaltyState::new(block_log_lambdas, joint_bundle);
+    let objective_state =
+        crate::assembly::InnerObjectiveState::new(family, block_log_lambdas, joint_bundle);
+    // A cached mode that is refused ONLY because the augmentation strength moved
+    // is the coefficient-objective homotopy doing exactly what it exists to do,
+    // and it used to be the silent case that broke it (#2612): the ρ half is
+    // constant along that path, so before the strength joined the state the
+    // whole equality answered `true` at every waypoint and the corrector was
+    // skipped whenever the incoming mode happened to still read PSD. Saying so
+    // makes a homotopy that is tracking its branch distinguishable, in the run
+    // record, from one that is not.
+    if let Some(cached) = warm_start.and_then(|seed| seed.cached_inner.as_ref())
+        && cached.objective_state.jeffreys_strength() != objective_state.jeffreys_strength()
+    {
+        log::info!(
+            "[PIRLS/joint-Newton warm-start] cached inner mode is not this objective's: Jeffreys \
+             augmentation strength {:.17e} -> {:.17e} at an unchanged smoothing state; correcting \
+             rather than reusing (#2612)",
+            cached.objective_state.jeffreys_strength(),
+            objective_state.jeffreys_strength(),
+        );
+    }
     let mut cached_active_sets: Vec<Option<Vec<usize>>> = vec![None; specs.len()];
     if let Some(seed) = warm_start
         && seed.block_beta.len() == states.len()
         && seed.active_sets.len() == states.len()
     {
-        // The cached mode is reusable only when it was solved at THIS smoothing
-        // state — both the per-block penalties and the joint bundle (#2615).
+        // The cached mode is reusable only when it was solved for THIS inner
+        // coefficient objective — the per-block penalties, the joint bundle
+        // (#2615), and the family's Jeffreys augmentation strength (#2612).
         if let Some(cached) = seed.cached_inner.as_ref()
-            && cached.penalty_state == penalty_state
+            && cached.objective_state == objective_state
             && cached.converged
             && cached.block_logdet_h.is_some_and(f64::is_finite)
             && cached.block_logdet_s.is_some_and(f64::is_finite)
@@ -2976,8 +2997,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     joint_workspace: certified_workspace,
                     kkt_residual: cached.kkt_residual.clone(),
                     active_constraints: cached.active_constraints.clone(),
-                    // Equal to `cached.penalty_state` by the guard above.
-                    penalty_state,
+                    // Equal to `cached.objective_state` by the guard above.
+                    objective_state,
                 });
             }
         }
@@ -3147,7 +3168,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             cached_joint_gradient,
             cached_joint_workspace,
             cached_joint_hessian_source,
-            penalty_state,
+            objective_state,
             joint_workspace_requested,
             matrix_free_joint_requested,
             total_joint_n,
@@ -4231,7 +4252,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         joint_workspace: certified_workspace,
         kkt_residual,
         active_constraints,
-        penalty_state: crate::assembly::InnerPenaltyState::new(block_log_lambdas, joint_bundle),
+        objective_state: crate::assembly::InnerObjectiveState::new(family, block_log_lambdas, joint_bundle),
     })
 }
 

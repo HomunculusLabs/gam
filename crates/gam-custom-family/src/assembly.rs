@@ -2571,45 +2571,93 @@ impl TerminalLikelihoodScore {
     }
 }
 
-/// The complete smoothing state an inner Laplace mode is a function of.
+/// The complete state an inner Laplace mode is a function of — the objective's
+/// state, not merely the penalty's.
 ///
-/// `β̂(ρ)`, `log|H(ρ)|` and `log|S(ρ)|` are determined by the TOTAL penalty
+/// The mode `β̂` minimises the inner coefficient objective
+///
+/// ```text
+///     ℓ_p(β)  =  −ℓ(β)  +  ½ βᵀ S_λ β  −  τ · Φ(β)
+/// ```
+///
+/// so it is determined by the TOTAL penalty
 ///
 /// ```text
 ///     S_λ = Σ_b Σ_k e^{ρ_{bk}} S_{bk}   +   Σ_j e^{ρ_j} S_j
 ///            ╰──── per-block ────╯          ╰─── joint ───╯
 /// ```
 ///
-/// so a cached mode is reusable exactly when BOTH halves are unchanged. This
-/// records them at the ρ the mode was actually solved at, and the cache lookup
-/// compares against that record — the mode carries its own provenance instead
-/// of the consumer reconstructing a key from whatever coordinates it happens to
-/// hold.
+/// AND by the family's Jeffreys/Firth augmentation strength `τ`. A cached mode
+/// is reusable exactly when every one of those is unchanged. This records them
+/// at the state the mode was actually solved at, and the cache lookup compares
+/// against that record — the mode carries its own provenance instead of the
+/// consumer reconstructing a key from whatever coordinates it happens to hold.
 ///
-/// Reconstructing the key is what failed (#2615). `physical_warm_start_for_labeled`
-/// rewrites a warm start's `rho` to the PHYSICAL per-block coordinates before the
-/// inner solve sees it, and a family whose smoothing lives entirely in the joint
-/// bundle has none: since #1587 emptied the multinomial's `spec.penalties` into a
-/// centered `M ⊗ S_t` bundle, `physical_count() == 0`. The old guard therefore
-/// compared an empty vector against an empty vector, answered `true` at every ρ,
-/// and returned the mode solved at the FIRST ρ for every subsequent one — freezing
-/// `log|H|` at a constant while `½log|S_λ|` kept growing, which leaves the profiled
-/// criterion monotone in ρ and rails every coordinate at its upper bound.
 /// Equality is the reuse test, and it is BITWISE on purpose: a cached mode is
-/// reusable only when the penalized objective it minimises is the identical
-/// function. A tolerance here would reintroduce exactly the failure this type
-/// exists to remove — a criterion evaluated at one ρ and reported at another.
+/// reusable only when the objective it minimises is the identical function. A
+/// tolerance here would reintroduce exactly the failure this type exists to
+/// remove — a criterion evaluated at one state and reported at another.
+///
+/// # Both halves of the state have failed, for the same reason
+///
+/// **The ρ half (#2615).** `physical_warm_start_for_labeled` rewrites a warm
+/// start's `rho` to the PHYSICAL per-block coordinates before the inner solve
+/// sees it, and a family whose smoothing lives entirely in the joint bundle has
+/// none: since #1587 emptied the multinomial's `spec.penalties` into a centered
+/// `M ⊗ S_t` bundle, `physical_count() == 0`. The old guard compared an empty
+/// vector against an empty vector, answered `true` at every ρ, and returned the
+/// mode solved at the FIRST ρ for every subsequent one — freezing `log|H|` at a
+/// constant while `½log|S_λ|` kept growing, which leaves the profiled criterion
+/// monotone in ρ and rails every coordinate at its upper bound.
+///
+/// **The τ half (#2612).** The same key, complete in ρ, was still the WHOLE
+/// reuse test — so it answered `true` at every `τ`. That is not a corner case
+/// for the one path that varies `τ`: `coefficient_mode_homotopy_member` defines
+/// the armed coefficient mode as the endpoint of a continuation in `τ` **at
+/// fixed ρ** (#2366), so on that path the ρ half is constant by construction and
+/// the key matched at every waypoint. The only thing that kept the corrector
+/// running was the fresh curvature certificate refusing a non-PSD incoming
+/// point — and the finer the discretization, the less the mode moves per
+/// waypoint and the more often that certificate passes. Measured on the
+/// penguins stride-4 refit, 8-step sweep, `λ_min` at each incoming mode:
+///
+/// ```text
+///   wp1 −7.88e-2   wp2 −8.74e-6   wp3 −7.26e-6   wp4 −4.82e-6
+///   wp5 −2.46e-6   wp6 −7.38e-7   wp7 −5.16e-8   wp8 +2.78e-8  <- reused
+/// ```
+///
+/// The endpoint of that sweep — the point the whole continuation exists to
+/// produce — was the `τ = 0.875` mode relabelled as the `τ = 1` mode, and the
+/// refinement that was supposed to make the path converge is precisely what
+/// disabled its corrector.
+///
+/// # What belongs here
+///
+/// Anything the inner coefficient objective depends on that is not the data.
+/// Today that is the two above: the family is immutable for the duration of a
+/// fit, and the ONE mechanism that produces a different family value at the same
+/// ρ is [`CustomFamily::coefficient_mode_homotopy_member`], whose contract
+/// restricts it to the augmentation strength. A future homotopy over any other
+/// family-carried quantity must extend this type in the same commit, because
+/// this equality is the only thing standing between it and a mode served for the
+/// wrong function.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct InnerPenaltyState {
+pub(crate) struct InnerObjectiveState {
     /// Per-block `log λ`, in block order.
     block: Vec<Array1<f64>>,
     /// Joint-bundle `log λ`, parallel to the bundle's specs; empty when the
     /// family declares no joint penalties.
     joint: Vec<f64>,
+    /// The family's Jeffreys/Firth augmentation strength `τ`, which multiplies
+    /// every Jeffreys value, score and curvature the inner objective carries.
+    /// `0` on the unbiased objective, `1` on the fully armed one, and the
+    /// homotopy coordinate in between.
+    jeffreys_strength: f64,
 }
 
-impl InnerPenaltyState {
-    pub(crate) fn new(
+impl InnerObjectiveState {
+    pub(crate) fn new<F: CustomFamily + ?Sized>(
+        family: &F,
         block_log_lambdas: &[Array1<f64>],
         joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
     ) -> Self {
@@ -2618,13 +2666,21 @@ impl InnerPenaltyState {
             joint: joint_bundle
                 .map(|bundle| bundle.log_lambdas().to_vec())
                 .unwrap_or_default(),
+            jeffreys_strength: family.joint_jeffreys_term_strength(),
         }
     }
 
     /// Round-trip form for the on-disk warm-start record. A persisted mode is
     /// only reusable if the state it was solved at travels with it, so both
-    /// halves are serialized rather than re-derived from the record's ρ (which
-    /// carries no block/joint split).
+    /// smoothing halves are serialized rather than re-derived from the record's
+    /// ρ (which carries no block/joint split).
+    ///
+    /// `τ` is deliberately NOT part of this pair: it reaches the persisted
+    /// record through the cache KEY
+    /// (`persistent_custom_family_key`), so a record that loads at all was
+    /// written by a family with the identical strength, and `from_parts` takes
+    /// that strength from the loading family. Serializing it as well would give
+    /// the same fact two homes that could disagree.
     pub(crate) fn to_parts(&self) -> (Vec<Vec<f64>>, Vec<f64>) {
         (
             self.block.iter().map(|b| b.to_vec()).collect(),
@@ -2632,11 +2688,42 @@ impl InnerPenaltyState {
         )
     }
 
-    pub(crate) fn from_parts(block: Vec<Vec<f64>>, joint: Vec<f64>) -> Self {
+    pub(crate) fn from_parts<F: CustomFamily + ?Sized>(
+        family: &F,
+        block: Vec<Vec<f64>>,
+        joint: Vec<f64>,
+    ) -> Self {
         Self {
             block: block.into_iter().map(Array1::from_vec).collect(),
             joint,
+            jeffreys_strength: family.joint_jeffreys_term_strength(),
         }
+    }
+
+    /// The state of an objective carrying NO Jeffreys augmentation.
+    ///
+    /// For fixtures that assemble a [`BlockwiseInnerResult`] directly and have
+    /// no family to read the strength from. Every production site has one and
+    /// must use [`Self::new`], which cannot be handed the wrong number.
+    #[cfg(test)]
+    pub(crate) fn unaugmented(
+        block_log_lambdas: &[Array1<f64>],
+        joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    ) -> Self {
+        Self {
+            block: block_log_lambdas.to_vec(),
+            joint: joint_bundle
+                .map(|bundle| bundle.log_lambdas().to_vec())
+                .unwrap_or_default(),
+            jeffreys_strength: 0.0,
+        }
+    }
+
+    /// The augmentation strength this state was recorded at. Read by the reuse
+    /// gate's own diagnostics so a refusal can say WHICH half of the state
+    /// differed.
+    pub(crate) fn jeffreys_strength(&self) -> f64 {
+        self.jeffreys_strength
     }
 }
 
@@ -2687,7 +2774,7 @@ pub struct BlockwiseInnerResult {
     pub active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
     /// The smoothing state this mode was solved at — the cache key a reuse
     /// decision must be taken against (#2615).
-    pub(crate) penalty_state: InnerPenaltyState,
+    pub(crate) objective_state: InnerObjectiveState,
 }
 
 impl std::fmt::Debug for BlockwiseInnerResult {
@@ -2738,5 +2825,5 @@ pub(crate) struct CachedInnerMode {
     /// The smoothing state this cached mode was solved at (#2615). A lookup
     /// compares against this, not against a key rebuilt from the caller's
     /// coordinates.
-    pub(crate) penalty_state: InnerPenaltyState,
+    pub(crate) objective_state: InnerObjectiveState,
 }

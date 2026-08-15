@@ -396,6 +396,17 @@ pub(crate) fn persistent_custom_family_key<F: CustomFamily + ?Sized>(
     hasher.write_str(&gam_solve::persistent_warm_start::cache_schema_tag());
     hasher.write_str(type_name::<F>());
     hasher.write_str(&family.persistent_warm_start_fingerprint(specs, options)?);
+    // #2612: the coefficient objective a persisted mode minimises is
+    // `−ℓ + ½βᵀS_λβ − τ·Φ`, so two families that differ ONLY in the
+    // Jeffreys/Firth augmentation strength `τ` define different modes at the
+    // same ρ and must not share a record. `persistent_warm_start_fingerprint`
+    // above is documented as a fingerprint of "the data that defines their
+    // likelihood" and no production family folds `τ` into it, so the key
+    // carries it here — where every family gets it, rather than in each
+    // family's own fingerprint, where the next one to opt in would have to
+    // remember. This is also what lets `InnerObjectiveState::from_parts` take
+    // `τ` from the loading family instead of from the record.
+    hasher.write_f64(family.joint_jeffreys_term_strength());
     hasher.write_usize(specs.len());
     for spec in specs {
         hasher.write_str(&spec.name);
@@ -489,8 +500,12 @@ pub(crate) fn load_persistent_custom_family_warm_start<F: CustomFamily + ?Sized>
         terminal_likelihood_score: None,
         // #2615: the smoothing state the persisted mode was solved at, so the
         // inner solve can decide reuse against the state itself rather than
-        // against the record's optimizer-coordinate `rho`.
-        penalty_state: crate::assembly::InnerPenaltyState::from_parts(
+        // against the record's optimizer-coordinate `rho`. #2612: the
+        // augmentation strength comes from `family` rather than from the record
+        // because it is part of `persistent_custom_family_key` — a record that
+        // loaded at all was written at this family's strength.
+        objective_state: crate::assembly::InnerObjectiveState::from_parts(
+            family,
             inner.block_log_lambdas,
             inner.joint_log_lambdas,
         ),
@@ -529,7 +544,7 @@ pub(crate) fn persistent_block_inner_summary(
         if !cached.log_likelihood.is_finite() || !cached.penalty_value.is_finite() {
             return None;
         }
-        let (block_log_lambdas, joint_log_lambdas) = cached.penalty_state.to_parts();
+        let (block_log_lambdas, joint_log_lambdas) = cached.objective_state.to_parts();
         Some(PersistentBlockInnerSummary {
             log_likelihood: cached.log_likelihood,
             penalty_value: cached.penalty_value,
