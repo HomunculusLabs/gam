@@ -1,5 +1,59 @@
 ## Unreleased
 
+- **The conditional-transformation-normal likelihood renormalized every row by
+  the standard-normal mass between two FITTED endpoints, and that is what left
+  the fit with no mode to find (#2600).** The row density was
+  `φ(h(y)) · h'(y) / [Φ(h(y_hi)) − Φ(h(y_lo))]`: the model CONDITIONED on the
+  response lying inside the fitted knot range, with both endpoints functions of
+  the coefficients being estimated. That divisor removes both properties a
+  most-likely-transformation model needs.
+
+  *Concavity.* `log Z = log[Φ(u) − Φ(l)]` is concave in `(l, u)` by Prékopa (the
+  Gaussian measure of a convex set is log-concave) and `(l, u)` are linear in β,
+  so subtracting it turned a convex negative log-likelihood — `½Σh² − Σlog h'`,
+  a quadratic plus a `−log(linear)` barrier — into a convex-plus-concave sum. At
+  one feasible β on the wine fixture, Hessian by central second differences:
+  truncated `λ_min = −6.365756e-1` against `λ_max = 7.418500e1`; untruncated
+  `λ_min = +2.346524e-1`. That single negative eigenvalue is the whole of
+  `resolvable_negative_curvature=true`, which the solver reported on every
+  terminal cycle of every refusal on this issue.
+
+  *Coercivity.* Raise the unpenalized location column to `c` and contract the
+  shape to `t/c`: `h`, `h_lo` and `h_hi` move together, the conditional law
+  converges to a truncated exponential in the normalized shape coordinate, and
+  the `−½Σh²` that would punish `c` is divided out by `Z`. The profile
+  likelihood over the location column, maximized over the shape at each `c`,
+  runs `141.0858 → 141.0604164` over `c ∈ [1, ∞)` with `c·Σα → 1.2235` —
+  monotone, never stationary, supremum attained only at `c = ∞`. The MLE did not
+  exist, at any λ: every penalty term is `O(‖shape‖²)` on that ray and vanishes,
+  so the penalty only sharpened the escape rather than causing it.
+
+  This is what five refuted hypotheses on that issue were all symptoms of — the
+  strict-interior dead band, the missing box-KKT repair, the face that would not
+  release, the Moré–Sorensen hard-case fill, and trust-region growth. The solver
+  was correctly refusing a problem with no solution.
+
+  The fitted density is now `φ(h) · h'` with no renormalization
+  (Hothorn–Möst–Bühlmann 2018), and with it: the model's CDF is `F(y|x) = Φ(h)`,
+  so the PIT is `Φ(h)` and the calibrated score is `h`; the
+  `OutsideCertifiedDomain` refusal is gone, because it existed only to stop the
+  conditional PIT fabricating a clamped `0`/`1` off the fitted range, and a
+  held-out response beyond the training range is now predicted rather than
+  refused; and `score_influence_jacobian` loses its endpoint-mass denominator,
+  its three `φ/D` coefficients and its `1/φ(z)` inversion, because `z = h`
+  identically on the interior.
+
+  Both transformation-normal quality arms produced no fit at all before
+  (`generated=2, screened=2, exact_validated=2, solver_started=0`) and now pass:
+  held-out PIT `KS=0.1597` against a `0.2517` bar, and wine-price normality
+  `W_gam=0.9533` against a `0.95` floor and `W_boxcox−0.02 = 0.9460`
+  match-or-beat. Two pins carry the properties rather than the fixtures —
+  `ctn_penalized_objective_is_coercive_in_the_location_column_2600` walks the
+  escape ray to the family's own `|h|` domain bound and requires divergence, not
+  merely monotone rise (a monotone sequence can be bounded, and bounded IS the
+  defect), and `ctn_observed_information_is_positive_semidefinite_2600`
+  eigendecomposes the exact SCOP information at nine feasible points.
+
 - **The constrained posterior's retention ladder searched a real number where
   the object being chosen is a set of rows, and floating point stopped it
   descending (#2714).** `assemble_retained_face` keeps a constraint row iff
