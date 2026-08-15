@@ -12,12 +12,11 @@
 //! 18 of #2674's 19 fixtures flipped green on that change. So the stall state
 //! that produced `8.24×` and `10.45×` may no longer be reachable.
 //!
-//! This test takes the measurement again at current `main`. It prints the
-//! measurement so we can compare against the pre-`a386c1e8b` baseline.
-//!
-//! Marked `#[ignore]` because it runs a 40-iteration inner solve and does not
-//! assert a regression invariant — it is a manual diagnostic reproducer.
-//! Run with: `cargo test -p gam-sae measure_chart_gauge_orbit -- --ignored --nocapture`
+//! This test takes the measurement again at current `main` and ENFORCES the
+//! re-measured baseline: the periodic/ARD-saddle stall must stay in the
+//! regime measured at `9b9973f` — v₀ at/below tolerance, v₁ above it but
+//! far below the pre-`a386c1e8b` 10.45× witness (the near-1.9× band). The
+//! measured values are deterministic on this fixture.
 //!
 //! ## Method
 //!
@@ -61,7 +60,6 @@ fn ard_saddle_state() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
 }
 
 #[test]
-#[ignore = "manual diagnostic reproducer for #2720; run with --ignored --nocapture"]
 fn measure_chart_gauge_orbit_gradient_projection_2720() {
     let (mut term, target, rho) = ard_saddle_state();
 
@@ -115,9 +113,7 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
     );
 
     let coord_dim = sys.rows.first().map(|r| r.gt.len()).unwrap_or(0);
-    eprintln!(
-        "[2720-baseline] n_rows={n_rows}, coord_dim={coord_dim}, border_dim={border_dim}"
-    );
+    eprintln!("[2720-baseline] n_rows={n_rows}, coord_dim={coord_dim}, border_dim={border_dim}");
     eprintln!("[2720-baseline] full gradient length = {full_len}");
     eprintln!("[2720-baseline] ‖g‖ = {grad_norm:.6e}");
 
@@ -158,15 +154,16 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
         tolerance.is_finite() && tolerance > 0.0,
         "[2720-baseline] tolerance is non-finite or non-positive"
     );
-    eprintln!(
-        "[2720-baseline] iterate_scale = {iterate_scale:.6e}, tolerance = {tolerance:.6e}"
-    );
+    eprintln!("[2720-baseline] iterate_scale = {iterate_scale:.6e}, tolerance = {tolerance:.6e}");
 
     // Project gradient onto each gauge direction.
     let mut max_ratio = 0.0f64;
     for (i, v) in gauge_basis.iter().enumerate() {
         let proj = grad.dot(v);
-        assert!(proj.is_finite(), "[2720-baseline] v_{i} projection is non-finite");
+        assert!(
+            proj.is_finite(),
+            "[2720-baseline] v_{i} projection is non-finite"
+        );
         let ratio = proj.abs() / tolerance;
         max_ratio = max_ratio.max(ratio);
         eprintln!(
@@ -179,17 +176,21 @@ fn measure_chart_gauge_orbit_gradient_projection_2720() {
     eprintln!("[2720-baseline] ────────────────────────────────────────");
     eprintln!("[2720-baseline] max |gᵀv|/tol = {max_ratio:.2}×");
 
-    if max_ratio <= 1.0 {
-        eprintln!(
-            "[2720-baseline] AT OR BELOW TOLERANCE — the orbit derivatives are now"
-        );
-        eprintln!("[2720-baseline] within the acceptance gate. The witness state for");
-        eprintln!("[2720-baseline] 8.24×/10.45× may be gone; the modelling fix's");
-        eprintln!("[2720-baseline] acceptance criteria need a new fixture.");
-    } else {
-        eprintln!("[2720-baseline] ABOVE TOLERANCE — the orbit derivatives are still");
-        eprintln!("[2720-baseline] materially above the convergence tolerance.");
-        eprintln!("[2720-baseline] The modelling question is live and the original");
-        eprintln!("[2720-baseline] acceptance criteria may still be applicable.");
-    }
+    // ENFORCED baseline (deterministic fixture, measured at `9b9973f` and
+    // re-verified identical after the #2765/#2767 rho-block merge):
+    // v₀ = 0.43× (at/below tolerance), v₁ = 1.89× (above, but far below the
+    // pre-`a386c1e8b` 10.45× witness). The band [1.0, 4.0] holds the v₁
+    // regime without pinning exact digits; outside it, either the stall
+    // state moved (v₁ ≤ 1.0 — the witness is gone, acceptance criteria need
+    // rebuilding) or the violation strengthened materially (v₁ > 4.0 —
+    // approaching the old witness class) — both are #2720-relevant changes
+    // someone must re-measure, not silently absorb.
+    assert!(
+        max_ratio > 1.0 && max_ratio < 4.0,
+        "[2720-baseline] the re-measured baseline left the post-a386c1e8b \
+         regime: max |gᵀv|/tol = {max_ratio:.2}× (measured 1.89× at 9b9973f). \
+         If ≤1.0 the witness state is GONE and #2720's acceptance criteria \
+         need a new fixture; if ≥4.0 the violation strengthened materially. \
+         Re-measure and update this pin deliberately."
+    );
 }
