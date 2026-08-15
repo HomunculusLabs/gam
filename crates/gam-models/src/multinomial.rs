@@ -607,9 +607,15 @@ fn multinomial_formula_penalized_separation_evidence(
     joint_specs: &[gam_problem::JointPenaltySpec],
     n_penalty_components: usize,
     joint_log_lambdas: Option<&Array1<f64>>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<MultinomialSeparationCertificate>, String> {
     if let Some(evidence) = multinomial_formula_separation_evidence(block_states) {
-        return Ok(Some(evidence));
+        // A saturated or non-finite mode: there is no certified curvature to
+        // measure a span from, so the term keeps its derived `ker(S_lambda)`
+        // span and only the verdict travels.
+        return Ok(Some(MultinomialSeparationCertificate {
+            evidence,
+            measured_span: None,
+        }));
     }
     let information = family
         .joint_jeffreys_information_with_specs(block_states, specs)?
@@ -649,15 +655,62 @@ fn multinomial_formula_penalized_separation_evidence(
     let reduced_penalty = identifiable_span
         .t()
         .dot(&s_lambda.dot(&identifiable_span));
-    let unreached = crate::multinomial_reml::measured_penalty_nullspace(&reduced_penalty)
+    // ── The span is MEASURED, not derived from a kernel (#2612) ─────────────
+    //
+    // `ker(S_λ)` answers "which directions could no smoothing parameter ever
+    // reach". The question this certificate needs answered is "which directions
+    // does the model, at the smoothing it actually selected, fail to bound", and
+    // on this very fixture those differ in the direction that matters. Measured
+    // at the penguins stride-4 unbiased mode:
+    //
+    // ```text
+    //   ker(S_lambda):                 2 of 74 directions, lambda_min(H+S_lambda) = 1.9e-3
+    //   whole identifiable span:                           lambda_min(H+S_lambda) = 5.1e-5
+    // ```
+    //
+    // The worst-bounded direction — five orders below one observation-equivalent
+    // — is NOT in the kernel. It is a `range(S)` direction whose selected λ
+    // railed at the floor, `MULTINOMIAL_FORMULA_PRIOR_PSEUDO_OBS = 8e-4`
+    // pseudo-observations. The claim that backs the kernel ("on `range(S)` the
+    // model already carries a proper prior, and a second one there is a
+    // duplicate") is true in name and false in magnitude: 8e-4
+    // pseudo-observations is not a prior. Left unarmed, that coefficient runs to
+    // `|η|∞ ≈ 45` and the posterior-mean predictive refuses to publish, because
+    // the posterior at that width is not describable by either Laplace expansion.
+    //
+    // So the span is `{v : vᵀ(H + S_λ)v < CONDITIONING_GATE_ABSOLUTE}` — the SAME
+    // one-observation-equivalent criterion that already decides the term's
+    // WEIGHT, now also deciding its SUPPORT. It contains the separating members
+    // of `ker(S_λ)` (there `S_λ v = 0` and `Hv → 0` under saturation) and
+    // excludes its well-determined ones (an unpenalized intercept the data pins
+    // needs no prior), so it is strictly better on both sides than either derived
+    // set. With no penalised component `S_λ` is zero and this reduces to "the
+    // directions the likelihood alone does not determine", which is what keeps
+    // the unpenalised quasi-separated design's verdict unchanged.
+    //
+    // The constancy the `Φ` derivative tower needs is met by WHERE this is
+    // measured, not by the matrix being constant: once, at the unbiased probe's
+    // certified mode and its selected λ, then handed to the armed refit as a
+    // fixed basis — the same construction, at the same point, that the arming
+    // DECISION already uses. That is why reading `H + S_λ`'s deficient subspace
+    // was previously rejected (it moves with β and ρ) and why this does not.
+    let reduced_penalized = identifiable_span.t().dot(&penalized.dot(&identifiable_span));
+    let unreached = crate::multinomial_reml::under_identified_subspace(&reduced_penalized)
         .map_err(|error| {
-            format!("multinomial separation certificate could not measure ker(S_lambda): {error}")
+            format!(
+                "multinomial separation certificate could not measure the under-identified \
+                 subspace of H+S_lambda: {error}"
+            )
         })?;
+    let kernel_dim = crate::multinomial_reml::measured_penalty_nullspace(&reduced_penalty)
+        .map(|columns| columns.ncols())
+        .unwrap_or(0);
     log::info!(
-        "multinomial separation certificate: {}/{} identifiable direction(s) are unreached by \
-         any smoothing parameter (S_lambda v = 0)",
+        "multinomial separation certificate: {}/{} identifiable direction(s) hold under one \
+         observation-equivalent of curvature in H+S_lambda at the certified mode (for \
+         comparison, {kernel_dim} are unreached by ANY smoothing parameter)",
         unreached.ncols(),
-        reduced_penalty.nrows(),
+        reduced_penalized.nrows(),
     );
     // Every direction is penalised: the model's own prior is proper everywhere,
     // and whatever width is left belongs to the posterior the predictive
@@ -735,17 +788,54 @@ fn multinomial_formula_penalized_separation_evidence(
         identifiable_span,
     )?;
     let (data_min, data_max) = unpenalized.information_extrema();
-    Ok(Some(format!(
-        "no smoothing parameter reaches {}/{} identifiable direction(s), and on that subspace \
-         the penalized curvature H+S_lambda is under-identified at the certified mode: \
-         lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
-         lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
-         (whole identifiable span: H+S_lambda in [{span_min:e}, {span_max:e}], likelihood alone \
-         in [{data_min:e}, {data_max:e}])",
-        unreached.ncols(),
-        reduced_penalty.nrows(),
-        plan.conditioning_gate_weight(),
-    )))
+    Ok(Some(MultinomialSeparationCertificate {
+        evidence: format!(
+            "{}/{} identifiable direction(s) hold under one observation-equivalent of curvature \
+             in H+S_lambda at the certified mode ({kernel_dim} of them are unreached by any \
+             smoothing parameter), and on that measured subspace the penalized curvature is \
+             under-identified: lambda_min={lambda_min:e}, lambda_max={lambda_max:e}, \
+             lambda_min/lambda_max={relative:e}, Jeffreys gate weight={:e} \
+             (whole identifiable span: H+S_lambda in [{span_min:e}, {span_max:e}], likelihood \
+             alone in [{data_min:e}, {data_max:e}])",
+            unreached.ncols(),
+            reduced_penalized.nrows(),
+            plan.conditioning_gate_weight(),
+        ),
+        // The span travels WITH the verdict, because they are one decision: the
+        // subspace the certificate judged is the subspace the term it arms must
+        // act on. Publishing only the verdict is how those two came apart in the
+        // first place -- the certificate reasoned about `ker(S_lambda)` while
+        // `build_joint_jeffreys_subspace` independently rebuilt it from the
+        // family's aggregate, and nothing checked that they agreed.
+        measured_span: Some(std::sync::Arc::new(unreached_span)),
+    }))
+}
+
+/// The separation certificate's two inseparable halves (#2612): the evidence
+/// that armed the Jeffreys/Firth prior, and the subspace that evidence was
+/// measured on -- which is the subspace the armed term must act on.
+#[derive(Debug, Clone)]
+pub(crate) struct MultinomialSeparationCertificate {
+    /// Human-readable evidence, carried to the payload as
+    /// `MultinomialSavedModel::separation_evidence`.
+    pub(crate) evidence: String,
+    /// Orthonormal basis, in raw joint coefficient order, of the directions the
+    /// model fails to bound at the smoothing it selected. `None` when the mode
+    /// was too degenerate to measure one (a saturated or non-finite solve), in
+    /// which case the term keeps its derived `ker(S_lambda)` span.
+    pub(crate) measured_span: Option<std::sync::Arc<Array2<f64>>>,
+}
+
+impl MultinomialSeparationCertificate {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.evidence
+    }
+}
+
+impl std::fmt::Display for MultinomialSeparationCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Inputs to [`fit_penalized_multinomial`].
@@ -3429,8 +3519,15 @@ pub fn fit_penalized_multinomial_formula(
 
     let run_firth_refit =
         |evidence: String,
+         measured_span: Option<std::sync::Arc<Array2<f64>>>,
          warm_start: Option<(&[ParameterBlockState], Option<&Array1<f64>>)>| {
-        let mut firth_family = family.clone().with_joint_jeffreys_term(true);
+        // The span the certificate MEASURED travels into the refit with the
+        // verdict it justified (#2612). `None` leaves the derived
+        // `ker(S_lambda)` route in place, which is what a degenerate mode gets.
+        let mut firth_family = family
+            .clone()
+            .with_joint_jeffreys_term(true)
+            .with_joint_jeffreys_span(measured_span);
         let mut firth_blocks = blocks.clone();
         if let Some((states, log_lambdas)) = warm_start {
             if states.len() != firth_blocks.len() {
@@ -3551,7 +3648,11 @@ pub fn fit_penalized_multinomial_formula(
                     );
                     (probe_fit, None)
                 }
-                Some(evidence) => {
+                Some(certificate) => {
+                    let MultinomialSeparationCertificate {
+                        evidence,
+                        measured_span,
+                    } = certificate;
                     // A certified unbiased optimum can still exhibit separation;
                     // use the already-computed mode and rho as the exact Firth
                     // continuation seed. The objectives differ only by the smooth
@@ -3560,6 +3661,7 @@ pub fn fit_penalized_multinomial_formula(
                     // unbiased path.
                     let refit = run_firth_refit(
                         evidence.clone(),
+                        measured_span,
                         Some((&probe_fit.block_states, joint_log_lambdas)),
                     )?;
                     (refit, Some(evidence))
@@ -3572,7 +3674,9 @@ pub fn fit_penalized_multinomial_formula(
                  budget ({} iteration(s)): {err}",
                 options.outer_max_iter,
             );
-            let refit = run_firth_refit(evidence.clone(), None)?;
+            // No certified mode, so no measured span: the derived
+            // `ker(S_lambda)` route stands.
+            let refit = run_firth_refit(evidence.clone(), None, None)?;
             (refit, Some(evidence))
         }
     };
@@ -4938,6 +5042,7 @@ mod fisher_override_tests {
         )
         .expect("exact Fisher certification")
         .expect("finite quasi-separation must arm the Firth refit");
+        let evidence = evidence.evidence;
         assert!(
             evidence.contains("under-identified")
                 && evidence.contains("lambda_min")
@@ -5029,6 +5134,7 @@ mod fisher_override_tests {
             "the fixture must be one the LIKELIHOOD alone cannot identify, or this test proves \
              nothing",
         );
+        let unpenalized = unpenalized.evidence;
         assert!(
             unpenalized.contains("lambda_min"),
             "the certificate must report the spectrum it decided on, got {unpenalized}"
@@ -6919,8 +7025,10 @@ mod reference_class_invariance_tests {
                  (min, max, count) = {lambda_range:?}\n    H alone      -> {:?}\n    H + S_lambda -> {:?}",
                 likelihood_only
                     .as_ref()
-                    .map(|e| e.as_ref().map(String::as_str)),
-                penalized.as_ref().map(|e| e.as_ref().map(String::as_str)),
+                    .map(|e| e.as_ref().map(MultinomialSeparationCertificate::as_str)),
+                penalized
+                    .as_ref()
+                    .map(|e| e.as_ref().map(MultinomialSeparationCertificate::as_str)),
             );
         }
     }

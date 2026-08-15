@@ -808,6 +808,26 @@ pub(crate) fn measured_penalty_nullspace(s: &Array2<f64>) -> Result<Array2<f64>,
     )
 }
 
+/// The directions a symmetric PSD curvature `A` fails to bound: an orthonormal
+/// basis of the span of `A`'s eigenvectors whose eigenvalue is below ONE
+/// observation-equivalent of curvature (gam#2612).
+///
+/// The threshold is `CONDITIONING_GATE_ABSOLUTE`, not a fresh constant. That
+/// value is already the codebase's answer to "how much curvature does one
+/// observation contribute to a unit-scale direction" — a binomial Fisher weight
+/// `p(1−p) ≤ ¼`, a Gaussian unit weight `1` — and it is already what decides
+/// whether the Jeffreys term FIRES. Using it to decide the term's SUPPORT as
+/// well is the same statement asked once instead of twice: a direction holding
+/// less than a single observation's worth of curvature is not determined by the
+/// model, whether the missing curvature is the likelihood's or the penalty's.
+///
+/// `A` is expected in the reduced (identifiable) coordinates, so the returned
+/// columns are too; the caller lifts them through the same identifiable span it
+/// reduced with.
+pub(crate) fn under_identified_subspace(a: &Array2<f64>) -> Result<Array2<f64>, String> {
+    gam_solve::estimate::reml::jeffreys_subspace::under_identified_subspace(a.view())
+}
+
 /// The reference-symmetric class-space metric `M = I_m − J_m/K` (`m = K−1`
 /// active classes, `J` = all-ones), the closed-form CLR whitening factor of
 /// the softmax gauge (gam#1587). Symmetric positive-definite with eigenvalues
@@ -979,6 +999,21 @@ pub struct MultinomialFamily {
     /// a single shared seed cannot express — and how fixed-ρ diagnostics pin
     /// the joint λs when probing the criterion surface (#2349).
     joint_initial_log_lambdas: Option<Vec<f64>>,
+    /// The MEASURED directions the model fails to bound at the smoothing it
+    /// selected, as an orthonormal `(K−1)P × m` basis in the raw joint
+    /// coefficient order — the span the Jeffreys/Firth term acts on (gam#2612).
+    ///
+    /// `None` (the default) falls back to `jeffreys_span_aggregate_penalty`,
+    /// i.e. `ker(S_λ)`. The formula REML driver sets this from the separation
+    /// certificate, which measures it ONCE at the unbiased probe's certified
+    /// mode and at the λ that probe selected, so it is constant for the lifetime
+    /// of the armed refit — the constancy every `Φ` derivative formula needs.
+    /// See `CustomFamily::jeffreys_span_basis` for why a penalty kernel is the
+    /// wrong object to derive this from.
+    ///
+    /// `Arc` because the family is cloned per homotopy waypoint and per outer
+    /// evaluation, and this basis never changes within a fit.
+    joint_jeffreys_span: Option<Arc<Array2<f64>>>,
 }
 
 /// One frozen-`β` snapshot of every canonical-axis joint-Hessian directional
@@ -1113,7 +1148,18 @@ impl MultinomialFamily {
             joint_jeffreys_term_strength: 1.0,
             initial_log_lambda: 0.0,
             joint_initial_log_lambdas: None,
+            joint_jeffreys_span: None,
         })
+    }
+
+    /// Install the MEASURED Jeffreys/Firth span (gam#2612).
+    ///
+    /// The caller is promising the basis is orthonormal, is expressed in the raw
+    /// joint coefficient order, and does not change for the lifetime of the fit.
+    /// See [`Self::joint_jeffreys_span`] and `CustomFamily::jeffreys_span_basis`.
+    pub fn with_joint_jeffreys_span(mut self, span: Option<Arc<Array2<f64>>>) -> Self {
+        self.joint_jeffreys_span = span;
+        self
     }
 
     /// Select whether this multinomial adapter instance contributes the
@@ -2528,6 +2574,20 @@ impl CustomFamily for MultinomialFamily {
 
     fn joint_jeffreys_term_strength(&self) -> f64 {
         self.joint_jeffreys_term_strength
+    }
+
+    fn jeffreys_span_basis(&self) -> Result<Option<Array2<f64>>, String> {
+        let Some(span) = self.joint_jeffreys_span.as_ref() else {
+            return Ok(None);
+        };
+        let expected = self.beta_flat_dim();
+        if span.nrows() != expected {
+            return Err(format!(
+                "multinomial measured Jeffreys span is {:?}, expected ({expected}, m)",
+                span.dim()
+            ));
+        }
+        Ok(Some(span.as_ref().clone()))
     }
 
     fn coefficient_mode_homotopy_member(&self, progress: f64) -> Result<Option<Self>, String> {

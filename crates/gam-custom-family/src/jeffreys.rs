@@ -46,6 +46,31 @@ pub(crate) fn build_joint_jeffreys_subspace<F: CustomFamily + ?Sized>(
     if total_p == 0 {
         return Ok(None);
     }
+    // gam#2612: a family that has MEASURED the directions it fails to bound
+    // states them directly, and that statement wins over anything derived from a
+    // penalty's kernel — see `CustomFamily::jeffreys_span_basis` for why a kernel
+    // is the wrong object to derive the span from, and for the constancy contract
+    // the family is promising by returning `Some` here.
+    if let Some(basis) = family
+        .jeffreys_span_basis()
+        .map_err(|reason| CustomFamilyError::DimensionMismatch { reason })?
+    {
+        if basis.nrows() != total_p {
+            return Err(CustomFamilyError::DimensionMismatch {
+                reason: format!(
+                    "jeffreys span basis has {} rows, expected the raw joint width {total_p}",
+                    basis.nrows()
+                ),
+            });
+        }
+        if basis.ncols() == 0 {
+            // The model bounds every direction at the smoothing it selected, so
+            // there is nothing for this term to bound — the same exit the
+            // aggregate route takes when every direction is penalised.
+            return Ok(None);
+        }
+        return Ok(Some(basis));
+    }
     // gam#2612: a family whose smoothing rides on a JOINT penalty bundle
     // (gam#1587) leaves every per-block `penalties` list empty, so the
     // block-diagonal assembly below sees no penalty and hands back the full
