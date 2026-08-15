@@ -149,13 +149,16 @@ fn joint_h_matvec(sys: &ArrowSchurSystem, v: ArrayView1<'_, f64>) -> Array1<f64>
     out
 }
 
+/// The REAL stall: poincare atom against the circle cloud (its refusal is
+/// robust — reproduced across every run and a 10x budget in #2772).
+/// ENFORCED (deterministic): the refusal must reproduce with the #2772
+/// telemetry signature, the gauge basis must be orthonormal, ≥99% of the
+/// gradient must lie in-orbit, and the independently-computed step must be
+/// strongly anti-aligned with g (measured cos θ ≈ −0.949). Scope: this is a
+/// zero-ridge reconstruction at the post-refusal state, not the production
+/// trajectory — it pins the stall signature, not the production root cause.
 #[test]
-#[ignore = "manual diagnostic; run with --ignored --nocapture"]
 fn step_projection_at_poincare_circle_stall_2720() {
-    // The REAL stall: poincare atom against the circle cloud (its refusal is
-    // robust — reproduced across every run and a 10x budget in #2772).
-    // Measure the step AT the stalled state, then, to see what the solver
-    // COULD do there, also after a no-op refinement that keeps the state.
     use crate::manifold::tests_gauge_frame_roundtrip_2720::planted_circle_cloud;
     let z = planted_circle_cloud();
     let minimal = build_sae_minimal_seed(SaeMinimalSeedRequest {
@@ -229,15 +232,28 @@ fn step_projection_at_poincare_circle_stall_2720() {
         1.0e-6,
         1.0e-6,
     );
-    match &outcome {
-        Ok(_) => eprintln!(
-            "[step-probe] UNEXPECTED: poincare/circle converged this run — the robust refusal did not reproduce"
-        ),
-        Err(e) => eprintln!(
-            "[step-probe] stall reproduced: {}",
-            e.to_string().chars().take(220).collect::<String>()
-        ),
-    }
+    let refusal_reproduced = match &outcome {
+        Ok(_) => {
+            eprintln!(
+                "[step-probe] UNEXPECTED: poincare/circle converged this run — the robust refusal did not reproduce"
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!(
+                "[step-probe] stall reproduced: {}",
+                e.to_string().chars().take(220).collect::<String>()
+            );
+            true
+        }
+    };
+    // ENFORCED: the #2772 refusal must reproduce (it has on every run of the
+    // corrected fixture — identical telemetry to all printed digits).
+    assert!(
+        refusal_reproduced,
+        "[step-probe] the poincare/circle refusal vanished — the stall state this \
+         test pins no longer exists; re-measure before trusting anything downstream"
+    );
 
     // Measure at whatever state that attempt left behind.
     let sys = term
@@ -351,6 +367,17 @@ fn step_projection_at_poincare_circle_stall_2720() {
                  ‖QᵀΔ‖={d_in_norm:.6e} ({d_in_share:.6} of ‖Δ‖), gᵀΔ={gd:.6e}, \
                  cos θ={cos_theta:.6}"
             );
+            // ENFORCED (stall signature, deterministic): a strong
+            // anti-gradient direction EXISTS at the refusing state
+            // (measured cos θ = −0.949). If this ever fails, the stall's
+            // character changed and every downstream interpretation of it
+            // must be re-measured.
+            assert!(
+                cos_theta < -0.9,
+                "[step-probe] the step at the stalled state is no longer strongly \
+                 anti-aligned with g (cos θ = {cos_theta:.4}) — a strong anti-gradient \
+                 direction no longer exists at the refusal; re-measure the stall"
+            );
             if d_in_share < 1.0e-8 {
                 eprintln!(
                     "[step-probe] VERDICT: step is gauge-PROJECTED at the stall — the original mechanism claim holds HERE"
@@ -361,14 +388,19 @@ fn step_projection_at_poincare_circle_stall_2720() {
                 );
             }
         }
-        Err(e) => eprintln!(
-            "[step-probe] Newton step FAILED at the stalled state: {e:?} — the refusal path may fail before a step exists"
+        Err(e) => panic!(
+            "[step-probe] Newton step FAILED at the stalled state: {e:?} — the refusal \
+             path produced no step, so the stall-signature measurement is impossible"
         ),
     }
 }
 
+/// Control arm: periodic on its OWN native target. ENFORCED (deterministic,
+/// corrected fixture): the solve CONVERGES (the earlier "periodic refuses
+/// native" was the RNG-artifact fixture) and the step at the returned state
+/// is strongly anti-aligned with g — on a converging path, showing the step
+/// machinery moves freely along the orbit (cos θ ≈ −0.999999 in-orbit).
 #[test]
-#[ignore = "manual diagnostic; run with --ignored --nocapture"]
 fn step_projection_at_periodic_native_stall_2720() {
     let (mut term, rho, _z) = seeded_native("periodic");
     for atom in term.atoms.iter_mut() {
@@ -376,8 +408,7 @@ fn step_projection_at_periodic_native_stall_2720() {
     }
     let native = native_target(&term);
 
-    // Drive toward the stall: run the solver until it refuses (the refusal IS
-    // the stall state), then measure AT the state the refusal left behind.
+    // On the corrected fixture this solve CONVERGES — the control contract.
     let outcome = term.penalized_quasi_laplace_criterion_with_cache(
         native.view(),
         &rho,
@@ -387,13 +418,20 @@ fn step_projection_at_periodic_native_stall_2720() {
         1.0e-6,
         1.0e-6,
     );
+    let converged = outcome.is_ok();
     match &outcome {
-        Ok(_) => eprintln!("[step-probe] NOTE: solve converged — stall not reproduced this run"),
+        Ok(_) => eprintln!("[step-probe] periodic/native converged (expected — control)"),
         Err(e) => eprintln!(
-            "[step-probe] stall reproduced: {}",
+            "[step-probe] periodic/native REFUSED: {}",
             e.to_string().chars().take(200).collect::<String>()
         ),
     }
+    assert!(
+        converged,
+        "[step-probe] periodic/native refused — regression against the corrected-fixture \
+         finding (it solves: criterion 2.471e1); if this is a genuine solver change, \
+         re-measure the stall probes before updating this control"
+    );
 
     // Assemble at the (stalled) current state.
     let sys = term
@@ -428,17 +466,24 @@ fn step_projection_at_periodic_native_stall_2720() {
         "[step-probe] no gauge directions — instrument inapplicable"
     );
     let g_norm = grad.dot(&grad).sqrt();
-    let mut g_in = 0.0f64;
+    let mut g_in_sq = 0.0f64;
     for v in basis.iter() {
-        g_in += grad.dot(v).powi(2);
+        g_in_sq += grad.dot(v).powi(2);
     }
-    let g_in_norm = g_in.sqrt();
+    let g_in_norm = g_in_sq.sqrt();
+    let g_in_share = if g_norm > 0.0 {
+        g_in_norm / g_norm
+    } else {
+        f64::NAN
+    };
     eprintln!(
-        "[step-probe] state: ‖g‖={g_norm:.6e}, in-orbit ‖Qᵀg‖={g_in_norm:.6e} \
-         ({:.4} of ‖g‖), {} gauge dirs",
-        g_in_norm / g_norm,
+        "[step-probe] periodic/native state: ‖g‖={g_norm:.6e}, in-orbit ‖Qᵀg‖={g_in_norm:.6e} \
+         ({g_in_share:.4} of ‖g‖), {} gauge dirs",
         basis.len()
     );
+    // No orbit-domination assertion here by design: this is the CONVERGED
+    // control; its in-orbit share is a reading, not a contract. The stall
+    // signature (orbit domination) is asserted in the poincare/circle test.
 
     // The solver's own entry, same options family the criterion uses.
     let options = ArrowSolveOptions::automatic(sys.k);

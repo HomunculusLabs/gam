@@ -184,8 +184,12 @@ fn state_snapshot(
 /// Probe A: at the SEEDED state, is the gauge basis likelihood-null for each
 /// kind? The instrument: worst |g_nullᵀv| / ‖g_null‖ over basis directions,
 /// plus the same for the FULL gradient (penalty included) as context.
+///
+/// Enforced (deterministic fixture): every kind's gauge directions must be
+/// likelihood-null at machine level, and the periodic control must produce a
+/// measurable basis. The measured values at `64e7818`: worst null-shares
+/// 6.8e-15 (periodic), 3.5e-9 (duchon), 1.8e-7 (poincare), 1.2e-7 (linear).
 #[test]
-#[ignore = "manual diagnostic; run with --ignored --nocapture"]
 fn poincare_gauge_nullness_at_seed_2720() {
     for kind in ["periodic", "duchon", "poincare", "linear"] {
         let (mut term, rho, z) = seeded_circle_term(kind);
@@ -220,14 +224,37 @@ fn poincare_gauge_nullness_at_seed_2720() {
             worst_null_share,
             worst_full_share
         );
+        // ENFORCED: gauge directions are likelihood-null at machine level on
+        // every kind. Meaningfulness guard is RELATIVE: the null-share is
+        // resolvable whenever the near-null projection itself carries mass
+        // above absolute noise (1e-12), not only when ‖g_null‖ is O(1).
+        let worst_abs_null_proj = basis
+            .iter()
+            .map(|v| null_grad.dot(v).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst_abs_null_proj < 1.0e-5 * null_norm.max(1.0e-12) || worst_abs_null_proj < 1.0e-8,
+            "[poincare-gauge] {kind}: gauge direction is NOT likelihood-null at the \
+             seed (worst |g_nullᵀv| = {worst_abs_null_proj:.3e} against ‖g_null‖ \
+             = {null_norm:.3e}) — the chart-gauge construction regressed on this kind"
+        );
+        // The periodic control must be measurable at all.
+        assert!(
+            !basis.is_empty() || kind != "periodic",
+            "[poincare-gauge] periodic control produced NO gauge directions"
+        );
     }
 }
 
 /// Probe B: a target that is BY CONSTRUCTION this poincaré atom's own
 /// reconstruction at its own seed state. data_fit ≈ 0 at t=0; if the solve
 /// still refuses, the refusal is native to the kind, not fixture stress.
+///
+/// Enforced (deterministic fixture): poincare MUST solve its native target
+/// (measured criterion 5.964e1, data_fit 1.46) and periodic MUST solve its
+/// own (criterion 2.471e1) — pinning the corrected-fixture finding that the
+/// earlier "periodic refuses native" was a harness RNG artifact.
 #[test]
-#[ignore = "manual diagnostic; run with --ignored --nocapture"]
 fn poincare_self_consistent_target_2720() {
     let (mut term, rho, _z) = seeded_circle_term("poincare");
     for atom in term.atoms.iter_mut() {
@@ -263,7 +290,7 @@ fn poincare_self_consistent_target_2720() {
 
     // Then: try the solve on the native target.
     let budget = 40usize;
-    match term.penalized_quasi_laplace_criterion_with_cache(
+    let poincare_solved = match term.penalized_quasi_laplace_criterion_with_cache(
         native.view(),
         &rho,
         None,
@@ -272,11 +299,14 @@ fn poincare_self_consistent_target_2720() {
         1.0e-6,
         1.0e-6,
     ) {
-        Ok((value, loss, _)) => eprintln!(
-            "[poincare-gauge] poincare  native SOLVED: criterion={value:.6e} \
-             (data_fit={:.3e}, smoothness={:.3e}, ard={:.3e}) — the refusal WAS fixture stress",
-            loss.data_fit, loss.smoothness, loss.ard
-        ),
+        Ok((value, loss, _)) => {
+            eprintln!(
+                "[poincare-gauge] poincare  native SOLVED: criterion={value:.6e} \
+                 (data_fit={:.3e}, smoothness={:.3e}, ard={:.3e}) — the refusal WAS fixture stress",
+                loss.data_fit, loss.smoothness, loss.ard
+            );
+            true
+        }
         Err(e) => {
             let note = e.to_string();
             eprintln!(
@@ -284,8 +314,9 @@ fn poincare_self_consistent_target_2720() {
                 note.chars().take(400).collect::<String>()
             );
             eprintln!("[poincare-gauge] → refusal is NATIVE to the poincare kind, not the fixture");
+            false
         }
-    }
+    };
 
     // Control: same native-target experiment on periodic.
     let (mut pterm, prho, _pz) = seeded_circle_term("periodic");
@@ -295,7 +326,7 @@ fn poincare_self_consistent_target_2720() {
     let pphi = pterm.atoms[0].basis_values.view();
     let pdec = pterm.atoms[0].decoder_coefficients();
     let pnative = pphi.dot(pdec);
-    match pterm.penalized_quasi_laplace_criterion_with_cache(
+    let periodic_solved = match pterm.penalized_quasi_laplace_criterion_with_cache(
         pnative.view(),
         &prho,
         None,
@@ -304,14 +335,34 @@ fn poincare_self_consistent_target_2720() {
         1.0e-6,
         1.0e-6,
     ) {
-        Ok((value, loss, _)) => eprintln!(
-            "[poincare-gauge] periodic  native SOLVED: criterion={value:.6e} \
-             (data_fit={:.3e})",
-            loss.data_fit
-        ),
-        Err(e) => eprintln!(
-            "[poincare-gauge] periodic  native REFUSED: {}",
-            e.to_string().chars().take(300).collect::<String>()
-        ),
-    }
+        Ok((value, loss, _)) => {
+            eprintln!(
+                "[poincare-gauge] periodic  native SOLVED: criterion={value:.6e} \
+                 (data_fit={:.3e})",
+                loss.data_fit
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "[poincare-gauge] periodic  native REFUSED: {}",
+                e.to_string().chars().take(300).collect::<String>()
+            );
+            false
+        }
+    };
+    // ENFORCED (corrected-fixture findings, deterministic): both kinds solve
+    // their own reconstructions. The pre-correction harness claimed periodic
+    // refuses its native target — that was the RNG-artifact fixture, and this
+    // assertion keeps it from coming back unnoticed.
+    assert!(
+        poincare_solved,
+        "[poincare-gauge] poincare no longer solves its native target — the refusal \
+         became kind-native, contradicting the corrected-fixture measurement"
+    );
+    assert!(
+        periodic_solved,
+        "[poincare-gauge] periodic no longer solves its native target — regression \
+         against the corrected-fixture measurement (criterion 2.471e1)"
+    );
 }
