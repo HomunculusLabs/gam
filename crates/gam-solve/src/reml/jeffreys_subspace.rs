@@ -47,7 +47,7 @@
 //! a well-conditioned fit) is the only "apply where needed" mechanism.
 
 use faer::Side;
-use gam_linalg::faer_ndarray::FaerEigh;
+use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
 use gam_linalg::lanczos::{SymmetricLanczosOptions, symmetric_lanczos_eigenpairs};
 use ndarray::{Array1, Array2, ArrayView2};
 use std::collections::HashMap;
@@ -1119,11 +1119,107 @@ pub fn under_identified_subspace(a: ArrayView2<'_, f64>) -> Result<Array2<f64>, 
     let (eigenvalues, eigenvectors) = symmetric.eigh(Side::Lower).map_err(|e| {
         format!("under_identified_subspace: curvature eigendecomposition failed: {e}")
     })?;
-    // Written as the NEGATION of "is bounded" rather than as `< threshold` so a
-    // non-finite eigenvalue lands in the span rather than out of it. A curvature
-    // this function cannot read is not a curvature that bounds anything, and the
-    // safe direction for a prior's support is to include the direction it cannot
-    // vouch for.
+    Ok(select_under_identified_columns(&eigenvalues, &eigenvectors))
+}
+
+/// The same measurement, taken in a METRIC rather than in the raw coordinates:
+/// the span of generalized eigenvectors of `A v = μ G v` with `μ` below one
+/// observation-equivalent, returned as an orthonormal basis.
+///
+/// # Why a metric is not optional for a gauge-carrying family
+///
+/// An eigenvalue threshold is a statement about coordinates. When the model's
+/// own parameterization is a GAUGE CHOICE, the same physical direction has
+/// different curvature in different gauges, and a threshold on the raw spectrum
+/// selects a different physical subspace in each — which is a fit that depends on
+/// an arbitrary convention.
+///
+/// The multinomial is exactly that case. Its coefficients live in the ALR frame
+/// anchored at an arbitrary reference class; relabelling classes acts on `θ` by a
+/// NON-orthogonal contrast change `R`, so the likelihood information transforms
+/// by congruence `H ↦ R⁻ᵀ H R⁻¹` and its eigenvalues move. `ker(S_λ)` survives
+/// that (a kernel is congruence-invariant) which is why the derived span never
+/// had this problem; a threshold does not. Measured on
+/// `multinomial_fit_is_invariant_to_reference_class_1587`, three labelings of one
+/// dataset: predicted-probability drift `4.093e-3` against a `1e-3` bar, with
+/// refit noise `0.0` — structural, not numerical.
+///
+/// The repair is the metric gam#1587 already owns. `G` must transform the same
+/// way as `A` (`G ↦ R⁻ᵀ G R⁻¹`); then `G^{-1/2} A G^{-1/2}` is orthogonally
+/// similar across gauges, so its spectrum — and the subspace this selects — is a
+/// property of the model rather than of the labelling. For the multinomial that
+/// `G` is the centered class metric `M ⊗ I_P`, the closed-form CLR whitening
+/// factor of the softmax gauge and the same `M` the reference-symmetric penalty
+/// `M ⊗ S_t` is built from.
+///
+/// The returned basis is orthonormalized in the ORDINARY inner product, because
+/// that is what `Z_JᵀHZ_J` is defined against. Orthonormalising a fixed span is a
+/// within-span rotation, so it changes `log|Z_JᵀHZ_J|` only by a `β`-independent
+/// constant — it moves no mode and no gradient.
+pub fn under_identified_subspace_in_metric(
+    a: ArrayView2<'_, f64>,
+    g: ArrayView2<'_, f64>,
+) -> Result<Array2<f64>, String> {
+    let p = a.nrows();
+    if a.ncols() != p {
+        return Err(format!(
+            "under_identified_subspace_in_metric: curvature must be square, got {}x{}",
+            a.nrows(),
+            a.ncols()
+        ));
+    }
+    if g.nrows() != p || g.ncols() != p {
+        return Err(format!(
+            "under_identified_subspace_in_metric: metric is {}x{}, expected {p}x{p}",
+            g.nrows(),
+            g.ncols()
+        ));
+    }
+    if p == 0 {
+        return Ok(Array2::zeros((0, 0)));
+    }
+    let mut metric = g.to_owned();
+    symmetrize_contiguous(&mut metric);
+    let chol = metric.cholesky(Side::Lower).map_err(|e| {
+        format!(
+            "under_identified_subspace_in_metric: the metric is not positive definite ({e}); a              gauge metric that is singular does not define which directions are unit-scale"
+        )
+    })?;
+    let lower = chol.lower_triangular();
+    // `W = L⁻¹ A L⁻ᵀ`, formed by two triangular solves rather than by inverting.
+    let mut symmetric = a.to_owned();
+    symmetrize_contiguous(&mut symmetric);
+    let half = solve_lower_triangular(&lower, &symmetric)?;
+    // `.as_standard_layout()` before `.to_owned()`: a transposed view's
+    // `to_owned` keeps the view's order, and `symmetrize_contiguous` below
+    // requires a standard-layout buffer.
+    let half_transposed = half.t().as_standard_layout().to_owned();
+    let mut whitened = solve_lower_triangular(&lower, &half_transposed)?;
+    symmetrize_contiguous(&mut whitened);
+    let (eigenvalues, eigenvectors) = whitened.eigh(Side::Lower).map_err(|e| {
+        format!("under_identified_subspace_in_metric: whitened eigendecomposition failed: {e}")
+    })?;
+    let selected = select_under_identified_columns(&eigenvalues, &eigenvectors);
+    if selected.ncols() == 0 {
+        return Ok(selected);
+    }
+    // Back to the model's own coordinates: `v = L⁻ᵀ w`.
+    let unwhitened = solve_upper_triangular_transpose(&lower, &selected)?;
+    orthonormalize_columns(&unwhitened)
+}
+
+/// Columns of `eigenvectors` whose eigenvalue is below one observation-equivalent.
+///
+/// Written as the NEGATION of "is bounded" rather than as `< threshold` so a
+/// non-finite eigenvalue lands in the span rather than out of it. A curvature
+/// this function cannot read is not a curvature that bounds anything, and the
+/// safe direction for a prior's support is to include the direction it cannot
+/// vouch for.
+fn select_under_identified_columns(
+    eigenvalues: &Array1<f64>,
+    eigenvectors: &Array2<f64>,
+) -> Array2<f64> {
+    let p = eigenvectors.nrows();
     let columns_wanted: Vec<usize> = (0..eigenvalues.len())
         .filter(|&i| !(eigenvalues[i] >= CONDITIONING_GATE_ABSOLUTE))
         .collect();
@@ -1133,7 +1229,97 @@ pub fn under_identified_subspace(a: ArrayView2<'_, f64>) -> Result<Array2<f64>, 
             columns[[row, target]] = eigenvectors[[row, source]];
         }
     }
-    Ok(columns)
+    columns
+}
+
+/// `L⁻¹ B` for a lower-triangular `L`, by forward substitution.
+fn solve_lower_triangular(lower: &Array2<f64>, b: &Array2<f64>) -> Result<Array2<f64>, String> {
+    let n = lower.nrows();
+    if b.nrows() != n {
+        return Err(format!(
+            "triangular solve: right-hand side has {} rows, expected {n}",
+            b.nrows()
+        ));
+    }
+    let mut x = b.to_owned();
+    for column in 0..x.ncols() {
+        for row in 0..n {
+            let mut value = x[[row, column]];
+            for k in 0..row {
+                value -= lower[[row, k]] * x[[k, column]];
+            }
+            let pivot = lower[[row, row]];
+            if pivot == 0.0 {
+                return Err("triangular solve: zero pivot in the metric's Cholesky".to_string());
+            }
+            x[[row, column]] = value / pivot;
+        }
+    }
+    Ok(x)
+}
+
+/// `L⁻ᵀ B` for a lower-triangular `L`, by back substitution.
+fn solve_upper_triangular_transpose(
+    lower: &Array2<f64>,
+    b: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    let n = lower.nrows();
+    if b.nrows() != n {
+        return Err(format!(
+            "triangular solve: right-hand side has {} rows, expected {n}",
+            b.nrows()
+        ));
+    }
+    let mut x = b.to_owned();
+    for column in 0..x.ncols() {
+        for row in (0..n).rev() {
+            let mut value = x[[row, column]];
+            for k in (row + 1)..n {
+                value -= lower[[k, row]] * x[[k, column]];
+            }
+            let pivot = lower[[row, row]];
+            if pivot == 0.0 {
+                return Err("triangular solve: zero pivot in the metric's Cholesky".to_string());
+            }
+            x[[row, column]] = value / pivot;
+        }
+    }
+    Ok(x)
+}
+
+/// Modified Gram-Schmidt, twice, so the returned columns are orthonormal to
+/// working precision even when the input is ill-conditioned. Columns that
+/// collapse are dropped rather than kept as noise: a span is what this returns,
+/// and a numerically dependent column is not part of it.
+fn orthonormalize_columns(columns: &Array2<f64>) -> Result<Array2<f64>, String> {
+    let rows = columns.nrows();
+    let mut kept: Vec<Array1<f64>> = Vec::with_capacity(columns.ncols());
+    for column in 0..columns.ncols() {
+        let mut v = columns.column(column).to_owned();
+        let initial = v.dot(&v).sqrt();
+        if !(initial > 0.0) || !initial.is_finite() {
+            continue;
+        }
+        for _pass in 0..2 {
+            for basis in kept.iter() {
+                let projection = basis.dot(&v);
+                v.scaled_add(-projection, basis);
+            }
+        }
+        let norm = v.dot(&v).sqrt();
+        // `1e-8` of the column's own entering length is the standard
+        // reorthogonalization cutoff: below it the column is a rounding artefact
+        // of the ones already kept, not a direction.
+        if !(norm > 1e-8 * initial) || !norm.is_finite() {
+            continue;
+        }
+        kept.push(v.mapv(|value| value / norm));
+    }
+    let mut basis = Array2::<f64>::zeros((rows, kept.len()));
+    for (index, column) in kept.iter().enumerate() {
+        basis.column_mut(index).assign(column);
+    }
+    Ok(basis)
 }
 
 /// One authoritative reduced-information artifact for a joint Jeffreys term.
@@ -3018,6 +3204,68 @@ mod tests {
         assert!(
             mass[2] < 1e-12 && mass[3] < 1e-12,
             "a direction the model bounds must not be in the span, got axis masses {mass:?}"
+        );
+    }
+
+    /// The metric-aware measurement is GAUGE-INVARIANT: the same physical
+    /// subspace comes back after a non-orthogonal change of coordinates, which
+    /// is exactly what the raw-spectrum version cannot promise and what
+    /// `multinomial_fit_is_invariant_to_reference_class_1587` measured it
+    /// failing.
+    #[test]
+    fn the_metric_aware_span_survives_a_non_orthogonal_change_of_gauge_2612() {
+        // Two under-identified directions (0.90, 0.95) and one the model bounds.
+        let curvature = array![[0.90, 0.0, 0.0], [0.0, 0.95, 0.0], [0.0, 0.0, 5.0]];
+        let metric = Array2::<f64>::eye(3);
+        let span = under_identified_subspace_in_metric(curvature.view(), metric.view())
+            .expect("identity metric");
+        assert_eq!(span.ncols(), 2);
+
+        // A non-orthogonal gauge change, under which BOTH the curvature and the
+        // metric transform by congruence — which is the multinomial's situation
+        // exactly: relabelling classes is a contrast change, and `H + S_λ` and
+        // `M ⊗ I_P` both follow it.
+        let r = array![[1.0, 0.0, 0.0], [-3.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let r_inv = array![[1.0, 0.0, 0.0], [3.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let curvature_gauged = r_inv.t().dot(&curvature.dot(&r_inv));
+        let metric_gauged = r_inv.t().dot(&metric.dot(&r_inv));
+        let span_gauged =
+            under_identified_subspace_in_metric(curvature_gauged.view(), metric_gauged.view())
+                .expect("gauged metric");
+        assert_eq!(span_gauged.ncols(), 2, "the DIMENSION must survive the gauge");
+
+        // And it is the same PHYSICAL subspace: `R` maps the original span onto
+        // the gauged one. Compared as projectors, so the comparison does not
+        // depend on which orthonormal basis either call happened to return.
+        let mapped = orthonormalize_columns(&r.dot(&span)).expect("mapped span");
+        let projector_a = mapped.dot(&mapped.t());
+        let projector_b = span_gauged.dot(&span_gauged.t());
+        let worst = projector_a
+            .iter()
+            .zip(projector_b.iter())
+            .fold(0.0_f64, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            worst < 1e-10,
+            "the metric-aware span must map to itself under the gauge change; worst projector \
+             entry differs by {worst:.3e}"
+        );
+
+        // The CONTROL that makes the assertion above mean something: taken in the
+        // RAW spectrum the same gauge change selects a different subspace — here
+        // it does not even keep the dimension, because congruence preserves
+        // inertia but not the count below a positive threshold. Without this the
+        // test could pass on a fixture where the metric does nothing.
+        let raw = under_identified_subspace(curvature.view()).expect("raw");
+        let raw_gauged = under_identified_subspace(curvature_gauged.view()).expect("raw gauged");
+        assert_eq!(
+            raw.ncols(),
+            2,
+            "the raw measurement agrees with the metric-aware one BEFORE the gauge change"
+        );
+        assert_eq!(
+            raw_gauged.ncols(),
+            1,
+            "and disagrees after it — that disagreement is the defect the metric removes"
         );
     }
 
