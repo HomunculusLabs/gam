@@ -184,6 +184,36 @@
   in the worktree and rerunning the same suite, so none of those 23 is this
   lane's.
 
+  One thing the sweep turned up underneath, recorded with the repair it
+  FALSIFIED rather than with a guess. The operator penalties' raw Frobenius
+  norms on the same cell, as the length scale shrinks:
+
+  ```
+  length_scale   mass      tension     stiffness    tension max|entry|
+    1.64e-1      3.00e0    2.71e-8     1.72e4       6.72e-1
+    2.05e-2      3.00e0    3.30e-97    7.03e7       6.00e-1
+    1.03e-2      3.00e0    1.00e0*     1.12e9       3.26e-203
+  ```
+
+  `*` at `1.03e-2` the normalizer declines to divide (its `all(|v| <= 1e-12)`
+  branch), so the scale reads `1.0` and the matrix ships un-normalized with
+  entries at `3.26e-203`. Either way the tension operator is numerically
+  annihilated and then carried as an ACTIVE penalty with its own smoothing
+  parameter -- which is where the certified nullity of 2 at that scale comes
+  from -- while mass and stiffness saturate to the same projector, which is the
+  "exact redundancy" this issue was built on. The obvious repair (drop a
+  candidate whose raw energy is under `EPSILON x` the strongest sibling on its
+  block) reds
+  `scale_contract::tests::every_wrapper_preserves_its_declared_inner_abscissa_pullback_2315`
+  (5 active penalties -> 3), and correctly: operators of derivative order `q`
+  carry dimensions `[f/x^q]^2`, so their raw energies move by `factor^(-2q)`
+  under a rescaling of the abscissa and a cross-order ratio is not a
+  scale-invariant quantity at all. Rule withdrawn. What is left is a magnitude
+  question inside the operator construction (`1/ls = 97.4` and
+  `97.4^-48 ~ 1e-95` is the shape of a `kappa`-power prefactor underflowing in
+  the closed-form branch), and it belongs to that subsystem rather than to the
+  curvature certificate.
+
   That premise is what this issue ran on for its whole life, and the sweep that
   killed it is `examples/probe2676_penalty_map_defect`: the
   `geo_disease_*_matern` redundancy is a small-length-scale LIMIT of two

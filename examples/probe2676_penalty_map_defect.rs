@@ -24,6 +24,45 @@
 //!   approximate flat direction to reason about and no exact one, and the
 //!   deflation cannot be what fixes it.
 //!
+//! # What the sweep turned up underneath, and the hypothesis it KILLED
+//!
+//! The redundancy's mechanism is visible in the raw scales the probe prints.
+//! On the `geo_disease_matern` cell (centers=10, n=1500, n_pcs=16), the three
+//! operator penalties' `normalization_scale` — their Frobenius norm BEFORE they
+//! were divided by it — as the length scale shrinks:
+//!
+//! ```text
+//!     length_scale   mass      tension     stiffness    tension max|entry|
+//!       1.64e-1      3.00e0    2.71e-8     1.72e4       6.72e-1
+//!       2.05e-2      3.00e0    3.30e-97    7.03e7       6.00e-1
+//!       1.03e-2      3.00e0    1.00e0*     1.12e9       3.26e-203
+//! ```
+//!
+//! `*` at `1.03e-2` the normalizer DECLINES to divide (its `all(|v| <= 1e-12)`
+//! branch), so the reported scale is `1.0` and the matrix ships un-normalized
+//! with entries at `3.26e-203`. Either way the tension operator is numerically
+//! annihilated and then carried as an ACTIVE penalty with its own smoothing
+//! parameter — which is also where the certified nullity of 2 at that scale
+//! comes from. Meanwhile mass and stiffness both saturate to the same
+//! projector, which is the "exact redundancy" #2676 was built on.
+//!
+//! **The obvious repair does not work, and the falsifier is already in-tree.**
+//! Dropping a candidate whose raw energy is below `EPSILON x` the strongest
+//! sibling on its block reds
+//! `scale_contract::tests::every_wrapper_preserves_its_declared_inner_abscissa_pullback_2315`
+//! (5 active penalties -> 3): operators of derivative order `q` carry
+//! dimensions `[f/x^q]^2`, so their raw energies move by `factor^(-2q)` under a
+//! rescaling of the abscissa and a cross-order ratio is not a scale-invariant
+//! quantity. Rescaling a covariate by `1e-9` moves those ratios by `1e18` and
+//! `1e36`, so any such rule drops real penalties for a change of units. Rule
+//! withdrawn.
+//!
+//! What is left is a magnitude question in the operator construction itself —
+//! `1/ls = 97.4` and `97.4^-48 ~ 1e-95`, which is the shape of a `kappa`-power
+//! prefactor underflowing in the closed-form branch — and it belongs to that
+//! subsystem, not to the curvature certificate. Recorded here rather than
+//! guessed at.
+//!
 //! Run: `cargo run --release --example probe2676_penalty_map_defect --`
 //!      `[centers] [n] [n_pcs]`
 
@@ -138,13 +177,29 @@ fn report(label: &str, design: &gam::smooth::TermCollectionDesign) {
     };
     eprintln!(
         "[probe2676] {label}: k={k} p={p} certified_nullity={dimension} gram_resolution={resolution:.3e} \
-         sources={:?} ranks={:?}",
+         sources={:?} ranks={:?} norms={:?} max_abs={:?} normalization_scales={:?}",
         design
             .penaltyinfo
             .iter()
             .map(|info| format!("{:?}", info.penalty.source))
             .collect::<Vec<_>>(),
         canonical.iter().map(|c| c.rank()).collect::<Vec<_>>(),
+        canonical
+            .iter()
+            .map(|c| format!("{:.6e}", c.local.iter().map(|v| v * v).sum::<f64>().sqrt()))
+            .collect::<Vec<_>>(),
+        canonical
+            .iter()
+            .map(|c| format!(
+                "{:.6e}",
+                c.local.iter().copied().map(f64::abs).fold(0.0_f64, f64::max)
+            ))
+            .collect::<Vec<_>>(),
+        design
+            .penaltyinfo
+            .iter()
+            .map(|info| format!("{:.6e}", info.penalty.normalization_scale))
+            .collect::<Vec<_>>(),
     );
     for i in 0..k {
         for j in (i + 1)..k {
