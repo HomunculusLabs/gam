@@ -88,6 +88,7 @@ use gam_problem::{
     FixedLambdaStationarityEvidence, ResponseColumnKind,
 };
 use gam_runtime::resource::ProblemHints;
+use gam_solve::model_types::InferenceCovarianceMode;
 use gam_terms::inference::formula_dsl::parse_formula;
 use gam_terms::smooth::{
     PenaltyBlockInfo, TermCollectionDesign, TermCollectionSpec, build_term_collection_design,
@@ -652,11 +653,9 @@ fn multinomial_formula_penalized_separation_evidence(
     // `measured_penalty_rank` reports as a count. With no penalised component
     // `S_λ` is the zero operator and this is the whole identifiable span, which
     // is what makes the unpenalised quasi-separated design's verdict unchanged.
-    let reduced_penalty = identifiable_span
-        .t()
-        .dot(&s_lambda.dot(&identifiable_span));
-    let unreached = crate::multinomial_reml::measured_penalty_nullspace(&reduced_penalty)
-        .map_err(|error| {
+    let reduced_penalty = identifiable_span.t().dot(&s_lambda.dot(&identifiable_span));
+    let unreached =
+        crate::multinomial_reml::measured_penalty_nullspace(&reduced_penalty).map_err(|error| {
             format!("multinomial separation certificate could not measure ker(S_lambda): {error}")
         })?;
     log::info!(
@@ -792,7 +791,9 @@ fn multinomial_formula_penalized_separation_evidence(
         family.total_classes,
         family.design.ncols(),
     );
-    let reduced_penalized = identifiable_span.t().dot(&penalized.dot(&identifiable_span));
+    let reduced_penalized = identifiable_span
+        .t()
+        .dot(&penalized.dot(&identifiable_span));
     let reduced_metric = identifiable_span
         .t()
         .dot(&coefficient_metric.dot(&identifiable_span));
@@ -1187,7 +1188,8 @@ pub fn fit_penalized_multinomial(
             // twin of the REML equivariant carrier (1326d0794). K per-class
             // lambdas on the centered class functions; reference-free by
             // construction, collapsing to the shared Centered metric at equal λ.
-            class_penalty_metric: crate::penalized_vector_glm::ClassPenaltyMetric::EquivariantPerClass,
+            class_penalty_metric:
+                crate::penalized_vector_glm::ClassPenaltyMetric::EquivariantPerClass,
             resume_from: vector_resume,
         },
         &likelihood,
@@ -2023,6 +2025,32 @@ pub struct MultinomialSavedModel {
     /// `(P·M)×(P·M)` matrix. This is required by the versioned persistence
     /// schema: a payload without covariance is not a usable multinomial model.
     pub coefficient_covariance_flat: Vec<f64>,
+    /// The first-order smoothing-parameter-uncertainty correction
+    /// `C = J·Var(ρ̂)·Jᵀ` (#2346), in the SAME raw units and block order as
+    /// [`Self::coefficient_covariance_flat`], flattened row-major over the
+    /// `(P·M)×(P·M)` matrix.
+    ///
+    /// `Self::coefficient_covariance_flat` is `V_cond = Var(β | λ̂)`: it answers
+    /// "how wide is the posterior once the smoothing parameters are known
+    /// exactly", and λ̂ is an estimate, not a known. Every other family in this
+    /// library publishes the pair — `InferenceCovarianceMode::{Conditional,
+    /// SmoothingCorrected}` in `gam-predict`, `beta_covariance` /
+    /// `beta_covariance_corrected` on `FitInference` — and the multinomial is
+    /// the one that never got it, so its bands were conditional-only
+    /// (gam#2612, and the #1871 defect one family over).
+    ///
+    /// `C` is stored rather than `V_c = V_cond + C` deliberately: the sum is
+    /// recoverable exactly by addition (see
+    /// [`Self::coefficient_covariance_corrected`]) while the difference is not
+    /// — subtracting two nearly-equal covariances would lose every digit of a
+    /// correction that is small relative to `V_cond`, which is the regime this
+    /// matrix is most often in.
+    ///
+    /// `None` is a TYPED ABSENCE, never a silent substitution: the outer solve
+    /// retained no ρ curvature, or every ρ coordinate is railed and so has no
+    /// finite variance to propagate (#2337 Thm 2.3).
+    #[serde(default)]
+    pub smoothing_correction_flat: Option<Vec<f64>>,
     /// Joint coefficient-space influence matrix `F = H⁻¹ X'WX` (#1101),
     /// block-ordered identically to [`Self::coefficient_covariance_flat`].
     /// Its per-term diagonal block trace is the term's effective degrees of
@@ -2216,7 +2244,11 @@ impl MultinomialSavedModel {
                 self.lambdas_per_block,
             );
         }
-        if self.lambda_labels.iter().any(|label| label.trim().is_empty()) {
+        if self
+            .lambda_labels
+            .iter()
+            .any(|label| label.trim().is_empty())
+        {
             crate::bail_invalid_estim!("multinomial saved model lambda labels must be non-empty");
         }
         let covariance_len = d.checked_mul(d).ok_or_else(|| {
@@ -2230,10 +2262,24 @@ impl MultinomialSavedModel {
                 self.coefficient_covariance_flat.len(),
             );
         }
+        if let Some(correction) = self.smoothing_correction_flat.as_ref() {
+            // A correction that is present but mis-shaped is worse than one that
+            // is absent: absence is typed and the consumers fall back to the
+            // conditional definition, while a wrong shape would silently pair a
+            // ρ-uncertainty term with the wrong coefficients.
+            if correction.len() != covariance_len {
+                crate::bail_invalid_estim!(
+                    "multinomial saved model has {} smoothing-correction values, expected \
+                     {covariance_len}",
+                    correction.len(),
+                );
+            }
+        }
         if let Some((index, value)) = self
             .coefficients_flat
             .iter()
             .chain(self.coefficient_covariance_flat.iter())
+            .chain(self.smoothing_correction_flat.iter().flat_map(|c| c.iter()))
             .copied()
             .enumerate()
             .find(|(_, value)| !value.is_finite())
@@ -2383,6 +2429,33 @@ impl MultinomialSavedModel {
         })
     }
 
+    /// Reconstruct the first-order smoothing correction `C = J·Var(ρ̂)·Jᵀ` as a
+    /// `(P·M)×(P·M)` `ndarray`, block-ordered like
+    /// [`Self::coefficient_covariance`] (#2346, gam#2612). `None` is the typed
+    /// absence documented on [`Self::smoothing_correction_flat`].
+    pub fn smoothing_correction(&self) -> Option<Array2<f64>> {
+        let d = self.p_per_class.checked_mul(self.n_active_classes)?;
+        let flat = self.smoothing_correction_flat.as_ref()?;
+        Array2::from_shape_vec((d, d), flat.clone()).ok()
+    }
+
+    /// The smoothing-CORRECTED joint posterior covariance `V_c = V_cond + C`,
+    /// the multinomial's `InferenceCovarianceMode::SmoothingCorrected` matrix.
+    ///
+    /// `None` exactly when [`Self::smoothing_correction`] is `None`. This never
+    /// falls back to the conditional matrix: a caller that asks for the
+    /// unconditional covariance and is handed the conditional one cannot tell
+    /// that its interval is narrower than it asked for, which is the whole
+    /// defect the mode axis exists to make visible.
+    pub fn coefficient_covariance_corrected(&self) -> Option<Array2<f64>> {
+        let correction = self.smoothing_correction()?;
+        let conditional = self.coefficient_covariance().ok()?;
+        if conditional.dim() != correction.dim() {
+            return None;
+        }
+        Some(conditional + correction)
+    }
+
     /// Reconstruct the joint influence matrix `F = H⁻¹ X'WX` as a
     /// `(P·M)×(P·M)` `ndarray`, block-ordered like
     /// [`Self::coefficient_covariance`] (#1101). `None` when unavailable.
@@ -2407,15 +2480,197 @@ impl MultinomialSavedModel {
     }
 
     /// Posterior-mean class probabilities and integrated marginal standard
-    /// deviations at fresh design rows.
+    /// deviations at fresh design rows, under the covariance definition this
+    /// model can support — [`Self::predict_probabilities_with_se_in_mode`] with
+    /// `SmoothingCorrected` when the correction is present and `Conditional`
+    /// when it is not.
+    ///
+    /// The DEFAULT is the corrected definition, matching
+    /// `PredictUncertaintyOptions::default()` for every other family
+    /// (`gam-predict`), because `λ̂` is an estimate and a band that conditions on
+    /// it being exact is answering a narrower question than the caller asked.
     pub fn predict_probabilities_with_se(
         &self,
         x_new: ArrayView2<'_, f64>,
     ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
+        let (mean, standard_error, _) = self.predict_probabilities_with_se_and_source(x_new)?;
+        Ok((mean, standard_error))
+    }
+
+    /// The same pair, plus the covariance definition it was actually built
+    /// from. A caller that cannot tell a conditional band from an unconditional
+    /// one cannot reason about the interval it was handed, so the provenance is
+    /// returned rather than inferred.
+    pub fn predict_probabilities_with_se_and_source(
+        &self,
+        x_new: ArrayView2<'_, f64>,
+    ) -> Result<(Array2<f64>, Array2<f64>, InferenceCovarianceMode), EstimationError> {
+        let source = if self.smoothing_correction_flat.is_some() {
+            InferenceCovarianceMode::SmoothingCorrected
+        } else {
+            InferenceCovarianceMode::Conditional
+        };
+        let (mean, standard_error) = self.predict_probabilities_with_se_in_mode(x_new, source)?;
+        Ok((mean, standard_error, source))
+    }
+
+    /// Posterior-mean class probabilities and their marginal standard
+    /// deviations under an explicitly named covariance definition.
+    ///
+    /// # What the two modes are
+    ///
+    /// [`InferenceCovarianceMode::Conditional`] is `sd(p_c | λ̂)`, computed by
+    /// [`crate::multinomial_predictive`] as `√(E[p_c²] − E[p_c]²)` from two
+    /// ratios of normalising constants at the selected smoothing. It is the
+    /// exact posterior spread of the probability GIVEN that `λ̂` is the truth.
+    ///
+    /// [`InferenceCovarianceMode::SmoothingCorrected`] additionally propagates
+    /// the uncertainty in `λ̂` itself, by the law of total variance:
+    ///
+    /// ```text
+    ///     Var(p_c) = E_ρ[ Var(p_c | ρ) ]  +  Var_ρ( E[p_c | ρ] )
+    ///              ≈ Var(p_c | ρ̂)         +  (∂E[p_c|ρ]/∂ρ)ᵀ V_ρ (∂E[p_c|ρ]/∂ρ)
+    /// ```
+    ///
+    /// and the second term needs no new object. To the order the correction is
+    /// itself computed at, `E[p_c | ρ]` moves with `ρ` through the mode
+    /// `θ̂(ρ)`, so `∂E[p_c|ρ]/∂ρ = gᵀ ∂θ̂/∂ρ` with `g = ∂p_c/∂θ` the softmax
+    /// Jacobian at the mode, and
+    ///
+    /// ```text
+    ///     Var_ρ( E[p_c|ρ] ) = gᵀ (J V_ρ Jᵀ) g = gᵀ C g
+    /// ```
+    ///
+    /// with `C` exactly the matrix [`Self::smoothing_correction`] carries. That
+    /// is the response-scale statement of `V_c = V_cond + C`: the same
+    /// correction, contracted through the same delta-method Jacobian the rest of
+    /// the library uses on the response scale, with no new constant and no new
+    /// approximation order.
+    ///
+    /// `g` is evaluated at the PLUG-IN probabilities `softmax(x'β̂)` rather than
+    /// at the published posterior mean. Those differ by `O(n⁻¹)`, and `g`
+    /// multiplies a term that is itself the first-order correction, so the
+    /// difference enters at an order neither term is accurate to; the plug-in
+    /// Jacobian is the exact derivative of the leading term.
+    ///
+    /// # Errors
+    ///
+    /// Asking for `SmoothingCorrected` on a model that carries no correction is
+    /// an ERROR, not a silent downgrade — the same contract
+    /// `gam-predict`'s `SmoothingCorrected` mode holds.
+    pub fn predict_probabilities_with_se_in_mode(
+        &self,
+        x_new: ArrayView2<'_, f64>,
+        mode: InferenceCovarianceMode,
+    ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
         let moments = self.predictive_moments(x_new, true)?;
-        let standard_deviation =
-            crate::multinomial_predictive::predictive_standard_deviation(&moments)?;
-        Ok((moments.class_mean, standard_deviation))
+        let conditional = crate::multinomial_predictive::predictive_standard_deviation(&moments)?;
+        match mode {
+            InferenceCovarianceMode::Conditional => Ok((moments.class_mean, conditional)),
+            InferenceCovarianceMode::SmoothingCorrected => {
+                let correction = self.smoothing_correction().ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "multinomial predict: the smoothing-corrected covariance was requested \
+                         but this fit retained no ρ-uncertainty correction (no outer ρ curvature, \
+                         or every ρ coordinate is railed and has no finite variance); ask for \
+                         the conditional definition by name rather than receiving it unannounced"
+                            .to_string(),
+                    )
+                })?;
+                let smoothing_variance =
+                    self.smoothing_variance_of_class_probability(x_new, correction.view())?;
+                let mut total = conditional;
+                for ((row, class), value) in total.indexed_iter_mut() {
+                    *value = (*value * *value + smoothing_variance[[row, class]]).sqrt();
+                }
+                Ok((moments.class_mean, total))
+            }
+        }
+    }
+
+    /// `gᵀ C g` per (row, class): the response-scale variance the smoothing
+    /// parameters' own uncertainty contributes to the mean class probability.
+    ///
+    /// The softmax Jacobian factorises as `g_c = u_c ⊗ x` with
+    /// `u_c[a] = p_c(δ_{ca} − p_a)` over the `M` ACTIVE logits (the reference
+    /// class `c = K−1` is included and simply has `δ_{ca} = 0` for every active
+    /// `a`), so the whole `(row, class)` table costs one `M×M` Gram
+    /// `Q[a,b] = xᵀ C_{ab} x` per row and then `K` quadratic forms of size `M`
+    /// against it — never a `d`-dimensional contraction per class.
+    fn smoothing_variance_of_class_probability(
+        &self,
+        x_new: ArrayView2<'_, f64>,
+        correction: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, EstimationError> {
+        let p = self.p_per_class;
+        let m = self.n_active_classes;
+        let k = self.class_levels.len();
+        let d = p * m;
+        if correction.dim() != (d, d) {
+            crate::bail_invalid_estim!(
+                "multinomial predict: smoothing correction is {}x{}, expected {d}x{d}",
+                correction.nrows(),
+                correction.ncols(),
+            );
+        }
+        if x_new.ncols() != p {
+            crate::bail_invalid_estim!(
+                "multinomial predict: design has {} columns, expected {p}",
+                x_new.ncols(),
+            );
+        }
+        let coefficients = self.coefficients_active()?;
+        let rows = x_new.nrows();
+        let mut out = Array2::<f64>::zeros((rows, k));
+        let mut gram = Array2::<f64>::zeros((m, m));
+        // `C x_b` for each active block `b`, reused across `a` and across classes.
+        let mut correction_times_x = Array2::<f64>::zeros((m, d));
+        for row in 0..rows {
+            let x = x_new.row(row);
+            for b in 0..m {
+                for i in 0..d {
+                    let mut acc = 0.0;
+                    for j in 0..p {
+                        acc += correction[[i, b * p + j]] * x[j];
+                    }
+                    correction_times_x[[b, i]] = acc;
+                }
+            }
+            for a in 0..m {
+                for b in 0..m {
+                    let mut acc = 0.0;
+                    for j in 0..p {
+                        acc += correction_times_x[[b, a * p + j]] * x[j];
+                    }
+                    gram[[a, b]] = acc;
+                }
+            }
+            let eta: Vec<f64> = (0..m)
+                .map(|a| (0..p).map(|i| x[i] * coefficients[[i, a]]).sum::<f64>())
+                .collect();
+            let probabilities = softmax_with_reference(&eta)?;
+            for class in 0..k {
+                let jacobian: Vec<f64> = (0..m)
+                    .map(|a| {
+                        let delta = if class == a { 1.0 } else { 0.0 };
+                        probabilities[class] * (delta - probabilities[a])
+                    })
+                    .collect();
+                let mut variance = 0.0;
+                for a in 0..m {
+                    for b in 0..m {
+                        variance += jacobian[a] * gram[[a, b]] * jacobian[b];
+                    }
+                }
+                // `C` is PSD by construction (`J V_ρ Jᵀ` with `V_ρ` PSD), so a
+                // negative quadratic form here is round-off on a direction the
+                // correction does not reach, not a measurement. Clamping at zero
+                // is exact for that case and the alternative — a NaN from
+                // `sqrt` — would destroy an otherwise valid band.
+                out[[row, class]] = variance.max(0.0);
+            }
+        }
+        Ok(out)
     }
 
     /// The posterior mode in the stacked class-major order the joint covariance,
@@ -2899,9 +3154,7 @@ fn reject_unsupported_multinomial_config(config: &FitConfig) -> Result<(), Estim
         );
     }
     if config.transformation_normal {
-        crate::bail_invalid_estim!(
-            "transformation_normal conflicts with the multinomial family"
-        );
+        crate::bail_invalid_estim!("transformation_normal conflicts with the multinomial family");
     }
     if config.expectile_tau.is_some() {
         crate::bail_invalid_estim!("expectile_tau requires the expectile family");
@@ -3549,65 +3802,67 @@ pub fn fit_penalized_multinomial_formula(
         |evidence: String,
          measured_span: Option<std::sync::Arc<Array2<f64>>>,
          warm_start: Option<(&[ParameterBlockState], Option<&Array1<f64>>)>| {
-        // The span the certificate MEASURED travels into the refit with the
-        // verdict it justified (#2612). `None` leaves the derived
-        // `ker(S_lambda)` route in place, which is what a degenerate mode gets.
-        let mut firth_family = family
-            .clone()
-            .with_joint_jeffreys_term(true)
-            .with_joint_jeffreys_span(measured_span);
-        let mut firth_blocks = blocks.clone();
-        if let Some((states, log_lambdas)) = warm_start {
-            if states.len() != firth_blocks.len() {
-                return Err(EstimationError::InvalidInput(format!(
-                    "multinomial Firth warm start has {} coefficient blocks, expected {}",
-                    states.len(),
-                    firth_blocks.len()
-                )));
-            }
-            for (block, state) in firth_blocks.iter_mut().zip(states) {
-                if state.beta.len() != block.design.ncols() {
+            // The span the certificate MEASURED travels into the refit with the
+            // verdict it justified (#2612). `None` leaves the derived
+            // `ker(S_lambda)` route in place, which is what a degenerate mode gets.
+            let mut firth_family = family
+                .clone()
+                .with_joint_jeffreys_term(true)
+                .with_joint_jeffreys_span(measured_span);
+            let mut firth_blocks = blocks.clone();
+            if let Some((states, log_lambdas)) = warm_start {
+                if states.len() != firth_blocks.len() {
                     return Err(EstimationError::InvalidInput(format!(
-                        "multinomial Firth warm-start block '{}' has {} coefficients, expected {}",
-                        block.name,
-                        state.beta.len(),
-                        block.design.ncols()
+                        "multinomial Firth warm start has {} coefficient blocks, expected {}",
+                        states.len(),
+                        firth_blocks.len()
                     )));
                 }
-                if state.beta.iter().any(|value| !value.is_finite()) {
-                    return Err(EstimationError::InvalidInput(format!(
-                        "multinomial Firth warm-start block '{}' contains non-finite coefficients",
-                        block.name
-                    )));
+                for (block, state) in firth_blocks.iter_mut().zip(states) {
+                    if state.beta.len() != block.design.ncols() {
+                        return Err(EstimationError::InvalidInput(format!(
+                            "multinomial Firth warm-start block '{}' has {} coefficients, expected {}",
+                            block.name,
+                            state.beta.len(),
+                            block.design.ncols()
+                        )));
+                    }
+                    if state.beta.iter().any(|value| !value.is_finite()) {
+                        return Err(EstimationError::InvalidInput(format!(
+                            "multinomial Firth warm-start block '{}' contains non-finite coefficients",
+                            block.name
+                        )));
+                    }
+                    block.initial_beta = Some(state.beta.clone());
                 }
-                block.initial_beta = Some(state.beta.clone());
-            }
-            if let Some(log_lambdas) = log_lambdas {
-                if log_lambdas.iter().any(|value| !value.is_finite()) {
-                    return Err(EstimationError::InvalidInput(
-                        "multinomial Firth warm start contains non-finite log-lambdas".to_string(),
-                    ));
+                if let Some(log_lambdas) = log_lambdas {
+                    if log_lambdas.iter().any(|value| !value.is_finite()) {
+                        return Err(EstimationError::InvalidInput(
+                            "multinomial Firth warm start contains non-finite log-lambdas"
+                                .to_string(),
+                        ));
+                    }
+                    firth_family =
+                        firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
                 }
-                firth_family = firth_family.with_joint_initial_log_lambdas(log_lambdas.to_vec());
             }
-        }
-        log::info!(
-            "multinomial REML: arming the Jeffreys/Firth proper prior — separation evidence: \
+            log::info!(
+                "multinomial REML: arming the Jeffreys/Firth proper prior — separation evidence: \
              {evidence}"
-        );
-        fit_custom_family_with_rho_prior(
-            &firth_family,
-            &firth_blocks,
-            firth_refit_options,
-            gam_problem::RhoPrior::Flat,
-        )
-        .map_err(|err| {
-            EstimationError::InvalidInput(format!(
-                "multinomial REML: Firth/Jeffreys-armed refit (separation evidence: \
+            );
+            fit_custom_family_with_rho_prior(
+                &firth_family,
+                &firth_blocks,
+                firth_refit_options,
+                gam_problem::RhoPrior::Flat,
+            )
+            .map_err(|err| {
+                EstimationError::InvalidInput(format!(
+                    "multinomial REML: Firth/Jeffreys-armed refit (separation evidence: \
                  {evidence}) failed: {err}"
-            ))
-        })
-    };
+                ))
+            })
+        };
 
     // The separation scans walk the full P×M logit block, so they are evaluated
     // ONCE into a binding and branched on, rather than recomputed in both a match
@@ -4021,34 +4276,55 @@ pub fn fit_penalized_multinomial_formula(
             }
         }
     };
+    // One raw-unit map, used by BOTH joint covariance-frame matrices. `C` lives
+    // in the same lifted frame as `V_cond` (it is assembled against it — see
+    // `BlockwiseFitAssembly::smoothing_corrected`), so it must take the same
+    // congruence; mapping only one of the pair would publish `V_cond + C` in two
+    // different parameterizations.
+    let to_raw_units = |matrix_std: &Array2<f64>| -> Vec<f64> {
+        if parametric_standardization.is_empty() {
+            return matrix_std.iter().copied().collect::<Vec<f64>>();
+        }
+        // Block-diagonal joint A (same per active class).
+        let mut a_joint = Array2::<f64>::eye(expected_joint);
+        let mut a_class = Array2::<f64>::eye(p_per_class);
+        build_per_class_affine(&mut a_class);
+        for a in 0..m {
+            let base = a * p_per_class;
+            for i in 0..p_per_class {
+                for j in 0..p_per_class {
+                    a_joint[[base + i, base + j]] = a_class[[i, j]];
+                }
+            }
+        }
+        let raw = a_joint.dot(matrix_std).dot(&a_joint.t());
+        raw.iter().copied().collect::<Vec<f64>>()
+    };
     let coefficient_covariance_flat = fit
         .covariance_conditional
         .as_ref()
         .filter(|c| c.nrows() == expected_joint && c.ncols() == expected_joint)
-        .map(|cov_std| {
-            if parametric_standardization.is_empty() {
-                return cov_std.iter().copied().collect::<Vec<f64>>();
-            }
-            // Block-diagonal joint A (same per active class).
-            let mut a_joint = Array2::<f64>::eye(expected_joint);
-            let mut a_class = Array2::<f64>::eye(p_per_class);
-            build_per_class_affine(&mut a_class);
-            for a in 0..m {
-                let base = a * p_per_class;
-                for i in 0..p_per_class {
-                    for j in 0..p_per_class {
-                        a_joint[[base + i, base + j]] = a_class[[i, j]];
-                    }
-                }
-            }
-            let cov_raw = a_joint.dot(cov_std).dot(&a_joint.t());
-            cov_raw.iter().copied().collect::<Vec<f64>>()
-        })
+        .map(|cov_std| to_raw_units(cov_std))
         .ok_or_else(|| {
             EstimationError::InvalidInput(format!(
                 "multinomial REML converged without the required {expected_joint}x{expected_joint} joint posterior covariance"
             ))
         })?;
+    // gam#2612: the same fit already computed the first-order ρ-uncertainty
+    // correction `C = J·Var(ρ̂)·Jᵀ` (#2346) and published it on the inference
+    // block; every other family in the library carries it onto its predict
+    // surface and this one dropped it at the read boundary, which is what made
+    // every multinomial band conditional-on-λ̂ and the standing coverage gate
+    // for the mean-probability band anti-conservative. A mis-shaped correction
+    // is a typed absence rather than an error: the conditional definition is
+    // still a correct answer to a narrower question, and the consumers say which
+    // one they used.
+    let smoothing_correction_flat = fit.inference.as_ref().and_then(|info| {
+        info.smoothing_correction
+            .as_ref()
+            .filter(|c| c.nrows() == expected_joint && c.ncols() == expected_joint)
+            .map(|c| to_raw_units(c))
+    });
     // The influence matrix `F = H⁻¹ X'WX = H⁻¹(H − S_λ) = I − H⁻¹ S_λ`. The
     // exact-Newton multinomial blocks carry no IRLS pseudo-data, so the generic
     // inference path does not export `coefficient_influence`; reconstruct it
@@ -4197,6 +4473,7 @@ pub fn fit_penalized_multinomial_formula(
         edf_per_class,
         edf_per_penalty,
         coefficient_covariance_flat,
+        smoothing_correction_flat,
         coefficient_influence_flat,
         smooth_term_spans,
         training_design_flat,
@@ -4371,11 +4648,38 @@ pub struct MultinomialPredictionIntervals {
     pub mean_lower: Array2<f64>,
     pub mean_upper: Array2<f64>,
     pub level: f64,
+    /// Exactly which posterior covariance definition the spread — and therefore
+    /// the band — was built from. The multinomial's counterpart of
+    /// `PredictUncertaintyResult::covariance_source`; see
+    /// [`MultinomialSavedModel::predict_probabilities_with_se_in_mode`].
+    pub covariance_source: InferenceCovarianceMode,
 }
 
-/// Build simplex-clamped normal moment intervals around the integrated
-/// logistic-normal posterior mean. Both center and spread come from the same
-/// deterministic posterior integral; no plug-in/delta quantity enters.
+/// Build a central posterior interval around the integrated logistic-normal
+/// posterior mean class probability. Both centre and spread come from the same
+/// deterministic posterior integral; no plug-in/delta quantity enters the
+/// centre.
+///
+/// # The band is built on the log-odds scale, not on the probability scale
+///
+/// The endpoints are `expit(logit(m) ± z·sd/(m(1−m)))`, which is the
+/// [`gam_predict::MeanIntervalMethod::TransformEta`] construction this library
+/// already prefers for every nonlinear link: build the symmetric interval where
+/// the posterior is closest to Gaussian, then carry it through a MONOTONE map.
+///
+/// A symmetric `m ± z·sd` band on the probability scale, clamped into `[0, 1]`,
+/// is wrong in two ways that both bite exactly where a class probability lives.
+/// It is symmetric about `m` when the posterior of a bounded quantity is not —
+/// the skew grows without bound as `m` approaches an endpoint — and the clamp
+/// silently DELETES the part of the interval that fell outside, so a nominally
+/// 95% band can carry materially less than 95% of the posterior while still
+/// reporting `level = 0.95`. Transforming a log-odds interval has neither
+/// property: `expit` is a bijection onto `(0, 1)`, so no mass is ever clipped
+/// and the asymmetry is produced by the map rather than approximated away.
+///
+/// At `m = ½` the two constructions agree to first order (`d logit/dp = 4` and
+/// the transform is locally affine), so this is not a re-scaling of well-posed
+/// bands — it is a repair of the ones near the boundary.
 pub fn predict_multinomial_formula_with_intervals(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,
@@ -4386,14 +4690,18 @@ pub fn predict_multinomial_formula_with_intervals(
             "multinomial prediction interval level must be finite and in (0, 1), got {level}"
         );
     }
-    let (mean, standard_error) = predict_multinomial_formula_with_se(model, data)?;
+    model.validate()?;
+    let x_dense = build_multinomial_predict_design(model, data)?;
+    let (mean, standard_error, covariance_source) =
+        model.predict_probabilities_with_se_and_source(x_dense.view())?;
     let z = gam_math::probability::standard_normal_quantile(0.5 + 0.5 * level)
         .map_err(EstimationError::InvalidInput)?;
     let mut mean_lower = mean.clone();
     let mut mean_upper = mean.clone();
     for ((row, class), &se) in standard_error.indexed_iter() {
-        mean_lower[[row, class]] = (mean[[row, class]] - z * se).clamp(0.0, 1.0);
-        mean_upper[[row, class]] = (mean[[row, class]] + z * se).clamp(0.0, 1.0);
+        let (lower, upper) = log_odds_interval(mean[[row, class]], se, z);
+        mean_lower[[row, class]] = lower;
+        mean_upper[[row, class]] = upper;
     }
     Ok(MultinomialPredictionIntervals {
         mean,
@@ -4401,7 +4709,43 @@ pub fn predict_multinomial_formula_with_intervals(
         mean_lower,
         mean_upper,
         level,
+        covariance_source,
     })
+}
+
+/// `expit(logit(m) ± z·sd/(m(1−m)))`, the monotone-transform central interval
+/// for a probability with posterior mean `m` and posterior standard deviation
+/// `sd`.
+///
+/// The delta-method log-odds spread is `sd / (m(1−m))`; `m(1−m)` is the
+/// Jacobian `dp/dlogit p` at `m`. The degenerate ends are handled where they
+/// arise rather than by a clamp afterwards: at `m ∈ {0, 1}` the log-odds scale
+/// does not exist, and a mean that has reached a vertex of the simplex with
+/// spread `sd` has no interval this transform can express, so the symmetric
+/// probability-scale band is the honest answer THERE and only there. `sd = 0`
+/// is a point interval on either scale.
+fn log_odds_interval(mean: f64, standard_error: f64, z: f64) -> (f64, f64) {
+    if !(mean.is_finite() && standard_error.is_finite()) || standard_error <= 0.0 {
+        return (mean, mean);
+    }
+    let jacobian = mean * (1.0 - mean);
+    if !(mean > 0.0 && mean < 1.0) || jacobian <= f64::MIN_POSITIVE {
+        return (
+            (mean - z * standard_error).clamp(0.0, 1.0),
+            (mean + z * standard_error).clamp(0.0, 1.0),
+        );
+    }
+    let center = (mean / (1.0 - mean)).ln();
+    let half_width = z * standard_error / jacobian;
+    let expit = |value: f64| -> f64 {
+        if value >= 0.0 {
+            1.0 / (1.0 + (-value).exp())
+        } else {
+            let e = value.exp();
+            e / (1.0 + e)
+        }
+    };
+    (expit(center - half_width), expit(center + half_width))
 }
 
 #[cfg(test)]
@@ -5013,21 +5357,15 @@ mod fisher_override_tests {
 
     #[test]
     fn fisher_certificate_distinguishes_finite_quasi_separation_2612() {
-        fn fixture(
-            rows: usize,
-            separated: bool,
-        ) -> (MultinomialFamily, Vec<ParameterBlockState>) {
-            let design = Arc::new(Array2::<f64>::from_shape_fn(
-                (rows, 2),
-                |(row, column)| {
-                    if column == 0 {
-                        1.0
-                    } else {
-                        let side = if row % 2 == 0 { -1.0 } else { 1.0 };
-                        side * (1.0 + row as f64 / rows as f64)
-                    }
-                },
-            ));
+        fn fixture(rows: usize, separated: bool) -> (MultinomialFamily, Vec<ParameterBlockState>) {
+            let design = Arc::new(Array2::<f64>::from_shape_fn((rows, 2), |(row, column)| {
+                if column == 0 {
+                    1.0
+                } else {
+                    let side = if row % 2 == 0 { -1.0 } else { 1.0 };
+                    side * (1.0 + row as f64 / rows as f64)
+                }
+            }));
             let mut response = Array2::<f64>::zeros((rows, 3));
             for row in 0..rows {
                 response[[row, row % 3]] = 1.0;
@@ -5769,7 +6107,12 @@ mod reference_class_invariance_tests {
             }
         };
         let mut lines = raw.lines();
-        let header: Vec<&str> = lines.next().expect("penguins header").trim().split(',').collect();
+        let header: Vec<&str> = lines
+            .next()
+            .expect("penguins header")
+            .trim()
+            .split(',')
+            .collect();
         let idx = |name: &str| header.iter().position(|c| *c == name).expect("column");
         let (i_species, i_bl, i_bd, i_fl, i_bm) = (
             idx("species"),
@@ -5781,7 +6124,8 @@ mod reference_class_invariance_tests {
         // The quality test's stride-3 TRAIN split, so this profiles the exact
         // design the reported numbers come from.
         let mut kept = 0usize;
-        let mut csv = String::from("bill_length_mm,bill_depth_mm,flipper_length_mm,body_mass_g,species\n");
+        let mut csv =
+            String::from("bill_length_mm,bill_depth_mm,flipper_length_mm,body_mass_g,species\n");
         for line in lines {
             let line = line.trim();
             if line.is_empty() {
@@ -5789,7 +6133,8 @@ mod reference_class_invariance_tests {
             }
             let f: Vec<&str> = line.split(',').collect();
             let num = |i: usize| f.get(i).and_then(|v| v.trim().parse::<f64>().ok());
-            let (Some(bl), Some(bd), Some(fl), Some(bm)) = (num(i_bl), num(i_bd), num(i_fl), num(i_bm))
+            let (Some(bl), Some(bd), Some(fl), Some(bm)) =
+                (num(i_bl), num(i_bd), num(i_fl), num(i_bm))
             else {
                 continue;
             };
@@ -6609,14 +6954,15 @@ mod reference_class_invariance_tests {
                 .family
                 .clone()
                 .with_joint_initial_log_lambdas(rho_vec.to_vec());
-            let diagnostics = crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
-                &fam,
-                &parts.blocks,
-                &probe_options,
-                &ndarray::Array1::from(rho_vec.to_vec()),
-                gam_problem::EvalMode::ValueAndGradient,
-            )
-            .expect("labeled outer evaluation");
+            let diagnostics =
+                crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                    &fam,
+                    &parts.blocks,
+                    &probe_options,
+                    &ndarray::Array1::from(rho_vec.to_vec()),
+                    gam_problem::EvalMode::ValueAndGradient,
+                )
+                .expect("labeled outer evaluation");
             (
                 diagnostics.objective,
                 diagnostics.gradient,
@@ -6628,9 +6974,7 @@ mod reference_class_invariance_tests {
         // (hard against its own wall); only the null-space coordinate moves.
         const RHO_WIGGLE: f64 = 8.0;
         let h = 1.0e-3;
-        eprintln!(
-            "#2615 null-space profile (rho_wiggle={RHO_WIGGLE}, one smooth, K=3, n=300)"
-        );
+        eprintln!("#2615 null-space profile (rho_wiggle={RHO_WIGGLE}, one smooth, K=3, n=300)");
         for step in 0..11 {
             let rho_n = -8.0 + 2.0 * step as f64;
             let rho: Vec<f64> = vec![RHO_WIGGLE, RHO_WIGGLE, RHO_WIGGLE, rho_n, rho_n, rho_n];
@@ -6771,7 +7115,11 @@ mod reference_class_invariance_tests {
         eprintln!(
             "#2349 |FD grad| = {norm:.6e} on the {} criterion \
              (certificate claimed |Pg|=2.047e0, bound 2.697e-3)",
-            if outer_uses_laml { "LAML" } else { "plain penalized-NLL" }
+            if outer_uses_laml {
+                "LAML"
+            } else {
+                "plain penalized-NLL"
+            }
         );
 
         // ── Warm-start stall isolation (#2349, round 3) ────────────────────
@@ -6804,8 +7152,7 @@ mod reference_class_invariance_tests {
                 .iter()
                 .flat_map(|bs| bs.beta.iter().copied())
                 .collect();
-            let block_cols: Vec<usize> =
-                parts.blocks.iter().map(|s| s.design.ncols()).collect();
+            let block_cols: Vec<usize> = parts.blocks.iter().map(|s| s.design.ncols()).collect();
             let warm = crate::custom_family::CustomFamilyWarmStart::from_cached_beta(
                 &block_cols,
                 &ndarray::Array1::from(far_beta),

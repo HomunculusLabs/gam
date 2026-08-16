@@ -280,15 +280,35 @@ pub fn uq_surface_registry() -> Vec<CalibrationTarget> {
         // not one of the three structs this file's completeness lint walked, so
         // nothing forced it onto the registry. Registered here and given its own
         // real end-to-end coverage sweep.
+        // The band this driver ACTUALLY publishes is the smoothing-corrected
+        // one whenever the fit retained a ρ-uncertainty correction, exactly as
+        // `PredictUncertaintyOptions::default()` does for every other family.
+        // It was registered as conditional-only because it WAS conditional-only:
+        // `fit_penalized_multinomial_formula` stored `covariance_conditional`
+        // and dropped the correction the same fit had already computed, which is
+        // what made the coverage sweep below anti-conservative (gam#2612). Both
+        // modes are registered now, as the Gaussian pair above is, because a
+        // fit that cannot produce the correction still legitimately publishes
+        // the conditional band and says so in `covariance_source`.
         CalibrationTarget {
             name: "multinomial_mean_prediction_interval",
+            kind: SurfaceKind::CredibleBand {
+                smoothing_corrected: true,
+            },
+            mode: AuditMode::CoverageSweep,
+            guards: &[1891, 2612],
+            audited_by: "sbc_multinomial_prediction_interval_coverage \
+                         (multinomial_mean_prediction_interval_covers_true_probability_at_nominal)",
+        },
+        CalibrationTarget {
+            name: "multinomial_mean_prediction_interval_conditional",
             kind: SurfaceKind::CredibleBand {
                 smoothing_corrected: false,
             },
             mode: AuditMode::CoverageSweep,
-            guards: &[1891],
+            guards: &[1891, 2612],
             audited_by: "sbc_multinomial_prediction_interval_coverage \
-                         (multinomial_mean_prediction_interval_covers_true_probability_at_nominal)",
+                         (multinomial_conditional_band_is_narrower_than_the_corrected_band)",
         },
     ]
 }
@@ -414,14 +434,25 @@ fn multinomial_payload_field_audits(payload: &MultinomialPredictionIntervals) ->
         mean_lower,
         mean_upper,
         level,
+        covariance_source,
     } = payload;
-    std::hint::black_box((mean, standard_error, mean_lower, mean_upper, level));
+    std::hint::black_box((
+        mean,
+        standard_error,
+        mean_lower,
+        mean_upper,
+        level,
+        covariance_source,
+    ));
     vec![
         FieldAudit::point("mean"),
         FieldAudit::audited("standard_error", "multinomial_mean_prediction_interval"),
         FieldAudit::audited("mean_lower", "multinomial_mean_prediction_interval"),
         FieldAudit::audited("mean_upper", "multinomial_mean_prediction_interval"),
         FieldAudit::point("level"),
+        // Provenance of the band, not a band: the same disposition
+        // `SurvivalPredictResult::covariance_source` carries (gam#2612).
+        FieldAudit::point("covariance_source"),
     ]
 }
 
@@ -531,6 +562,7 @@ fn multinomial_probe() -> MultinomialPredictionIntervals {
         mean_lower: one.clone(),
         mean_upper: one,
         level: 0.95,
+        covariance_source: InferenceCovarianceMode::SmoothingCorrected,
     }
 }
 
