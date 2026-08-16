@@ -353,6 +353,29 @@ fn uniform_cloud(n: usize, dim: usize, seed: u64) -> Array2<f64> {
     Array2::from_shape_fn((n, dim), |_| lcg(&mut s) - 0.5)
 }
 
+fn sorted_bars(bars: &[PersistenceBar]) -> Vec<PersistenceBar> {
+    let mut out = bars.to_vec();
+    out.sort_by(|a, b| {
+        a.birth
+            .partial_cmp(&b.birth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.death.partial_cmp(&b.death).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    out
+}
+
+/// Difference two barcodes as MULTISETS of bars, bit for bit on every endpoint.
+///
+/// The emission order is deliberately not compared, and that is a statement
+/// about what a barcode is rather than a weakening of the gate. A persistence
+/// barcode is a multiset: the order in which a reduction happens to discover
+/// its pairs is an artifact of which matrix it reduced, and cohomology
+/// discovers the same pairs in a different sequence. Every consumer in this
+/// module reads the bars accordingly — `components_and_scale` sorts the deaths,
+/// `spacing_floor_bar_count` and `shell_plateau_bar_count` sort the critical
+/// values and count bars alive at a probe, `dominant_persistence` folds a max —
+/// so none of them can observe the order. The verdict gate below closes that
+/// argument by measurement rather than by inspection.
 fn assert_same_bars(label: &str, degree: &str, got: &[PersistenceBar], want: &[PersistenceBar]) {
     assert_eq!(
         got.len(),
@@ -361,6 +384,8 @@ fn assert_same_bars(label: &str, degree: &str, got: &[PersistenceBar], want: &[P
         got.len(),
         want.len()
     );
+    let got = sorted_bars(got);
+    let want = sorted_bars(want);
     for (index, (a, b)) in got.iter().zip(want.iter()).enumerate() {
         assert!(
             a.birth.to_bits() == b.birth.to_bits() && a.death.to_bits() == b.death.to_bits(),
@@ -499,3 +524,155 @@ fn the_pair_budget_never_drops_a_bar_the_reference_engine_finds() {
         assert_same_bars(&format!("seed {seed}"), "H1", &got.h1, &want.h1);
     }
 }
+
+/// The cost claim, measured against the engine it replaces on the SAME cover
+/// the audit runs.
+///
+/// This is a ratio between two implementations timed back to back in one
+/// process on one thread, which is the load-immune form: a shared slowdown
+/// moves both numbers and leaves the ratio alone. The bar is deliberately far
+/// below what is observed (a 3x floor against a measured order of magnitude) so
+/// host noise cannot turn it red, while a regression that reinstated the
+/// per-simplex allocation or the exhausted-tail reduction would fail it by a
+/// wide margin.
+///
+/// `PERSISTENCE_H1_MAX_POINTS = 256` is the cover `atom_topology_persistence`
+/// uses for a full-support atom; this runs at 160 so the CONTROL — which is the
+/// slow engine, by construction — stays inside a unit test's budget. The
+/// enumeration is cubic in the cover, so 160 already carries `C(160,3) = 669 920`
+/// triangles.
+#[test]
+fn the_rewritten_engine_is_measurably_cheaper_at_the_audit_cover() {
+    use std::time::Instant;
+
+    let points = circle(160, 1.0);
+    let started = Instant::now();
+    let reference = reference_dtm_vietoris_rips_persistence(points.view(), None, 1);
+    let reference_seconds = started.elapsed().as_secs_f64();
+
+    let started = Instant::now();
+    let rewritten = dtm_vietoris_rips_persistence(points.view(), None, 1);
+    let rewritten_seconds = started.elapsed().as_secs_f64();
+
+    assert_same_bars("cost gate", "H0", &rewritten.h0, &reference.h0);
+    assert_same_bars("cost gate", "H1", &rewritten.h1, &reference.h1);
+
+    let speedup = reference_seconds / rewritten_seconds.max(1.0e-9);
+    println!(
+        "#2757 filtration engine on circle(160): reference {reference_seconds:.3}s, \
+         rewritten {rewritten_seconds:.3}s, {speedup:.1}x"
+    );
+    assert!(
+        speedup >= 5.0,
+        "the rewritten filtration must be at least 5x cheaper than the engine it \
+         replaces on the audit's own cover; measured {reference_seconds:.3}s vs \
+         {rewritten_seconds:.3}s ({speedup:.2}x)"
+    );
+}
+
+/// The order argument, closed by measurement rather than by reading the
+/// consumers.
+///
+/// The rewritten engine discovers the same pairs in a different sequence, so
+/// the bar lists it returns are permutations of the old ones. Every claim that
+/// this is harmless rests on the four functions that actually read a barcode
+/// being pure functions of the MULTISET. That is asserted here twice over: the
+/// four readings agree between the two engines, and each reading is unchanged
+/// when its own bar list is reversed. A reader that had smuggled in an
+/// order dependence would fail the second half even on one engine.
+/// The same measurement at the cover `atom_topology_persistence` actually uses
+/// for a full-support atom, which is the cell #2757 was measured on.
+#[test]
+fn the_rewritten_engine_at_the_full_persistence_h1_cover() {
+    use std::time::Instant;
+
+    let points = circle(PERSISTENCE_H1_MAX_POINTS, 1.0);
+    let started = Instant::now();
+    let rewritten = dtm_vietoris_rips_persistence(points.view(), None, 1);
+    let rewritten_seconds = started.elapsed().as_secs_f64();
+    println!(
+        "#2757 filtration engine at the full H1 cover (m={PERSISTENCE_H1_MAX_POINTS}): \
+         {rewritten_seconds:.3}s, h0={} h1={}",
+        rewritten.h0.len(),
+        rewritten.h1.len()
+    );
+    // The reference engine is NOT run here: it is the ~17 s per call this issue
+    // was filed on, and a unit test must not carry that. Its number at this
+    // cover is on the issue thread and in the commit that landed the rewrite.
+    assert!(
+        rewritten_seconds < 5.0,
+        "the filtration at the audit's own cover must be seconds, not tens of \
+         seconds; measured {rewritten_seconds:.3}s"
+    );
+    assert_eq!(
+        rewritten.h0.len(),
+        PERSISTENCE_H1_MAX_POINTS,
+        "a connected cover of m points has m H0 bars: m-1 merges and one essential"
+    );
+}
+
+#[test]
+fn every_reader_of_a_barcode_is_a_function_of_the_multiset() {
+    let fixtures: Vec<(&str, Array2<f64>, usize)> = vec![
+        ("circle(48)", circle(48, 1.0), 1),
+        ("clusters(3x9)", clusters(3, 9), 1),
+        ("line(20)", line(20), 1),
+        ("tied(21)", tied(21), 1),
+        ("clifford_torus(5x5)", clifford_torus(5, 5), 2),
+        ("uniform(30,3)", uniform_cloud(30, 3, 0x2757_5EED_0000_0001), 1),
+    ];
+    for (label, points, max_homology_dim) in fixtures {
+        let distances = dtm_weighted_distances(points.view(), None);
+        let rewritten = dtm_vietoris_rips_persistence(points.view(), None, max_homology_dim);
+        let reference =
+            reference_dtm_vietoris_rips_persistence(points.view(), None, max_homology_dim);
+
+        let finite = |bars: &[PersistenceBar]| -> Vec<PersistenceBar> {
+            bars.iter().copied().filter(|b| !b.is_essential()).collect()
+        };
+        assert_eq!(
+            components_and_scale(&finite(&rewritten.h0), &distances),
+            components_and_scale(&finite(&reference.h0), &distances),
+            "{label}: component reading diverged"
+        );
+        assert_eq!(
+            spacing_floor_bar_count(&rewritten.h1, &distances),
+            spacing_floor_bar_count(&reference.h1, &distances),
+            "{label}: b1 reading diverged"
+        );
+        assert_eq!(
+            shell_plateau_bar_count(&rewritten.h2),
+            shell_plateau_bar_count(&reference.h2),
+            "{label}: b2 reading diverged"
+        );
+        assert_eq!(
+            dominant_persistence(&rewritten.h1).to_bits(),
+            dominant_persistence(&reference.h1).to_bits(),
+            "{label}: dominant H1 persistence diverged"
+        );
+
+        // And each reading is blind to the order of the list it is handed.
+        let mut reversed_h0 = finite(&rewritten.h0);
+        reversed_h0.reverse();
+        let mut reversed_h1 = rewritten.h1.clone();
+        reversed_h1.reverse();
+        let mut reversed_h2 = rewritten.h2.clone();
+        reversed_h2.reverse();
+        assert_eq!(
+            components_and_scale(&reversed_h0, &distances),
+            components_and_scale(&finite(&rewritten.h0), &distances),
+            "{label}: the component reading is order-dependent"
+        );
+        assert_eq!(
+            spacing_floor_bar_count(&reversed_h1, &distances),
+            spacing_floor_bar_count(&rewritten.h1, &distances),
+            "{label}: the b1 reading is order-dependent"
+        );
+        assert_eq!(
+            shell_plateau_bar_count(&reversed_h2),
+            shell_plateau_bar_count(&rewritten.h2),
+            "{label}: the b2 reading is order-dependent"
+        );
+    }
+}
+

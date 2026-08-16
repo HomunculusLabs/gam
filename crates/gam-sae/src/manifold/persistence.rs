@@ -38,7 +38,7 @@
 use super::*;
 use crate::inference::atlas_nerve::AtlasCoveringSide;
 use crate::null_battery::ClaimNullCalibration;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Compute ceiling on the number of points fed to the Vietoris–Rips filtration.
 ///
@@ -449,118 +449,6 @@ fn fold_mass_to_landmarks(
     folded
 }
 
-/// One simplex in the Vietoris–Rips filtration: its sorted vertex set, its
-/// filtration value (max pairwise distance among its vertices), and dimension.
-///
-/// Held inline. A `Vec<usize>` per simplex would be one heap allocation per
-/// simplex, and the `H₁` cover enumerates `C(256, 3) = 2 763 520` of them
-/// (#2757): the vertex list, the boundary list and the reduced column were
-/// three `Vec`s each, and the vertex list was cloned again as a hash key —
-/// about eleven million allocations for one atom's certificate. The vertex set
-/// is at most four `u32`s in every dimension this module builds, so it lives in
-/// the struct.
-///
-/// Unused slots hold `NO_VERTEX`. That is not padding to be skipped: simplices
-/// are only ever compared within one dimension (the ordering compares
-/// dimension first), so all four slots are meaningful on both sides of any
-/// comparison and the lexicographic order on `[u32; 4]` IS the lexicographic
-/// order on the vertex lists.
-const SIMPLEX_MAX_VERTS: usize = 4;
-
-/// Filler for the unused vertex slots of a simplex below dimension three.
-const NO_VERTEX: u32 = u32::MAX;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Simplex {
-    verts: [u32; SIMPLEX_MAX_VERTS],
-    filt: f64,
-}
-
-impl Simplex {
-    /// Order two simplices OF THE SAME DIMENSION as the filtration does:
-    /// ascending filtration value, then lexicographic vertex list.
-    fn filtration_order(&self, other: &Self) -> std::cmp::Ordering {
-        self.filt
-            .partial_cmp(&other.filt)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| self.verts.cmp(&other.verts))
-    }
-}
-
-/// Binomial coefficients `C(v, t)` for `t ≤ 4` over the vertex range, which is
-/// the whole of the combinatorial-number-system arithmetic this module needs.
-///
-/// `C(255, 4) = 1.6e7`, so `usize` never overflows at any cover this module
-/// builds.
-fn simplex_binomials(m: usize) -> Vec<[usize; SIMPLEX_MAX_VERTS + 1]> {
-    // Pascal's rule, so the table needs no division and no overflow argument
-    // beyond `C(m, 4)` fitting a `usize`.
-    let mut table = vec![[0usize; SIMPLEX_MAX_VERTS + 1]; m + 1];
-    table[0][0] = 1;
-    for v in 1..=m {
-        table[v][0] = 1;
-        for t in 1..=SIMPLEX_MAX_VERTS {
-            table[v][t] = table[v - 1][t - 1] + table[v - 1][t];
-        }
-    }
-    table
-}
-
-/// The colexicographic rank `Σ_t C(v_t, t+1)` of a sorted vertex tuple — the
-/// combinatorial number system's bijection between the `d+1`-subsets of
-/// `{0..m}` and `0..C(m, d+1)`.
-///
-/// This is what replaces the `HashMap<Vec<usize>, usize>` the filtration used
-/// to key every simplex through: a face's slot is an array index computed in
-/// `d` additions, so the boundary of a simplex is looked up without hashing and
-/// without allocating.
-#[inline]
-fn colex_rank(verts: &[u32], binomials: &[[usize; SIMPLEX_MAX_VERTS + 1]]) -> usize {
-    let mut rank = 0usize;
-    for (t, &v) in verts.iter().enumerate() {
-        rank += binomials[v as usize][t + 1];
-    }
-    rank
-}
-
-/// One dimension's simplices, in filtration order, with the inverse of the
-/// colex ranking so a face can be resolved to its position.
-struct FiltrationLevel {
-    /// Simplices of this dimension, sorted by [`Simplex::filtration_order`].
-    /// The filtration's global order restricted to one dimension IS this order,
-    /// because the global comparison puts dimension between the two keys.
-    order: Vec<Simplex>,
-    /// `position_of_rank[colex rank] = index into `order``.
-    position_of_rank: Vec<u32>,
-}
-
-impl FiltrationLevel {
-    /// Build the level from simplices generated in colex order, so the
-    /// generation index IS the colex rank.
-    fn from_colex_generation(
-        generated: Vec<Simplex>,
-        dim: usize,
-        binomials: &[[usize; SIMPLEX_MAX_VERTS + 1]],
-    ) -> Self {
-        let count = generated.len();
-        let mut order = generated;
-        order.sort_by(Simplex::filtration_order);
-        let mut position_of_rank = vec![0u32; count];
-        for (position, simplex) in order.iter().enumerate() {
-            let rank = colex_rank(&simplex.verts[..=dim], binomials);
-            position_of_rank[rank] = position as u32;
-        }
-        Self {
-            order,
-            position_of_rank,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.order.len()
-    }
-}
-
 /// Distance-to-measure radii for the selected support. The mass source is this
 /// atom's assignment-mass vector today; this function is the single swap point
 /// for a first-class support measure carrying density-corrected row masses.
@@ -632,25 +520,279 @@ pub(crate) fn dtm_weighted_distances_and_radii(
     (dist, dtm)
 }
 
-fn dtm_weighted_distances(
+pub(crate) fn dtm_weighted_distances(
     points: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
 ) -> Array2<f64> {
     dtm_weighted_distances_and_radii(points, weights).0
 }
 
-/// Exact DTM-weighted Vietoris–Rips persistent homology up to H₁ (needs
-/// 2-simplices to kill loops). Filtration values are exact weighted pairwise
-/// distances — no scale grid.
+/// The largest vertex count any simplex in this filtration has: a tetrahedron,
+/// which the `H₂` shell audit needs and nothing above it does.
+const SIMPLEX_MAX_VERTS: usize = 4;
+
+/// Binomial coefficients `C(v, t)` for `t ≤ 4` over the vertex range, which is
+/// the whole of the combinatorial-number-system arithmetic this module needs.
 ///
-/// Reduction is the standard GF(2) boundary-matrix reduction: simplices are
-/// ordered by `(filtration, dimension)`, each column is reduced against earlier
-/// pivots, and a persistence pair `(birth-face, death-simplex)` is emitted when
-/// a column's lowest surviving entry matches an existing pivot.
-pub fn vietoris_rips_persistence(points: ArrayView2<'_, f64>) -> PersistenceDiagram {
-    dtm_vietoris_rips_persistence(points, None, 1)
+/// `C(255, 4) = 1.6e7`, so `usize` never overflows at any cover this module
+/// builds.
+fn simplex_binomials(m: usize) -> Vec<[usize; SIMPLEX_MAX_VERTS + 1]> {
+    // Pascal's rule, so the table needs no division and no overflow argument
+    // beyond `C(m, 4)` fitting a `usize`.
+    let mut table = vec![[0usize; SIMPLEX_MAX_VERTS + 1]; m + 1];
+    table[0][0] = 1;
+    for v in 1..=m {
+        table[v][0] = 1;
+        for t in 1..=SIMPLEX_MAX_VERTS {
+            table[v][t] = table[v - 1][t - 1] + table[v - 1][t];
+        }
+    }
+    table
 }
 
+/// The combinatorial data of one DTM-weighted Vietoris–Rips filtration: the
+/// point count, the weighted pairwise distances, the per-vertex DTM radii, and
+/// the binomial table the combinatorial number system indexes through.
+///
+/// Every simplex-level operation the reduction needs — a filtration value, a
+/// rank-to-vertices decode, a cofacet enumeration — is a question about this
+/// object and nothing else, so it owns them as methods rather than threading
+/// four immutable references through each call.
+struct Filtration<'a> {
+    points: usize,
+    dist: &'a Array2<f64>,
+    dtm: &'a [f64],
+    binomials: Vec<[usize; SIMPLEX_MAX_VERTS + 1]>,
+}
+
+impl<'a> Filtration<'a> {
+    fn new(points: usize, dist: &'a Array2<f64>, dtm: &'a [f64]) -> Self {
+        Self {
+            points,
+            dist,
+            dtm,
+            binomials: simplex_binomials(points),
+        }
+    }
+
+    /// The number of `dim`-simplices, `C(m, dim+1)`.
+    fn simplex_count(&self, dim: usize) -> usize {
+        self.binomials[self.points][dim + 1]
+    }
+
+/// The filtration value of a simplex: the largest weighted distance between two
+/// of its vertices, and for a vertex its own DTM radius.
+///
+/// `dist[i][j] = max(‖x_i − x_j‖, w_i, w_j) ≥ w_i, w_j` already, so for a
+/// simplex of dimension ≥ 1 the pairwise max alone carries the DTM birth of
+/// every face.
+#[inline]
+    fn simplex_filtration(&self, verts: &[u32]) -> f64 {
+        if verts.len() <= 1 {
+            return verts.first().map_or(0.0, |&v| self.dtm[v as usize]);
+        }
+        let mut filt = f64::NEG_INFINITY;
+        for (a, &va) in verts.iter().enumerate() {
+            for &vb in &verts[a + 1..] {
+                let d = self.dist[[va as usize, vb as usize]];
+                if d > filt {
+                    filt = d;
+                }
+            }
+        }
+        filt
+    }
+
+/// Decode a colex rank back into its ascending vertex list.
+///
+/// The combinatorial number system writes any `d+1`-subset uniquely as
+/// `rank = Σ_t C(v_t, t+1)` with `v_0 < … < v_d`, recovered greedily from the
+/// top: `v_d` is the largest `v` with `C(v, d+1) ≤ rank`.
+    fn colex_vertices(&self, mut rank: usize, dim: usize, out: &mut Vec<u32>) {
+        out.clear();
+        out.resize(dim + 1, 0);
+        let mut upper = self.binomials.len() - 1;
+        for slot in (0..=dim).rev() {
+            // Largest `v ≤ upper` with `C(v, slot+1) ≤ rank`. `C(·, k)` is
+            // non-decreasing in `v`, so this is a binary search.
+            let (mut lo, mut hi) = (slot, upper);
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2;
+                if self.binomials[mid][slot + 1] <= rank {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            out[slot] = lo as u32;
+            rank -= self.binomials[lo][slot + 1];
+            upper = lo.saturating_sub(1);
+        }
+    }
+
+    /// The colexicographic rank `Σ_t C(v_t, t+1)` of a sorted vertex tuple.
+    #[inline]
+    fn colex_rank(&self, verts: &[u32]) -> usize {
+        let mut rank = 0usize;
+        for (t, &v) in verts.iter().enumerate() {
+            rank += self.binomials[v as usize][t + 1];
+        }
+        rank
+    }
+
+/// Persistent COHOMOLOGY of one degree: reduce each column's coboundary and
+/// read the degree-`d` barcode off the pairs.
+///
+/// # Why the coboundary
+///
+/// The homology reduction takes the `(d+1)`-simplices as its columns. At the
+/// `H₁` cover that is `C(256,3) = 2 763 520` triangles, of which at most
+/// `C(256,2) = 32 640` can ever pair — pivots are edges — so ~2.73 M columns
+/// exist only to be ground down to zero, and each one costs a chain of GF(2)
+/// column additions. Measured: 5.7 s of a 5.8 s filtration at a 160-point
+/// cover, with the reduction 99 % of it (#2757).
+///
+/// Persistent cohomology has the same barcode (de Silva–Morozov–
+/// Vejdemo-Johansson) and the opposite cost profile. Its columns are the
+/// `d`-simplices — the EDGES, 32 640 of them — and the `(d+1)`-simplices appear
+/// only as entries, enumerated on demand as cofacets and never materialized as
+/// a list. So the triangle enumeration that dominated both the time and the
+/// memory does not happen at all.
+///
+/// Two further exact reductions come with it:
+///
+/// * **Clearing.** A simplex that was a pivot in degree `d−1` is a death
+///   partner; its own coboundary column is known to reduce to zero, so it is
+///   not a column at all. In the coboundary direction this is available in the
+///   order the degrees are already computed, which is what it is not in the
+///   boundary direction.
+/// * **Emergent pairs, for free.** On a Vietoris–Rips filtration most pairs are
+///   between a simplex and a cofacet of the SAME filtration value. Such a
+///   cofacet is necessarily the column's pivot (every cofacet's value is at
+///   least the simplex's), so if it owns no pivot yet the loop below pairs it on
+///   its first iteration with no column addition at all. This needs no special
+///   case; it falls out of the pivot being the earliest entry.
+///
+/// Returns the degree's bars and the set of `(d+1)`-simplex ranks that became
+/// pivots, which is the next degree's clearing set.
+    fn reduce_coboundary(
+        &self,
+        columns: &[FiltrationSimplex],
+        degree: usize,
+    ) -> (Vec<PersistenceBar>, HashSet<usize>) {
+    let mut bars: Vec<PersistenceBar> = Vec::new();
+    let mut pivot_owner: HashMap<usize, usize> = HashMap::new();
+    let mut reduced: Vec<Vec<FiltrationSimplex>> = Vec::new();
+    let mut pivots: HashSet<usize> = HashSet::new();
+    if degree + 1 >= self.points {
+        // No cofacet exists, so every column is an essential class.
+        for column in columns {
+            bars.push(PersistenceBar {
+                birth: column.filt,
+                death: f64::INFINITY,
+            });
+        }
+        return (bars, pivots);
+    }
+
+    let mut verts: Vec<u32> = Vec::with_capacity(degree + 1);
+    let mut cofacet_verts: Vec<u32> = Vec::with_capacity(degree + 2);
+    let mut working: Vec<FiltrationSimplex> = Vec::new();
+    let mut scratch: Vec<FiltrationSimplex> = Vec::new();
+
+    for column in columns {
+        self.colex_vertices(column.rank, degree, &mut verts);
+        // Built straight into the working column: the coboundary IS the
+        // unreduced column, and at this cover copying it aside first would move
+        // 130 MB for nothing.
+        self.collect_cofacets(&verts, column.filt, &mut cofacet_verts, &mut working);
+        loop {
+            // The pivot of a COboundary column is its entry that is EARLIEST in
+            // the filtration, not the latest. The coboundary reduction is the
+            // boundary reduction of the anti-transposed matrix, so "lowest
+            // surviving entry" reads off the reversed order — and the reversal is
+            // the whole reason the barcode comes out the same while the cost
+            // profile flips. Taking the latest instead reports each class dying
+            // at the coarsest simplex that touches it, which on a circle cover is
+            // the diameter rather than the merge scale.
+            let Some(&pivot) = working.first() else {
+                bars.push(PersistenceBar {
+                    birth: column.filt,
+                    death: f64::INFINITY,
+                });
+                break;
+            };
+            match pivot_owner.get(&pivot.rank) {
+                Some(&owner) => {
+                    cochain_symmetric_difference(&working, &reduced[owner], &mut scratch);
+                    std::mem::swap(&mut working, &mut scratch);
+                }
+                None => {
+                    if pivot.filt > column.filt {
+                        bars.push(PersistenceBar {
+                            birth: column.filt,
+                            death: pivot.filt,
+                        });
+                    }
+                    pivots.insert(pivot.rank);
+                    pivot_owner.insert(pivot.rank, reduced.len());
+                    // Handed over rather than cloned; the next column rebuilds
+                    // its own coboundary from scratch anyway.
+                    reduced.push(std::mem::take(&mut working));
+                    break;
+                }
+            }
+        }
+    }
+    (bars, pivots)
+    }
+
+/// Every cofacet of `verts` — the simplices `σ ∪ {w}` for `w ∉ σ` — in
+/// ascending filtration order, so the reduction's pivot is the last entry.
+///
+/// The cofacet's filtration value is `max(filt(σ), max_t dist(w, v_t))`: adding
+/// a vertex can only add the pairs it is party to.
+    fn collect_cofacets(
+        &self,
+        verts: &[u32],
+        filt: f64,
+        cofacet_verts: &mut Vec<u32>,
+        out: &mut Vec<FiltrationSimplex>,
+    ) {
+        out.clear();
+        for w in 0..self.points {
+            let w32 = w as u32;
+            if verts.contains(&w32) {
+                continue;
+            }
+            let mut cofacet_filt = filt;
+            for &v in verts {
+                let d = self.dist[[w, v as usize]];
+                if d > cofacet_filt {
+                    cofacet_filt = d;
+                }
+            }
+            cofacet_verts.clear();
+            let insert_at = verts.partition_point(|&v| v < w32);
+            cofacet_verts.extend_from_slice(&verts[..insert_at]);
+            cofacet_verts.push(w32);
+            cofacet_verts.extend_from_slice(&verts[insert_at..]);
+            out.push(FiltrationSimplex {
+                filt: cofacet_filt,
+                rank: self.colex_rank(cofacet_verts),
+            });
+        }
+        out.sort_by(FiltrationSimplex::filtration_order);
+    }
+}
+
+/// Exact DTM-weighted Vietoris–Rips persistent homology up to the requested
+/// degree. Filtration values are exact weighted pairwise distances — no scale
+/// grid.
+///
+/// Computed through persistent COHOMOLOGY, which has the same barcode and a
+/// cost profile suited to this filtration; see [`Filtration::reduce_coboundary`]
+/// for why (#2757).
 pub(crate) fn dtm_vietoris_rips_persistence(
     points: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
@@ -658,10 +800,14 @@ pub(crate) fn dtm_vietoris_rips_persistence(
 ) -> PersistenceDiagram {
     let m = points.nrows();
     let mut h0 = Vec::new();
-    let mut h1 = Vec::new();
-    let mut h2 = Vec::new();
+    let h1;
+    let h2;
     if m == 0 {
-        return PersistenceDiagram { h0, h1, h2 };
+        return PersistenceDiagram {
+            h0,
+            h1: Vec::new(),
+            h2: Vec::new(),
+        };
     }
     if m == 1 {
         // A single point has DTM radius 0 (`dtm_radii` returns 0 for `m <= 1`), so
@@ -670,242 +816,122 @@ pub(crate) fn dtm_vietoris_rips_persistence(
             birth: 0.0,
             death: f64::INFINITY,
         });
-        return PersistenceDiagram { h0, h1, h2 };
-    }
-
-    let (dist, dtm) = dtm_weighted_distances_and_radii(points, weights);
-
-    // Build simplices up to the coface dimension needed by the requested
-    // homology: H₁ needs triangles, H₂ needs tetrahedra.
-    let max_simplex_dim = (max_homology_dim + 1).min(3);
-    let binomials = simplex_binomials(m);
-
-    // Each dimension is generated in COLEX order (`v_d` outermost, `v_0`
-    // innermost), so the generation index is the simplex's colex rank and
-    // `FiltrationLevel` can invert the ranking without a hash map.
-    //
-    // Standard `p = ∞` DTM-weighted Vietoris–Rips convention: a vertex is born at
-    // its own DTM radius `w_i = dtm[i]`, NOT at 0. Edges/higher simplices already
-    // carry `max(d_ij, w_i, w_j)` (see `dtm_weighted_distances_and_radii`), which
-    // is `≥` each face's DTM birth, so face-before-coface ordering is preserved.
-    let mut levels: Vec<FiltrationLevel> = Vec::with_capacity(max_simplex_dim + 1);
-    {
-        let vertices: Vec<Simplex> = (0..m)
-            .map(|i| Simplex {
-                verts: [i as u32, NO_VERTEX, NO_VERTEX, NO_VERTEX],
-                filt: dtm[i],
-            })
-            .collect();
-        levels.push(FiltrationLevel::from_colex_generation(
-            vertices,
-            0,
-            &binomials,
-        ));
-    }
-    if max_simplex_dim >= 1 {
-        let mut edges: Vec<Simplex> = Vec::with_capacity(binomials[m][2]);
-        for j in 0..m {
-            for i in 0..j {
-                edges.push(Simplex {
-                    verts: [i as u32, j as u32, NO_VERTEX, NO_VERTEX],
-                    filt: dist[[i, j]],
-                });
-            }
-        }
-        levels.push(FiltrationLevel::from_colex_generation(edges, 1, &binomials));
-    }
-    if max_simplex_dim >= 2 {
-        let mut triangles: Vec<Simplex> = Vec::with_capacity(binomials[m][3]);
-        for k in 0..m {
-            for j in 0..k {
-                let d_jk = dist[[j, k]];
-                for i in 0..j {
-                    triangles.push(Simplex {
-                        verts: [i as u32, j as u32, k as u32, NO_VERTEX],
-                        filt: dist[[i, j]].max(dist[[i, k]]).max(d_jk),
-                    });
-                }
-            }
-        }
-        levels.push(FiltrationLevel::from_colex_generation(
-            triangles, 2, &binomials,
-        ));
-    }
-    if max_simplex_dim >= 3 {
-        let mut tetrahedra: Vec<Simplex> = Vec::with_capacity(binomials[m][4]);
-        for l in 0..m {
-            for k in 0..l {
-                let d_kl = dist[[k, l]];
-                for j in 0..k {
-                    let d_jk_jl = dist[[j, k]].max(dist[[j, l]]).max(d_kl);
-                    for i in 0..j {
-                        tetrahedra.push(Simplex {
-                            verts: [i as u32, j as u32, k as u32, l as u32],
-                            filt: dist[[i, j]]
-                                .max(dist[[i, k]])
-                                .max(dist[[i, l]])
-                                .max(d_jk_jl),
-                        });
-                    }
-                }
-            }
-        }
-        levels.push(FiltrationLevel::from_colex_generation(
-            tetrahedra, 3, &binomials,
-        ));
-    }
-
-    // The GF(2) boundary reduction DECOMPOSES BY DIMENSION: the boundary of a
-    // `d`-simplex contains only `(d−1)`-simplices, so a pivot installed while
-    // reducing dimension `d` can never be the low of a column of any other
-    // dimension. Reducing one dimension at a time is therefore exactly the same
-    // computation as the single interleaved sweep over the global order, and it
-    // is what makes the pair BUDGET below available.
-    //
-    // The budget is the whole point, and it is a theorem rather than a cutoff.
-    // At the largest filtration value the complex is the full `max_simplex_dim`
-    // skeleton of the simplex on `m` vertices, whose homology vanishes below the
-    // top dimension. So every class born in a dimension `d − 1 < max_simplex_dim`
-    // is dead by the end, except the one connected component:
-    //
-    //     pairs in dimension d  =  (columns of dimension d−1 that reduced to
-    //                               zero)  −  (1 if d == 1 else 0)
-    //
-    // Once that many pairs have been emitted, EVERY remaining column of this
-    // dimension reduces to zero and can contribute nothing. At the `H₁` cover
-    // that is `C(m,2) − (m−1) ≈ 32 000` pairs against `C(m,3) ≈ 2 760 000`
-    // columns: the tail after the last loop dies is pure waste, and it was the
-    // bulk of the work.
-    //
-    // The stop is only taken in the TOP dimension, because a lower dimension's
-    // zero-column SET (not just its count) is needed twice: as the next
-    // dimension's budget, and as its own essential classes. The top dimension's
-    // zero columns are never essential in a recorded degree (`PersistenceDiagram`
-    // carries H₀/H₁/H₂ and the top dimension is `max_homology_dim + 1`).
-    let mut zero_columns: Vec<Vec<u32>> = vec![Vec::new(); max_simplex_dim + 1];
-    // Dimension 0 has an empty boundary, so every vertex is a zero column.
-    zero_columns[0] = (0..levels[0].len() as u32).collect();
-    let mut zero_counts: Vec<usize> = vec![0; max_simplex_dim + 1];
-    zero_counts[0] = levels[0].len();
-    // `paired[d][pos]` — this `d`-simplex has been consumed as the BIRTH of a
-    // pair, so it is not an essential class.
-    let mut paired: Vec<Vec<bool>> = (0..=max_simplex_dim)
-        .map(|d| vec![false; levels[d].len()])
-        .collect();
-    // Bars, per recorded homology degree, in the order the sweep emits them.
-    let mut paired_bars: Vec<Vec<PersistenceBar>> = vec![Vec::new(); max_simplex_dim + 1];
-
-    let mut face_buffer: Vec<u32> = Vec::with_capacity(SIMPLEX_MAX_VERTS);
-    let mut column: Vec<u32> = Vec::with_capacity(SIMPLEX_MAX_VERTS);
-    let mut scratch: Vec<u32> = Vec::new();
-
-    for dim in 1..=max_simplex_dim {
-        let budget = zero_counts[dim - 1].saturating_sub(usize::from(dim == 1));
-        let top_dimension = dim == max_simplex_dim;
-        // `pivot_column[low]` is the reduced column that owns pivot `low`. Keyed
-        // by the pivot's position within dimension `dim − 1`, so at most one
-        // entry per `(dim−1)`-simplex ever exists.
-        let mut pivot_column: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut pairs = 0usize;
-        let mut zeros = 0usize;
-        let column_count = levels[dim].len();
-        for position in 0..column_count {
-            let simplex = levels[dim].order[position];
-            // Boundary: the `dim + 1` codimension-one faces, as positions within
-            // the level below, ascending.
-            column.clear();
-            for drop in 0..=dim {
-                face_buffer.clear();
-                for (slot, &v) in simplex.verts[..=dim].iter().enumerate() {
-                    if slot != drop {
-                        face_buffer.push(v);
-                    }
-                }
-                let rank = colex_rank(&face_buffer, &binomials);
-                column.push(levels[dim - 1].position_of_rank[rank]);
-            }
-            column.sort_unstable();
-            while let Some(&low) = column.last() {
-                match pivot_column.get(&low) {
-                    Some(owner) => {
-                        symmetric_difference_into(&column, owner, &mut scratch);
-                        std::mem::swap(&mut column, &mut scratch);
-                    }
-                    None => break,
-                }
-            }
-            match column.last().copied() {
-                Some(low) => {
-                    paired[dim - 1][low as usize] = true;
-                    let birth = levels[dim - 1].order[low as usize].filt;
-                    let death = simplex.filt;
-                    if death > birth {
-                        paired_bars[dim - 1].push(PersistenceBar { birth, death });
-                    }
-                    pivot_column.insert(low, column.clone());
-                    pairs += 1;
-                    if top_dimension && pairs == budget {
-                        break;
-                    }
-                }
-                None => {
-                    zeros += 1;
-                    if !top_dimension {
-                        zero_columns[dim].push(position as u32);
-                    }
-                }
-            }
-        }
-        // With the stop taken, the columns never visited are exactly the ones
-        // that would have reduced to zero, so the count is still exact.
-        zero_counts[dim] = if top_dimension {
-            column_count - pairs
-        } else {
-            zeros
+        return PersistenceDiagram {
+            h0,
+            h1: Vec::new(),
+            h2: Vec::new(),
         };
     }
 
-    // The degrees `PersistenceDiagram` carries: H₀ and H₁ always, H₂ only when
-    // it was asked for. That is exactly `max_homology_dim + 1` capped at three,
-    // and it is strictly below the filtration's top dimension
-    // `max_simplex_dim = max_homology_dim + 1` — which is why the top dimension's
-    // zero-column set is never needed and the pair budget may stop there.
-    let recorded_degrees = (max_homology_dim + 1).min(3);
-    // Emission order, matching the single-sweep reduction this replaces: every
-    // paired bar of a degree first (in ascending death-simplex order, which is
-    // the order the sweep visits that degree's columns), then the essential
-    // classes of that degree in ascending simplex order.
-    let mut recorded: Vec<Vec<PersistenceBar>> = vec![Vec::new(); recorded_degrees];
-    for (degree, bars) in recorded.iter_mut().enumerate() {
-        bars.append(&mut paired_bars[degree]);
-        // Essential classes: zero columns never consumed as a birth.
-        for &position in &zero_columns[degree] {
-            if !paired[degree][position as usize] {
-                bars.push(PersistenceBar {
-                    birth: levels[degree].order[position as usize].filt,
-                    death: f64::INFINITY,
-                });
+    let (dist, dtm) = dtm_weighted_distances_and_radii(points, weights);
+    let filtration = Filtration::new(m, &dist, &dtm);
+
+    // Degrees 0 .. max_homology_dim, each reduced against its own COBOUNDARY.
+    // `cleared` carries forward the pivots of the previous degree.
+    let mut cleared: HashSet<usize> = HashSet::new();
+    let mut degrees: Vec<Vec<PersistenceBar>> = Vec::with_capacity(max_homology_dim + 1);
+    let mut columns: Vec<FiltrationSimplex> = Vec::new();
+    let mut verts: Vec<u32> = Vec::with_capacity(SIMPLEX_MAX_VERTS);
+    for degree in 0..=max_homology_dim {
+        // Columns to reduce: every simplex of this degree that was NOT a pivot of
+        // the previous degree. A pivot is the death partner of a class already
+        // accounted for, and its own coboundary column is known to reduce to
+        // zero — so skipping it is not an approximation, and it is also what
+        // stops those simplices from being counted as essential classes.
+        columns.clear();
+        let count = filtration.simplex_count(degree);
+        for rank in 0..count {
+            if cleared.contains(&rank) {
+                continue;
             }
+            filtration.colex_vertices(rank, degree, &mut verts);
+            columns.push(FiltrationSimplex {
+                filt: filtration.simplex_filtration(&verts),
+                rank,
+            });
         }
+        columns.sort_by(FiltrationSimplex::reduction_order);
+        let (bars, pivots) = filtration.reduce_coboundary(&columns, degree);
+        degrees.push(bars);
+        cleared = pivots;
     }
-    let mut recorded = recorded.into_iter();
-    h0 = recorded.next().unwrap_or_default();
-    h1 = recorded.next().unwrap_or_default();
-    h2 = recorded.next().unwrap_or_default();
+
+    let mut degrees = degrees.into_iter();
+    h0 = degrees.next().unwrap_or_default();
+    h1 = degrees.next().unwrap_or_default();
+    h2 = degrees.next().unwrap_or_default();
 
     PersistenceDiagram { h0, h1, h2 }
 }
 
-/// GF(2) column addition: the symmetric difference of two ascending index
-/// lists, written into `out` (which is cleared first) so the reduction reuses
-/// one buffer instead of allocating a fresh column at every step.
-fn symmetric_difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+/// Exact DTM-weighted Vietoris–Rips persistent homology up to H₁ (needs
+/// 2-simplices to kill loops).
+pub fn vietoris_rips_persistence(points: ArrayView2<'_, f64>) -> PersistenceDiagram {
+    dtm_vietoris_rips_persistence(points, None, 1)
+}
+
+/// A simplex in the filtration, identified by the colex rank of its vertex set
+/// within its own dimension, carrying its filtration value.
+///
+/// The rank IS the identity: it is a dense integer index into the
+/// `d+1`-subsets, so the cofacet enumeration and the pivot table address
+/// simplices by arithmetic rather than through a `HashMap<Vec<usize>, usize>`
+/// keyed on a heap-allocated vertex list.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FiltrationSimplex {
+    filt: f64,
+    rank: usize,
+}
+
+impl FiltrationSimplex {
+    /// The filtration's total order on simplices OF ONE DIMENSION: ascending
+    /// filtration value, ties broken by colex rank.
+    ///
+    /// The tie-break is a REFINEMENT choice, and the diagram does not depend on
+    /// it: simplices sharing a filtration value enter the complex together, so
+    /// any refinement computes the same persistence module, and refinements can
+    /// differ only in how they pair simultaneous simplices — which produces bars
+    /// of zero length, and those are dropped (`death > birth`) before anything
+    /// reads them.
+    fn filtration_order(&self, other: &Self) -> std::cmp::Ordering {
+        self.filt
+            .partial_cmp(&other.filt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.rank.cmp(&other.rank))
+    }
+
+    /// The order the COBOUNDARY reduction visits columns in: descending
+    /// filtration value, ties by ascending rank.
+    ///
+    /// This is not a preference. The coboundary reduction is the ordinary
+    /// left-to-right reduction of the ANTI-TRANSPOSE of the boundary matrix —
+    /// entry `(i, j)` of `D` moved to `(N+1−j, N+1−i)` — so its columns are the
+    /// filtration read backwards, and its "lowest surviving entry" is the entry
+    /// EARLIEST in the filtration. Both reversals belong to the same
+    /// transformation: taking one without the other computes neither barcode.
+    fn reduction_order(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .filt
+            .partial_cmp(&self.filt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.rank.cmp(&other.rank))
+    }
+}
+
+/// GF(2) addition of two cochains held in ascending filtration order, written
+/// into `out` so the reduction reuses one buffer instead of allocating a fresh
+/// column at every step.
+fn cochain_symmetric_difference(
+    a: &[FiltrationSimplex],
+    b: &[FiltrationSimplex],
+    out: &mut Vec<FiltrationSimplex>,
+) {
     out.clear();
     out.reserve(a.len() + b.len());
     let mut ia = 0;
     let mut ib = 0;
     while ia < a.len() && ib < b.len() {
-        match a[ia].cmp(&b[ib]) {
+        match a[ia].filtration_order(&b[ib]) {
             std::cmp::Ordering::Less => {
                 out.push(a[ia]);
                 ia += 1;
@@ -960,7 +986,7 @@ fn symmetric_difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
 /// DTM-weighted landmark distances as the filtration.
 ///
 /// Returns `(n_components, within_component_scale)`.
-fn components_and_scale(finite_h0: &[PersistenceBar], distances: &Array2<f64>) -> (usize, f64) {
+pub(crate) fn components_and_scale(finite_h0: &[PersistenceBar], distances: &Array2<f64>) -> (usize, f64) {
     let mut deaths: Vec<f64> = finite_h0
         .iter()
         .map(|b| b.death)
@@ -1036,7 +1062,7 @@ fn smallest_linkage_component(distances: &Array2<f64>, scale: f64) -> usize {
     sizes.values().copied().min().unwrap_or(0)
 }
 
-fn dominant_persistence(bars: &[PersistenceBar]) -> f64 {
+pub(crate) fn dominant_persistence(bars: &[PersistenceBar]) -> f64 {
     bars.iter().map(|b| b.persistence()).fold(0.0_f64, f64::max)
 }
 
@@ -1081,7 +1107,7 @@ fn dominant_persistence(bars: &[PersistenceBar]) -> f64 {
 /// Returns `(count, fell_back)`. `fell_back` is true when the diagram had bars
 /// but none survived the covering-scale floor, so the returned count is the
 /// essential-bar default rather than a reading of the filtration (#2552).
-fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> (usize, bool) {
+pub(crate) fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> (usize, bool) {
     let essential = bars.iter().filter(|b| b.is_essential()).count();
     // Covering-scale floor: the median nearest-neighbour distance of the landmark
     // cover. A cycle that persists past this outlives the sampling resolution and
@@ -1158,7 +1184,7 @@ fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> 
     (essential + best, false)
 }
 
-fn shell_plateau_bar_count(bars: &[PersistenceBar]) -> usize {
+pub(crate) fn shell_plateau_bar_count(bars: &[PersistenceBar]) -> usize {
     let essential = bars.iter().filter(|b| b.is_essential()).count();
     let finite: Vec<PersistenceBar> = bars
         .iter()
