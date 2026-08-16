@@ -332,28 +332,23 @@ fn the_published_tail_matches_a_direct_simulation_of_its_own_law() {
     // One set of draws, reused at every threshold: the thresholds are nested
     // events on the same `(Q, V)` pair, so sharing the sample keeps them
     // consistent with each other as well as with the reference.
-    let sample: Vec<(f64, f64)> = (0..DRAWS)
-        .map(|_| {
-            let q: f64 = reference
-                .weights
-                .iter()
-                .map(|&weight| {
-                    let z: f64 = normal.sample(&mut rng);
-                    weight * z * z
-                })
-                .sum();
-            let v: f64 = scale
-                .residual_weights
-                .iter()
-                .map(|&weight| {
-                    let z: f64 = normal.sample(&mut rng);
-                    weight * z * z
-                })
-                .sum::<f64>()
-                + unit_block.sample(&mut rng);
-            (q, v)
-        })
-        .collect();
+    let mut sample = Vec::<(f64, f64)>::with_capacity(DRAWS);
+    for _ in 0..DRAWS {
+        let mut q = 0.0_f64;
+        for &weight in &reference.weights {
+            let z: f64 = normal.sample(&mut rng);
+            q += weight * z * z;
+        }
+        // The `n − p` unit directions are one `χ²_{n−p}` draw rather than
+        // `n − p` normals, for the same reason the reference folds them into one
+        // term: they are a multiplicity, not a spectrum.
+        let mut v: f64 = unit_block.sample(&mut rng);
+        for &weight in &scale.residual_weights {
+            let z: f64 = normal.sample(&mut rng);
+            v += weight * z * z;
+        }
+        sample.push((q, v));
+    }
 
     for multiple in [0.5_f64, 1.0, 2.0, 4.0] {
         let ratio = multiple * half_tail_ratio;
