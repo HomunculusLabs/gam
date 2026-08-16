@@ -2690,6 +2690,140 @@
         );
     }
 
+    /// gam#2714: a monomial whose exact residual binary64 cannot represent is
+    /// not a derivative binary64 cannot represent.
+    ///
+    /// `two_product` is error-free only while the product stays at or above
+    /// `2^-970`; below it the FMA residual can need bits under `2^-1074` and
+    /// calling it exact would be a lie. That premise is right. Refusing on it
+    /// is not — it throws away the whole derivative over a monomial that cannot
+    /// move the answer by an ulp.
+    ///
+    /// The witness is the smallest possible instance of the recurrence. Two
+    /// perfectly ordinary normal moments, `e^-350 ≈ 1e-152` each, against a
+    /// leading moment of `1`:
+    ///
+    /// ```text
+    /// κ(0b0011) = m(0b0011) − κ(0b0001)·m(0b0010) = 1 − 1e-304
+    /// ```
+    ///
+    /// `1e-304` is 304 orders below `1` and 252 orders below `1`'s own half-ulp
+    /// `2^-53`, so the correctly rounded cumulant is `1.0` and nothing about
+    /// the arithmetic is in doubt. The product is nonetheless under `2^-970`,
+    /// which is what refused it — the same shape as the tie-to-even refusal
+    /// this file already fixed for gam#2538, where the certification refused
+    /// precisely the inputs it can decide.
+    ///
+    /// Measured on the #2714 witness: five of the seven outer seeds of the
+    /// veteran latent-frailty fit die with `derivative mask 0b1111 has no
+    /// certified binary64 value: an exact-expansion product entered the
+    /// unprovable underflow range`.
+    #[test]
+    fn latent_cumulant_expansion_certifies_a_monomial_binary64_cannot_carry_2714() {
+        let tiny = LatentSignedLog {
+            log_abs: -350.0,
+            sign: 1.0,
+        };
+        // The two factors of the refused monomial are ordinary normals, and
+        // their product is not: that separation is the whole fixture.
+        let factor = tiny.log_abs.exp();
+        assert!(
+            factor >= f64::MIN_POSITIVE && factor.is_finite(),
+            "each factor must be an ordinary normal binary64, got {factor:e}"
+        );
+        assert!(
+            factor * factor < f64::MIN_POSITIVE / f64::EPSILON,
+            "the fixture is only a witness if the PRODUCT lands under 2^-970, got {:e}",
+            factor * factor
+        );
+
+        let mut moments = [LatentSignedLog::ZERO; 16];
+        moments[0] = LatentSignedLog::ONE;
+        moments[0b0001] = tiny;
+        moments[0b0010] = tiny;
+        moments[0b0011] = LatentSignedLog::ONE;
+
+        let certified = latent_certified_cumulants(moments, 0b0011, "2714 subnormal monomial")
+            .expect(
+                "a monomial 304 orders below the leading moment cannot decide the rounding of \
+                 the cumulant, so it cannot refuse it either",
+            );
+        assert_eq!(
+            certified[0b0011].value, 1.0,
+            "κ(0b0011) = 1 − 1e-304 rounds to 1.0 in binary64; the subtracted monomial is 252 \
+             orders below 1.0's own half-ulp"
+        );
+        assert_eq!(
+            certified[0b0001].value, factor,
+            "the pointed singleton cumulant is its own moment"
+        );
+    }
+
+    /// The other side of gam#2714, so the repair above cannot become "drop the
+    /// small terms": where the mass binary64 genuinely cannot carry REACHES the
+    /// answer's rounding cell, the derivative must still be refused.
+    ///
+    /// The bound is one subnormal ulp, `2^-1074`, per underflowing monomial, so
+    /// it competes with a rounding cell only at the very bottom of the normal
+    /// range. This fixture puts the cumulant in the binade `[2^-1021, 2^-1020)`,
+    /// where the half-ulp is exactly `2^-1074` — the same size as the mass — and
+    /// nothing above that binade can be affected by one such monomial. The
+    /// fixture asserts both facts rather than trusting them, so a change to the
+    /// bound cannot leave the test silently exercising a different regime.
+    #[test]
+    fn latent_cumulant_expansion_refuses_when_the_unrepresentable_mass_reaches_the_cell_2714() {
+        // `e^-707.4 ≈ 5.5e-308`: an ordinary normal, one binade above the
+        // smallest, whose rounding cell radius is one subnormal ulp.
+        let leading = LatentSignedLog {
+            log_abs: -707.4,
+            sign: 1.0,
+        };
+        let magnitude = leading.log_abs.exp();
+        assert!(
+            magnitude >= f64::MIN_POSITIVE,
+            "the leading moment must be a normal binary64, got {magnitude:e}"
+        );
+        let cell_radius = 0.5 * (LatentExactExpansion::next_up(magnitude) - magnitude);
+        assert_eq!(
+            cell_radius,
+            2.0_f64.powi(-1074),
+            "the fixture is only in the contested regime if the rounding cell radius IS the \
+             per-monomial bound"
+        );
+
+        // A monomial whose two factors are ordinary normals and whose product
+        // is not: the same construction as the certifying witness above, at a
+        // scale where what it loses is no longer negligible.
+        let factor = LatentSignedLog {
+            log_abs: -370.0,
+            sign: 1.0,
+        };
+        let factor_magnitude = factor.log_abs.exp();
+        assert!(
+            factor_magnitude >= f64::MIN_POSITIVE
+                && factor_magnitude * factor_magnitude < f64::MIN_POSITIVE / f64::EPSILON,
+            "the monomial must underflow the product bar while its factors do not"
+        );
+
+        let mut moments = [LatentSignedLog::ZERO; 16];
+        moments[0] = LatentSignedLog::ONE;
+        moments[0b0001] = factor;
+        moments[0b0010] = factor;
+        moments[0b0011] = leading;
+
+        let error = latent_certified_cumulants(moments, 0b0011, "2714 cell-scale residual")
+            .expect_err(
+                "an unrepresentable residual the size of the rounding cell must stay refused",
+            );
+        assert!(
+            matches!(
+                error,
+                LatentSurvivalError::DerivativeAccuracyUnresolved { .. }
+            ),
+            "accuracy loss must use the typed refusal, got {error:?}"
+        );
+    }
+
     /// An exact midpoint has no unique NEAREST binary64, but it has a unique
     /// CORRECTLY ROUNDED one: ties-to-even, the mode `certified_round`'s own
     /// doc comment names and the mode every binary64 operation downstream of it
