@@ -531,6 +531,107 @@ fn the_gram_accumulation_resolves_below_machine_epsilon_2676() {
     assert_eq!(residual, f64::EPSILON * f64::EPSILON);
 }
 
+/// The rank boundary is a statement about the operators, so it must not move
+/// when every operator is rescaled by a common factor — the map's null space is
+/// scale-free and the floor is denominated in the operators' own norm.
+///
+/// Run at `1e-8` and `1e8`, i.e. sixteen orders apart, on both a dependent and
+/// an independent bundle. This is the edge case the `max(1.0)` clamp the floor
+/// used to carry would have failed: it made the floor loose in exact proportion
+/// to how small the operators were.
+#[test]
+fn the_rank_verdict_is_invariant_to_a_uniform_rescaling_2676() {
+    let s0 = array![[2.0_f64, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s1 = array![[0.0_f64, 0.0, 0.0], [0.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+    let dependent = s0.mapv(|value| 0.75 * value);
+    let independent = array![[1.0_f64, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 4.0]];
+    for factor in [1.0_f64, 1e-8, 1e8] {
+        for (third, expected) in [(&dependent, 1usize), (&independent, 0usize)] {
+            let bundle = vec![
+                penalty(s0.mapv(|value| factor * value), 3),
+                penalty(s1.mapv(|value| factor * value), 3),
+                penalty(third.mapv(|value| factor * value), 3),
+            ];
+            let invariance = PenaltyMapInvariance::from_canonical_penalties(&bundle, 3)
+                .expect("gram decomposes");
+            assert_eq!(
+                invariance.dimension(),
+                expected,
+                "the verdict must not depend on a uniform rescaling (factor {factor:.1e})"
+            );
+        }
+    }
+}
+
+/// The degenerate end: a penalty map that is identically zero constrains
+/// nothing, so every direction of `lambda` leaves the criterion unchanged and
+/// the whole space is the invariance. The floor is zero there — the operators'
+/// own scale is zero — so no pivot can clear it, which is the right answer
+/// reached for the right reason rather than by a special case.
+#[test]
+fn an_all_zero_penalty_map_is_entirely_null_2676() {
+    let zero = Array2::<f64>::zeros((3, 3));
+    let bundle = vec![penalty(zero.clone(), 3), penalty(zero, 3)];
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 3).expect("gram decomposes");
+    assert_eq!(
+        invariance.dimension(),
+        2,
+        "an identically zero penalty map is flat in every lambda direction"
+    );
+    assert_eq!(invariance.resolution(), 0.0);
+}
+
+/// A three-term redundancy no pairwise measure can see: `A_2 = A_0 + A_1` with
+/// all three pairs far from proportional. The certification must find it, and
+/// the direction it returns must be the right one.
+///
+/// This is why the pairwise screen is documented as a SCREEN: it would report
+/// nothing here.
+#[test]
+fn a_three_term_redundancy_no_pair_can_see_is_certified_2676() {
+    let s0 = array![[2.0_f64, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s1 = array![[0.0_f64, 0.0, 0.0], [0.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+    let s2 = &s0 + &s1;
+    // Every pair is measurably distinct, so nothing pairwise fires.
+    for (a, b) in [(&s0, &s1), (&s0, &s2), (&s1, &s2)] {
+        let aa: f64 = a.iter().map(|v| v * v).sum();
+        let ab: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let scale = ab / aa;
+        let residual: f64 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (y - scale * x) * (y - scale * x))
+            .sum::<f64>()
+            .sqrt()
+            / aa.sqrt();
+        assert!(
+            residual > 1e-2,
+            "the fixture must be pairwise-invisible; got a pair defect of {residual:.3e}"
+        );
+    }
+    let bundle = vec![penalty(s0, 3), penalty(s1, 3), penalty(s2, 3)];
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 3).expect("gram decomposes");
+    assert_eq!(invariance.dimension(), 1);
+    // `w ∝ (1, 1, -1)`, normalised, up to sign.
+    let w = invariance.lambda_basis().column(0).to_owned();
+    let expected = Array1::from(vec![1.0_f64, 1.0, -1.0]).mapv(|v| v / 3.0_f64.sqrt());
+    let aligned = if w.dot(&expected) < 0.0 {
+        w.mapv(|value| -value)
+    } else {
+        w
+    };
+    for index in 0..3 {
+        assert!(
+            (aligned[index] - expected[index]).abs() < 1e-12,
+            "component {index}: got {}, expected {}",
+            aligned[index],
+            expected[index]
+        );
+    }
+}
+
 /// The `(H_ρ, g_ρ, lifted invariance)` triple used by the #2748 instrument
 /// gates: a criterion that depends on `λ` only through `Λ = λ₀ + c·λ₂` and
 /// `λ₁`, assembled through the chain rule so the reparameterisation identity
