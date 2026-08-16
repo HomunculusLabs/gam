@@ -1,5 +1,112 @@
 ## Unreleased
 
+- **A two-class multinomial with a smooth term published `β ≡ 0` — every
+  predicted probability was the uniform simplex, at `edf_per_class = 4.09`
+  (#2612).** The fit was not refused and did not look degenerate from outside:
+  it selected interior smoothing parameters, published a full-rank posterior
+  covariance and a ρ-uncertainty correction, and reported four effective degrees
+  of freedom — next to eight coefficients that were all exactly `0.0`. Nothing
+  in the payload contradicted itself loudly enough for any gate to notice,
+  because the EDF comes from `H⁻¹S_λ` and the covariance from `H`, and neither
+  reads `β`.
+
+  Measured on the #1891 coverage fixture, 40 replications, truth ranging over
+  `p ∈ [0.21, 0.82]`:
+
+  ```text
+  #2612-INT rep=  0 x*=0.2803 p_true=0.716264 mean=0.500000 sd=0.062987
+  #2612-INT rep= 39 x*=0.5941 p_true=0.618759 mean=0.500000 sd=0.046169
+  ```
+
+  `mean = 0.500000` on every replication. The standing coverage gate read that
+  as an under-covering interval; the centre was a constant.
+
+  One axis varied at a time isolates it exactly — `K = 2` AND a smooth term
+  (`K = 2` parametric and `K = 3` smooth are both fine):
+
+  ```text
+  K=2 tp k=8      max|beta|=0.000000e0  plugin=[0.500000, 0.500000]  edf=[4.091]
+  K=2 parametric  max|beta|=1.020912e0  plugin=[0.411708, 0.660159]  edf=[2.0]
+  K=3 tp k=8      max|beta|=6.181604e0  plugin=[0.208740, 0.642326]  edf=[3.38, 2.92]
+  ```
+
+  **Root cause.** `MultinomialFamily::specs_match_workspace_shape` required
+  `spec.penalties.len() == self.penalties.len()`. Penalties are not part of a
+  workspace's GEOMETRY — no penalty ever enters `X_aᵀ diag(w_ab) X_b`; the
+  solver adds `s_lambdas` and the joint bundle itself, on the other side of that
+  call. The clause predates #1587, which moved this family's entire smoothing
+  onto the JOINT penalty and made `build_block_specs` attach
+  `penalties: Vec::new()` deliberately ("The per-class blocks attach NO smooth
+  penalty"). So from #1587 onward the predicate was FALSE for every penalized
+  multinomial: the family declared "I cannot serve a joint workspace" about the
+  workspace it does serve. It gates all three `*_available` capabilities and,
+  through `has_workspace_source`, the solver's routing:
+
+  ```rust
+  use_joint_newton = has_joint_exacthessian && (specs.len() >= 2 || has_workspace_source)
+  ```
+
+  `K ≥ 3` has two blocks and reaches the joint path anyway, so there it cost
+  only the workspace gradient/log-likelihood/HVP fast paths. `K = 2` has ONE
+  block, so the stale clause WAS the routing decision, and the fit fell onto the
+  block-coordinate path:
+
+  ```text
+  [PIRLS/blockwise step]  block=0 |delta|inf=1.037938e1 block_s_lambda_frob=0.000000e0
+  [PIRLS/blockwise trial] bt=0 alpha=1.000e0    -trial_ll=2.210072311e2 prev=1.663553233e2
+  [PIRLS/blockwise trial] bt=7 alpha=7.8125e-3  -trial_ll=1.666445362e2 prev=1.663553233e2
+  [PIRLS/blockwise convergence] cycle 0 | max_proposed_step=1.038e1 (tol=1.000e-11)
+                                | max_accepted_step=0.000e0 | obj_change=0.000e0
+  ```
+
+  Eight backtracks, none accepted, converged at cycle 0.
+
+  **And the guard that made it silent.** `exact_joint_stationarity_ok` was
+  ASSUMED `true` for single-block fits, and the surrounding test is
+  `max_accepted_step <= tol && objective_change <= tol` — both exactly zero when
+  the line search accepts nothing. "Nothing moved" and "nothing needed to move"
+  are the same two numbers; only the residual separates them, and it was the one
+  quantity not consulted. The comment's premise (for one block the blockwise
+  iteration IS the joint iteration) is true and licenses TRUSTING the
+  block-conditional verdict, not skipping it; the cost it cites is a multi-block
+  phenomenon that cannot arise with one block. Now measured for every block
+  count.
+
+  After: `max|beta| = 1.023557e1`, plug-in range `[0.313129, 0.822891]` against a
+  truth range of `[0.2142, 0.8176]`, deviance `296.59` against the uniform
+  model's `332.71`. `K = 3` unchanged to `1e-13`.
+
+- **The multinomial was the one family in the library whose published
+  uncertainty never got the covariance-mode axis (#2612).**
+  `fit_penalized_multinomial_formula` read `fit.covariance_conditional` and
+  stopped; the same `fit_custom_family_with_rho_prior` call had already computed
+  the first-order ρ-uncertainty correction `C = J·Var(ρ̂)·Jᵀ` (#2346) and
+  published it on the inference block. So every multinomial band answered "how
+  wide is the posterior once λ̂ is the truth" while every other family defaults
+  to `SmoothingCorrected`.
+
+  It could not even be expressed: `InferenceCovarianceMode` was declared in
+  `gam-predict`, which sits ABOVE `gam-models`, so the one family that owns its
+  own predict surface was the one family that structurally could not name the
+  distinction. The enum now lives in `gam-solve::model_types` beside
+  `SmoothingCorrectionMethod`, and `gam-predict` re-exports it — every existing
+  path is unchanged.
+
+  The correction reaches the response scale by the law of total variance,
+  `Var(p_c) = Var(p_c | ρ̂) + Var_ρ(E[p_c|ρ])`, whose second term is `gᵀCg` with
+  `g = ∂p_c/∂θ` the softmax Jacobian at the mode: the response-scale statement
+  of `V_c = V_cond + C`, with no new object, no new constant and no new
+  approximation order. `SmoothingCorrected` on a fit that retained no correction
+  is an error, never a silent downgrade.
+
+  The band is also built on the log-odds scale and transformed
+  (`MeanIntervalMethod::TransformEta`, which this library already prefers for
+  every nonlinear link). A symmetric `m ± z·sd` band clamped into `[0, 1]` is
+  wrong twice where a class probability lives: symmetric about a bounded, skewed
+  posterior, and the clamp DELETES the mass that fell outside, so a nominal 95%
+  band could carry less than 95% while still reporting `level = 0.95`. `expit`
+  is a bijection onto `(0, 1)`, so nothing is ever clipped.
+
 - **The composed monotone warp was built one derivative short of the objective
   that differentiates it, so the inner objective had an O(1) JUMP (#2695).**
   `linkwiggle(...)` puts a monotone I-spline on the model's own index —
