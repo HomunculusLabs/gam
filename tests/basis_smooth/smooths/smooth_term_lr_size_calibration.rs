@@ -44,8 +44,7 @@ use gam::smooth::{
     smooth_term_lr_inference_forspec,
 };
 use gam::{
-    FitConfig, FitRequest, FitResult, encode_recordswith_inferred_schema, fit_from_formula,
-    init_parallelism, materialize,
+    FitConfig, FitRequest, encode_recordswith_inferred_schema, init_parallelism, materialize,
 };
 
 use csv::StringRecord;
@@ -964,74 +963,43 @@ fn gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672() {
     assert_grid_calibration(&cells, REPS, "gaussian");
 }
 
-/// DIAGNOSTIC (not a contract, #2672): is the Gaussian arm's anti-conservatism
-/// the PROFILED SCALE?
+/// DIAGNOSTIC (not a contract, #2672): the A/B on the estimated-scale channel.
 ///
-/// `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672` reads
-/// `size@.05 = 0.0792` pooled over 480 replicates against nominal `0.05`
-/// (pooled s.e. `0.00995`, so `2.9` s.e.), with `first == fixed == est` in every
-/// cell — the Lawley factor is inert on a Gaussian, exactly as its own theory
-/// says, so the whole miss belongs to the REFERENCE.
+/// This arm was written before the fix, to score a candidate correction from
+/// published fields without touching the driver. The driver has it now, so the
+/// same measurement is available as a strict A/B and is worth more that way:
+/// `SmoothLrReferenceDf::profiled_scale` is a public `Option`, so the SAME fit,
+/// the SAME statistic and the SAME spectrum can be scored with the channel on
+/// and with it off, and nothing but the reference differs.
 ///
-/// The mechanism this measures: `σ` is PROFILED, and the reference is the
-/// known-scale law. With `σ̂² = RSS/n` from the same data,
-///
-/// ```text
-/// W = 2(ℓ_full − ℓ_null) = n·log(RSS_null/RSS_full) ≈ Q · n/RSS_full·σ²
-///                        ≈ Q / (V/ν),    Q = Σ_j w_j χ²_1,  V ~ χ²_ν
-/// ```
-///
-/// with `ν = n − edf_total` the residual degrees of freedom. The reference
-/// scores `Q`, the statistic is `Q` divided by an independent `V/ν` whose mean
-/// is one and whose spread is `√(2/ν)`. Both the mean shift `ν/(ν−2)` and the
-/// extra spread push the test anti-conservative, and both are `O(1/ν)` — which
-/// is why this is invisible at `n = 1000` and worth `0.03` in size at `n = 30`.
-/// It is the same reason mgcv's smooth-term p-values use an `F` reference when
-/// the scale is estimated and a `χ²` when it is known.
-///
-/// The arms, scored on ONE set of fits so nothing but the reference differs:
-///
-/// * `shipped` — what the driver publishes today.
-/// * `two-moment` — `P(χ²_a > W/g)` from the published `(a, g)`, the same shape
-///   with the exact spectrum and the selection replay removed, so the `F` arm
-///   below has a same-family comparison.
-/// * `F` — `P(F_{a,ν} > W/(g·a))`, the two-moment shape with the profiled
-///   scale's own variability folded in.
-///
-/// The candidate FIX is scored here too, and it needs no driver change to
-/// evaluate because it is a function of published fields:
+/// The mechanism, restated because this is where it is measured. gam's profiled
+/// Gaussian log-likelihood is `ℓ = −½[n·ln 2π + n·ln(D/ν) − Σ ln w_i + ν]`, so
 ///
 /// ```text
-/// p_scaled = p_shipped + [ P(F_{a,ν} > w/(κ·g·a)) − P(χ²_a > w/g) ]
+/// W = 2(ℓ_f − ℓ_0) = n·ln(D_0/D_f) + n·ln(ν_f/ν_0) + (ν_0 − ν_f)
+///                  = n·ln(1 + Q/V) + B,
 /// ```
 ///
-/// — the shipped tail (exact spectrum + selection replay) plus the scale
-/// integration taken in the two-moment FAMILY, where it is a closed form:
-/// `E_V[P(χ²_a > wV/(νg))] = P(F_{a,ν} > w/(g·a))` exactly. The bracket is a
-/// control variate that is EXACT whenever the weights are equal, which is the
-/// shrunk regime this grid spends its time in, and it costs two closed-form
-/// evaluations rather than a quadrature over `V`.
+/// `Q = (D_0 − D_f)/σ²` the quantity the reference's spectrum is the spectrum
+/// OF, and `V = D_f/σ²` a random variable of the same data. The known-scale
+/// reference scores `Q`; both the mean shift `ν/(ν−2)` and the extra spread are
+/// `O(1/ν)`, which is why this is invisible at `n = 1000` and worth `0.03` in
+/// size at `n = 30`.
 ///
-/// `κ` is the DETERMINISTIC half of the same mechanism and is a property of
-/// gam's own convention rather than of the theory. `σ̂² = RSS/(n − edf_total)`,
-/// so the profiled log-likelihood is `−(n/2)·log(RSS/ν) − ν/2` and
+/// The arms, on ONE set of fits:
 ///
-/// ```text
-/// W = 2(ℓ_f − ℓ_0) = n·log(RSS_0/RSS_f) + n·log(ν_f/ν_0) + (ν_0 − ν_f)
-///                  ≈ (n/ν)·Q/(V/ν) − Δ·edf/ν
-/// ```
+/// * `shipped` — what the driver publishes, i.e. the ratio reference;
+/// * `known` — the same reference with `profiled_scale` cleared, i.e. what
+///   shipped before the fix;
+/// * `F` — `P(F_{a,ν} > W/(g·a))` from the published two-moment `(a, g)`, the
+///   `F`-family approximation of the same correction, so the exact inversion
+///   has a same-family comparison and the difference between "inverted exactly"
+///   and "approximated in the two-moment family" is visible rather than
+///   asserted.
 ///
-/// so the `log σ̂²` term in front carries `n` while the denominator gam divides
-/// by carries `ν`. Both `κ = 1` and `κ = n/ν` are scored, because which one is
-/// right is a statement about that convention and not about the statistic, and
-/// it should be read off a measurement rather than asserted.
-///
-/// If a candidate arm lands on nominal at `n = 30` AND stays there at
-/// `n = 200`, the mechanism and the convention are both pinned and the fix is
-/// the bracket above, in `SmoothLrReferenceDf::conditional_tail_with_bound`,
-/// for `ProfiledGaussian` only — the other estimated-dispersion families do not
-/// estimate through a residual sum of squares and this derivation does not
-/// reach them.
+/// `ratio` reads `mean(W)` against the mean of the law the p-value is read
+/// from; under an unscored profiled scale it sits near `ν/(ν−2)` rather than at
+/// one, and that is the readout that says the mechanism is present at all.
 #[test]
 fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
     init_parallelism();
@@ -1042,13 +1010,13 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
     let family = NullFamily::GaussianIdentity;
 
     eprintln!(
-        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped / +F(k=1) / +F(k=n/nu) | \
-         two-moment / F(k=1) / F(k=n/nu) | mean_nu  mean_kappa  ratio",
+        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped / known / F | size@.01 shipped / \
+         known | mean_nu  mean_kappa  ratio",
         "n", "k", "used"
     );
     for &k in &ks {
         for &n in &ns {
-            let mut counts = [0usize; 6];
+            let mut counts = [0usize; 5];
             let (mut used, mut sum_w, mut sum_nu, mut sum_kappa, mut sum_predicted) =
                 (0usize, 0.0, 0.0, 0.0, 0.0);
             let mut predicted_used = 0usize;
@@ -1063,35 +1031,17 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
                 if !(r.statistic_lr.is_finite() && a.is_finite() && a > 0.0 && g > 0.0) {
                     continue;
                 }
-                // The residual degrees of freedom the profiled `σ̂` actually
-                // has, from the same fit seen through the ordinary entry point.
-                let cfg = FitConfig {
-                    family: Some(family.family_name().to_string()),
-                    ..FitConfig::default()
-                };
-                let formula = format!("y ~ x + s(z, k={k})");
-                let FitResult::Standard(standard) =
-                    fit_from_formula(&formula, &data, &cfg).expect("fit")
-                else {
-                    panic!("expected a standard fit");
-                };
-                let Some(edf_total) = standard.fit.edf_total() else {
+                let Some(scale) = provenance.profiled_scale.as_ref() else {
                     continue;
                 };
-                let residual_df = (n as f64 - edf_total).max(1.0);
-                // `σ̂² = RSS/(n − edf_total)`, so the profiled log-likelihood is
-                // `−(n/2)·log(RSS/ν) − ν/2` and
-                //
-                //   W = 2(ℓ_f − ℓ_0) ≈ (n/ν)·Q/(V/ν) − Δ·edf/ν
-                //
-                // — the F shape carries a DETERMINISTIC inflation `κ = n/ν`
-                // alongside the random `V/ν`, because the denominator gam
-                // divides by is `ν` while the `log σ̂²` term in front is `n`.
-                let kappa = n as f64 / residual_df;
+                // The residual degrees of freedom the profiled `σ̂` actually
+                // has, published by the reference itself rather than refitted.
+                let residual_df: f64 = scale.residual_weights.iter().sum::<f64>()
+                    + scale.residual_unit_dimension;
                 used += 1;
                 sum_w += r.statistic_lr;
                 sum_nu += residual_df;
-                sum_kappa += kappa;
+                sum_kappa += n as f64 / residual_df;
                 if let Some(replay) = provenance.selection.replay() {
                     let mean = replay.selection_mean();
                     if mean.is_finite() {
@@ -1100,48 +1050,35 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
                     }
                 }
                 let statistic = r.statistic_corrected;
-                let chi_square_tail = gam_math::probability::chi_square_sf(statistic / g, a);
-                let fisher_tail = |scale: f64| {
-                    gam_math::probability::fisher_snedecor_sf(
-                        statistic / (scale * g * a),
-                        a,
-                        residual_df,
-                    )
-                };
-                // THE CANDIDATE FIX, computable from published fields alone: the
-                // shipped tail (exact spectrum + selection replay) plus the
-                // scale integration taken in the two-moment FAMILY, where it is
-                // a closed form. `E_V[P(χ²_a > wV/(νg))] = P(F_{a,ν} > w/(g·a))`
-                // exactly, so the bracket is a control variate that is EXACT
-                // whenever the weights are equal — which is the shrunk regime
-                // this grid spends its time in.
-                let candidate =
-                    |scale: f64| (r.p_value_corrected + fisher_tail(scale) - chi_square_tail).clamp(0.0, 1.0);
+                let mut known = provenance.clone();
+                known.profiled_scale = None;
                 let arms = [
                     r.p_value_corrected,
-                    candidate(1.0),
-                    candidate(kappa),
-                    chi_square_tail,
-                    fisher_tail(1.0),
-                    fisher_tail(kappa),
+                    known.tail_probability(statistic),
+                    gam_math::probability::fisher_snedecor_sf(statistic / (g * a), a, residual_df),
                 ];
                 for (slot, p) in arms.iter().enumerate() {
                     if *p <= 0.05 {
                         counts[slot] += 1;
                     }
                 }
+                if r.p_value_corrected <= 0.01 {
+                    counts[3] += 1;
+                }
+                if known.tail_probability(statistic) <= 0.01 {
+                    counts[4] += 1;
+                }
             }
             let denominator = used.max(1) as f64;
             let size = |slot: usize| counts[slot] as f64 / denominator;
             eprintln!(
                 "[zz2672-scale] {n:>5} {k:>3} {used:>5} |   {:.3} / {:.3} / {:.3}   |   \
-                 {:.3} / {:.3} / {:.3}   | {:>7.2}  {:>7.4}  {:>6.3}",
+                 {:.3} / {:.3}   | {:>7.2}  {:>7.4}  {:>6.3}",
                 size(0),
                 size(1),
                 size(2),
                 size(3),
                 size(4),
-                size(5),
                 sum_nu / denominator,
                 sum_kappa / denominator,
                 (sum_w / denominator) / (sum_predicted / predicted_used.max(1) as f64),
@@ -1149,10 +1086,11 @@ fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
         }
     }
     eprintln!(
-        "[zz2672-scale] read: nominal 0.05, MC s.e. {:.4} per cell at {REPS} reps. \
-         `ratio` is mean(W) against the mean of the law the p-value is read from — \
-         under the profiled scale it should sit near ν/(ν−2), not at one.",
-        size_se(0.05, REPS)
+        "[zz2672-scale] read: nominal 0.05 / 0.01, MC s.e. {:.4} / {:.4} per cell at {REPS} reps. \
+         `ratio` is mean(W) against the mean of the law the p-value is read from — under an \
+         UNSCORED profiled scale it sits near ν/(ν−2), not at one.",
+        size_se(0.05, REPS),
+        size_se(0.01, REPS)
     );
 }
 
