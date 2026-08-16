@@ -1,7 +1,7 @@
 """Offline check of the #2672 profiled-Gaussian reference law.
 
 Fixed design, FIXED lambda, null-true smooth: the experiment that isolates the
-profiled scale from lambda selection.  Three things are measured separately.
+profiled scale from lambda selection.  Four things are measured separately.
 
   1. Is the CONDITIONAL reference right?   Q = (RSS_0 - RSS_f)/sigma^2 against
      sum_j w_j chi2_1,  w = 1 - p_j^2 on the tested block.  This uses the TRUE
@@ -13,6 +13,18 @@ profiled scale from lambda selection.  Three things are measured separately.
         P(sum_j w_j chi2_1 - c(W) * sum_i v_i chi2_1 > 0),
         c(W) = exp((W - B)/n) - 1,  B = n log(nu_f/nu_0) + (nu_0 - nu_f),
      versus the SHIPPED P(sum_j w_j chi2_1 > W).
+  4. What does it cost in POWER? (`power()`) The same design with a real
+     z-effect planted inside the smooth's span. Measured at n=40, k=6, lam=3,
+     800 replicates, against a null size that moved 0.0642 -> 0.0542:
+
+         amplitude 0.4:  shipped 0.6675  ratio 0.6150
+         amplitude 0.6:  shipped 0.9587  ratio 0.9375
+         amplitude 0.9:  shipped 0.9988  ratio 0.9988
+
+     The loss shrinks to nothing as the signal grows, which is the signature of
+     a pure recalibration: both references are strictly decreasing in W, so
+     they order replicates identically and at a MATCHED size they are the same
+     test. What is given up is the over-rejection, not discrimination.
 """
 import numpy as np
 from scipy import linalg, stats
@@ -148,3 +160,50 @@ if __name__ == "__main__":
     for n in (30, 50, 100, 200):
         for lam in (1.0e2, 1.0):
             run(n=n, k=12, lam=lam, reps=reps, seed=11 + n)
+
+
+def power(n=40, k=6, lam=3.0, reps=1200, seed=0, sigma=0.5, amplitude=0.6):
+    """What the estimated-scale reference costs in POWER on an alternative.
+
+    Same machinery as `run`, with a real z-effect planted INSIDE the smooth's
+    span. A reference that buys nominal size by becoming conservative
+    everywhere would show up here as a large rejection-rate loss.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.linspace(0.0, 1.0, n)
+    z = rng.uniform(0.0, 1.0, n)
+    Bz, Sz = smooth_block(z, k)
+    X0 = np.column_stack([np.ones(n), x])
+    X = np.column_stack([X0, Bz])
+    p, p0 = X.shape[1], X0.shape[1]
+    S = np.zeros((p, p))
+    S[p0:, p0:] = Sz
+    H = X.T @ X + lam * S
+    Hinv = linalg.inv(H)
+    A = X @ Hinv @ X.T
+    nu_f, nu_0 = n - np.trace(A), n - p0
+    IA = np.eye(n) - A
+    IA0 = np.eye(n) - X0 @ linalg.inv(X0.T @ X0) @ X0.T
+
+    blk = slice(p0, p)
+    w = 1.0 - shares(Hinv[blk, blk], lam * S[blk, blk]) ** 2
+    v_all = np.concatenate([shares(Hinv, lam * S) ** 2, np.ones(n - p)])
+    B_det = n * np.log(nu_f / nu_0) + (nu_0 - nu_f)
+
+    signal = amplitude * np.sin(2.0 * np.pi * z)
+    mu = X0 @ np.array([0.3, 0.8]) + signal
+    hits = [0, 0]
+    for _ in range(reps):
+        y = mu + sigma * rng.standard_normal(n)
+        rss_f = float(y @ IA @ IA @ y)
+        rss_0 = float(y @ IA0 @ y)
+        W = n * np.log(rss_0 / rss_f) + B_det
+        if imhof_sf(w, np.ones_like(w), W) <= 0.05:
+            hits[0] += 1
+        c = np.exp((W - B_det) / n) - 1.0
+        lamv = np.concatenate([w, -c * v_all])
+        if imhof_sf(lamv, np.ones(len(w) + len(v_all)), 0.0) <= 0.05:
+            hits[1] += 1
+    print(f"POWER n={n} k={k} lam={lam:g} amplitude={amplitude}: "
+          f"shipped={hits[0]/reps:.4f}  ratio={hits[1]/reps:.4f}  "
+          f"(MC s.e. ~{np.sqrt(0.25/reps):.4f})")

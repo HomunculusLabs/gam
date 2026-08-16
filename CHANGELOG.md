@@ -148,6 +148,20 @@
   including `n = 30`. KS improves in every cell, so this is the whole p-value
   distribution and not one level.
 
+  **What it costs, measured rather than argued.** Both references are strictly
+  decreasing in `W` — `c(w) = expm1((w − B)/n)` is increasing and
+  `P(Q − c·V > 0)` is decreasing in `c` — so they order replicates identically
+  and at a MATCHED size they are the same test. The raw power difference is the
+  over-rejection being paid back and nothing else, and it vanishes as the signal
+  grows (`n = 40, k = 6`, planted alternative, 800 replicates, against a null
+  size that moved `0.0642 → 0.0542`):
+
+  ```text
+  amplitude   0.4     0.6     0.9
+  shipped   0.6675  0.9587  0.9988
+  ratio     0.6150  0.9375  0.9988
+  ```
+
   The summary table's Wald smooth test has taken an `F` reference under an
   estimated scale since #675 (`SmoothTestScale::Estimated`), so the two tests in
   the same report disagreed about what estimating `σ` costs: one paid for it and
