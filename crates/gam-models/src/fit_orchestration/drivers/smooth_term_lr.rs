@@ -3801,7 +3801,7 @@ mod profiled_scale_reference_tests {
         );
         let mut previous = f64::INFINITY;
         let mut statistic = -2.0_f64;
-        let mut strict_moves = 0usize;
+        let (mut highest, mut lowest) = (f64::NEG_INFINITY, f64::INFINITY);
         while statistic < 60.0 {
             let tail = subject.tail_probability(statistic);
             assert!(
@@ -3812,16 +3812,22 @@ mod profiled_scale_reference_tests {
                 tail <= previous + 1e-9,
                 "W={statistic}: the tail rose from {previous} to {tail}"
             );
-            if tail < previous - 1e-6 {
-                strict_moves += 1;
-            }
             previous = tail;
+            highest = highest.max(tail);
+            lowest = lowest.min(tail);
             statistic += 0.25;
         }
+        // ANTI-VACUITY, stated as the property rather than as a step count. A
+        // tail that is flat is monotone and orders nothing, and "it moved
+        // strictly N times" needs an N nobody can derive — the first draft used
+        // `> 100` against a sweep that delivers 98, which is a tuned constant
+        // failing rather than a claim failing. What the argument actually needs
+        // is that the reference SPANS the range a p-value is read in, so that
+        // is what is asserted.
         assert!(
-            strict_moves > 100,
-            "the reference moved strictly only {strict_moves} times over the sweep — a tail \
-             that is flat almost everywhere orders nothing"
+            highest > 0.99 && lowest < 0.01,
+            "the reference spans only [{lowest}, {highest}] over the sweep — a tail that never \
+             reaches either end cannot order the data across the range a p-value is read in"
         );
     }
 
