@@ -9522,6 +9522,69 @@ fn a_degree_two_composed_warp_steps_even_on_the_warp_knot_vector_2695() {
     }
 }
 
+/// gam#2695 — the term of the OBJECTIVE, not the matrix behind it, must close
+/// across a knot at the degree a composed warp is actually built at.
+///
+/// `joint_hessian_is_continuous_as_q0_crosses_a_link_warp_knot_2695` pins `H`.
+/// This pins `Φ = ½ Σ g(λ(Z_JᵀHZ_J))`, which is what `trial_penalty` subtracts
+/// and therefore what the trust region compares two points on. The two are not
+/// the same assertion: `Φ` is a log-determinant of a FLOORED spectrum, so a step
+/// in `H` could in principle land where `g` is flat, and a `Φ` that closes is
+/// the statement the accept test needs.
+///
+/// The degree is not written here. It is
+/// [`crate::wiggle::composed_warp_minimum_degree`], so if that floor is ever
+/// lowered this pin measures the lowered value and goes red rather than
+/// continuing to certify a degree production no longer builds.
+#[test]
+fn the_objective_jeffreys_term_closes_across_a_link_warp_knot_at_the_built_degree_2695() {
+    let degree = crate::wiggle::composed_warp_minimum_degree();
+    for amplitude in [1.0e-6_f64, 3.0e-2] {
+        let (coarse, fine) = link_warp_knot_crossing_gap_2695(
+            degree,
+            true,
+            amplitude,
+            LinkWarpKnotReading::ObjectiveJeffreysTerm,
+        );
+        assert!(
+            coarse > 0.0,
+            "Φ must respond to β at all for this measurement to mean anything              (degree {degree}, βw={amplitude:.1e})"
+        );
+        assert!(
+            fine <= coarse / 50.0,
+            "the inner objective's Jeffreys term does not close across a link-warp knot at              degree {degree}, βw={amplitude:.1e}: gap {coarse:.6e} at h=1e-3 and {fine:.6e}              at h=1e-5, a ratio of {:.3e} against the 100x a continuous Φ must give",
+            coarse / fine.max(f64::MIN_POSITIVE),
+        );
+    }
+}
+
+/// Non-vacuity, and the measurement the floor exists for: at degree 2 the SAME
+/// reading is a jump, and it is a jump of the size the shipped witness reported
+/// (`2.976461e-1` there, `O(1e-1)` here — same mechanism, different state).
+///
+/// This is the test that would have caught the regression from the other side:
+/// if the floor is removed, production builds degree 2 again and this arm is
+/// what production is then minimising.
+#[test]
+fn a_degree_two_composed_warp_makes_the_objective_term_jump_2695() {
+    for amplitude in [1.0e-6_f64, 3.0e-2] {
+        let (coarse, fine) = link_warp_knot_crossing_gap_2695(
+            2,
+            true,
+            amplitude,
+            LinkWarpKnotReading::ObjectiveJeffreysTerm,
+        );
+        assert!(
+            fine > coarse / 10.0,
+            "degree 2 at βw={amplitude:.1e} must make Φ JUMP — if it closes, the `I″`              channel with no `βw` factor is gone from `H` and the composed-warp degree              floor can go with it: gap {coarse:.6e} at h=1e-3 and {fine:.6e} at h=1e-5",
+        );
+        assert!(
+            fine > 1.0e-3,
+            "the degree-2 jump must be a real one, not a rounding plateau: {fine:.6e}"
+        );
+    }
+}
+
 /// `(gap at h=1e-3, gap at h=1e-5)` of the joint Hessian across a knot that one
 /// EVENT row's exit `q₀` crosses as `β_thr` moves through `1`.
 ///
@@ -9533,6 +9596,22 @@ fn link_warp_hessian_gap_across_a_knot_2695(
     degree: usize,
     warp_knots: bool,
     warp_amplitude: f64,
+) -> (f64, f64) {
+    link_warp_knot_crossing_gap_2695(
+        degree,
+        warp_knots,
+        warp_amplitude,
+        LinkWarpKnotReading::ObservedInformation,
+    )
+}
+
+/// `(gap at h=1e-3, gap at h=1e-5)` of `read` across a knot that one EVENT row's
+/// exit `q₀` crosses as `β_thr` moves through `1`.
+fn link_warp_knot_crossing_gap_2695(
+    degree: usize,
+    warp_knots: bool,
+    warp_amplitude: f64,
+    read: LinkWarpKnotReading,
 ) -> (f64, f64) {
     let primaries: Vec<[f64; SLS_ROW_K]> = vec![
         [0.2, 0.9, 1.3, 0.6, 0.4, 0.25, 0.3, 0.1, -0.2],
@@ -9606,7 +9685,7 @@ fn link_warp_hessian_gap_across_a_knot_2695(
             .expect("the family exposes an exact joint hessian")
     };
 
-    let gap = |h: f64| -> f64 {
+    let straddles = |h: f64| {
         // Confirm the step really straddles the knot before reading the gap.
         let q0_plus = q0_slope(CROSSING_ROW) * (B_STAR + h);
         let q0_minus = q0_slope(CROSSING_ROW) * (B_STAR - h);
@@ -9615,14 +9694,51 @@ fn link_warp_hessian_gap_across_a_knot_2695(
             "step h={h:.1e} must straddle the knot {centre:.9e}; got q0 {q0_minus:.9e} \
              and {q0_plus:.9e}"
         );
+    };
+    let gap = |h: f64| -> f64 {
+        straddles(h);
         let plus = hessian_at(B_STAR + h);
         let minus = hessian_at(B_STAR - h);
-        plus.iter()
-            .zip(minus.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f64, f64::max)
+        match read {
+            LinkWarpKnotReading::ObservedInformation => plus
+                .iter()
+                .zip(minus.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max),
+            // The OBJECTIVE's own term, not a matrix norm of its input. `Φ` is
+            // what `trial_penalty` subtracts and what the accept test therefore
+            // compares, so this is the quantity whose continuity the trust
+            // region needs — read on the FULL identifiable span (`Z_J = I`),
+            // which is what the inner solve installs for this family.
+            LinkWarpKnotReading::ObjectiveJeffreysTerm => {
+                (jeffreys_value_2695(&plus) - jeffreys_value_2695(&minus)).abs()
+            }
+        }
     };
     (gap(1.0e-3), gap(1.0e-5))
+}
+
+/// Which quantity a knot-crossing measurement reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkWarpKnotReading {
+    /// The joint observed information `H` the Jeffreys term is built from.
+    ObservedInformation,
+    /// `Φ = ½ Σ g(λ(Z_JᵀHZ_J))`, the term of the inner objective itself.
+    ObjectiveJeffreysTerm,
+}
+
+/// `Φ` at a joint Hessian, on the full identifiable span, through the SAME entry
+/// point the inner solve's accept test uses.
+fn jeffreys_value_2695(h_joint: &Array2<f64>) -> f64 {
+    let p = h_joint.nrows();
+    let z = Array2::<f64>::eye(p);
+    gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
+        h_joint.view(),
+        z.view(),
+        |_: &Array1<f64>| Ok(None),
+    )
+    .expect("joint Jeffreys term at the crossing fixture")
+    .0
 }
 
 /// TEMPORARY gam#2695 probe — does `H` close across a knot the crossing row's
