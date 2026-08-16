@@ -511,7 +511,15 @@ pub fn reml_laml_evaluate(
                 // by construction (no separate `(p,1)` Array2 allocation +
                 // column copy, no second BLAS-3 entry point to drift from the
                 // gradient kernel's `solve_multi`).
-                let w = hop.solve(r);
+                //
+                // #2765: "bit-identical to the gradient side" means reading the
+                // SAME operator the gradient's `ThetaModeResponseKernel::select`
+                // reads, which is `mode_response_operator()` — equal to `hop` on
+                // every lane that installs no distinct IFT curvature, and NOT
+                // equal to it once the Jeffreys completion installs one. Both
+                // sides are one-step Newton displacements of the inner
+                // stationarity system, so both take that system's own operator.
+                let w = solution.mode_response_operator().solve(r);
                 let cost_correction = -0.5_f64 * r.view().dot(&w);
                 polish_step_for_warm_start = Some(w.clone());
                 (w, cost_correction, "full_h")

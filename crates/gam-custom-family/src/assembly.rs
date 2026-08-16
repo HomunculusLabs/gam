@@ -989,14 +989,32 @@ pub(crate) fn joint_outer_evaluate(
     // Φ-augmented inner objective, which is what `v_k = ∂β̂/∂ρ_k` solves
     // against. The logdet VALUE and its trace kernel keep the bare `H_Φ`
     // (value↔drift consistency); see `custom_family_outer_jeffreys_hphi`.
-    // Folded ONLY when the projected kernel will own the value and the
-    // first-order traces (the same precondition as the kernel install below);
-    // on the unprojected route the operator IS the value/trace object and
-    // must stay on the divided-difference pair.
-    let completion_in_operator = project_hessian_logdet
-        && include_logdet_h
-        && include_logdet_s
-        && pseudo_logdet_mode == PseudoLogdetMode::Smooth;
+    //
+    // #2765: the log-determinant operator must NEVER carry a term whose drift
+    // the gradient cannot produce — on ANY route, not merely on the routes that
+    // happen to hand the scalar to a different object.
+    //
+    // The completion was folded into `hessian_op` whenever the projected-logdet
+    // route was going to own the value and the traces, on the reasoning that
+    // the operator is then used only for solves and its `logdet()` cancels
+    // exactly against `projected_logdet − hessian_op.logdet()`. That reasoning
+    // is sound and it is also a PRECONDITION a downstream lane can invalidate,
+    // which is what happens on an active inequality face: the tangent-projected
+    // evaluator drops the projected kernel (correctly — a p-space subspace
+    // kernel does not act on an m-dimensional face) and takes its determinant
+    // from `hessian_op`'s dense assembly directly. The completion is then in
+    // the VALUE with nothing to differentiate it, and the outer gradient is
+    // short by `½tr(K · D_β[completion][v])` — a third directional derivative
+    // no family exposes, so the term is not merely missing but unobtainable.
+    // Measured on #2765 as the residual `logdet_h` gap after the correction
+    // pairing was fixed: 4.4% on both ρ coordinates, identical to four digits,
+    // and linear in `v` exactly as `D_β[·][v]` must be.
+    //
+    // So the completion goes to the IFT operator unconditionally, which is the
+    // #2612 separation applied as an invariant instead of as a route-dependent
+    // convenience. `hessian_op` is the value/trace object everywhere, and no
+    // later lane can make it one by surprise.
+
     // The IFT operator differentiates the SELECTED INNER STATIONARITY system.
     // Its curvature is therefore the complete coefficient Hessian
     //
@@ -1015,16 +1033,7 @@ pub(crate) fn joint_outer_evaluate(
     // without its third-order drift would define a different scalar. Under the
     // projected route, however, the scalar and IFT kernels are already separate,
     // so every available completion belongs in the IFT operator unconditionally.
-    let robust_jeffreys_hphi_for_operator: Option<Array2<f64>> = match (
-        robust_jeffreys_hphi.as_ref(),
-        robust_jeffreys_completion
-            .as_ref()
-            .filter(|_| completion_in_operator),
-    ) {
-        (Some(hphi), Some(completion)) => Some(hphi + completion),
-        (Some(hphi), None) => Some(hphi.clone()),
-        (None, _) => None,
-    };
+    let robust_jeffreys_hphi_for_operator: Option<Array2<f64>> = robust_jeffreys_hphi.clone();
     // Pre-scale the outer-REML Jeffreys curvature into the same rescaled space as
     // the penalties so the projected-logdet path and the operator agree. `None`
     // (flag OFF / no under-identified span) keeps the released outer REML exact.
@@ -1362,9 +1371,7 @@ pub(crate) fn joint_outer_evaluate(
     // term at all) means `M_true == M_DD` and there is nothing to separate.
     let mode_response_op: Option<Arc<dyn HessianFactorization>> = match (
         robust_jeffreys_hphi.as_ref(),
-        robust_jeffreys_completion
-            .as_ref()
-            .filter(|_| !completion_in_operator),
+        robust_jeffreys_completion.as_ref(),
     ) {
         (Some(hphi), Some(completion)) => Some(assemble_operator(Some(&(hphi + completion)))?),
         _ => None,

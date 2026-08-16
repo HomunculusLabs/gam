@@ -1570,14 +1570,48 @@ pub(crate) fn try_tangent_projected_evaluate(
     // callbacks, which the wrapper projects exactly.
     let projected_ext_coord_pair_fn = solution.ext_coord_pair_fn.clone();
     let projected_rho_ext_pair_fn = solution.rho_ext_pair_fn.clone();
+    // Reduce the distinct IFT operator onto the same face (#2765). Built the
+    // same way as the scalar wrapper above — `ZᵀMZ` re-eigendecomposed — so the
+    // mode response and the criterion agree about which subspace β̂ can move in.
+    let projected_mode_response_op: Option<Arc<dyn HessianFactorization>> =
+        match solution.mode_response_op.as_ref() {
+            None => None,
+            Some(op) => {
+                let m_full = op.assemble_h_dense_for_tangent_projection().map_err(|error| {
+                    format!(
+                        "active-constraint tangent projection needs a dense mode-response \
+                         curvature and the installed operator has none: {error}"
+                    )
+                })?;
+                let m_t = z.t().dot(&m_full).dot(&z);
+                let m_t_op = DenseSpectralOperator::from_symmetric(&m_t).map_err(|error| {
+                    format!("tangent mode-response eigendecomposition failed: {error}")
+                })?;
+                Some(Arc::new(TangentProjectedHessianOperator {
+                    z: z.clone(),
+                    h_t_op: m_t_op,
+                }))
+            }
+        };
     let projected = InnerSolution {
         log_likelihood: solution.log_likelihood,
         penalty_quadratic: solution.penalty_quadratic,
         hessian_op: Arc::new(wrapper),
-        // The projection wraps the SCALAR/trace operator only; the inner
-        // stationarity system `β̂(θ)` is differentiated through is unchanged, so
-        // the mode-response operator carries over verbatim (#2612).
-        mode_response_op: solution.mode_response_op.clone(),
+        // The inner stationarity system `β̂(θ)` is differentiated through is the
+        // REDUCED one here (#2765). On an active inequality face the mode stays
+        // on the face under a small θ perturbation, so `dβ̂/dθ` lies in
+        // `range(Z)` and solves against `ZᵀM_trueZ` — not against the p-space
+        // `M_true`, whose solve has a component off the face that the mode
+        // cannot take.
+        //
+        // Passing the operator through unprojected was harmless only while no
+        // lane installed a distinct one AND reached this entry: with
+        // `mode_response_op = None` the response falls back to `hessian_op`,
+        // which the wrapper above already projects. #2765 makes the Jeffreys
+        // completion install a distinct operator on every route, so the
+        // fallback no longer covers this case and the projection has to be
+        // explicit.
+        mode_response_op: projected_mode_response_op,
         beta: solution.beta.clone(),
         penalty_coords: solution.penalty_coords.clone(),
         penalty_logdet: projected_logdet,
