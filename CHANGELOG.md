@@ -1,5 +1,95 @@
 ## Unreleased
 
+- **The composed monotone warp was built one derivative short of the objective
+  that differentiates it, so the inner objective had an O(1) JUMP (#2695).**
+  `linkwiggle(...)` puts a monotone I-spline on the model's own index —
+  `q = q0 + sum_j betaw_j * I_j(q0)` with `q0 = -eta_t * exp(-eta_ls)` — so `q0`
+  moves with `beta` while the knots stay where the seed put them, and the
+  objective DIFFERENTIATES the basis rather than evaluating it. The row program
+  composes it twice, and the second is the one that sets the requirement:
+
+  ```text
+    q1w = q1 + sum betaw_j * I_j(q1)      stack [I, I(1), I(2), I(3), I(4)]
+    m1  = 1  + sum betaw_j * I(1)_j(q1)   stack [I(1), I(2), I(3), I(4), ...]  <- SHIFTED
+    g   = eta_t(1) + m1 * q0dot,  and  the row NLL contains  -d * log g
+  ```
+
+  `H = d2(-l)/dbeta2` is the order-2 coefficient of that jet, and `m1`'s order-2
+  coefficient reads its stack's slot 2 — which, because `m1` is built from the
+  basis's FIRST derivative, is the basis's THIRD. `Phi = 1/2 sum g(lambda(Z_J^T H
+  Z_J))` is a TERM OF THE OBJECTIVE (the inner NLL is `-l + 1/2 beta^T S beta -
+  Phi`), so the objective's own value reads `I(3)` — while a degree-`d` I-spline
+  is only `C^(d-1)` at a simple knot. At the shipped `degree=2` the accept test
+  was comparing two points on two different functions:
+
+  ```text
+  |delta|inf = 7.094e-13    d_obj = -2.976461e-1
+     trial_ll   -1.896965289627e1   IDENTICAL to 12 digits
+     trial_pen   6.367949854901e-3  IDENTICAL to 12 digits
+     trial_phi  -1.185962102549e1   vs  -1.156197496286e1   <- the whole jump
+  ```
+
+  the same `-2.976461e-1` at every step norm from `1.436e-10` to `7.094e-13`.
+
+  A composed warp is now BUILT at `composed_warp_minimum_degree()`, derived as
+  `COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER + 1 = 4`, and the raise is
+  logged with its derivation rather than refused: an earlier attempt refused
+  below the floor and was reverted because a refusal breaks every working
+  degree-2 fit and buys none of them a fit. The realised degree is what the
+  knots, the design, the penalties and the saved metadata all carry. It is
+  scoped to simple-ended warps: at a boundary knot of multiplicity `degree + 1`
+  the ramp is `C^-1` at EVERY degree, so raising a clamped warp's degree would
+  move those fits while fixing nothing.
+
+  **The fourth derivative had to land with it.** The row program's five-slot
+  tower ended in the literal `0.0`, which is the fourth derivative of a
+  degree-`d` I-spline only for `d <= 3` — exactly the degrees the floor now
+  excludes. `survival_wiggle_fourth_basis` supplies it, so no order-3 or order-4
+  lowering differentiates a different function than the value it is paired with.
+  That coupling is why the earlier attempt could not work: degree 3 was not
+  enough (the `betaw`-weighted third-derivative channel) and degree 4 could not
+  work while the tower it needed was a literal.
+
+- **A fraction-to-the-boundary backoff was multiplicative, so an active-set
+  method behind it could never identify a face (#2695).**
+  `feasible_step_fraction` applied `alpha <- 0.995 * alpha` when a row clipped
+  the step. The surviving slack after a clipped step is then
+  `s + alpha*d = (1 - 0.995)*s`, so every clipped cycle keeps `1/200` of the
+  slack and NO finite number of cycles reaches the face. Measured on the #2695
+  witness: exactly `200x` per cycle for 400 cycles, with the QP's proposal
+  constant at `1.554e-2`, the joint trust radius held, and the objective change
+  exactly zero — the solve spending its whole budget walking one warp
+  coefficient from `1e-3` to `1e-163` while the row it approached never became
+  active.
+
+  A backoff answers ROUND-OFF in an exact ratio test, which is a statement about
+  resolution in the scaled-slack metric the contract is denominated in, not
+  about how far the step happened to travel. It is now
+  `alpha = fraction - PRIMAL_FEASIBILITY_TOL / |scaled drift|`: a step with room
+  stops one feasibility tolerance short of the face, and a step whose remaining
+  slack is already inside that tolerance yields `alpha <= 0`, which the contract
+  reports as `BlockedByActiveFace` and the caller answers with a projection onto
+  that face. The row becomes active in ONE cycle. `ContractFeasibleStep` already
+  publishes the blocking row's scaled drift, so there is no new geometry and no
+  new constant. Landing on the face is not a hazard for these constraints and
+  that is checked rather than assumed: the row programs that take a logarithm of
+  a bounded quantity carry their own guard (`log g` below the event-Jacobian
+  floor is a CONTINUED logarithm), so the interior-point rationale that would
+  justify stopping strictly short does not apply.
+
+  Four existing exact-value pins asserted the old constant (`0.995*0.05`,
+  `0.995*0.2`, `0.995*0.4`, `0.995*0.5`); they now assert the derived value
+  computed from each fixture's stated row geometry, so they still pin an exact
+  number and now pin the right one.
+
+  Together these move the witness fit
+  (`survival_location_scale_saved_fit_preserves_linkwiggle_metadata`) from a
+  terminal stationarity residual of `4.79e-1` against a `7.9e-11` tolerance to
+  `1.40e-8` against `1.08e-10` — seven orders — with the inner solve now exiting
+  on a measured geometric convergence RATE (`0.9882x/cycle`) rather than on a
+  discontinuity, and one seed reaching `KKT/certificate-converged`. The residue
+  is a trust-region controller question and is recorded on the issue.
+
 - **A penalty map within `1.5e-8` of a linear dependency was certified EXACTLY
   dependent, because its rank was decided on the SQUARE of the defect (#2676).**
   `PenaltyMapInvariance` licenses the curvature certificate's deflation by
