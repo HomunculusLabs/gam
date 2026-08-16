@@ -364,10 +364,11 @@ mod tests_rank_charge_2101;
 #[cfg(test)]
 mod tests_frame_curvature_2757;
 
-/// #2757 — the phase-by-phase stopwatch on the post-fit certification. Every
-/// test in it is `#[ignore]`d; it is an instrument, not a gate.
+/// #2757 — the phase-by-phase stopwatch on the post-fit certification. It runs
+/// at a committed small shape and prints its table; the sweep is a `const` a
+/// working tree raises to reach the production cell.
 #[cfg(test)]
-mod probe_report_cost_2757;
+mod probe_report_cost_2757_tests;
 
 #[cfg(test)]
 mod tests_sure_dispersion_2133;

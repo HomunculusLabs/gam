@@ -17,51 +17,64 @@
 //!   to a root, or to a dense `(p·D)²` Gram once the root has more rows than
 //!   columns, which is exactly the object #2757 is named for.
 //!
-//! Both are `#[ignore]`d: they are stopwatches, not gates. Drive them with
+//! ## Why the shapes are constants and the runs are not `#[ignore]`d
+//!
+//! Both stopwatches arrived (`7917759c7`) as `#[ignore]`d tests reading their
+//! sweep out of `GAM_2757_*` environment variables. Each of those is a build
+//! ban in this workspace — `#[ignore]` because a test that never runs is not a
+//! statement, `env::var` because a run whose shape comes from the environment
+//! is not reproducible from the tree — so the scanner aborted **every** build
+//! in the workspace and no lane could compile anything. See `0c9ed39c5` for the
+//! same lesson on the #2714 probe.
+//!
+//! The instrument is unchanged in what it measures; only its entry conditions
+//! are. The sweep is a `const` below (raise it in a working tree to reach the
+//! production cell), and the committed shape is small enough that the phase
+//! table is produced on every run rather than never. Read it with
 //!
 //! ```sh
-//! cargo test -p gam-sae --release --lib probe_2757 -- --ignored --nocapture
+//! cargo test -p gam-sae --release --lib probe_2757 -- --nocapture
 //! ```
-//!
-//! and set `GAM_2757_P_SWEEP` / `GAM_2757_CHARTS` / `GAM_2757_N` to move the
-//! shape.
 
 use super::tests_frame_curvature_2757::{planted_term_for_probe, unit_rho_for_probe};
 use crate::identifiability::FrameColumnLayout;
 use ndarray::Array2;
 use std::time::Instant;
 
-fn env_usize(key: &str, fallback: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(fallback)
-}
-
-fn env_sweep(key: &str, fallback: &[usize]) -> Vec<usize> {
-    match std::env::var(key) {
-        Ok(v) => v
-            .split(',')
-            .filter_map(|s| s.trim().parse::<usize>().ok())
-            .collect(),
-        Err(_) => fallback.to_vec(),
-    }
-}
+/// Rows in the committed sweep.
+const PROBE_ROWS: usize = 64;
+/// Charts in the committed Euclidean sweep.
+const PROBE_EUCLIDEAN_CHARTS: usize = 8;
+/// Output widths in the committed Euclidean sweep. The #2731 production cell is
+/// `p = 2048, charts = 32, n = 256`; raise this to walk toward it.
+const PROBE_EUCLIDEAN_WIDTHS: [usize; 3] = [16, 32, 64];
+/// Charts in the committed gauge-driving sweep.
+const PROBE_GAUGE_CHARTS: usize = 4;
+/// Rank of the output-Fisher metric root in the committed gauge-driving sweep.
+const PROBE_GAUGE_METRIC_RANK: usize = 2;
+/// Output widths in the committed gauge-driving sweep.
+const PROBE_GAUGE_WIDTHS: [usize; 3] = [8, 16, 32];
 
 /// Phase-by-phase wall-clock of the whole certification, on the branch the
 /// #2731 cell actually ran.
 #[test]
-#[ignore = "stopwatch, not a gate: drive with --ignored --nocapture"]
 fn probe_2757_report_phase_profile_euclidean() {
-    let n = env_usize("GAM_2757_N", 256);
-    let charts = env_usize("GAM_2757_CHARTS", 32);
-    let sweep = env_sweep("GAM_2757_P_SWEEP", &[256, 512, 1024]);
+    let n = PROBE_ROWS;
+    let charts = PROBE_EUCLIDEAN_CHARTS;
     println!("\n#2757 phase profile — Euclidean metric (n={n}, charts={charts})");
     println!(
         "{:>6} {:>9} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "p", "param_dim", "two_lens", "curvature", "reduce+gen", "fidelity", "embed", "topology", "TOTAL"
+        "p",
+        "param_dim",
+        "two_lens",
+        "curvature",
+        "reduce+gen",
+        "fidelity",
+        "embed",
+        "topology",
+        "TOTAL"
     );
-    for &p in &sweep {
+    for &p in &PROBE_EUCLIDEAN_WIDTHS {
         let term = planted_term_for_probe(n, p, charts, true);
         let rho = unit_rho_for_probe(charts);
         let fitted = term
@@ -73,8 +86,7 @@ fn probe_2757_report_phase_profile_euclidean() {
         let param_dim = layout.param_dim();
 
         let t0 = Instant::now();
-        let _lens = crate::inference::atom_lens::atom_two_lens(&term, &metric, None)
-            .expect("two-lens report");
+        crate::inference::atom_lens::atom_two_lens(&term, &metric, None).expect("two-lens report");
         let two_lens = t0.elapsed().as_secs_f64();
 
         let t1 = Instant::now();
@@ -104,26 +116,25 @@ fn probe_2757_report_phase_profile_euclidean() {
         let reduce_and_generators = t2.elapsed().as_secs_f64();
 
         let t3 = Instant::now();
-        let _fidelity: Vec<_> = (0..charts)
+        let fidelity_reports: Vec<_> = (0..charts)
             .map(|k| super::coordinate_fidelity::atom_coordinate_fidelity(&term, k))
             .collect();
         let fidelity = t3.elapsed().as_secs_f64();
 
         let t4 = Instant::now();
-        let _embed: Vec<_> = (0..charts)
+        let embed_reports: Vec<_> = (0..charts)
             .map(|k| super::embeddedness::atom_decoder_embeddedness(&term, k))
             .collect();
         let embed = t4.elapsed().as_secs_f64();
 
         let t5 = Instant::now();
-        let _topology: Vec<_> = (0..charts)
+        let topology_reports: Vec<_> = (0..charts)
             .map(|k| super::persistence::atom_topology_persistence(&term, k))
             .collect();
         let topology = t5.elapsed().as_secs_f64();
 
         let t6 = Instant::now();
-        let _report = term
-            .fit_diagnostics_report(None, false, None, fitted.view(), None)
+        term.fit_diagnostics_report(None, false, None, fitted.view(), None)
             .expect("diagnostics report");
         let total = t6.elapsed().as_secs_f64();
 
@@ -134,10 +145,14 @@ fn probe_2757_report_phase_profile_euclidean() {
         );
         println!(
             "        curvature={tag} stored_scalars={scalars} \
-             (dense Gram would be {}) pinning_rank={} verdicts={}",
+             (dense Gram would be {}) pinning_rank={} verdicts={} \
+             per-chart reports={}/{}/{}",
             param_dim * param_dim,
             gauge.pinning_rank,
-            gauge.generators.len()
+            gauge.generators.len(),
+            fidelity_reports.len(),
+            embed_reports.len(),
+            topology_reports.len()
         );
     }
 }
@@ -145,12 +160,10 @@ fn probe_2757_report_phase_profile_euclidean() {
 /// The other branch: a metric that genuinely couples output coordinates. This
 /// is where the dense `param_dim × param_dim` Gram still lives.
 #[test]
-#[ignore = "stopwatch, not a gate: drive with --ignored --nocapture"]
 fn probe_2757_report_phase_profile_gauge_driving() {
-    let n = env_usize("GAM_2757_N", 256);
-    let charts = env_usize("GAM_2757_CHARTS", 8);
-    let rank = env_usize("GAM_2757_RANK", 4);
-    let sweep = env_sweep("GAM_2757_P_SWEEP", &[32, 64, 128]);
+    let n = PROBE_ROWS;
+    let charts = PROBE_GAUGE_CHARTS;
+    let rank = PROBE_GAUGE_METRIC_RANK;
     println!(
         "\n#2757 phase profile — output-Fisher (gauge-driving) metric \
          (n={n}, charts={charts}, metric rank={rank})"
@@ -166,12 +179,11 @@ fn probe_2757_report_phase_profile_gauge_driving() {
             .wrapping_add(1442695040888963407);
         ((seed >> 11) as f64) / ((1u64 << 53) as f64)
     };
-    for &p in &sweep {
+    for &p in &PROBE_GAUGE_WIDTHS {
         let mut term = planted_term_for_probe(n, p, charts, true);
         let factors = Array2::<f64>::from_shape_fn((n, p * rank), |_| lcg() - 0.5);
-        let metric =
-            gam_problem::RowMetric::output_fisher(std::sync::Arc::new(factors), p, rank)
-                .expect("output-Fisher metric");
+        let metric = gam_problem::RowMetric::output_fisher(std::sync::Arc::new(factors), p, rank)
+            .expect("output-Fisher metric");
         term.set_row_metric(metric.clone()).expect("conformable");
         assert!(metric.drives_gauge());
         let layout = FrameColumnLayout::new(p, &vec![1usize; charts]);

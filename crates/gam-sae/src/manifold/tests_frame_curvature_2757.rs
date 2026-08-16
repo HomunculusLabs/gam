@@ -53,7 +53,7 @@ fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeMani
 }
 
 /// The same fixture, shared with the #2757 cost probe
-/// ([`crate::manifold::probe_report_cost_2757`]) so the stopwatch and the gates
+/// ([`crate::manifold::probe_report_cost_2757_tests`]) so the stopwatch and the gates
 /// measure the identical object.
 pub(crate) fn planted_term_for_probe(
     n: usize,
