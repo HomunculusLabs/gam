@@ -1876,19 +1876,22 @@ pub struct SmoothLrReferenceDf {
 /// # Where the residual law comes from
 ///
 /// The same spectral object the numerator uses, taken over the whole model
-/// instead of over the tested block. With unit-scale weights the profiled
-/// Gaussian's hat matrix `A = X H⁻¹X'` is symmetric with eigenvalues
-/// `f_i = 1 − p_i` (the `p_i` being the penalty shares
-/// [`lr_tested_block`] returns) and `n − p` further zeros, and the true mean is
-/// annihilated because it lies in the penalty's null space. So
+/// instead of over the tested block. The profiled Gaussian's hat matrix
+/// `A = X H⁻¹X'W` is symmetric in the whitened coordinates the weighted RSS is
+/// a sum of squares in (`X̃ = W^{1/2}X`, where `ε̃ = W^{1/2}ε` has covariance
+/// `σ²I` because `Var(y_i) = σ²/w_i`), with eigenvalues `f_i = 1 − p_i` — the
+/// `p_i` being the penalty shares [`lr_tested_block`] returns, which are
+/// unchanged by the whitening since `H⁻¹S` is — and `n − p` further zeros. The
+/// true mean is annihilated because it lies in the penalty's null space. So
 ///
 /// ```text
-///   V = ε'(I − A)²ε ~ Σ_i p_i²·χ²_1  +  χ²_{n−p},
+///   V = ε̃'(I − Ã)²ε̃ ~ Σ_i p_i²·χ²_1  +  χ²_{n−p},
 /// ```
 ///
-/// exact at fixed `λ`. The `n − p` unit directions are folded into ONE term
-/// with `n − p` degrees of freedom, which is what keeps an `n`-sized reference
-/// the same cost as a `p`-sized one.
+/// exact at fixed `λ`, with `n` the POSITIVE-WEIGHT row count in both places.
+/// The `n − p` unit directions are folded into ONE term with `n − p` degrees of
+/// freedom, which is what keeps an `n`-sized reference the same cost as a
+/// `p`-sized one.
 ///
 /// # What is approximated, stated plainly
 ///
