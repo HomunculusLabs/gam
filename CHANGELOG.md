@@ -85,6 +85,100 @@
   streamable — which is a change to what the certificate reads, not to how the
   curvature is stored.
 
+- **The smooth-term likelihood-ratio p-value of a Gaussian fit was scored
+  against the reference for a KNOWN variance, on a fit that estimated its own
+  (#2672).** The Gaussian arm of the null-simulation size grid read
+  `size@.05 = 0.0792` pooled over 480 replicates against a nominal `0.05` —
+  `2.9` standard errors, with `first == fixed == est` in every cell, so the
+  Lawley Bartlett factor was inert and the whole miss belonged to the reference.
+  That arm exists as a DISCRIMINATOR: on a Gaussian response the log-likelihood
+  is exactly the quadratic every other lane expands to, so a size miss there
+  cannot be the expansion.
+
+  **Root cause.** gam's profiled Gaussian log-likelihood is
+  `ℓ = −½[n·ln 2π + n·ln(D/ν) − Σ ln w_i + ν]` with `D` the weighted residual
+  sum of squares and `ν` the residual degrees of freedom it divides by. So the
+  whole-term LR statistic is, with no expansion anywhere,
+
+  ```text
+  W = 2(ℓ_f − ℓ_0) = n·ln(D_0/D_f) + n·ln(ν_f/ν_0) + (ν_0 − ν_f)
+                   = n·ln(1 + Q/V) + B
+  ```
+
+  with `Q = (D_0 − D_f)/σ²` and `V = D_f/σ²`. `Q` is what the reference's null
+  spectrum is the spectrum OF — so the shipped reference answered "how extreme
+  is `Q`" when the question was "how extreme is `n·ln(1 + Q/V) + B`", and `V` is
+  a random variable of the same data with mean `ν` and spread `√(2ν)`. Both the
+  mean shift `ν/(ν−2)` and the extra spread push the test anti-conservative, and
+  both are `O(1/ν)`: invisible at `n = 1000`, worth `0.03` in size at `n = 30`.
+  It is the same reason mgcv's smooth-term p-values take an `F` reference when
+  the scale is estimated and a `χ²` when it is known.
+
+  **The fix inverts the map instead of expanding it.** `W > w` is exactly
+  `Q − c(w)·V > 0` with `c(w) = expm1((w − B)/n)`, a linear combination of
+  independent chi-squares with a NEGATIVE weight evaluated at zero. `n` and `ν`
+  appear where the log-likelihood put them, so the `κ ∈ {1, n/ν}` convention
+  question the candidate scoring was going to decide by measurement does not
+  arise. The residual law is the same spectral object the numerator uses, taken
+  over the whole model instead of the tested block: with `A = XH⁻¹X'` symmetric
+  and the true mean in the penalty's null space,
+  `V = ε'(I−A)²ε ~ Σ_i p_i²·χ²_1 + χ²_{n−p}`, exact at fixed `λ`.
+
+  Rejected: adding `[P(F_{a,ν} > w/(κga)) − P(χ²_a > w/g)]` as a control
+  variate to the shipped tail. It is exact only where the weights are equal,
+  it needs the `κ` convention decided from a size measurement, and this
+  subsystem's history is a list of terms that moved a size the right way and
+  turned out to be compensating for something else.
+
+  **Measured**, offline at fixed `λ` on a fixed design
+  (`scripts/probe_2672_profiled_scale_ratio_law.py`, 800 replicates, MC s.e.
+  `0.0077`), which isolates the scale from λ-selection:
+
+  ```text
+  n     lambda   shipped size@.05   ratio size@.05   shipped KS   ratio KS
+   30      100        0.0650           0.0525          0.0435      0.0235
+   30        1        0.0950           0.0437          0.0733      0.0319
+   50        1        0.0663           0.0413          0.0372      0.0234
+  100        1        0.0512           0.0450          0.0408      0.0231
+  200        1        0.0475           0.0437          0.0202      0.0177
+  ```
+
+  The shipped size decays `0.095 → 0.0475` with `n` — the `O(1/ν)` signature —
+  and the ratio reference is inside the Monte-Carlo band at every rung
+  including `n = 30`. KS improves in every cell, so this is the whole p-value
+  distribution and not one level.
+
+  Scope: `ProfiledGaussian` only. Every other family carries its dispersion in
+  the IRLS weight, and the estimated-dispersion families that do not
+  (Gamma, Beta, negative binomial, Tweedie) do not estimate through a residual
+  sum of squares, so this derivation does not reach them.
+
+- **A ratio's tail is a signed weighted chi-square, and the Imhof panel rule was
+  never resolving the amplitude (#2672).** `weighted_chi_square_sf` took
+  non-negative weights at one degree of freedom each. The general form
+  (`WeightedChiSquareTerm { weight, degrees_of_freedom }`, either sign) is what
+  every estimated-scale reference needs, since `P(A/B > t) = P(A − tB > 0)`, and
+  the multiplicity is what keeps an `n`-sized reference the cost of a `p`-sized
+  one. Imhof's derivation never asked for positivity; the TRUNCATION BOUND did —
+  `16/(x·U·ρ(U))` divides by `x`, and a ratio reference is evaluated at exactly
+  `x = 0`. The replacement is the amplitude bound `4/(H·ρ(U))`, which the same
+  `x = 0` makes strong: a ratio reference carries `χ²_{n−p}`, so `H` is of order
+  `n` and `ρ` grows like `U^{n/2}`.
+
+  Generalizing it exposed a defect in the shipped quadrature. `F_{1,5}` at
+  `f = 0.05` returned `0.8319119` against the exact `0.8319122` — **an error of
+  `3.4e-7` while certifying `1e-11`**. The panel width `4π/(x + Σw_j)` sizes on
+  the PHASE only; the amplitude `1/(u·ρ(u))` has its own scale `1/|λ|` where
+  `(1 + λ²u²)^{h/4}` turns over, and a panel far wider than that is a 16-node
+  rule aliasing a factor it never sampled. This was reachable before the
+  generalization — any spectrum with one dominant weight and a small statistic —
+  and `two_unequal_weights_match_an_independent_convolution` was carrying a
+  `5e-7` relative tolerance that is exactly the size of what it tolerated. The
+  second scale is derived from the Bernstein ellipse through the integrand's
+  nearest branch point at `u = ±i/|λ|_max`:
+  `a = d/[(ϱ − 1/ϱ)/2]`, `ϱ = tolerance^{-1/2N}`. Worst `F`-identity error is
+  now `1.7e-12`.
+
 - **A two-class multinomial with a smooth term published `β ≡ 0` — every
   predicted probability was the uniform simplex, at `edf_per_class = 4.09`
   (#2612).** The fit was not refused and did not look degenerate from outside:

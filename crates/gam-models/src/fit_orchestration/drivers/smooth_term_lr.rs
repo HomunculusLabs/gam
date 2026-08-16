@@ -1744,6 +1744,18 @@ fn split_mix64(state: u64) -> u64 {
 ///   reference cannot degenerate that way: as REML shrinks a term the weights and
 ///   the statistic collapse *together*, `W/g` stays `O(1)`, and `ν → q`. The floor
 ///   was a patch on the wrong shape, not on a missing quantity.
+///
+/// # And what all of it is the reference FOR
+///
+/// Everything above describes the law of `Q`, the statistic a KNOWN-scale
+/// likelihood ratio is. A profiled Gaussian's `W` is not `Q` — it is
+/// `n·ln(1 + Q/V) + B`, with `V` the residual sum of squares the same fit
+/// estimated its `σ̂` from. Scoring `W` against `Q`'s law is anti-conservative
+/// at `O(1/ν)`: measured `size@.05 = 0.0792` pooled over 480 replicates at
+/// `n ∈ {30, 50}` against a nominal `0.05`, with the Lawley factor inert
+/// throughout, so the whole miss belonged here. [`Self::profiled_scale`] is
+/// that channel and [`SmoothLrProfiledScale`] is the derivation; it is `None`
+/// on every family whose dispersion is already inside the IRLS weight.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SmoothLrReferenceDf {
     /// The null spectrum itself, `w_j ∈ [0, 1]`, sorted descending — the whole
@@ -1810,6 +1822,98 @@ pub struct SmoothLrReferenceDf {
     /// [`Self::tail_probability_with_bound`] for what this is used for and why
     /// it is not a numerical-accuracy knob.
     pub statistic_resolution: f64,
+    /// The ESTIMATED-SCALE channel, present exactly when the fit profiled its
+    /// own Gaussian dispersion out of a residual sum of squares (#2672).
+    ///
+    /// `None` is a statement about the family, not a missing measurement: every
+    /// other likelihood on this path carries its dispersion in the IRLS weight
+    /// and its `W` is not a function of a second, independently-estimated
+    /// scalar. See [`SmoothLrProfiledScale`].
+    pub profiled_scale: Option<SmoothLrProfiledScale>,
+}
+
+/// What the reference needs in order to score a statistic whose SCALE was
+/// estimated from the same residuals (#2672).
+///
+/// # The statistic is a ratio, exactly
+///
+/// gam's profiled Gaussian log-likelihood is `ℓ = −½[n·ln 2π + n·ln(D/ν) −
+/// Σ ln w_i + ν]` with `D` the weighted residual sum of squares and `ν` the
+/// residual degrees of freedom it divides by — so the whole-term LR statistic
+/// is, with no expansion anywhere,
+///
+/// ```text
+///   W = 2(ℓ_full − ℓ_null) = n·ln(D_0/D_f) + n·ln(ν_f/ν_0) + (ν_0 − ν_f)
+///     = n·ln(1 + Q/V) + B,
+///   Q = (D_0 − D_f)/σ²,   V = D_f/σ²,   B = n·ln(ν_f/ν_0) + (ν_0 − ν_f).
+/// ```
+///
+/// `Q` is what [`SmoothLrReferenceDf::weights`] is the null spectrum OF, and
+/// the known-scale reference scores it directly. The shipped reference
+/// therefore answers the question "how extreme is `Q`" when the question asked
+/// was "how extreme is `n·ln(1 + Q/V) + B`" — and `V` is a random variable of
+/// the same data, with mean `ν` and spread `√(2ν)`. Both the mean shift
+/// `ν/(ν−2)` and the extra spread push the test anti-conservative, and both are
+/// `O(1/ν)`: invisible at `n = 1000`, worth `0.03` in size at `n = 30`. It is
+/// the same reason mgcv's smooth-term p-values take an `F` reference when the
+/// scale is estimated and a `χ²` when it is known.
+///
+/// # Inverting it costs nothing, because the map is monotone
+///
+/// `W > w ⟺ Q/V > exp((w − B)/n) − 1`, so
+///
+/// ```text
+///   P(W > w) = P( Q − c(w)·V > 0 ),   c(w) = expm1((w − B)/n),
+/// ```
+///
+/// a linear combination of independent chi-squares with a NEGATIVE weight,
+/// evaluated at zero — which is exactly
+/// [`gam_math::probability::signed_weighted_chi_square_sf_to_tolerance`]. There
+/// is no expansion, no `κ`-convention to pick, and no separate `F`-family
+/// approximation: `n` and `ν` appear where the log-likelihood actually put
+/// them.
+///
+/// # Where the residual law comes from
+///
+/// The same spectral object the numerator uses, taken over the whole model
+/// instead of over the tested block. With unit-scale weights the profiled
+/// Gaussian's hat matrix `A = X H⁻¹X'` is symmetric with eigenvalues
+/// `f_i = 1 − p_i` (the `p_i` being the penalty shares
+/// [`lr_tested_block`] returns) and `n − p` further zeros, and the true mean is
+/// annihilated because it lies in the penalty's null space. So
+///
+/// ```text
+///   V = ε'(I − A)²ε ~ Σ_i p_i²·χ²_1  +  χ²_{n−p},
+/// ```
+///
+/// exact at fixed `λ`. The `n − p` unit directions are folded into ONE term
+/// with `n − p` degrees of freedom, which is what keeps an `n`-sized reference
+/// the same cost as a `p`-sized one.
+///
+/// # What is approximated, stated plainly
+///
+/// Two things, both inherited rather than introduced. `Q`'s spectrum is the
+/// reference's own claim, unchanged. And `Q` and `V` are taken INDEPENDENT —
+/// exact for the unpenalized linear model by Cochran, approximate under
+/// penalization, and the same independence every `F` reference for a penalized
+/// smooth rests on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmoothLrProfiledScale {
+    /// `n` — the multiplier the profiled `ln σ̂²` carries in the log-likelihood.
+    pub observations: f64,
+    /// `B = n·ln(ν_f/ν_0) + (ν_0 − ν_f)`, the part of `W` that is a function of
+    /// the two fits' residual degrees of freedom and of nothing random.
+    ///
+    /// It is NOT negligible and it is not the same sign as the rest: on the
+    /// `n = 30` Gaussian cells it runs `−0.13` to `−0.61`.
+    pub deterministic_offset: f64,
+    /// `p_i²` over the whole model's penalty shares — the non-trivial half of
+    /// the residual quadratic form's spectrum.
+    pub residual_weights: Vec<f64>,
+    /// `n − p`, the residual directions no design column reaches. Each carries
+    /// weight exactly one, so they are one term with this many degrees of
+    /// freedom rather than this many terms.
+    pub residual_unit_dimension: f64,
 }
 
 /// Accumulated-roundoff floor on the requested tail accuracy.
@@ -1888,7 +1992,7 @@ impl SmoothLrReferenceDf {
         if !conditional.is_finite() {
             return (conditional, bound);
         }
-        let (shift, standard_error) = replay.tail_shift(statistic);
+        let (shift, standard_error) = replay.tail_shift(self.selection_threshold(statistic));
         (
             (conditional + shift).clamp(0.0, 1.0),
             bound + 2.0 * standard_error,
@@ -1901,9 +2005,59 @@ impl SmoothLrReferenceDf {
     /// This is a `O(draws)` pass over two samples, four orders cheaper than the
     /// quadrature it is used to budget.
     fn selection_standard_error(&self, statistic: f64) -> f64 {
-        self.selection
-            .replay()
-            .map_or(0.0, |replay| replay.tail_shift(statistic).1)
+        self.selection.replay().map_or(0.0, |replay| {
+            replay.tail_shift(self.selection_threshold(statistic)).1
+        })
+    }
+
+    /// The threshold the λ̂-selection replay has to be asked about, which is not
+    /// the statistic itself once the scale is profiled.
+    ///
+    /// The replay samples the statistic's KNOWN-SCALE law `Q` under two ways of
+    /// choosing `λ`, and its shift is the difference of the two tails at a
+    /// `Q`-threshold. With an estimated scale the event `W > w` is
+    /// `Q > c(w)·V`, so the `Q`-threshold is random; the selection correction is
+    /// `E_V[Δ(c(w)·V)]`, and evaluating `Δ` at `E[V]` is the first-order term of
+    /// that expectation. `E[V] = Σ_i v_i + (n − p)` is the residual law's own
+    /// mean, already carried.
+    ///
+    /// As `ν → ∞` this returns the statistic: `B → 0`, `E[V]/n → 1`, and
+    /// `expm1(w/n)·n → w`. So the correction composes with the known-scale
+    /// behaviour rather than replacing it.
+    fn selection_threshold(&self, statistic: f64) -> f64 {
+        let Some(scale) = self.profiled_scale.as_ref() else {
+            return statistic;
+        };
+        let residual_mean: f64 = scale.residual_weights.iter().sum::<f64>()
+            + scale.residual_unit_dimension;
+        let ratio = ((statistic - scale.deterministic_offset) / scale.observations).exp_m1();
+        ratio.max(0.0) * residual_mean
+    }
+
+    /// The statistic's OWN null law, as a list of `λ_j·χ²_{h_j}` terms: the
+    /// exact spectrum where the fit supplied one, and the two-moment summary
+    /// `(g, ν)` where it did not.
+    ///
+    /// The two lanes are one object here rather than two branches because the
+    /// summary is not an approximation of a different shape — it is the same
+    /// linear combination with one term. Reading it this way is what lets the
+    /// profiled-scale route below apply on every lane instead of only on the
+    /// lane that reached the spectrum.
+    fn null_law_terms(&self) -> Vec<gam_math::probability::WeightedChiSquareTerm> {
+        use gam_math::probability::WeightedChiSquareTerm;
+        if self.weights.is_empty() {
+            return vec![WeightedChiSquareTerm {
+                weight: self.scale,
+                degrees_of_freedom: self.chi_square_df,
+            }];
+        }
+        self.weights
+            .iter()
+            .map(|&weight| WeightedChiSquareTerm {
+                weight,
+                degrees_of_freedom: 1.0,
+            })
+            .collect()
     }
 
     fn conditional_tail_with_bound(&self, statistic: f64) -> (f64, f64) {
@@ -1912,7 +2066,7 @@ impl SmoothLrReferenceDf {
         }
         let summary =
             |w: f64| gam_math::probability::chi_square_sf(w / self.scale, self.chi_square_df);
-        if self.weights.is_empty() {
+        if self.weights.is_empty() && self.profiled_scale.is_none() {
             // The summary IS the reference on the two degraded lanes, and it is
             // a closed form: no truncation, so no bound to report.
             return (summary(statistic), 0.0);
@@ -1946,11 +2100,37 @@ impl SmoothLrReferenceDf {
         let tolerance = derived
             .max(self.selection_standard_error(statistic))
             .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST);
-        gam_math::probability::weighted_chi_square_sf_to_tolerance(
-            &self.weights,
-            statistic,
-            tolerance,
-        )
+        let mut terms = self.null_law_terms();
+        let Some(scale) = self.profiled_scale.as_ref() else {
+            return gam_math::probability::signed_weighted_chi_square_sf_to_tolerance(
+                &terms, statistic, tolerance,
+            );
+        };
+        // `W > w  ⟺  Q/V > expm1((w − B)/n)`, so the tail is the SIGNED
+        // combination `Q − c·V` at zero. See [`SmoothLrProfiledScale`].
+        let ratio = ((statistic - scale.deterministic_offset) / scale.observations).exp_m1();
+        if !ratio.is_finite() {
+            return (f64::NAN, f64::NAN);
+        }
+        if ratio <= 0.0 {
+            // `W` is at or under the value the two fits' degrees of freedom
+            // alone produce. `Q ≥ 0` and `V > 0`, so `Q − cV ≥ 0` with
+            // certainty and the statistic is not evidence of anything.
+            return (1.0, 0.0);
+        }
+        terms.extend(scale.residual_weights.iter().map(|&weight| {
+            gam_math::probability::WeightedChiSquareTerm {
+                weight: -ratio * weight,
+                degrees_of_freedom: 1.0,
+            }
+        }));
+        if scale.residual_unit_dimension > 0.0 {
+            terms.push(gam_math::probability::WeightedChiSquareTerm {
+                weight: -ratio,
+                degrees_of_freedom: scale.residual_unit_dimension,
+            });
+        }
+        gam_math::probability::signed_weighted_chi_square_sf_to_tolerance(&terms, 0.0, tolerance)
     }
 }
 
@@ -2209,6 +2389,28 @@ pub fn smooth_term_lr_inference_forspec(
     let smooth_start = p_total.saturating_sub(full.design.smooth.total_smooth_cols());
     let fitted_likelihood = resolved_likelihood_for_fit(&full.fit)?;
     let family_disp = lawley_dispersion_for_family(&fitted_likelihood, &full.fit)?;
+    // The estimated-scale channel (#2672), assembled once because every part of
+    // it except the deterministic offset is a property of the FULL fit and not
+    // of which term is being tested.
+    let profiled_residual_shares = profiled_scale_residual_shares(
+        &fitted_likelihood,
+        hessian_inverse.as_ref(),
+        &s_lambda,
+        p_total,
+    )?;
+    let full_residual_df = profiled_residual_shares
+        .as_ref()
+        .and(profiled_residual_degrees_of_freedom(&full.fit, n));
+    // `(v, h)`: the non-trivial residual weights and the degrees of freedom of
+    // the weight-one block. On the exact rung that block is the `n − p`
+    // directions no column reaches; on the summary rung the whole residual law
+    // is folded into it at the fit's own `ν`.
+    let profiled_residual = profiled_residual_shares.zip(full_residual_df).map(
+        |(shares, residual_df)| match shares {
+            Some(weights) => (weights, n.saturating_sub(p_total) as f64),
+            None => (Vec::new(), residual_df),
+        },
+    );
 
     let mut out = Vec::<SmoothTermLrInference>::new();
     for (term_idx, design_term) in full.design.smooth.terms.iter().enumerate() {
@@ -2333,6 +2535,7 @@ pub fn smooth_term_lr_inference_forspec(
             &term_penalties,
             &term_log_lambda,
         );
+        let mut reference = reference;
         let ref_df = reference.mean;
         if !(ref_df.is_finite()
             && ref_df > 0.0
@@ -2343,7 +2546,6 @@ pub fn smooth_term_lr_inference_forspec(
         {
             continue;
         }
-        let ref_df_provenance = reference.clone();
 
         // Null model: drop this smooth term from the spec and refit. The term's
         // name pins which spec entry to remove (design and spec share names).
@@ -2365,7 +2567,7 @@ pub fn smooth_term_lr_inference_forspec(
             family.clone(),
             options,
         );
-        let (statistic_lr, eta_null) = match null_fit {
+        let (statistic_lr, eta_null, null_residual_df) = match null_fit {
             Ok(null) if null.fit.log_likelihood.is_finite() => {
                 let w = (2.0 * (ll_full - null.fit.log_likelihood)).max(0.0);
                 // η at the null fit: X_null β_null + affine_offset + offset
@@ -2379,10 +2581,32 @@ pub fn smooth_term_lr_inference_forspec(
                     .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
                 let mut eta = null.design.design.dot(&null.fit.beta);
                 eta += &null_offset;
-                (w, Some(eta))
+                let residual_df = profiled_residual_degrees_of_freedom(&null.fit, n);
+                (w, Some(eta), residual_df)
             }
-            _ => (f64::NAN, None),
+            _ => (f64::NAN, None, None),
         };
+
+        // The estimated-scale channel needs BOTH fits' residual degrees of
+        // freedom, so it is completed here rather than where the rest of the
+        // reference was built: `B = n·ln(ν_f/ν_0) + (ν_0 − ν_f)` is the only
+        // part of `W` that is a function of the null refit and of nothing
+        // random (#2672).
+        if let Some((residual_weights, residual_unit_dimension)) = profiled_residual.as_ref()
+            && let (Some(full_df), Some(null_df)) = (full_residual_df, null_residual_df)
+            && full_df > 0.0
+            && null_df > 0.0
+        {
+            let observations = n as f64;
+            reference.profiled_scale = Some(SmoothLrProfiledScale {
+                observations,
+                deterministic_offset: observations * (full_df / null_df).ln()
+                    + (null_df - full_df),
+                residual_weights: residual_weights.clone(),
+                residual_unit_dimension: *residual_unit_dimension,
+            });
+        }
+        let ref_df_provenance = reference.clone();
 
         let (p_uncorrected, mut p_bound) = reference.tail_probability_with_bound(statistic_lr);
         let mut p_conditional = reference.conditional_tail_probability(statistic_lr);
@@ -2506,6 +2730,72 @@ pub fn smooth_term_lr_inference_forspec(
     Ok(out)
 }
 
+/// The residual degrees of freedom the fit's profiled `σ̂` ACTUALLY divided by,
+/// read back as `D/σ̂²` from two published fields.
+///
+/// Not recomputed as `n − edf_total`. That is what the optimizer uses on one of
+/// its two branches — the other, taken when inference is off, divides by `n` —
+/// and a reference that assumed the branch would be silently wrong on the other
+/// one. `D` is the weighted residual sum of squares (the Gaussian deviance) and
+/// `σ̂² = D/ν` by construction, so `ν = D/σ̂²` inverts the fit's own convention
+/// whatever it was.
+///
+/// `None` when the two fields cannot produce a residual degrees of freedom that
+/// is finite, positive, and no larger than the sample size — a statement that
+/// this fit's `σ̂` is not the profiled residual one the identity above assumes,
+/// which is exactly when the estimated-scale channel must stay switched off.
+fn profiled_residual_degrees_of_freedom(fit: &UnifiedFitResult, n: usize) -> Option<f64> {
+    let variance = fit.standard_deviation * fit.standard_deviation;
+    if !(variance.is_finite() && variance > 0.0 && fit.deviance.is_finite() && fit.deviance > 0.0) {
+        return None;
+    }
+    let residual_df = fit.deviance / variance;
+    // The `n` ceiling carries a tolerance because `ν = D/σ̂²` is a ratio of two
+    // separately-rounded published numbers, and the branch that divides by `n`
+    // exactly lands on the ceiling.
+    let ceiling = n as f64 * (1.0 + 8.0 * f64::EPSILON);
+    (residual_df.is_finite() && residual_df > 0.0 && residual_df <= ceiling).then_some(residual_df)
+}
+
+/// The residual quadratic form's spectrum, `v_i = p_i²` over the WHOLE model's
+/// penalty shares — or `None` when the family does not profile a Gaussian scale
+/// out of a residual sum of squares.
+///
+/// This is [`lr_tested_block`] over the full coefficient range rather than over
+/// a term's: the same self-adjoint decomposition and the same `[0, 1]` shares,
+/// deliberately not a second route to the same object. See
+/// [`SmoothLrProfiledScale`] for why `V ~ Σ_i p_i²·χ²_1 + χ²_{n−p}`.
+///
+/// `Some(None)` — the family profiles a scale but the shares are unreachable —
+/// is a rung, not a refusal, on the same ladder the numerator's reference
+/// already has: the fit that cannot publish `H⁻¹` is the fit whose numerator is
+/// also a two-moment summary. What the caller does with it is fold the whole
+/// residual law into `V ~ χ²_{ν}` at the fit's own `ν`, which is mgcv's `F`
+/// reference exactly. Two things are then inexact rather than exact, both
+/// bounded by `Σ_i f_i(1 − f_i)` — the count of PARTIALLY shrunk directions,
+/// zero at both ends of the shrinkage range: `E[V] = tr((I−A)²) = ν −
+/// Σ f(1−f)` rather than `ν`, and `Var(V)/2 = Σv² ≤ Σv` so `χ²_ν`
+/// over-disperses. That is strictly better than the known-scale reference,
+/// which is what the alternative — dropping the channel — would silently
+/// restore.
+fn profiled_scale_residual_shares(
+    likelihood: &gam_spec::GlmLikelihoodSpec,
+    hessian_inverse: Option<&Array2<f64>>,
+    penalty: &Array2<f64>,
+    p_total: usize,
+) -> Result<Option<Option<Vec<f64>>>, EstimationError> {
+    let resolved = likelihood
+        .resolved_scale()
+        .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
+    if !matches!(resolved, gam_spec::ResolvedLikelihoodScale::ProfiledGaussian) {
+        return Ok(None);
+    }
+    Ok(Some(
+        lr_tested_block(hessian_inverse, Some(penalty), &(0..p_total))
+            .map(|block| block.shares.iter().map(|share| share * share).collect()),
+    ))
+}
+
 fn resolved_likelihood_for_fit(
     fit: &UnifiedFitResult,
 ) -> Result<gam_spec::GlmLikelihoodSpec, EstimationError> {
@@ -2599,6 +2889,9 @@ fn lr_null_reference(
         // geometry the replay is built from either.
         selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
         statistic_resolution,
+        // Completed by the caller once the null refit has produced the second
+        // residual degrees of freedom `B` needs (#2672).
+        profiled_scale: None,
     };
     let unit_weight = || {
         let df = edf.max(null_dim as f64).max(1.0);
@@ -2648,6 +2941,7 @@ fn lr_null_reference(
                     log_scale_windows,
                 ),
                 statistic_resolution,
+                profiled_scale: None,
             };
         }
     }
@@ -3257,6 +3551,226 @@ mod lr_null_reference_tests {
             lr_null_reference(None, None, None, &(0..4), 0.01, 0, 0.0, WINDOW, &[], &[]).chi_square_df,
             1.0
         );
+    }
+}
+
+/// The ESTIMATED-SCALE channel (#2672): the reference a profiled Gaussian's
+/// `W = n·ln(1 + Q/V) + B` actually has.
+#[cfg(test)]
+mod profiled_scale_reference_tests {
+    use super::{
+        SmoothLrProfiledScale, SmoothLrReferenceDf, SmoothLrReferenceSource, SmoothLrSelection,
+        SmoothLrSelectionDecline,
+    };
+
+    /// A reference carrying an explicit spectrum, no selection replay, and the
+    /// strictest tail accuracy the clamp allows.
+    fn reference(weights: Vec<f64>, profiled_scale: Option<SmoothLrProfiledScale>) -> SmoothLrReferenceDf {
+        let mean: f64 = weights.iter().sum();
+        let second_moment: f64 = weights.iter().map(|w| w * w).sum();
+        SmoothLrReferenceDf {
+            weights,
+            mean,
+            second_moment,
+            chi_square_df: mean * mean / second_moment,
+            scale: second_moment / mean,
+            moment_residual: None,
+            edf: mean,
+            null_dim: 0,
+            source: SmoothLrReferenceSource::NullSpectrum,
+            selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
+            statistic_resolution: 0.0,
+            profiled_scale,
+        }
+    }
+
+    /// When the tested block's spectrum is FLAT the ratio law is a Fisher-
+    /// Snedecor tail in closed form, so the whole channel — the `expm1`
+    /// inversion, the residual spectrum, the multiplicity fold — is checkable
+    /// against `fisher_snedecor_sf` with nothing shared but the arithmetic.
+    ///
+    /// `Q = g·χ²_q` and `V = χ²_ν`, so
+    /// `P(W > w) = P(g·χ²_q > c·χ²_ν) = P(F_{q,ν} > c·ν/(g·q))`.
+    #[test]
+    fn a_flat_spectrum_makes_the_profiled_reference_an_f_tail() {
+        for &(q, scale) in &[(1usize, 1.0_f64), (4, 1.0), (4, 0.37), (9, 2.5)] {
+            for &nu in &[8.0_f64, 26.0, 191.0] {
+                let observations = nu + q as f64;
+                let subject = reference(
+                    vec![scale; q],
+                    Some(SmoothLrProfiledScale {
+                        observations,
+                        deterministic_offset: 0.0,
+                        // `V ~ χ²_ν` exactly: no partially-shrunk direction, so
+                        // the whole residual law is the unit-multiplicity term.
+                        residual_weights: Vec::new(),
+                        residual_unit_dimension: nu,
+                    }),
+                );
+                for &statistic in &[0.05_f64, 0.8, 3.0, 12.0, 30.0] {
+                    let (got, bound) = subject.tail_probability_with_bound(statistic);
+                    let ratio = (statistic / observations).exp_m1();
+                    let want = gam_math::probability::fisher_snedecor_sf(
+                        ratio * nu / (scale * q as f64),
+                        q as f64,
+                        nu,
+                    );
+                    assert!(
+                        (got - want).abs() <= bound + 1e-9,
+                        "q={q} g={scale} ν={nu} W={statistic}: {got} vs F-tail {want} \
+                         (certified {bound:.3e})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The correction only ever costs power, never buys it: dividing by an
+    /// independent mean-one variate adds spread, so the profiled tail is above
+    /// the known-scale one everywhere in the upper tail. This is the SIGN of the
+    /// whole change, asserted as a property.
+    #[test]
+    fn the_profiled_reference_is_more_conservative_than_the_known_scale_one() {
+        let weights = vec![0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        let known = reference(weights.clone(), None);
+        for &nu in &[10.0_f64, 26.0, 100.0] {
+            let profiled = reference(
+                weights.clone(),
+                Some(SmoothLrProfiledScale {
+                    observations: nu + 5.0,
+                    deterministic_offset: 0.0,
+                    residual_weights: vec![0.81, 0.49],
+                    residual_unit_dimension: nu,
+                }),
+            );
+            for &statistic in &[3.0_f64, 6.0, 11.0, 20.0] {
+                let bare = known.tail_probability(statistic);
+                let scaled = profiled.tail_probability(statistic);
+                if bare > 0.4 {
+                    continue;
+                }
+                assert!(
+                    scaled > bare,
+                    "ν={nu} W={statistic}: profiled tail {scaled} must exceed the \
+                     known-scale {bare}"
+                );
+            }
+        }
+    }
+
+    /// And it converges back onto the known-scale reference as the residual
+    /// degrees of freedom grow, which is what makes this a refinement of the
+    /// large-`n` behaviour rather than a change to it.
+    #[test]
+    fn the_profiled_reference_converges_to_the_known_scale_one() {
+        let weights = vec![0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        let known = reference(weights.clone(), None);
+        for &statistic in &[2.0_f64, 5.0, 10.0] {
+            let target = known.tail_probability(statistic);
+            let mut previous = f64::INFINITY;
+            for &nu in &[100.0_f64, 1_000.0, 10_000.0, 100_000.0] {
+                let profiled = reference(
+                    weights.clone(),
+                    Some(SmoothLrProfiledScale {
+                        observations: nu + 5.0,
+                        deterministic_offset: 0.0,
+                        residual_weights: Vec::new(),
+                        residual_unit_dimension: nu,
+                    }),
+                );
+                let gap = (profiled.tail_probability(statistic) - target).abs();
+                assert!(gap < previous, "W={statistic} ν={nu}: {gap:.3e} vs {previous:.3e}");
+                previous = gap;
+            }
+            assert!(
+                previous < 1e-3,
+                "W={statistic}: still {previous:.3e} from the known-scale tail at ν = 100000"
+            );
+        }
+    }
+
+    /// The deterministic offset is part of the statistic, not a nuisance: a `W`
+    /// at or below it corresponds to `Q/V ≤ 0`, which cannot happen, so the
+    /// p-value is exactly one rather than something the quadrature invents.
+    #[test]
+    fn a_statistic_under_the_deterministic_offset_is_not_evidence() {
+        let subject = reference(
+            vec![1.0_f64, 0.5],
+            Some(SmoothLrProfiledScale {
+                observations: 30.0,
+                deterministic_offset: -0.61,
+                residual_weights: vec![0.25],
+                residual_unit_dimension: 24.0,
+            }),
+        );
+        for &statistic in &[-5.0_f64, -0.61, -0.7] {
+            let (got, bound) = subject.tail_probability_with_bound(statistic);
+            assert_eq!(got, 1.0, "W={statistic}");
+            assert_eq!(bound, 0.0);
+        }
+        // And it is a strict boundary: just above the offset the tail is still
+        // essentially one, but it is no longer the exact branch.
+        let (just_above, _) = subject.tail_probability_with_bound(-0.6099);
+        assert!(just_above < 1.0 && just_above > 0.999, "{just_above}");
+    }
+
+    /// The offset SHIFTS the reference, in the direction its sign says. A
+    /// negative `B` — which is what a null model with fewer effective degrees of
+    /// freedom produces — makes the same `W` more extreme.
+    #[test]
+    fn the_deterministic_offset_moves_the_reference_the_way_its_sign_says() {
+        let weights = vec![0.9_f64, 0.4, 0.1];
+        let build = |offset: f64| {
+            reference(
+                weights.clone(),
+                Some(SmoothLrProfiledScale {
+                    observations: 50.0,
+                    deterministic_offset: offset,
+                    residual_weights: vec![0.36, 0.04],
+                    residual_unit_dimension: 44.0,
+                }),
+            )
+        };
+        for &statistic in &[2.0_f64, 5.0, 9.0] {
+            let neutral = build(0.0).tail_probability(statistic);
+            let negative = build(-0.5).tail_probability(statistic);
+            let positive = build(0.5).tail_probability(statistic);
+            assert!(
+                negative < neutral && neutral < positive,
+                "W={statistic}: {negative} / {neutral} / {positive} are not ordered by the offset"
+            );
+        }
+    }
+
+    /// The channel is available on the DEGRADED lanes too, because the two-moment
+    /// summary is a one-term linear combination rather than a different shape.
+    /// Without it, a fit that could not reach its own spectrum would silently
+    /// fall back to the known-scale reference — the exact defect being removed.
+    #[test]
+    fn the_two_moment_lane_also_carries_the_estimated_scale() {
+        let mut subject = reference(Vec::new(), None);
+        subject.mean = 3.0;
+        subject.second_moment = 2.4;
+        subject.chi_square_df = 3.75;
+        subject.scale = 0.8;
+        let bare = subject.tail_probability(6.0);
+        subject.profiled_scale = Some(SmoothLrProfiledScale {
+            observations: 40.0,
+            deterministic_offset: 0.0,
+            residual_weights: Vec::new(),
+            residual_unit_dimension: 34.0,
+        });
+        let scaled = subject.tail_probability(6.0);
+        let want = gam_math::probability::fisher_snedecor_sf(
+            (6.0_f64 / 40.0).exp_m1() * 34.0 / (0.8 * 3.75),
+            3.75,
+            34.0,
+        );
+        assert!(
+            (scaled - want).abs() < 1e-9,
+            "the two-moment lane's ratio tail {scaled} is not the F tail {want}"
+        );
+        assert!(scaled > bare, "{scaled} must be above the known-scale {bare}");
     }
 }
 

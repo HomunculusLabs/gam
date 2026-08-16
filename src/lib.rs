@@ -281,8 +281,9 @@ pub mod smooth {
     // long-standing flat `gam::smooth::{…}` paths — imported across the
     // inference/curvature/coefficient-group integration tests — keep resolving.
     pub use gam_models::fit_orchestration::drivers::{
-        CurvatureInference, FittedTermCollectionWithSpec, SmoothLrCorrection, SmoothLrReferenceDf,
-        SmoothLrReferenceSource, SmoothLrSelection, SmoothLrSelectionDecline,
+        CurvatureInference, FittedTermCollectionWithSpec, SmoothLrCorrection,
+        SmoothLrProfiledScale, SmoothLrReferenceDf, SmoothLrReferenceSource, SmoothLrSelection,
+        SmoothLrSelectionDecline,
         SmoothTermLrInference, SpatialLengthScaleOptimizationTiming,
         build_term_collection_designs_and_freeze_joint, build_term_collection_designs_joint,
         curvature_inference_forspec, fit_term_collection_forspec,
