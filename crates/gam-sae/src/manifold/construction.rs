@@ -5,6 +5,7 @@ use super::*;
 use super::outer_objective::ProbeRefusalKind;
 use crate::identifiability::{
     FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature,
+    TriangularRootAccumulator,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
@@ -2915,24 +2916,46 @@ impl SaeManifoldTerm {
         // `rank` root rows `v_r[(k,i,a)] = U_n[i,r] · g[i,(k,a)]`. Each is a
         // `param_dim`-vector built in `param_dim` flops — the whitening reaches
         // exactly one output coordinate per column.
-        let dense = root_rows > param_dim;
-        let mut root = if dense {
+        //
+        // The metric couples output coordinates here, so `H` genuinely has no
+        // block structure: the per-row Jacobian is output-coordinate diagonal,
+        // but `M_n` is not, and the product `J_nᵀ M_n J_n` is dense. What the
+        // certificate reads off `H` is nevertheless read off a ROOT in both
+        // regimes (#2757):
+        //
+        // * with no more rows than columns the root is the smaller object and is
+        //   kept whole;
+        // * with more, its rows are folded into the `param_dim`-square
+        //   upper-triangular factor `T` with `TᵀT = RᵀR` by Givens rotations.
+        //
+        // This branch used to assemble the dense `param_dim × param_dim` GRAM
+        // instead — the exact object this issue is named for, on the half of the
+        // fork the block-structured curvature never reached — and then take its
+        // symmetric eigendecomposition. The factor is strictly better on both
+        // axes the certificate cares about: `eigh` allocates a second
+        // `param_dim²` for eigenvectors the reduction discards where a
+        // values-only SVD allocates none, and the rank decision stays on `σ`
+        // rather than being squared into `λ = σ²` and then floored at the
+        // eigensolver's own resolution `ε·param_dim·λ_max`.
+        //
+        // What it does not do is make this branch affordable at production
+        // width: `min(rows, param_dim)²` is what an exact full spectrum costs
+        // from either side, and no representation of a coupling metric's
+        // curvature avoids it. See `TriangularRootAccumulator`.
+        let fold = root_rows > param_dim;
+        let mut root = if fold {
             Array2::<f64>::zeros((0, 0))
         } else {
             Array2::<f64>::zeros((root_rows, param_dim))
         };
         let pin_rows = dense_rows.nrows();
-        let mut gram = if dense {
-            Array2::<f64>::zeros((param_dim, param_dim))
-        } else {
-            Array2::<f64>::zeros((0, 0))
-        };
+        let mut folded = fold.then(|| TriangularRootAccumulator::new(param_dim));
         let mut root_row = vec![0.0_f64; param_dim];
         for row in 0..n {
             if !self.fill_row_frame_jacobian(row, &assignments, layout, &mut tangent, &mut g) {
                 // No assignment mass: every root row this observation would
                 // contribute is exactly zero, and a zero row changes neither the
-                // Gram nor the (already zero) stored root row.
+                // triangular factor nor the (already zero) stored root row.
                 continue;
             }
             for r in 0..rank {
@@ -2943,11 +2966,20 @@ impl SaeManifoldTerm {
                         root_row[layout.column(i, l)] = w * g[[i, l]];
                     }
                 }
-                if dense {
-                    Self::accumulate_residual_gauge_gram_row(&mut gram, &root_row);
-                } else {
-                    for (c, v) in root_row.iter().enumerate() {
-                        root[[out_index, c]] = *v;
+                match folded.as_mut() {
+                    // `push_root_row` consumes the buffer (it is left as the
+                    // annihilated residual), and the next iteration overwrites
+                    // every entry it wrote — but only the entries this row's
+                    // Jacobian touches, so the buffer is re-zeroed rather than
+                    // trusted.
+                    Some(accumulator) => {
+                        accumulator.push_root_row(&mut root_row)?;
+                        root_row.fill(0.0);
+                    }
+                    None => {
+                        for (c, v) in root_row.iter().enumerate() {
+                            root[[out_index, c]] = *v;
+                        }
                     }
                 }
             }
@@ -2957,20 +2989,19 @@ impl SaeManifoldTerm {
         // lost by appending them, and none was available to exploit.
         for j in 0..pin_rows {
             let pin_row = dense_rows.row(j);
-            if dense {
-                let owned: Vec<f64> = pin_row.iter().copied().collect();
-                Self::accumulate_residual_gauge_gram_row(&mut gram, &owned);
-            } else {
-                root.row_mut(n * rank + j).assign(&pin_row);
+            match folded.as_mut() {
+                Some(accumulator) => {
+                    for (c, v) in pin_row.iter().enumerate() {
+                        root_row[c] = *v;
+                    }
+                    accumulator.push_root_row(&mut root_row)?;
+                    root_row.fill(0.0);
+                }
+                None => root.row_mut(n * rank + j).assign(&pin_row),
             }
         }
-        if dense {
-            for a in 0..param_dim {
-                for b in 0..a {
-                    gram[[b, a]] = gram[[a, b]];
-                }
-            }
-            return Ok(ResidualGaugeCurvature::DenseGram { gram, root_rows });
+        if let Some(accumulator) = folded {
+            return Ok(accumulator.finish(root_rows));
         }
         Ok(ResidualGaugeCurvature::DualRoot { root, root_rows })
     }
@@ -3005,21 +3036,6 @@ impl SaeManifoldTerm {
             }
         }
         any
-    }
-
-    pub(crate) fn accumulate_residual_gauge_gram_row(gram: &mut Array2<f64>, row: &[f64]) {
-        for a in 0..row.len() {
-            let va = row[a];
-            if va == 0.0 {
-                continue;
-            }
-            for b in 0..=a {
-                let vb = row[b];
-                if vb != 0.0 {
-                    gram[[a, b]] += va * vb;
-                }
-            }
-        }
     }
 
     pub fn set_temperature_schedule(

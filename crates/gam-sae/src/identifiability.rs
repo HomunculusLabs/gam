@@ -82,7 +82,10 @@
 
 pub mod frame_curvature;
 
-pub use frame_curvature::{FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature};
+pub use frame_curvature::{
+    FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature,
+    TriangularRootAccumulator,
+};
 
 use crate::chart_canonicalization::CanonicalChartTopology;
 use crate::inference::layer_transport::{ChartTopology, TransportLadderReport, transport_ladder};
