@@ -286,6 +286,127 @@ fn only_the_profiled_gaussian_carries_the_estimated_scale_channel() {
     );
 }
 
+/// THE WHOLE DISTRIBUTION, not one level. A size grid asks whether the tail
+/// mass at `α = 0.05` is right; a p-value that is wrong everywhere else can
+/// still pass that, and a reference that is wrong by a MONOTONE distortion — a
+/// scale, which is exactly what an unscored `V` is — moves the whole
+/// distribution rather than one point of it. So this arm reads the
+/// Kolmogorov–Smirnov distance of the pooled null p-values from `Uniform(0,1)`,
+/// which is the statement "the reference IS the statistic's law".
+///
+/// The bar is derived, not chosen: `K(1.95) = 0.9990`, so `1.95/√R` is the
+/// distance an exactly-calibrated test exceeds once in a thousand runs. Both
+/// arms are reported so the comparison is in the output rather than in this
+/// comment — the known-scale reference is scored on the SAME p-values' own
+/// fits, so nothing but the reference differs.
+#[test]
+fn the_gaussian_null_p_values_are_uniform_under_the_estimated_scale() {
+    init_parallelism();
+    const REPS: usize = 150;
+    const NULL_N: usize = 40;
+    const NULL_K: usize = 6;
+
+    let mut published = Vec::<f64>::with_capacity(REPS);
+    let mut known_scale = Vec::<f64>::with_capacity(REPS);
+    let mut refused = 0usize;
+    for rep in 0..REPS {
+        let data = null_replicate(NULL_N, 0x2672_0000_0000_1001 + rep as u64);
+        let cfg = FitConfig {
+            family: Some("gaussian".to_string()),
+            ..FitConfig::default()
+        };
+        let formula = format!("y ~ x + s(z, k={NULL_K})");
+        let mat = materialize(&formula, &data, &cfg).expect("materialize");
+        let FitRequest::Standard(req) = mat.request else {
+            panic!("expected a standard fit request");
+        };
+        let reports = match smooth_term_lr_inference_forspec(
+            req.data.view(),
+            req.y.view(),
+            req.weights.view(),
+            req.offset.view(),
+            &req.spec,
+            req.family,
+            &req.options,
+        ) {
+            Ok(reports) => reports,
+            Err(_) => {
+                refused += 1;
+                continue;
+            }
+        };
+        let Some(report) = reports.into_iter().find(|r| r.name.contains('z')) else {
+            continue;
+        };
+        if !report.p_value_corrected.is_finite() {
+            continue;
+        }
+        let mut bare = report.ref_df_provenance.clone();
+        bare.profiled_scale = None;
+        published.push(report.p_value_corrected);
+        known_scale.push(bare.tail_probability(report.statistic_corrected));
+    }
+
+    assert!(
+        published.len() >= REPS * 8 / 10,
+        "only {}/{REPS} replicates produced a finite p-value ({refused} fit refusals)",
+        published.len()
+    );
+    let bar = 1.95 / (published.len() as f64).sqrt();
+    let published_ks = kolmogorov_smirnov(&published);
+    let known_ks = kolmogorov_smirnov(&known_scale);
+    eprintln!(
+        "[2672-uniformity] R={} KS(published)={published_ks:.4} KS(known-scale)={known_ks:.4} \
+         bar={bar:.4} | size@.05 published={:.4} known={:.4}",
+        published.len(),
+        published.iter().filter(|p| **p <= 0.05).count() as f64 / published.len() as f64,
+        known_scale.iter().filter(|p| **p <= 0.05).count() as f64 / known_scale.len() as f64,
+    );
+    assert!(
+        published_ks <= bar,
+        "the published null p-values are {published_ks:.4} from Uniform(0,1) in KS distance, \
+         above the {bar:.4} an exactly-calibrated test exceeds once in a thousand runs. The \
+         known-scale reference on the same fits reads {known_ks:.4}."
+    );
+}
+
+/// One-sample Kolmogorov–Smirnov distance from `Uniform(0, 1)`.
+fn kolmogorov_smirnov(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite p-values"));
+    let count = sorted.len() as f64;
+    sorted
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            let below = index as f64 / count;
+            let above = (index as f64 + 1.0) / count;
+            (value - below).abs().max((above - value).abs())
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+/// A null-true Gaussian replicate: `y = 0.3 + 0.8x + N(0, 0.5²)` with `z` an
+/// independent nuisance the smooth is fitted on.
+fn null_replicate(n: usize, seed: u64) -> gam::data::EncodedDataset {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let headers = ["y", "x", "z"].iter().map(|s| s.to_string()).collect();
+    let mut rows = Vec::<StringRecord>::with_capacity(n);
+    for i in 0..n {
+        let x = i as f64 / (n as f64 - 1.0);
+        let z: f64 = rng.random_range(0.0..1.0);
+        let y = Normal::new(0.3 + 0.8 * x, 0.5)
+            .expect("normal")
+            .sample(&mut rng);
+        rows.push(StringRecord::from(vec![
+            y.to_string(),
+            x.to_string(),
+            z.to_string(),
+        ]));
+    }
+    encode_recordswith_inferred_schema(headers, rows).expect("encode the #2672 null replicate")
+}
+
 /// THE SIGN. An estimated scale adds spread and can only cost power, so the
 /// published p-value must be at or above the one the SAME reference would give
 /// with the channel switched off — and materially so at this `n`.
