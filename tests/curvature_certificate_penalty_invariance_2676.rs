@@ -1,8 +1,7 @@
-//! #2676 end-to-end: a Matérn joint spatial smooth whose penalty map carries an
-//! EXACT linear redundancy must still fit and still certify.
+//! #2676 end-to-end: what the curvature certificate is entitled to deflate, and
+//! what it is not.
 //!
-//! This is the shape of the three `geo_disease_*_matern` bench refusals, at a
-//! size that runs in a test. The refusals were:
+//! The refusals this issue was filed for were:
 //!
 //! * `INDEFINITE CURVATURE AT INTERIOR OPTIMUM (curvature floor did not clear)`
 //!   with `interior lambda_min = -5.048e-6` and `railed = []`, and
@@ -10,45 +9,65 @@
 //!   own resolution floor 1.444e-6 … a genuine contradiction rather than an
 //!   unresolvable direction` — decided by a **0.55%** margin.
 //!
-//! Both were the sign of a rounding residual on a direction where the
-//! ρ-curvature is `Σ_k g_k t_k²` by the chain rule, and nothing else. See
-//! `gam_solve::penalty_invariance` for the derivation.
+//! On a direction where the criterion is EXACTLY constant in `lambda` the
+//! rho-curvature is `Σ_k g_k t_k²` by the chain rule and nothing else, so the
+//! gate compares a quantity against its own absolute value and the verdict is
+//! the sign of a rounding residual. The repair is to deflate such a direction
+//! rather than judge it. See `gam_solve::penalty_invariance`.
 //!
-//! The two assertions here are a pair and neither is meaningful alone:
+//! # Why this file has two arms, and why the second one exists at all
 //!
-//! 1. **The fix.** The fit completes, with inference requested so the
-//!    smoothing-correction inverse runs alongside the outer certificate.
-//! 2. **Non-vacuity**, taken on the design the fit ACTUALLY REALIZED and
-//!    returned — not on a separately-built one, which is a different object on
-//!    this route (the joint spatial freeze resolves the length scale, and the
-//!    penalty map moves with it; measured: a cold `build_term_collection_design`
-//!    of this same spec has no redundancy at all). Without this the fit above
-//!    could pass for the boring reason that there was nothing to deflate.
+//! The premise "the `geo_disease_*_matern` penalty map carries an exact
+//! redundancy" came from a screen that printed `cos` to six decimals, and
+//! `1 - cos = delta²/2` — the cosine is the DEFECT SQUARED. Measured
+//! (`examples/probe2676_penalty_map_defect`, centers=10, n=1500, n_pcs=16):
+//!
+//! ```text
+//!     length_scale      relative defect   certified nullity
+//!       2.05e-2           2.079e-15              1
+//!       1.64e-1 (Auto)    1.874e-5               0
+//!       1.27e0  (fitted)  3.396e-1               0
+//! ```
+//!
+//! The redundancy is a small-length-scale LIMIT of two genuinely different
+//! operators, and it is not present at the geometry the `Auto` fit settles on.
+//! So:
+//!
+//! * [`a_redundant_penalty_map_still_fits_and_certifies_2676`] gates the
+//!   deflation on a geometry where the premise is TRUE, found by measurement
+//!   rather than pinned to a constant;
+//! * [`the_auto_geometry_carries_no_exact_invariance_and_still_certifies_2676`]
+//!   pins the honest fact about the geometry the issue's own bench cells use —
+//!   the fit certifies there and NOTHING is deflated — so the false premise
+//!   cannot come back by inheritance.
 
 use gam::estimate::FitOptions;
 use gam::smooth::{
     ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
-    TermCollectionSpec,
+    TermCollectionDesign, TermCollectionSpec,
 };
+use gam::solver::penalty_invariance::PenaltyMapInvariance;
 use gam::terms::basis::{
     CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternLengthScale, MaternNu,
 };
+use gam::terms::construction::CanonicalPenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{FitRequest, FitResult, StandardFitRequest};
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 
 // Chosen by sweeping `examples/repro2676_geo_disease_matern` over
-// `(centers, n, n_pcs)`: the smallest cell measured that BOTH carries the exact
-// redundancy and completes (2.7 s in release). The redundancy is a property of
-// the `(centers, n_pcs)` pair rather than of `n` — `(10, 6)` has none,
-// `(10, 16)` and `(24, 16)` do — so neither constant is arbitrary and neither
-// may be tuned to make a red test green.
+// `(centers, n, n_pcs)`: the smallest cell measured that BOTH reaches the
+// #2676 code paths and completes (a few seconds in release). The exact
+// redundancy is a property of the `(centers, n_pcs)` pair and of the geometry —
+// `(10, 6)` has none at any scale, `(10, 16)` and `(24, 16)` have one below
+// `~4e-2` — so neither constant is arbitrary and neither may be tuned to make a
+// red test green.
 const N_ROWS: usize = 1500;
 const N_PCS: usize = 16;
 const CENTERS: usize = 10;
 const SEED: u64 = 20260226;
 
-fn spec() -> TermCollectionSpec {
+fn spec_at(length_scale: MaternLengthScale) -> TermCollectionSpec {
     TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
@@ -62,10 +81,7 @@ fn spec() -> TermCollectionSpec {
                         num_centers: CENTERS,
                     },
                     periodic: None,
-                    // Omitted `length_scale=` — the same `Auto` the formula
-                    // surface produces, which is what routes the fit through
-                    // the joint spatial κ search the #2676 refusals live in.
-                    length_scale: MaternLengthScale::auto(),
+                    length_scale,
                     nu: MaternNu::FiveHalves,
                     include_intercept: false,
                     double_penalty: false,
@@ -80,14 +96,13 @@ fn spec() -> TermCollectionSpec {
     }
 }
 
-/// Every pairwise matrix cosine `tr(S_i S_j)/sqrt(tr(S_i²) tr(S_j²))` of a
-/// realized penalty bundle, for the failure message. A cosine of exactly 1 is
-/// the redundancy signature the pairwise screen already reports; the Gram null
-/// space is the general form of it.
-fn pair_cosines(
-    canonical: &[gam::terms::construction::CanonicalPenalty],
-) -> Vec<(usize, usize, f64)> {
-    let norms: Vec<f64> = canonical
+/// `min_c ||S_j - c S_i||_F / ||S_i||_F` — the defect of the proportionality
+/// claim, in the coordinate the penalty map's rank is actually decided in.
+///
+/// NOT `1 - cos`: that is this quantity SQUARED, and the squaring is what let a
+/// `1.9e-5` pair print as `cos = 1.000000` for the whole life of this issue.
+fn pair_defects(canonical: &[CanonicalPenalty]) -> Vec<(usize, usize, f64)> {
+    let norms_sq: Vec<f64> = canonical
         .iter()
         .map(|penalty| penalty.local.iter().map(|value| value * value).sum::<f64>())
         .collect();
@@ -95,26 +110,34 @@ fn pair_cosines(
     for i in 0..canonical.len() {
         for j in (i + 1)..canonical.len() {
             if canonical[i].col_range != canonical[j].col_range
-                || norms[i] == 0.0
-                || norms[j] == 0.0
+                || norms_sq[i] == 0.0
+                || norms_sq[j] == 0.0
             {
                 continue;
             }
-            let dot: f64 = canonical[i]
+            let inner: f64 = canonical[i]
                 .local
                 .iter()
                 .zip(canonical[j].local.iter())
                 .map(|(a, b)| a * b)
                 .sum();
-            out.push((i, j, dot / (norms[i] * norms[j]).sqrt()));
+            let scale = inner / norms_sq[i];
+            let residual_sq: f64 = canonical[i]
+                .local
+                .iter()
+                .zip(canonical[j].local.iter())
+                .map(|(a, b)| {
+                    let residual = b - scale * a;
+                    residual * residual
+                })
+                .sum();
+            out.push((i, j, (residual_sq / norms_sq[i]).sqrt()));
         }
     }
     out
 }
 
-fn canonicalize(
-    design: &gam::smooth::TermCollectionDesign,
-) -> (Vec<gam::terms::construction::CanonicalPenalty>, usize) {
+fn canonicalize(design: &TermCollectionDesign) -> (Vec<CanonicalPenalty>, usize) {
     let specs: Vec<gam::terms::PenaltySpec> = design
         .penalties
         .iter()
@@ -137,25 +160,15 @@ fn canonicalize(
     (canonical, p)
 }
 
-/// THE ACCEPTANCE: a Matérn joint spatial fit whose penalty map carries an exact
-/// redundancy completes, with inference, and the design it realized is then
-/// checked to actually carry that redundancy.
-///
-/// Before the deflation landed, whether this refused was decided by the sign of
-/// a rounding residual — it refused on the bench hosts and admitted on others,
-/// with nothing about the fit differing between the two. That is why the fit
-/// assertion is bare success: the failure mode is a hard `Err`.
-#[test]
-fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
+fn fit_at(length_scale: MaternLengthScale) -> Result<gam::FittedTermCollection, String> {
     let (x, y) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
     let n = y.len();
-
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {
         data: gam::solver::fit_orchestration::StandardFitData::shared(x),
         y: std::sync::Arc::new(y),
         weights: std::sync::Arc::new(Array1::ones(n)),
         offset: std::sync::Arc::new(Array1::zeros(n)),
-        spec: spec(),
+        spec: spec_at(length_scale),
         family: LikelihoodSpec::new(
             ResponseFamily::Binomial,
             InverseLink::Standard(StandardLink::Logit),
@@ -174,46 +187,19 @@ fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
         penalty_block_gamma_priors: Vec::new(),
         latent_coord: None,
     }));
-
-    let fitted = match result {
-        Ok(FitResult::Standard(fit)) => fit,
+    match result {
+        Ok(FitResult::Standard(fit)) => Ok(fit),
         Ok(_) => panic!("the standard request must produce a standard result"),
-        Err(error) => panic!(
-            "a Matern joint spatial fit whose penalty map carries an exact redundancy must not \
-             refuse: {error}"
-        ),
-    };
-    assert!(
-        fitted.fit.beta.iter().all(|value: &f64| value.is_finite()),
-        "every coefficient of a certified fit must be finite"
-    );
+        Err(error) => Err(error.to_string()),
+    }
+}
 
-    // Non-vacuity, on the design the fit REALIZED.
-    let (canonical, p) = canonicalize(&fitted.design);
-    let invariance =
-        gam::solver::penalty_invariance::PenaltyMapInvariance::from_canonical_penalties(
-            &canonical, p,
-        )
-        .expect("the penalty-map Gram of a realized design must decompose");
-    assert_eq!(
-        invariance.dimension(),
-        1,
-        "this fixture exists because the realized Matern joint spatial penalty map has exactly \
-         one exact linear redundancy; if that is no longer true the acceptance above proves \
-         nothing and this test must be re-derived, not relaxed. k={}, p={p}, ranges={:?}, \
-         pair cosines={:?}",
-        canonical.len(),
-        canonical
-            .iter()
-            .map(|c| (c.col_range.start, c.col_range.end))
-            .collect::<Vec<_>>(),
-        pair_cosines(&canonical),
-    );
-
-    // And the redundancy is genuinely a NULL of the map, not a near-one: the
-    // combination it names assembles to zero.
-    let w = invariance.lambda_basis().column(0).to_owned();
-    let mut assembled = ndarray::Array2::<f64>::zeros((p, p));
+/// `sum_i w_i S_i`, assembled at the certified null direction, as a max-norm
+/// against the penalty scale. An EXACT invariance leaves this at round-off; a
+/// near one does not, and this is the check that tells them apart without
+/// consulting the same machinery that made the call.
+fn assembled_null_residual(canonical: &[CanonicalPenalty], w: &Array1<f64>, p: usize) -> (f64, f64) {
+    let mut assembled = Array2::<f64>::zeros((p, p));
     for (index, penalty) in canonical.iter().enumerate() {
         let start = penalty.col_range.start;
         for row in 0..penalty.local.nrows() {
@@ -231,9 +217,148 @@ fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
         .iter()
         .flat_map(|c| c.local.iter().copied().map(f64::abs))
         .fold(0.0_f64, f64::max);
+    (residual, scale)
+}
+
+/// THE ACCEPTANCE: a Matérn spatial fit whose penalty map carries an EXACT
+/// linear redundancy completes, with inference.
+///
+/// Before the deflation landed, whether this refused was decided by the sign of
+/// a rounding residual — it refused on the bench hosts and admitted on others,
+/// with nothing about the fit differing between the two. That is why the fit
+/// assertion is bare success: the failure mode is a hard `Err`.
+///
+/// The geometry is FOUND, not pinned. The redundancy is a small-length-scale
+/// limit, so which scales carry it is a property of the operator construction
+/// and moves when that construction does; a hard-coded scale would silently
+/// stop exercising the deflation the first time it moved, which is exactly the
+/// failure this file is being rewritten out of. The ladder is fixed and short,
+/// the first scale that certifies is the one used, and if NONE of them does the
+/// test fails saying so — that is the honest signal that the pipeline can no
+/// longer produce the object this acceptance is about.
+#[test]
+fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
+    let (x, _) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
+    let mut trail = Vec::new();
+    let mut chosen = None;
+    // Four scales spanning the measured exact-redundancy band (`<= 4e-2`) and
+    // its upper edge, coarsest first.
+    for scale in [4.0e-2_f64, 2.0e-2, 1.0e-2, 5.0e-3] {
+        let design = match gam::smooth::build_term_collection_design(
+            x.view(),
+            &spec_at(MaternLengthScale::fixed(scale)),
+        ) {
+            Ok(design) => design,
+            Err(error) => {
+                trail.push(format!("ls={scale:.3e}: build failed: {error}"));
+                continue;
+            }
+        };
+        let (canonical, p) = canonicalize(&design);
+        let invariance = PenaltyMapInvariance::from_canonical_penalties(&canonical, p)
+            .expect("the penalty-map factorization of a realized design must succeed");
+        trail.push(format!(
+            "ls={scale:.3e}: k={} certified_nullity={} defect_floor={:.3e} pair_defects={:?}",
+            canonical.len(),
+            invariance.dimension(),
+            invariance.resolution(),
+            pair_defects(&canonical),
+        ));
+        if invariance.dimension() >= 1 {
+            chosen = Some((scale, canonical, p, invariance));
+            break;
+        }
+    }
+    let Some((scale, canonical, p, invariance)) = chosen else {
+        panic!(
+            "no length scale on the ladder produces a penalty map with an exact linear \
+             redundancy, so this acceptance has nothing to gate. Re-derive it against whatever \
+             the operator construction now produces; do NOT relax it. Trail:\n  {}",
+            trail.join("\n  ")
+        );
+    };
+
+    // Non-vacuity, checked WITHOUT the machinery that made the call: the
+    // combination the invariance names must assemble to zero.
+    let w = invariance.lambda_basis().column(0).to_owned();
+    let (residual, penalty_scale) = assembled_null_residual(&canonical, &w, p);
     assert!(
-        residual <= 1.0e-10 * scale.max(1.0),
-        "sum_i w_i S_i must vanish (got max|entry| = {residual:.3e} against a penalty scale of \
-         {scale:.3e})"
+        residual <= 1.0e-10 * penalty_scale.max(1.0),
+        "sum_i w_i S_i must vanish at ls={scale:.3e} (got max|entry| = {residual:.3e} against a \
+         penalty scale of {penalty_scale:.3e}); trail:\n  {}",
+        trail.join("\n  ")
+    );
+
+    // And the fit at that geometry completes, with inference, so both the outer
+    // certificate and the smoothing-correction inverse run on it.
+    let fitted = fit_at(MaternLengthScale::fixed(scale)).unwrap_or_else(|error| {
+        panic!(
+            "a Matern spatial fit whose penalty map carries an exact redundancy must not \
+             refuse (ls={scale:.3e}): {error}\ntrail:\n  {}",
+            trail.join("\n  ")
+        )
+    });
+    assert!(
+        fitted.fit.beta.iter().all(|value: &f64| value.is_finite()),
+        "every coefficient of a certified fit must be finite"
+    );
+
+    // The design the fit REALIZED must still carry it — a fit that moved the
+    // geometry out from under the premise would make the success above prove
+    // nothing, which is precisely how the previous version of this test went
+    // vacuous.
+    let (realized, realized_p) = canonicalize(&fitted.design);
+    let realized_invariance = PenaltyMapInvariance::from_canonical_penalties(&realized, realized_p)
+        .expect("the penalty-map factorization of a realized design must succeed");
+    assert!(
+        realized_invariance.dimension() >= 1,
+        "the REALIZED design must still carry the redundancy the acceptance is about; got \
+         certified_nullity={} with pair defects {:?} (build-time trail:\n  {})",
+        realized_invariance.dimension(),
+        pair_defects(&realized),
+        trail.join("\n  "),
+    );
+}
+
+/// The other half, and the reason this file was rewritten: the geometry the
+/// issue's own `geo_disease_*_matern` bench cells run at carries NO exact
+/// invariance, the fit certifies there anyway, and nothing is deflated.
+///
+/// Three assertions, and the last two are what stop the false premise coming
+/// back: the map certifies nothing, and the pair that used to be called
+/// "structurally identical" is measurably distinct — reported as a defect, at a
+/// stated multiple of the floor, so the next reader does not have to re-derive
+/// it from a rounded cosine.
+#[test]
+fn the_auto_geometry_carries_no_exact_invariance_and_still_certifies_2676() {
+    let fitted = fit_at(MaternLengthScale::auto())
+        .unwrap_or_else(|error| panic!("the Auto-geometry Matern fit must not refuse: {error}"));
+    assert!(
+        fitted.fit.beta.iter().all(|value: &f64| value.is_finite()),
+        "every coefficient of a certified fit must be finite"
+    );
+
+    let (canonical, p) = canonicalize(&fitted.design);
+    let invariance = PenaltyMapInvariance::from_canonical_penalties(&canonical, p)
+        .expect("the penalty-map factorization of a realized design must succeed");
+    let defects = pair_defects(&canonical);
+    let smallest = defects
+        .iter()
+        .map(|(_, _, defect)| *defect)
+        .fold(f64::INFINITY, f64::min);
+    assert_eq!(
+        invariance.dimension(),
+        0,
+        "the Auto geometry carries NO exact penalty-map invariance — if it now does, the \
+         operator construction has changed and the first arm's premise has to be re-derived \
+         rather than this assertion relaxed. defects={defects:?}"
+    );
+    assert!(
+        smallest > invariance.resolution(),
+        "and it must be measurably so: the closest pair sits at {smallest:.3e} against a defect \
+         floor of {:.3e} ({:.3e}x). A defect at or under the floor with a certified nullity of \
+         zero would mean the two disagree.",
+        invariance.resolution(),
+        smallest / invariance.resolution(),
     );
 }

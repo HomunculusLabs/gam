@@ -22,6 +22,12 @@
 //! `G_ij = <A_i, A_j>_F` of the penalty operators, because
 //! `w' G w = ||sum_i w_i A_i||_F^2`.
 //!
+//! That identity is the definition and NOT the algorithm. It carries the
+//! defect `||sum_i w_i A_i||_F` squared, so asking an `f64` eigensolver for
+//! `null(G)` decides at `sqrt(eps)`: every map within `1.5e-8` of dependent
+//! reads as exactly dependent. [`DoubleDouble`] carries the measurement that
+//! makes this concrete and the arithmetic that removes it.
+//!
 //! # Why the certificate has to know
 //!
 //! `rho = log lambda` is a nonlinear reparameterisation, so for any smooth `V`
@@ -50,6 +56,20 @@
 //! `sigma = 2.0930992e-5`, `sum_k g_k v_k^2 = 2.0946774e-5`, intrinsic
 //! `-1.578e-8` — the identity holding to `7.5e-4` relative, with the gate's
 //! whole verdict riding on the sign of that residual.
+//!
+//! # ⚠ And this does NOT apply to a near-invariance
+//!
+//! Everything above is an identity, and it holds only where `sum_i w_i A_i` is
+//! EXACTLY zero. Where it is merely small — `||sum_i w_i A_i||_F = delta` — the
+//! criterion carries genuine curvature of order `delta^2` along the lift, the
+//! residual of `t'H_rho t - sum_k g_k t_k^2` is that curvature and NOT the
+//! assembly's error, and deflating the direction hides a measurement instead of
+//! a rounding. Measured (`examples/probe2676_penalty_map_defect`): the
+//! `geo_disease_*_matern` cells' redundancy is a small-length-scale limit —
+//! `delta = 2.079e-15` below `4e-2`, `1.874e-5` at the cold `Auto` geometry,
+//! `3.396e-1` at the geometry the fit settles on — so on those cells there is
+//! nothing here to deflate, and a certification that said otherwise was reading
+//! `delta^2` against `eps`.
 //!
 //! The repair is therefore NOT a wider floor. The comparison is degenerate, not
 //! under-resolved: **deflate the subspace, then apply the existing, unchanged
@@ -83,56 +103,156 @@
 use gam_terms::construction::CanonicalPenalty;
 use ndarray::{Array1, Array2};
 
-/// Neumaier (Kahan–Babuška) compensated summation.
+/// A double-double (unevaluated two-term) real, carrying `hi + lo` with
+/// `|lo| <= ulp(hi)/2` — roughly 32 decimal digits.
 ///
-/// A running sum of `m` terms accumulates `O(m·eps·Σ|term|)` of error under
-/// naive addition; this variant tracks the discarded low-order bits and returns
-/// a result whose error is `eps·Σ|term| + O(eps²)` — **independent of `m`**.
+/// # Why this site needs more than `f64`
 ///
-/// It is used where a decision is taken at the scale of the accumulation's own
-/// round-off: the penalty-map Gram (#2748), whose smallest eigenvalue decides
-/// whether the criterion has an exact invariance, is `O(1)` in size and is
-/// judged against `O(eps)`, so a length-dependent error term is the difference
-/// between reading an exact redundancy and reading none.
+/// The penalty map's rank is `rank({A_i})`, and the quantity that decides it is
+/// the DEFECT `delta = min_w ||sum_i w_i A_i||_F / ||w||` — a linear measure of
+/// how far the operators are from dependent. The Gram `G_ij = <A_i, A_j>_F`
+/// carries it SQUARED: `lambda_min(G) = delta^2`. So a rank test taken on `G` in
+/// working precision, at `G`'s own `eps`, is a defect test at `sqrt(eps)`:
 ///
-/// The Neumaier variant (rather than plain Kahan) is used because the terms
-/// here are not sorted and a later term can exceed the running sum, which is
-/// the case plain Kahan compensates in the wrong direction.
-#[derive(Clone, Copy, Debug, Default)]
-struct NeumaierSum {
-    sum: f64,
-    compensation: f64,
+/// ```text
+///     delta = 1.5e-8   =>   lambda_min(G) = 2.2e-16 = eps
+/// ```
+///
+/// and every penalty map within `1.5e-8` of a linear dependency reads as
+/// EXACTLY dependent. Measured on `geo_disease_matern` (centers=24, n=4000,
+/// `examples/probe2676_penalty_map_defect`): pair defect `1.238e-8`, certified
+/// nullity 1, the direction deflated, and the invariance residual the deflation
+/// then feeds into the curvature resolution read `1.170e-8` — a number that was
+/// reported as the ASSEMBLY'S ERROR and is in fact the criterion's own genuine
+/// curvature along a direction it is not flat along.
+///
+/// The classical repair is to never form the normal equations: factor the
+/// operator stack instead, whose singular values ARE the defects. Materializing
+/// that stack costs `k * block^2` doubles, which at a shared block of a few
+/// thousand columns is hundreds of megabytes. Doing the same arithmetic in
+/// double-double instead costs a constant factor of TIME and no memory at all,
+/// and it restores exactly what the squaring took: with `G` accurate to
+/// `~eps^2` and its Cholesky taken in the same precision, the pivot
+/// `sqrt(d_j)` is the defect, accurate to `~eps` RELATIVE, at any magnitude
+/// down to `eps` itself.
+///
+/// This is the same lesson as this module's other compensation (#2748) one
+/// level up: compute the quantity to the accuracy the decision needs, rather
+/// than widening the bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct DoubleDouble {
+    hi: f64,
+    lo: f64,
 }
 
-impl NeumaierSum {
-    fn add(&mut self, term: f64) {
-        let total = self.sum + term;
-        // Whichever operand is larger in magnitude is exactly representable in
-        // the difference, so the other one's lost low bits are recovered.
-        self.compensation += if self.sum.abs() >= term.abs() {
-            (self.sum - total) + term
-        } else {
-            (term - total) + self.sum
-        };
-        self.sum = total;
+impl DoubleDouble {
+    const ZERO: Self = Self { hi: 0.0, lo: 0.0 };
+
+    fn new(value: f64) -> Self {
+        Self {
+            hi: value,
+            lo: 0.0,
+        }
     }
 
-    fn value(self) -> f64 {
-        self.sum + self.compensation
+    /// The nearest `f64`. Correct to a rounding of the double-double value.
+    fn to_f64(self) -> f64 {
+        self.hi + self.lo
+    }
+
+    /// Knuth's TwoSum: exact for any two finite `f64`, no ordering assumption.
+    fn two_sum(a: f64, b: f64) -> (f64, f64) {
+        let sum = a + b;
+        let b_virtual = sum - a;
+        let a_virtual = sum - b_virtual;
+        ((sum), ((a - a_virtual) + (b - b_virtual)))
+    }
+
+    /// Dekker's QuickTwoSum: exact when `|a| >= |b|`, which the renormalisation
+    /// step below guarantees.
+    fn quick_two_sum(a: f64, b: f64) -> (f64, f64) {
+        let sum = a + b;
+        (sum, b - (sum - a))
+    }
+
+    /// Exact product, via one fused multiply-add. `mul_add` rounds ONCE, so
+    /// `a*b - p` is representable and is the product's exact residual.
+    fn two_product(a: f64, b: f64) -> (f64, f64) {
+        let product = a * b;
+        (product, a.mul_add(b, -product))
+    }
+
+    fn add(self, other: Self) -> Self {
+        let (sum, mut error) = Self::two_sum(self.hi, other.hi);
+        error += self.lo + other.lo;
+        let (hi, lo) = Self::quick_two_sum(sum, error);
+        Self { hi, lo }
+    }
+
+    fn sub(self, other: Self) -> Self {
+        self.add(Self {
+            hi: -other.hi,
+            lo: -other.lo,
+        })
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let (product, mut error) = Self::two_product(self.hi, other.hi);
+        error += self.hi * other.lo + self.lo * other.hi;
+        let (hi, lo) = Self::quick_two_sum(product, error);
+        Self { hi, lo }
+    }
+
+    /// Exact product of two `f64`, as a double-double. This is how every term
+    /// of the Gram enters: rounding the product first would put an `eps`-sized
+    /// error on a quantity the decision reads at `eps^2`.
+    fn from_product(a: f64, b: f64) -> Self {
+        let (hi, lo) = Self::two_product(a, b);
+        Self { hi, lo }
+    }
+
+    /// One Newton correction on the `f64` quotient, which doubles its digits.
+    fn div(self, other: Self) -> Self {
+        let approximate = self.hi / other.hi;
+        if !approximate.is_finite() {
+            return Self::new(approximate);
+        }
+        let remainder = self.sub(other.mul(Self::new(approximate)));
+        let correction = remainder.hi / other.hi;
+        let (hi, lo) = Self::quick_two_sum(approximate, correction);
+        Self { hi, lo }
+    }
+
+    /// One Newton correction on the `f64` square root, same doubling.
+    fn sqrt(self) -> Self {
+        if self.hi <= 0.0 {
+            return Self::ZERO;
+        }
+        let approximate = self.hi.sqrt();
+        let remainder = self.sub(Self::new(approximate).mul(Self::new(approximate)));
+        let correction = remainder.to_f64() / (2.0 * approximate);
+        let (hi, lo) = Self::quick_two_sum(approximate, correction);
+        Self { hi, lo }
+    }
+
+    fn is_finite(self) -> bool {
+        self.hi.is_finite() && self.lo.is_finite()
     }
 }
 
 /// The exact null space of the penalty map, in `lambda` coordinates.
 ///
 /// Built from the canonical penalties alone. No tolerance is chosen: the rank
-/// boundary is decided by the eigensolver's own backward error under Weyl's law
-/// (#2690), the same instrument
-/// [`crate::estimate::smoothing_correction`] already uses for this Gram.
+/// boundary is decided in the DEFECT's own units — the norm of what is left of
+/// an operator after projecting onto the ones already accepted — against the
+/// construction error operators of that size carry. See [`DoubleDouble`] for
+/// why the Gram's eigenvalues cannot answer this and what it cost when they
+/// were asked to (#2676).
 #[derive(Debug, Clone)]
 pub struct PenaltyMapInvariance {
-    /// Orthonormal columns spanning `null(G)`, shape `k x d`.
+    /// Orthonormal columns spanning `null({A_i})`, shape `k x d`.
     basis: Array2<f64>,
-    /// The Weyl resolution the rank boundary was decided at.
+    /// The defect floor the rank boundary was decided at.
     resolution: f64,
 }
 
@@ -144,12 +264,16 @@ impl PenaltyMapInvariance {
         self.basis.ncols()
     }
 
-    /// The resolution the rank boundary was decided at.
+    /// The DEFECT floor the rank boundary was decided at, i.e. the largest
+    /// `min_c ||A_j - sum c_i A_i||_F` this constructor is willing to call
+    /// zero. Denominated in the operators' own norm, NOT in the Gram's — a
+    /// defect of `r` shows up in the Gram as `r^2`, and reporting the square
+    /// is what let a `1.2e-8` near-dependency read as exact (#2676).
     pub fn resolution(&self) -> f64 {
         self.resolution
     }
 
-    /// Orthonormal basis of `null(G)` in `lambda` coordinates, `k x d`.
+    /// Orthonormal basis of `null({A_i})` in `lambda` coordinates, `k x d`.
     pub fn lambda_basis(&self) -> &Array2<f64> {
         &self.basis
     }
@@ -175,8 +299,6 @@ impl PenaltyMapInvariance {
         canonical: &[CanonicalPenalty],
         coefficient_dimension: usize,
     ) -> Result<Self, String> {
-        use gam_linalg::faer_ndarray::FaerEigh;
-
         let k = canonical.len();
         if k == 0 {
             return Ok(Self {
@@ -262,120 +384,205 @@ impl PenaltyMapInvariance {
             }
         }
 
-        // Gram of the unscaled augmented maps. Positive lambdas only rescale
-        // the columns of the map and therefore cannot change this rank.
+        // Gram of the unscaled augmented maps, in DOUBLE-DOUBLE. Positive
+        // lambdas only rescale the columns of the map and therefore cannot
+        // change this rank.
         //
-        // # Why the accumulation is compensated (#2748)
-        //
-        // The rank decision below is taken at `O(eps)` on entries of size
-        // `O(1)`, so the accumulation's own error IS the decision. Naive
-        // summation of `m = block^2` products carries `m*eps*sum|S_i S_j|`,
-        // which for a `23 x 23` block is `1.2e-13` — three orders above the
-        // bar and enough to make an EXACTLY proportional pair read as
-        // independent. Measured on the two `geo_disease_matern` cells this
-        // issue compares: `1 - cos` came out `1.11e-16` on one and
-        // `4.80e-14` on the other, from penalty pairs of the same structure —
-        // the spread is the summation, not the operators.
-        //
-        // Neumaier compensation removes the length dependence entirely: the
-        // error becomes `eps * sum|S_i S_j| <= eps * ||S_i||_F ||S_j||_F`, i.e.
-        // one rounding of the answer's own scale however long the sum. That is
-        // the repair — compute the quantity to the accuracy the decision needs
-        // — and NOT a wider bar, which would have admitted genuinely distinct
-        // penalties as redundant.
-        let mut gram = Array2::<f64>::zeros((k, k));
+        // Every term enters as an EXACT product (`from_product`) and every
+        // addition is exact to the second word, so a Gram entry of size `O(1)`
+        // carries `O(m * eps^2)` of error rather than `O(eps)`. That is what
+        // makes the rank boundary below a statement about the OPERATORS rather
+        // than about `sqrt(eps)`; see [`DoubleDouble`] for the measurement that
+        // forced it.
+        let mut gram = vec![DoubleDouble::ZERO; k * k];
         for i in 0..k {
             for j in i..k {
                 let start = canonical[i].col_range.start.max(canonical[j].col_range.start);
                 let end = canonical[i].col_range.end.min(canonical[j].col_range.end);
-                let mut accumulator = NeumaierSum::default();
+                let mut accumulator = DoubleDouble::ZERO;
                 for global_row in start..end {
                     for global_col in start..end {
-                        accumulator.add(
+                        accumulator = accumulator.add(DoubleDouble::from_product(
                             canonical[i].local[[
                                 global_row - canonical[i].col_range.start,
                                 global_col - canonical[i].col_range.start,
-                            ]] * canonical[j].local[[
+                            ]],
+                            canonical[j].local[[
                                 global_row - canonical[j].col_range.start,
                                 global_col - canonical[j].col_range.start,
                             ]],
-                        );
+                        ));
                     }
                 }
                 // The two border blocks of A_i contribute 2 c_i . c_j, the
-                // corner contributes q_i q_j. Both enter the same compensated
-                // accumulator: they are terms of the same inner product, and
-                // splitting them off would reintroduce an uncompensated add at
-                // exactly the scale the decision is taken at.
-                let mut border = NeumaierSum::default();
+                // corner contributes q_i q_j. Both enter the same accumulator:
+                // they are terms of the same inner product, and splitting them
+                // off would reintroduce a rounding at exactly the scale the
+                // decision is taken at.
+                let mut border = DoubleDouble::ZERO;
                 for column in 0..centering.ncols() {
-                    border.add(centering[[i, column]] * centering[[j, column]]);
+                    border = border.add(DoubleDouble::from_product(
+                        centering[[i, column]],
+                        centering[[j, column]],
+                    ));
                 }
-                accumulator.add(2.0 * border.value());
-                accumulator.add(quadratic[i] * quadratic[j]);
-                let inner = accumulator.value();
-                gram[[i, j]] = inner;
-                gram[[j, i]] = inner;
+                accumulator = accumulator.add(border.mul(DoubleDouble::new(2.0)));
+                accumulator =
+                    accumulator.add(DoubleDouble::from_product(quadratic[i], quadratic[j]));
+                if !accumulator.is_finite() {
+                    return Err(format!(
+                        "penalty-map Gram entry ({i},{j}) is not finite"
+                    ));
+                }
+                gram[i * k + j] = accumulator;
+                gram[j * k + i] = accumulator;
             }
         }
 
-        let (eigenvalues, eigenvectors) = gram
-            .eigh(faer::Side::Lower)
-            .map_err(|error| format!("penalty-map Gram eigendecomposition failed: {error}"))?;
-        // The Gram is assembled analytically, so its rank boundary is judged by
-        // the Weyl law (#2690), never by the finite-difference one.
-        let resolution = crate::estimate::smoothing_correction::eigenpair_backward_error_bound(
-            &gram,
-            &eigenvalues,
-            &eigenvectors,
-        )?
-        .resolution();
-        let minimum = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
-        if minimum < -resolution {
-            let negated = -resolution;
-            return Err(format!(
-                "penalty-map Gram matrix has negative eigenvalue {minimum:.3e} below \
-                 backward-error bound {negated:.3e}"
-            ));
+        // ── The rank boundary, in the DEFECT's own units ──
+        //
+        // `floor(r)` is the size of a residual that `r + 1` operators of this
+        // size could produce out of their own construction arithmetic alone.
+        // Each operator is an accumulation over its `m = block^2` entries, so
+        // its own error is `sqrt(m) * eps * ||A||_F`; a residual against `r`
+        // accepted columns combines `r + 1` such independent errors, which add
+        // in quadrature. Nothing is chosen: the model is the arithmetic, and it
+        // is calibrated by the two populations it has to separate — measured on
+        // `geo_disease_matern`, a pair known equal sits at `2.079e-15` against
+        // a `sqrt(m) * eps` of `2.220e-15`, and the nearest pair known distinct
+        // sits at `8.75e-9`, six orders the other side.
+        let entries = canonical
+            .iter()
+            .map(|penalty| penalty.local.len())
+            .max()
+            .unwrap_or(0) as f64;
+        let scale = norms
+            .iter()
+            .fold(0.0_f64, |worst, value| worst.max(value.sqrt()))
+            .max(1.0);
+        let operator_error = entries.sqrt() * f64::EPSILON * scale;
+        let defect_floor = |accepted: usize| operator_error * ((accepted + 1) as f64).sqrt();
+
+        // ── Pivoted Cholesky of the double-double Gram ──
+        //
+        // `G = L L'` with column pivoting. At step `s` the pivot `d[j]` is the
+        // SQUARED norm of `A_j`'s residual against the span already accepted,
+        // so `sqrt(d[j])` IS the defect of column `j` against that span —
+        // exactly the quantity the boundary is denominated in, and (unlike
+        // `lambda_min(G)` read off an `f64` eigensolver) known to full relative
+        // accuracy because the whole recurrence runs in double-double.
+        let mut lower = vec![DoubleDouble::ZERO; k * k];
+        let mut diagonal: Vec<DoubleDouble> = (0..k).map(|i| gram[i * k + i]).collect();
+        let mut order: Vec<usize> = (0..k).collect();
+        let mut rank = k;
+        for step in 0..k {
+            let pivot = (step..k).fold(step, |best, index| {
+                if diagonal[index].to_f64() > diagonal[best].to_f64() {
+                    index
+                } else {
+                    best
+                }
+            });
+            let residual = diagonal[pivot];
+            // A true Gram is PSD, so a pivot below `-floor^2` is not a rank
+            // statement — it is a malformed input, and saying so beats
+            // silently truncating the rank.
+            let floor = defect_floor(step);
+            if residual.to_f64() < -(floor * floor) {
+                return Err(format!(
+                    "penalty-map Gram is not positive semidefinite: pivot {:.3e} at step {step} \
+                     is below the negated squared defect floor {:.3e}",
+                    residual.to_f64(),
+                    -(floor * floor),
+                ));
+            }
+            if !(residual.sqrt().to_f64() > floor) {
+                rank = step;
+                break;
+            }
+            order.swap(step, pivot);
+            diagonal.swap(step, pivot);
+            for column in 0..step {
+                lower.swap(step * k + column, pivot * k + column);
+            }
+            let pivot_root = diagonal[step].sqrt();
+            lower[step * k + step] = pivot_root;
+            for row in (step + 1)..k {
+                let mut accumulated = gram[order[row] * k + order[step]];
+                for column in 0..step {
+                    accumulated =
+                        accumulated.sub(lower[row * k + column].mul(lower[step * k + column]));
+                }
+                let entry = accumulated.div(pivot_root);
+                lower[row * k + step] = entry;
+                diagonal[row] = diagonal[row].sub(entry.mul(entry));
+            }
         }
-        let null_columns: Vec<usize> = (0..k)
-            .filter(|&index| eigenvalues[index] <= resolution)
-            .collect();
-        // The one number that decides whether the curvature certificate gets to
-        // deflate anything, printed with the bar it was decided against. Without
-        // this line a `cos = 1.000000` redundancy warning and a `structural_zero
-        // = 0` classification sit in the same log with nothing connecting them,
-        // which is exactly the state #2748 was found in.
-        log::debug!(
-            "[PENALTY-INVARIANCE] k={k} gram_eigenvalues={:?} resolution={resolution:.6e} \
-             certified_nullity={} gram_diagonal={:?} min_offdiag_defect={:.6e} \
-             (a column is certified null when its Gram eigenvalue is at or under the \
-             resolution)",
-            eigenvalues.as_slice().unwrap_or(&[]),
-            null_columns.len(),
-            (0..k).map(|i| gram[[i, i]]).collect::<Vec<_>>(),
-            (0..k)
-                .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
-                .map(|(i, j)| {
-                    // 1 - cos(S_i, S_j): zero exactly when the two operators are
-                    // proportional, so this is the scale the Gram's null eigenvalue
-                    // is set by.
-                    let denominator = (gram[[i, i]] * gram[[j, j]]).sqrt();
-                    if denominator > 0.0 {
-                        1.0 - gram[[i, j]] / denominator
-                    } else {
-                        f64::INFINITY
-                    }
-                })
-                .fold(f64::INFINITY, f64::min),
-        );
-        let mut basis = Array2::<f64>::zeros((k, null_columns.len()));
-        for (target, &source) in null_columns.iter().enumerate() {
+
+        // ── The null space of the MAP, from the factor rather than the Gram ──
+        //
+        // Column `j` of the permuted stack is `sum_t L[j][t] q_t` in the
+        // orthonormal frame the factorisation produced, so
+        // `sum_j w_j A_j = 0` reads `L[:, 0..rank]' w = 0`. With `L1` the
+        // leading `rank x rank` triangle (nonsingular by the pivot test above)
+        // and `L2` the rows below it, the solutions are
+        // `w1 = -(L1')^{-1} L2' w2` for free `w2`, which is a basis of exactly
+        // `k - rank` columns.
+        let mut basis = Array2::<f64>::zeros((k, k - rank));
+        for (column, free) in (rank..k).enumerate() {
+            let mut w = Array1::<f64>::zeros(k);
+            w[free] = 1.0;
+            // Back-substitute `L1' w1 = -L2' w2` from the bottom row up.
+            for row in (0..rank).rev() {
+                let mut accumulated = 0.0_f64;
+                for index in (row + 1)..k {
+                    accumulated += lower[index * k + row].to_f64() * w[index];
+                }
+                let pivot_root = lower[row * k + row].to_f64();
+                w[row] = if pivot_root != 0.0 {
+                    -accumulated / pivot_root
+                } else {
+                    0.0
+                };
+            }
+            for (position, &source) in order.iter().enumerate() {
+                basis[[source, column]] = w[position];
+            }
+        }
+        let basis = if basis.ncols() == 0 {
             basis
-                .column_mut(target)
-                .assign(&eigenvectors.column(source));
-        }
-        Ok(Self { basis, resolution })
+        } else {
+            match orthonormalize_columns(&basis) {
+                Some(orthonormal) => orthonormal,
+                // Every column of a null basis is independent by construction,
+                // so losing them all means the back-substitution produced
+                // nothing usable. Certify nothing rather than a wrong subspace.
+                None => Array2::<f64>::zeros((k, 0)),
+            }
+        };
+
+        // The one number that decides whether the curvature certificate gets to
+        // deflate anything, printed in the DEFECT's units and with the bar it
+        // was decided against. Without this line a redundancy warning and a
+        // `structural_zero = 0` classification sit in the same log with nothing
+        // connecting them, which is exactly the state #2748 was found in.
+        log::debug!(
+            "[PENALTY-INVARIANCE] k={k} rank={rank} certified_nullity={} \
+             defect_floor={operator_error:.6e} pivot_defects={:?} gram_diagonal={:?} \
+             (a column is certified dependent when its residual defect sqrt(d_j) — the norm of \
+             what is left of it after projecting onto the columns already accepted — is at or \
+             under the floor; the floor is one operator-construction error per operator involved, \
+             in quadrature)",
+            basis.ncols(),
+            (0..k)
+                .map(|i| diagonal[i].sqrt().to_f64())
+                .collect::<Vec<_>>(),
+            (0..k).map(|i| gram[i * k + i].to_f64()).collect::<Vec<_>>(),
+        );
+        Ok(Self {
+            basis,
+            resolution: operator_error,
+        })
     }
 
     /// Lift the invariance to the outer coordinate vector.

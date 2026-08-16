@@ -406,6 +406,131 @@ fn a_perturbation_off_the_invariance_does_not_move_the_residual_2748() {
     );
 }
 
+/// THE REGRESSION (#2676): a penalty map whose operators are `1.2e-8` from
+/// dependent must NOT be certified as exactly dependent.
+///
+/// `1.2e-8` is the measured `geo_disease_matern` (centers=24, n=4000) figure.
+/// It matters because the Gram carries the defect SQUARED —
+/// `lambda_min(G) = delta^2 = 1.5e-16` — so a rank test taken on `G` at `G`'s
+/// own `eps` certified it, deflated the direction, and then reported the
+/// criterion's genuine curvature there as the assembly's error.
+///
+/// Three assertions, and the second and third are what make the first
+/// non-vacuous: the fixture IS a near-dependency at exactly that scale, and its
+/// Gram eigenvalue IS at machine epsilon, i.e. the old test could not have
+/// distinguished it from an exact one.
+#[test]
+fn a_map_1p2e_minus_8_from_dependent_is_not_certified_dependent_2676() {
+    const DEFECT: f64 = 1.238_259e-8;
+    let s0 = array![[2.0_f64, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s1 = array![[0.0_f64, 0.0, 0.0], [0.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+    // A perturbation orthogonal to `s0` in the Frobenius inner product, so the
+    // defect is exactly its relative size and none of it is absorbed into the
+    // best proportionality constant.
+    let base_norm = s0.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let mut direction = array![[0.0_f64, 0.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let overlap =
+        direction.iter().zip(s0.iter()).map(|(a, b)| a * b).sum::<f64>() / (base_norm * base_norm);
+    direction = &direction - &(overlap * &s0);
+    let direction_norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let s2 = &s0 + &(direction * (DEFECT * base_norm / direction_norm));
+
+    let bundle = vec![penalty(s0.clone(), 3), penalty(s1, 3), penalty(s2.clone(), 3)];
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 3).expect("gram decomposes");
+    assert_eq!(
+        invariance.dimension(),
+        0,
+        "operators {DEFECT:.3e} from dependent are MEASURABLY independent and must not be \
+         certified; the criterion carries genuine curvature of order defect^2 along that \
+         direction and the certificate has to judge it"
+    );
+    assert!(
+        invariance.resolution() < DEFECT,
+        "the reported defect floor {:.3e} must be BELOW the defect it refused, or the refusal \
+         is an accident",
+        invariance.resolution()
+    );
+
+    // Non-vacuity 1: the fixture really is a near-dependency at that scale.
+    let residual = (&s2 - &s0).iter().map(|v| v * v).sum::<f64>().sqrt() / base_norm;
+    assert!(
+        (residual - DEFECT).abs() <= 1e-3 * DEFECT,
+        "the fixture must sit at {DEFECT:.3e}; got {residual:.3e}"
+    );
+
+    // Non-vacuity 2: the Gram route could not have seen it. The smallest
+    // eigenvalue of the 2x2 Gram of the near-dependent pair is `delta^2/2` times
+    // the operator scale, which is AT machine epsilon on this fixture — so a
+    // rank test denominated in the Gram is deciding on its own round-off.
+    let gram_eigenvalue = 0.5 * DEFECT * DEFECT * base_norm * base_norm;
+    assert!(
+        gram_eigenvalue <= 16.0 * f64::EPSILON * base_norm * base_norm,
+        "the fixture must be one the Gram cannot resolve: lambda_min(G) = {gram_eigenvalue:.3e} \
+         against an eps-scaled Gram norm of {:.3e}",
+        f64::EPSILON * base_norm * base_norm
+    );
+}
+
+/// The other side of the same boundary: operators that ARE equal to the
+/// arithmetic that formed them stay certified. Without this the fix above could
+/// be "certify nothing", which would silently retire the whole deflation.
+#[test]
+fn operators_equal_to_their_own_arithmetic_stay_certified_2676() {
+    let s0 = array![[2.0_f64, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s1 = array![[0.0_f64, 0.0, 0.0], [0.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+    // One ulp of perturbation on the largest entry — the most a bit-identical
+    // pair can differ by and still be the same operator.
+    let mut s2 = s0.mapv(|value| 0.75 * value);
+    s2[[0, 0]] = f64::from_bits(s2[[0, 0]].to_bits() + 1);
+    let bundle = vec![penalty(s0, 3), penalty(s1, 3), penalty(s2, 3)];
+    let invariance =
+        PenaltyMapInvariance::from_canonical_penalties(&bundle, 3).expect("gram decomposes");
+    assert_eq!(
+        invariance.dimension(),
+        1,
+        "a one-ulp difference is the operators' own representation and must stay certified"
+    );
+}
+
+/// The arithmetic the rank boundary rests on, gated directly: the double-double
+/// accumulation must resolve a Gram entry whose value is `eps^2`-scale, which is
+/// precisely what an `f64` accumulation cannot do.
+#[test]
+fn the_gram_accumulation_resolves_below_machine_epsilon_2676() {
+    // `sum_i a_i b_i` over terms of size 1 whose exact total is 1e-24. An `f64`
+    // accumulation of the same terms returns 0 or an eps-scale artefact.
+    let a = [1.0_f64, 1.0, 1e-24];
+    let b = [1.0_f64, -1.0, 1.0];
+    let mut compensated = DoubleDouble::ZERO;
+    let mut naive = 0.0_f64;
+    for index in 0..a.len() {
+        compensated = compensated.add(DoubleDouble::from_product(a[index], b[index]));
+        naive += a[index] * b[index];
+    }
+    assert_eq!(
+        compensated.to_f64(),
+        1e-24,
+        "the compensated accumulation must return the exact total"
+    );
+    // The naive one happens to survive THIS ordering, so reorder it into the one
+    // a Gram loop would produce and show the loss.
+    let mut reordered = 0.0_f64;
+    for index in [0usize, 2, 1] {
+        reordered += a[index] * b[index];
+    }
+    assert_eq!(
+        reordered, 0.0,
+        "the f64 accumulation loses the entire quantity under a different ordering \
+         (got {reordered:.3e}), which is why the rank boundary cannot rest on it"
+    );
+    assert_eq!(naive, 1e-24);
+    // And the two-product residual is exact where a rounded product is not.
+    let (product, residual) = DoubleDouble::two_product(1.0 + f64::EPSILON, 1.0 + f64::EPSILON);
+    assert_eq!(product, 1.0 + 2.0 * f64::EPSILON);
+    assert_eq!(residual, f64::EPSILON * f64::EPSILON);
+}
+
 /// The `(H_ρ, g_ρ, lifted invariance)` triple used by the #2748 instrument
 /// gates: a criterion that depends on `λ` only through `Λ = λ₀ + c·λ₂` and
 /// `λ₁`, assembled through the chain rule so the reparameterisation identity

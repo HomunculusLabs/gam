@@ -137,7 +137,14 @@ fn report(label: &str, design: &gam::smooth::TermCollectionDesign) {
         }
     };
     eprintln!(
-        "[probe2676] {label}: k={k} p={p} certified_nullity={dimension} gram_resolution={resolution:.3e}"
+        "[probe2676] {label}: k={k} p={p} certified_nullity={dimension} gram_resolution={resolution:.3e} \
+         sources={:?} ranks={:?}",
+        design
+            .penaltyinfo
+            .iter()
+            .map(|info| format!("{:?}", info.penalty.source))
+            .collect::<Vec<_>>(),
+        canonical.iter().map(|c| c.rank()).collect::<Vec<_>>(),
     );
     for i in 0..k {
         for j in (i + 1)..k {
