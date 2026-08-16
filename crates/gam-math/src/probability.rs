@@ -473,6 +473,123 @@ pub fn weighted_chi_square_sf_to_tolerance(
     statistic: f64,
     absolute_tolerance: f64,
 ) -> (f64, f64) {
+    let mut terms = Vec::with_capacity(weights.len());
+    for &weight in weights {
+        if !weight.is_finite() || weight < 0.0 {
+            return (f64::NAN, f64::NAN);
+        }
+        terms.push(WeightedChiSquareTerm {
+            weight,
+            degrees_of_freedom: 1.0,
+        });
+    }
+    signed_weighted_chi_square_sf_to_tolerance(&terms, statistic, absolute_tolerance)
+}
+
+/// One `λ_j · χ²_{h_j}` term of a linear combination of independent
+/// chi-squares, with the weight's SIGN and the term's degrees of freedom both
+/// carried explicitly.
+///
+/// Two things separate this from the `&[f64]` weight list
+/// [`weighted_chi_square_sf`] takes, and each of them is a distribution the
+/// one-degree-of-freedom non-negative form cannot express:
+///
+/// * **A negative weight makes a RATIO a tail.** `P(A/B > t)` for independent
+///   non-negative `A`, `B` is `P(A − tB > 0)`, so every F-shaped reference —
+///   any statistic whose scale was estimated from the same data — is a
+///   *signed* combination evaluated at zero. The classical `F_{a,b}` is the
+///   two-term case `λ = (1, −t·a/b)`, `h = (a, b)`.
+/// * **A multiplicity is not `h` copies of a weight.** It is, mathematically,
+///   but the Imhof integrand costs one `atan` and one `ln` per TERM, and a
+///   residual sum of squares carries `n − p` unit weights. Folding them into
+///   one term with `h = n − p` is what makes an `n`-sized reference cost the
+///   same as a `p`-sized one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeightedChiSquareTerm {
+    /// `λ_j`, of either sign. A zero weight contributes nothing and is dropped.
+    pub weight: f64,
+    /// `h_j > 0`. Real rather than integral: a two-moment summary of a spectrum
+    /// is a chi-square with a fractional shape, and this type is what carries it.
+    pub degrees_of_freedom: f64,
+}
+
+/// Survival probability `P(Σ_j λ_j χ²_{h_j} > statistic)` for independent
+/// central chi-squares, with weights of EITHER SIGN, at
+/// [`WEIGHTED_CHI_SQUARE_TOLERANCE`].
+///
+/// See [`WeightedChiSquareTerm`] for why the sign and the multiplicity are
+/// worth carrying, and [`signed_weighted_chi_square_sf_to_tolerance`] for the
+/// accuracy contract.
+pub fn signed_weighted_chi_square_sf(terms: &[WeightedChiSquareTerm], statistic: f64) -> f64 {
+    signed_weighted_chi_square_sf_to_tolerance(terms, statistic, WEIGHTED_CHI_SQUARE_TOLERANCE).0
+}
+
+/// [`signed_weighted_chi_square_sf`] at a caller-chosen absolute accuracy,
+/// returning the bound actually achieved alongside the value.
+///
+/// # Method
+///
+/// Imhof's (1961) inversion in its general central form, of which the
+/// non-negative unit-`h` case documented on [`weighted_chi_square_sf`] is the
+/// specialization:
+///
+/// ```text
+/// P(Q > x) = 1/2 + (1/π) ∫_0^∞ sin θ(u) / (u ρ(u)) du,
+/// θ(u) = ½ Σ_j h_j arctan(λ_j u) − ½ x u,
+/// ρ(u) = Π_j (1 + λ_j² u²)^{h_j/4}.
+/// ```
+///
+/// Nothing in the derivation asks `λ_j > 0` — `arctan` is odd and `λ²` is even,
+/// so a negative weight simply turns its part of the phase the other way.
+///
+/// # Two truncation bounds, because one of them stops working at `x = 0`
+///
+/// The oscillatory bound `16/(x·U·ρ(U))` documented on
+/// [`weighted_chi_square_sf`] divides by `x`, and the ratio references this
+/// signed form exists for are evaluated at exactly `x = 0`, where the phase
+/// stops turning at all: `θ(u) → (π/4)·Σ_j h_j·sgn(λ_j)`, a constant. There is
+/// no oscillation left to cancel, so the alternating-series argument yields
+/// nothing.
+///
+/// What replaces it is the AMPLITUDE, which the same `x = 0` makes strong
+/// rather than weak. For `u ≥ U` and `t = u/U ≥ 1`,
+/// `(1 + λ²u²)/(1 + λ²U²) ≥ (1 + t²)/2 ≥ t` on every term ACTIVE at `U`
+/// (`|λ_j|·U ≥ 1`) and `≥ 1` on the rest, so `ρ(u) ≥ ρ(U)·t^{H/4}` with
+/// `H = Σ_{active} h_j` and
+///
+/// ```text
+/// |tail(U)| ≤ ∫_U^∞ du/(u ρ(u)) ≤ 4 / (H · ρ(U)).
+/// ```
+///
+/// This is a bound on the answer, not a guess about it, and it is the CHEAP
+/// one exactly where the oscillatory bound is unavailable: a ratio reference
+/// carries the residual `χ²_{n−p}`, so `H` is of order `n` and `ρ` grows like
+/// `U^{n/2}` — a handful of panels. Both bounds are evaluated and the smaller
+/// is taken, which also strictly improves the non-negative case at small `x`,
+/// where `16/(x·U·ρ)` is what used to make the sweep long.
+///
+/// # Phase monotonicity, generalized
+///
+/// The oscillatory bound is valid only past the point where `|θ′| ≥ x/4`. With
+/// mixed signs `φ′(u) = ½ Σ_j h_j λ_j/(1 + λ_j²u²)` is no longer monotone in
+/// `u`, so the test is applied to `½ Σ_j h_j |λ_j|/(1 + λ_j²u²)` — an upper
+/// bound on `|φ′|` that IS decreasing, hence a condition at `U` that holds for
+/// every `u ≥ U`. On non-negative weights the two expressions coincide.
+///
+/// # Exact special cases
+///
+/// * no nonzero weight — `Q ≡ 0`;
+/// * all weights positive and `x ≤ 0`, or all negative and `x ≥ 0` — the
+///   inequality is decided by the support;
+/// * all weights bit-identical — `Q = λ·χ²_{Σh}` exactly, on either sign.
+///
+/// Returns `NaN` if any weight is non-finite, if any degrees-of-freedom is not
+/// finite and positive, or if `statistic` is `NaN`.
+pub fn signed_weighted_chi_square_sf_to_tolerance(
+    terms: &[WeightedChiSquareTerm],
+    statistic: f64,
+    absolute_tolerance: f64,
+) -> (f64, f64) {
     let tolerance = if absolute_tolerance.is_finite() && absolute_tolerance > 0.0 {
         absolute_tolerance
     } else {
@@ -481,29 +598,47 @@ pub fn weighted_chi_square_sf_to_tolerance(
     if statistic.is_nan() {
         return (f64::NAN, f64::NAN);
     }
-    let mut positive = Vec::with_capacity(weights.len());
-    for &w in weights {
-        if !w.is_finite() || w < 0.0 {
+    let mut active = Vec::with_capacity(terms.len());
+    for term in terms {
+        if !term.weight.is_finite()
+            || !(term.degrees_of_freedom.is_finite() && term.degrees_of_freedom > 0.0)
+        {
             return (f64::NAN, f64::NAN);
         }
-        if w > 0.0 {
-            positive.push(w);
+        if term.weight != 0.0 {
+            active.push(*term);
         }
     }
-    if positive.is_empty() {
+    if active.is_empty() {
         // `Q` is identically zero: it exceeds a negative threshold with
         // certainty and a non-negative one never.
         return (if statistic < 0.0 { 1.0 } else { 0.0 }, 0.0);
     }
-    if statistic <= 0.0 {
+    let all_positive = active.iter().all(|term| term.weight > 0.0);
+    let all_negative = active.iter().all(|term| term.weight < 0.0);
+    if all_positive && statistic <= 0.0 {
         // `Q > 0` almost surely once one weight is positive.
         return (1.0, 0.0);
     }
-    let first = positive[0];
-    if positive.iter().all(|&w| w == first) {
-        return (chi_square_sf(statistic / first, positive.len() as f64), 0.0);
+    if all_negative && statistic >= 0.0 {
+        // `Q < 0` almost surely once every weight is negative.
+        return (0.0, 0.0);
     }
-    imhof_survival(&positive, statistic, tolerance)
+    let first = active[0].weight;
+    if active.iter().all(|term| term.weight == first) {
+        let total_df: f64 = active.iter().map(|term| term.degrees_of_freedom).sum();
+        // `P(λ·χ² > x)` is the χ² upper tail at `x/λ` for `λ > 0` and the LOWER
+        // tail there for `λ < 0`, because dividing by a negative number turns
+        // the inequality around.
+        let scaled = statistic / first;
+        let tail = if first > 0.0 {
+            chi_square_sf(scaled, total_df)
+        } else {
+            1.0 - chi_square_sf(scaled, total_df)
+        };
+        return (tail, 0.0);
+    }
+    imhof_survival(&active, statistic, tolerance)
 }
 
 /// Default absolute accuracy [`weighted_chi_square_sf`] certifies on its Imhof
@@ -529,45 +664,120 @@ const GAUSS_LEGENDRE_16: [(f64, f64); 8] = [
 
 /// Imhof's integrand `sin θ(u) / (u ρ(u))` with the `u → 0` limit folded in.
 #[inline]
-fn imhof_integrand(weights: &[f64], statistic: f64, u: f64) -> f64 {
+fn imhof_integrand(terms: &[WeightedChiSquareTerm], statistic: f64, u: f64) -> f64 {
     if u == 0.0 {
-        return 0.5 * (weights.iter().sum::<f64>() - statistic);
+        let mean: f64 = terms
+            .iter()
+            .map(|term| term.weight * term.degrees_of_freedom)
+            .sum();
+        return 0.5 * (mean - statistic);
     }
     let mut phase = -0.5 * statistic * u;
     let mut log_rho = 0.0;
-    for &w in weights {
-        let wu = w * u;
-        phase += 0.5 * wu.atan();
-        log_rho += 0.25 * wu.mul_add(wu, 1.0).ln();
+    for term in terms {
+        let wu = term.weight * u;
+        phase += 0.5 * term.degrees_of_freedom * wu.atan();
+        log_rho += 0.25 * term.degrees_of_freedom * wu.mul_add(wu, 1.0).ln();
     }
     phase.sin() / (u * log_rho.exp())
 }
 
 /// `ln ρ(u)`, the Imhof amplitude exponent.
 #[inline]
-fn imhof_log_rho(weights: &[f64], u: f64) -> f64 {
-    weights
+fn imhof_log_rho(terms: &[WeightedChiSquareTerm], u: f64) -> f64 {
+    terms
         .iter()
-        .map(|&w| {
-            let wu = w * u;
-            0.25 * wu.mul_add(wu, 1.0).ln()
+        .map(|term| {
+            let wu = term.weight * u;
+            0.25 * term.degrees_of_freedom * wu.mul_add(wu, 1.0).ln()
         })
         .sum()
 }
 
-/// `φ'(u) = ½ Σ_j w_j/(1 + w_j²u²)`, the non-linear part of the phase's own
-/// derivative. The oscillatory truncation bound is valid only past the point
-/// where this has fallen below `x/4`, so that `θ` is monotone with
-/// `|θ'| ≥ x/4`.
+/// `½ Σ_j h_j|w_j|/(1 + w_j²u²)`, a DECREASING upper bound on the magnitude of
+/// the non-linear part of the phase's own derivative.
+///
+/// The oscillatory truncation bound is valid only past the point where the
+/// phase is monotone with `|θ'| ≥ x/4`, which needs `|φ'(u)| ≤ x/4` for every
+/// `u` past the truncation point rather than at it. With mixed-sign weights
+/// `φ'` is not monotone, so the test is applied to this bound instead; on
+/// non-negative weights the two are the same expression.
 #[inline]
-fn imhof_phase_slack(weights: &[f64], u: f64) -> f64 {
-    weights
+fn imhof_phase_slack(terms: &[WeightedChiSquareTerm], u: f64) -> f64 {
+    terms
         .iter()
-        .map(|&w| {
-            let wu = w * u;
-            0.5 * w / wu.mul_add(wu, 1.0)
+        .map(|term| {
+            let wu = term.weight * u;
+            0.5 * term.degrees_of_freedom * term.weight.abs() / wu.mul_add(wu, 1.0)
         })
         .sum()
+}
+
+/// `4/(H·ρ(U))`, the AMPLITUDE truncation bound, with
+/// `H = Σ_{|w_j|U ≥ 1} h_j` the degrees of freedom already active at `U`.
+///
+/// Valid unconditionally — it bounds `∫_U^∞ du/(u ρ(u))` and never looks at the
+/// phase — and it is the only bound available at `statistic = 0`, where the
+/// oscillatory one divides by zero. `None` when nothing is active yet, since
+/// `ρ` is then still flat and there is no decay to integrate against.
+/// Panel width that resolves the integrand's AMPLITUDE, as opposed to its
+/// phase.
+///
+/// The phase rule below sizes a panel so it sweeps at most one oscillation.
+/// That is necessary and it is not sufficient: `1/(u ρ(u))` has structure of
+/// its own, on the scale `1/|λ|` where `(1 + λ²u²)^{h/4}` turns over, and a
+/// panel far wider than that scale is a 16-node rule aliasing a factor it never
+/// sampled. The two rules coincide only when the phase happens to turn at the
+/// same rate the amplitude does — which is exactly what fails when the phase
+/// rate is small: a ratio reference is evaluated at `statistic = 0`, and a
+/// two-term `F`-shaped combination can have `Σ h_j|λ_j|` of order one while
+/// `max_j|λ_j|` is also of order one, so `4π/Σ h|λ| ≈ 12` against an amplitude
+/// scale of `1`. Measured on `F_{1,5}` at `f = 0.05`: the phase-only panel
+/// returned `0.8319119` against the exact `0.8319122`, an error of `3.4e-7`
+/// certified at `1e-11`.
+///
+/// The scale is not a guess. As a function of complex `u` the integrand's
+/// nearest singularities are the branch points of `(1 + λ_j²u²)^{h_j/4}` at
+/// `u = ±i/|λ_j|`; the closest is `d = 1/max_j|λ_j|`, and the `−xu/2` phase and
+/// the `1/u` are entire and removable respectively. Gauss–Legendre with `N`
+/// nodes on a panel of half-width `a` converges like `ϱ^{-2N}` in the Bernstein
+/// parameter of the largest ellipse the integrand is analytic in, and an
+/// ellipse with semi-minor axis `d` has `ϱ` solving `(ϱ − 1/ϱ)/2 = d/a`. So
+/// asking `ϱ^{-2N} ≤ tolerance` fixes the half-width:
+///
+/// ```text
+/// ϱ = tolerance^{-1/2N},   a = d / [(ϱ − 1/ϱ)/2].
+/// ```
+///
+/// This is a RATE, not a certificate: the Bernstein bound also carries the
+/// integrand's maximum modulus on that ellipse, which the ellipse touching the
+/// branch point does not bound. The node count is what carries the margin, and
+/// the margin is MEASURED rather than asserted —
+/// `the_quadrature_resolves_the_amplitude_not_only_the_phase` compares against
+/// a reference at a far finer panel and reads the achieved error off it.
+///
+/// A looser request buys a wider panel here, which is the right direction: the
+/// consumer that derives its tolerance from the resolution of the statistic it
+/// is scoring pays for what it asked for.
+#[inline]
+fn imhof_amplitude_panel(max_abs_weight: f64, tolerance: f64) -> f64 {
+    let node_count = 2.0 * GAUSS_LEGENDRE_16.len() as f64;
+    let bernstein = tolerance.recip().powf(0.5 / node_count);
+    let semi_minor_ratio = 0.5 * (bernstein - bernstein.recip());
+    if !(semi_minor_ratio > 0.0 && max_abs_weight > 0.0) {
+        return f64::INFINITY;
+    }
+    2.0 / (max_abs_weight * semi_minor_ratio)
+}
+
+#[inline]
+fn imhof_amplitude_bound(terms: &[WeightedChiSquareTerm], u: f64) -> Option<f64> {
+    let active_df: f64 = terms
+        .iter()
+        .filter(|term| term.weight.abs() * u >= 1.0)
+        .map(|term| term.degrees_of_freedom)
+        .sum();
+    (active_df > 0.0).then(|| 4.0 / (active_df * imhof_log_rho(terms, u).exp()))
 }
 
 /// Cost backstop on the Imhof panel sweep.
@@ -585,17 +795,34 @@ fn imhof_phase_slack(weights: &[f64], u: f64) -> f64 {
 /// that corner can see it instead of inferring it.
 pub const IMHOF_MAX_PANELS: usize = 1 << 21;
 
-fn imhof_survival(weights: &[f64], statistic: f64, tolerance: f64) -> (f64, f64) {
+fn imhof_survival(
+    terms: &[WeightedChiSquareTerm],
+    statistic: f64,
+    tolerance: f64,
+) -> (f64, f64) {
     // A panel has to resolve the WHOLE phase, not just the `−xu/2` half. The
-    // total phase rate is bounded by `|θ'(u)| = |φ'(u) − x/2| ≤ (Σ w_j + x)/2`
-    // — `φ'` is largest at the origin, where it is `½ Σ w_j` — so a panel of
-    // `4π/(x + Σ w_j)` sweeps at most one full oscillation anywhere on the
-    // half-line. Sizing on `4π/x` alone is correct only in the tail: at a small
-    // statistic that panel is enormous while the arctan part of the phase still
-    // turns over on the scale `1/w_j`, and the 16-node rule then aliases it
-    // (measured: a monotonicity violation of ~1e-5 at `x ≈ 4e-4`).
-    let weight_sum: f64 = weights.iter().sum();
-    let panel = 4.0 * std::f64::consts::PI / (statistic + weight_sum);
+    // total phase rate is bounded by `|θ'(u)| = |φ'(u) − x/2| ≤ (Σ h_j|w_j| +
+    // |x|)/2` — `|φ'|` is largest at the origin, where it is `½ Σ h_j|w_j|` —
+    // so a panel of `4π/(|x| + Σ h_j|w_j|)` sweeps at most one full oscillation
+    // anywhere on the half-line. Sizing on `4π/x` alone is correct only in the
+    // tail: at a small statistic that panel is enormous while the arctan part
+    // of the phase still turns over on the scale `1/w_j`, and the 16-node rule
+    // then aliases it (measured: a monotonicity violation of ~1e-5 at
+    // `x ≈ 4e-4`). At `x = 0` — the ratio references — the arctan part is the
+    // ONLY phase there is, and sizing on it is what keeps the rule honest.
+    let rate: f64 = terms
+        .iter()
+        .map(|term| term.degrees_of_freedom * term.weight.abs())
+        .sum();
+    let phase_panel = 4.0 * std::f64::consts::PI / (statistic.abs() + rate);
+    // ...and it has to resolve the AMPLITUDE as well; see
+    // `imhof_amplitude_panel` for why the phase rule alone is not enough and
+    // where the second scale comes from.
+    let max_abs_weight = terms
+        .iter()
+        .map(|term| term.weight.abs())
+        .fold(0.0_f64, f64::max);
+    let panel = phase_panel.min(imhof_amplitude_panel(max_abs_weight, tolerance));
     let mut integral = 0.0_f64;
     let mut lower = 0.0_f64;
     let mut bound = f64::INFINITY;
@@ -607,18 +834,22 @@ fn imhof_survival(weights: &[f64], statistic: f64, tolerance: f64) -> (f64, f64)
         for &(node, weight) in &GAUSS_LEGENDRE_16 {
             let offset = half * node;
             panel_value += weight
-                * (imhof_integrand(weights, statistic, mid + offset)
-                    + imhof_integrand(weights, statistic, mid - offset));
+                * (imhof_integrand(terms, statistic, mid + offset)
+                    + imhof_integrand(terms, statistic, mid - offset));
         }
         integral += half * panel_value;
         lower = upper;
-        // The bound is only a bound once the phase is monotone; before that the
-        // loop simply keeps integrating.
-        if imhof_phase_slack(weights, lower) <= 0.25 * statistic {
-            bound = 16.0 / (statistic * lower * imhof_log_rho(weights, lower).exp());
-            if bound <= tolerance {
-                break;
-            }
+        // The amplitude bound holds unconditionally; the oscillatory one only
+        // once the phase is monotone, and only for a positive statistic.
+        // Whichever is available and smaller is the certified accuracy.
+        bound = imhof_amplitude_bound(terms, lower).unwrap_or(f64::INFINITY);
+        if statistic > 0.0 && imhof_phase_slack(terms, lower) <= 0.25 * statistic {
+            let oscillatory =
+                16.0 / (statistic * lower * imhof_log_rho(terms, lower).exp());
+            bound = bound.min(oscillatory);
+        }
+        if bound <= tolerance {
+            break;
         }
     }
     (
@@ -3486,5 +3717,312 @@ mod weighted_chi_square_tests {
         assert!(weighted_chi_square_sf(&[1.0, f64::NAN], 1.0).is_nan());
         assert!(weighted_chi_square_sf(&[1.0, f64::INFINITY], 1.0).is_nan());
         assert!(weighted_chi_square_sf(&[1.0, 0.5], f64::NAN).is_nan());
+    }
+}
+
+/// The SIGNED, multiplicity-carrying form — the generalization the estimated-
+/// scale references need (gam#2672).
+#[cfg(test)]
+mod signed_weighted_chi_square_tests {
+    use super::*;
+
+    fn term(weight: f64, degrees_of_freedom: f64) -> WeightedChiSquareTerm {
+        WeightedChiSquareTerm {
+            weight,
+            degrees_of_freedom,
+        }
+    }
+
+    /// THE identity the signed form exists for, against a closed form computed
+    /// a completely different way (the regularized incomplete beta):
+    ///
+    /// ```text
+    /// P(F_{a,b} > f) = P( (χ²_a/a) / (χ²_b/b) > f ) = P( χ²_a − (f·a/b)·χ²_b > 0 ).
+    /// ```
+    ///
+    /// A ratio's tail IS a signed combination evaluated at zero. Fractional `a`
+    /// is included because a two-moment summary of a smooth's null spectrum is a
+    /// chi-square with a non-integral shape, which is exactly what this form is
+    /// asked for.
+    #[test]
+    fn the_f_tail_is_the_two_term_signed_combination_at_zero() {
+        let mut worst = 0.0_f64;
+        for &(a, b) in &[
+            (1.0_f64, 5.0_f64),
+            (2.0, 17.0),
+            (3.0, 26.0),
+            (0.7, 24.0),
+            (5.4, 191.0),
+            (11.0, 4.0),
+        ] {
+            for &f in &[0.05_f64, 0.5, 1.0, 2.5, 9.0, 40.0] {
+                let terms = [term(1.0, a), term(-f * a / b, b)];
+                let (got, bound) = signed_weighted_chi_square_sf_to_tolerance(
+                    &terms,
+                    0.0,
+                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                );
+                let want = fisher_snedecor_sf(f, a, b);
+                let error = (got - want).abs();
+                worst = worst.max(error);
+                assert!(
+                    error <= 1e-9 + bound,
+                    "F({a},{b}) at {f}: imhof {got} vs beta {want} \
+                     (error {error:.3e}, certified bound {bound:.3e})"
+                );
+            }
+        }
+        println!("worst |imhof − F| over the grid: {worst:.3e}");
+    }
+
+    /// A multiplicity is not a different law from repeating the weight — it is
+    /// the same law computed in one term instead of `h`. Bit-level agreement is
+    /// not claimed (the arithmetic is reassociated); the certified bounds are.
+    #[test]
+    fn a_multiplicity_is_the_law_of_the_repeated_weight() {
+        for &(weight, count) in &[(1.0_f64, 5usize), (0.37, 9), (2.5, 2)] {
+            let repeated = vec![weight; count];
+            let folded = [term(weight, count as f64)];
+            for &x in &[1e-3_f64, 0.4, 3.0, 20.0, 150.0] {
+                let (want, _) = weighted_chi_square_sf_with_bound(&repeated, x);
+                let (got, _) = signed_weighted_chi_square_sf_to_tolerance(
+                    &folded,
+                    x,
+                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                );
+                assert_eq!(got, want, "w={weight} h={count} x={x}");
+            }
+        }
+        // And in a MIXED spectrum, where neither side takes the closed form.
+        let repeated = [0.9_f64, 0.2, 0.2, 0.2, 0.2];
+        let folded = [term(0.9, 1.0), term(0.2, 4.0)];
+        for &x in &[0.2_f64, 1.7, 6.0] {
+            let (want, want_bound) = weighted_chi_square_sf_with_bound(&repeated, x);
+            let (got, got_bound) = signed_weighted_chi_square_sf_to_tolerance(
+                &folded,
+                x,
+                WEIGHTED_CHI_SQUARE_TOLERANCE,
+            );
+            assert!(
+                (got - want).abs() <= want_bound + got_bound + 1e-12,
+                "x={x}: folded {got} vs repeated {want}"
+            );
+        }
+    }
+
+    /// The unit-weight entry point is a special case of this one and must not
+    /// have moved when it became one. Bit-for-bit, on the branch that goes
+    /// through the quadrature.
+    #[test]
+    fn the_non_negative_entry_point_is_unchanged_bit_for_bit() {
+        let spectra: [&[f64]; 3] = [
+            &[1.0, 0.5, 0.25, 0.125],
+            &[0.999, 0.31, 0.02, 1e-3],
+            &[0.4, 0.4, 0.39, 0.01],
+        ];
+        for spectrum in spectra {
+            let terms: Vec<WeightedChiSquareTerm> =
+                spectrum.iter().map(|&w| term(w, 1.0)).collect();
+            for &x in &[0.05_f64, 0.9, 4.0, 25.0] {
+                let (direct, direct_bound) = weighted_chi_square_sf_with_bound(spectrum, x);
+                let (general, general_bound) = signed_weighted_chi_square_sf_to_tolerance(
+                    &terms,
+                    x,
+                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                );
+                assert_eq!(direct.to_bits(), general.to_bits(), "spectrum {spectrum:?} x={x}");
+                assert_eq!(direct_bound.to_bits(), general_bound.to_bits());
+            }
+        }
+    }
+
+    /// A single negative weight is the LOWER tail of a chi-square, because
+    /// dividing by a negative number turns the inequality around. Exact branch,
+    /// so exact agreement.
+    #[test]
+    fn an_all_negative_spectrum_is_the_reflected_chi_square() {
+        for &(weight, df) in &[(-1.0_f64, 3.0_f64), (-0.25, 7.5), (-4.0, 1.0)] {
+            for &x in &[-40.0_f64, -8.0, -0.3, -1e-4] {
+                let got = signed_weighted_chi_square_sf(&[term(weight, df)], x);
+                let want = 1.0 - chi_square_sf(x / weight, df);
+                assert_eq!(got, want, "w={weight} h={df} x={x}");
+            }
+            // The support decides everything at or above zero.
+            assert_eq!(signed_weighted_chi_square_sf(&[term(weight, df)], 0.0), 0.0);
+            assert_eq!(signed_weighted_chi_square_sf(&[term(weight, df)], 1.0), 0.0);
+        }
+    }
+
+    /// A survival function over the WHOLE line, which is what a signed
+    /// combination has: monotone non-increasing, in `[0, 1]`, going to one in
+    /// the far negative tail and to zero in the far positive one.
+    #[test]
+    fn the_signed_survival_function_is_monotone_over_the_whole_line() {
+        let terms = [term(1.0, 1.0), term(0.4, 2.0), term(-0.3, 6.0), term(-1.5, 1.0)];
+        let mut previous = 1.0_f64;
+        let mut x = -60.0_f64;
+        while x < 60.0 {
+            let value = signed_weighted_chi_square_sf(&terms, x);
+            assert!((0.0..=1.0).contains(&value), "x={x} value={value}");
+            assert!(
+                value <= previous + 1e-9,
+                "not monotone at x={x}: {value} > {previous}"
+            );
+            previous = value;
+            x += 0.5;
+        }
+        assert!(signed_weighted_chi_square_sf(&terms, -400.0) > 0.999);
+        assert!(signed_weighted_chi_square_sf(&terms, 400.0) < 1e-3);
+    }
+
+    /// The certified bound at `statistic = 0` — where the oscillatory bound does
+    /// not exist and the amplitude bound is the whole contract. Checked against
+    /// a reference computed at a far stricter request, so the assertion is that
+    /// the RETURNED bound actually bounds the error.
+    #[test]
+    fn the_amplitude_bound_certifies_the_zero_statistic_answer() {
+        let cases: [&[WeightedChiSquareTerm]; 3] = [
+            &[term(1.0, 1.0), term(-0.05, 26.0)],
+            &[term(0.9, 1.0), term(0.2, 3.0), term(-0.01, 191.0)],
+            &[term(1.0, 5.4), term(-2.5, 1.0), term(-0.004, 44.0)],
+        ];
+        for terms in cases {
+            let (reference, reference_bound) =
+                signed_weighted_chi_square_sf_to_tolerance(terms, 0.0, 1e-14);
+            for tolerance in [1e-4_f64, 1e-7, 1e-10] {
+                let (got, bound) =
+                    signed_weighted_chi_square_sf_to_tolerance(terms, 0.0, tolerance);
+                assert!(
+                    bound <= tolerance,
+                    "asked {tolerance:.0e}, certified {bound:.3e} on {terms:?}"
+                );
+                assert!(
+                    (got - reference).abs() <= bound + reference_bound,
+                    "{got} vs {reference} exceeds the certified {bound:.3e} + \
+                     {reference_bound:.3e} on {terms:?}"
+                );
+            }
+        }
+    }
+
+    /// The limit that makes this a *generalization* rather than a replacement:
+    /// as the denominator's degrees of freedom grow, `Q/(V/ν)` collapses onto
+    /// `Q`, so the ratio reference converges to the known-scale reference. This
+    /// is the property that says a fix built on it cannot change large-`n`
+    /// answers.
+    #[test]
+    fn the_ratio_reference_converges_to_the_known_scale_reference() {
+        let spectrum = [0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        for &x in &[1.0_f64, 3.0, 8.0] {
+            let known = weighted_chi_square_sf(&spectrum, x);
+            let mut previous_gap = f64::INFINITY;
+            for &nu in &[50.0_f64, 500.0, 5_000.0, 50_000.0] {
+                // `P(Q > x·V/ν) = P(Q − (x/ν)·χ²_ν > 0)`.
+                let mut terms: Vec<WeightedChiSquareTerm> =
+                    spectrum.iter().map(|&w| term(w, 1.0)).collect();
+                terms.push(term(-x / nu, nu));
+                let ratio = signed_weighted_chi_square_sf(&terms, 0.0);
+                let gap = (ratio - known).abs();
+                assert!(
+                    gap < previous_gap,
+                    "x={x} ν={nu}: gap {gap:.3e} did not shrink from {previous_gap:.3e}"
+                );
+                previous_gap = gap;
+            }
+            assert!(
+                previous_gap < 1e-4,
+                "x={x}: the ν = 50000 ratio reference is still {previous_gap:.3e} from the \
+                 known-scale one"
+            );
+        }
+    }
+
+    /// The estimated scale always costs POWER at the level, never buys it: the
+    /// ratio tail is above the known-scale tail at every threshold in the upper
+    /// tail, because dividing by an independent mean-one variate can only add
+    /// spread. This is the sign of the whole correction, asserted as a property
+    /// rather than read off one measurement.
+    #[test]
+    fn the_ratio_reference_is_uniformly_more_conservative_in_the_upper_tail() {
+        let spectrum = [0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        for &nu in &[10.0_f64, 26.0, 100.0] {
+            for &x in &[2.0_f64, 4.0, 8.0, 16.0] {
+                let known = weighted_chi_square_sf(&spectrum, x);
+                if known > 0.4 {
+                    continue; // not the upper tail
+                }
+                let mut terms: Vec<WeightedChiSquareTerm> =
+                    spectrum.iter().map(|&w| term(w, 1.0)).collect();
+                terms.push(term(-x / nu, nu));
+                let ratio = signed_weighted_chi_square_sf(&terms, 0.0);
+                assert!(
+                    ratio > known,
+                    "ν={nu} x={x}: ratio tail {ratio} must exceed the known-scale {known}"
+                );
+            }
+        }
+    }
+
+    /// The panel rule has to resolve the integrand's AMPLITUDE, not only its
+    /// phase, and this is the arm that measures whether it does.
+    ///
+    /// The reference is the same quadrature at a panel forced far below either
+    /// rule (by asking for an accuracy the sizing then honours), so the
+    /// comparison isolates the discretization from the truncation. The shapes
+    /// are the ones where the two scales come apart: a small phase rate
+    /// (`statistic = 0`, weights that nearly cancel) against an amplitude that
+    /// turns over at `u ≈ 1`.
+    ///
+    /// Pre-fix, `F_{1,5}` at `f = 0.05` missed by `3.4e-7` while certifying
+    /// `1e-11`.
+    #[test]
+    fn the_quadrature_resolves_the_amplitude_not_only_the_phase() {
+        let cases: [&[WeightedChiSquareTerm]; 5] = [
+            &[term(1.0, 1.0), term(-0.01, 5.0)],
+            &[term(1.0, 1.0), term(-0.2, 2.0)],
+            &[term(1.0, 3.0), term(-1.0, 3.0)],
+            &[term(0.9, 1.0), term(0.2, 4.0), term(-0.05, 26.0)],
+            &[term(1.0, 0.7), term(-0.006, 24.0)],
+        ];
+        let mut worst = 0.0_f64;
+        for terms in cases {
+            for &statistic in &[0.0_f64, 0.3, -0.2] {
+                let (reference, reference_bound) =
+                    signed_weighted_chi_square_sf_to_tolerance(terms, statistic, 1e-15);
+                let (got, bound) = signed_weighted_chi_square_sf_to_tolerance(
+                    terms,
+                    statistic,
+                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                );
+                let error = (got - reference).abs();
+                worst = worst.max(error);
+                assert!(
+                    error <= bound + reference_bound,
+                    "{terms:?} at {statistic}: {got} vs {reference} differs by {error:.3e}, \
+                     above the certified {bound:.3e} + {reference_bound:.3e}"
+                );
+            }
+        }
+        println!("worst discretization error against the fine-panel reference: {worst:.3e}");
+    }
+
+    /// Domain errors are `NaN`. A zero or negative degrees-of-freedom is one:
+    /// `χ²_0` is a point mass the inversion has no phase for, and a caller that
+    /// produced it has a rank bug, not a distribution.
+    #[test]
+    fn signed_domain_errors_are_not_answered() {
+        assert!(signed_weighted_chi_square_sf(&[term(1.0, 0.0)], 1.0).is_nan());
+        assert!(signed_weighted_chi_square_sf(&[term(1.0, -2.0)], 1.0).is_nan());
+        assert!(signed_weighted_chi_square_sf(&[term(1.0, f64::NAN)], 1.0).is_nan());
+        assert!(signed_weighted_chi_square_sf(&[term(f64::INFINITY, 1.0)], 1.0).is_nan());
+        assert!(signed_weighted_chi_square_sf(&[term(1.0, 1.0)], f64::NAN).is_nan());
+        // A zero weight is dropped, not rejected — it is a direction the
+        // statistic cannot see — and an all-zero spectrum is the point mass.
+        assert_eq!(
+            signed_weighted_chi_square_sf(&[term(0.0, 3.0), term(-1.0, 2.0)], -1.0),
+            signed_weighted_chi_square_sf(&[term(-1.0, 2.0)], -1.0)
+        );
+        assert_eq!(signed_weighted_chi_square_sf(&[term(0.0, 3.0)], -1.0), 1.0);
+        assert_eq!(signed_weighted_chi_square_sf(&[term(0.0, 3.0)], 0.0), 0.0);
     }
 }
