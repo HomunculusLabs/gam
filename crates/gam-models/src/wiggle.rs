@@ -70,44 +70,54 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 /// A composed warp is not evaluated on fixed data. It sits on the model's index,
 /// `q = q₀ + Σ_j βw_j·I_j(q₀)` with `q₀ = −η_t·e^{−η_ls}`, so `q₀` moves with β
 /// while the knots stay where the seed put them, and the objective differentiates
-/// the basis rather than merely evaluating it:
+/// the basis rather than merely evaluating it.
+///
+/// # Read off the row program, not argued
+///
+/// `sls_row_nll_wiggle` composes the basis into the row jet at two places, and
+/// the second is the one that sets this order:
 ///
 /// ```text
-///   ℓ                      reads  I  and I′   (the warped index, and the event
-///                                              Jacobian's m₁ = 1 + Σ βw_j I′_j)
-///   H = ∂²(−ℓ)/∂β²         reads  I″          (β enters q₀ linearly, so each
-///                                              ∂/∂β costs one basis derivative)
-///   Φ = ½ Σ g(λ(Z_JᵀHZ_J)) reads  H
+///   q₁ʷ = q₁ + Σ βw_j·I_j(q₁)          stack [I, I′, I″, I‴, I⁗]
+///   m₁  = 1  + Σ βw_j·I′_j(q₁)         stack [I′, I″, I‴, I⁗, …]   <- SHIFTED BY ONE
+///   g   = η_t′ + m₁·q̇₀,  and  ℓ ∋ −d·log g
 /// ```
 ///
-/// and `Φ` is a TERM OF THE OBJECTIVE, not a diagnostic about it — the inner
-/// NLL is `−ℓ + ½βᵀSβ − Φ`. So the objective's value reads `I″`, and a step in
-/// `I″` is a jump in the function the trust region compares two points on.
+/// `H = ∂²(−ℓ)/∂β²` is the order-2 coefficient of that jet, and `m₁`'s order-2
+/// coefficient reads its stack's slot 2 — which, because `m₁` is built from `I′`,
+/// is **`I‴`**. `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is a TERM OF THE OBJECTIVE, not a
+/// diagnostic about it — the inner NLL is `−ℓ + ½βᵀSβ − Φ` — so the objective's
+/// own value reads `I‴`, and a step in `I‴` is a jump in the function the trust
+/// region compares two points on.
 ///
-/// # This order is measured, not asserted
+/// # The order is measured on the FIT, because a unit fixture under-reported it
 ///
-/// `probe_2695_joint_hessian_across_an_interior_knot` walks one EVENT row's `q₀`
-/// across an interior knot and reads the gap in `H` at `h = 1e-3` against
-/// `h = 1e-5` (`100×` = continuous, `1×` = a jump):
+/// This constant was first landed as `2`, from
+/// `probe_2695_joint_hessian_across_an_interior_knot`: on that fixture `H` steps
+/// at degree 2 (ratio `1.00` at both `βw = 1e-6` and `βw = 3e-2`) and closes at
+/// degree 3 (ratio `100`). That fixture does not excite the `βw`-weighted `I‴`
+/// channel above its own resolution, so it cannot see the difference between
+/// degree 3 and degree 4, and reading the order off it alone was wrong.
+///
+/// The shipped witness does excite it. `Φ`'s response to the accepted step,
+/// swept down the trust ladder (`|Δφ| / |δ|∞` constant ⇒ smooth; `Δφ` constant
+/// ⇒ a jump):
 ///
 /// ```text
-///   degree 2, warp knots, βw = 1e-6 : gap 1.465e0  -> 1.471e0   ratio 1.00  JUMP
-///   degree 2, warp knots, βw = 3e-2 : gap 1.528e0  -> 1.535e0   ratio 1.00  JUMP
-///   degree 3, warp knots, βw = 1e-6 : gap 1.565e-2 -> 1.565e-4  ratio 100   closes
-///   degree 3, warp knots, βw = 3e-2 : gap 1.901e-2 -> 1.901e-4  ratio 100   closes
-///   degree 4, 5, either amplitude   :                            ratio 100   closes
+///   built at 3:  |δ|∞ 1.573e-10 → 3.379e-13   Δφ  −2.571e-7 … −2.599e-7   JUMP
+///   built at 4:  |δ|∞ 2.037e-08 → 9.820e-12   ratio 13.76 … 12.22        smooth
+///   built at 5:  |δ|∞ 1.032e-01 → 7.545e-02   ratio 6.01e-2 … 5.88e-2    smooth
+///   built at 6:  |δ|∞ 4.608e-06 → 1.150e-06   ratio 8.77 … 8.86          smooth
 /// ```
 ///
-/// The `βw = 1e-6` row is what fixes the ORDER at two rather than three: the
-/// channel that steps at degree 2 survives with no `βw` factor, which is the
-/// signature of `I″` reaching `H` through `∂m₁/∂β` rather than of a
-/// `βw`-weighted `I‴`.
+/// Three decades of step size with `Δφ` pinned at `−2.6e-7` is a jump; four
+/// decades with `|Δφ|/|δ|∞` constant to three digits is a derivative. So the
+/// objective reads `I‴`, the order is **3**, and a composed warp is built at 4.
 ///
-/// End to end, on the shipped witness: at degree 2 the accept-test objective
-/// jumps by `2.976461e-1` — identically, at step norms from `1.436e-10` to
-/// `7.094e-13` — and the jump is Φ to twelve digits while `ℓ` and `½βᵀSβ` do not
-/// move at all.
-pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 2;
+/// End to end, before any of this: at degree 2 the accept-test objective jumped
+/// by `2.976461e-1`, identically, at step norms from `1.436e-10` to `7.094e-13`,
+/// and the jump was Φ to twelve digits while `ℓ` and `½βᵀSβ` did not move at all.
+pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 3;
 
 /// The smallest public degree at which a composed warp's basis is continuous to
 /// [`COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER`], hence the smallest degree
@@ -634,10 +644,12 @@ pub(crate) fn select_wiggle_basis_from_seed_with_knots(
                 log::info!(
                     "[warp-degree] composed monotone warp requested degree {} and is built at \
                      {minimum}: the inner objective reads the basis's derivative of order {} \
-                     (H reads I'' and Phi = 1/2 sum g(lambda(Z_J^T H Z_J)) is a term of the \
-                     objective), and a degree-d I-spline is C^(d-1) at a simple knot, so degree \
-                     {} leaves the objective discontinuous across every knot the index crosses \
-                     (gam#2695)",
+                     (H is the order-2 coefficient of the row jet and reaches the basis through \
+                     m1 = 1 + sum betaw_j B'_j, i.e. the tower SHIFTED BY ONE, so it consumes \
+                     the basis's THIRD derivative; and Phi = 1/2 sum g(lambda(Z_J^T H Z_J)) is a \
+                     term of the objective, not a diagnostic about it), while a degree-d \
+                     I-spline is only C^(d-1) at a simple knot — so degree {} leaves the \
+                     objective discontinuous across every knot the index crosses (gam#2695)",
                     cfg.degree,
                     COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER,
                     cfg.degree,

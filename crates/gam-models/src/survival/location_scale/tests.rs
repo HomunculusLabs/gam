@@ -9580,6 +9580,13 @@ fn the_objective_jeffreys_term_closes_across_a_link_warp_knot_at_the_built_degre
 /// This is the test that would have caught the regression from the other side:
 /// if the floor is removed, production builds degree 2 again and this arm is
 /// what production is then minimising.
+///
+/// It does NOT bound the floor from below on its own, and that is worth stating
+/// where the reader is: this fixture does not excite the `βw`-weighted `I‴`
+/// channel above its own resolution, so it reports degree 3 as closing when the
+/// shipped witness's `Φ` still jumps by `2.6e-7` there. The order is fixed on
+/// the FIT — see `COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER` — and this arm
+/// is the degree-2 lower bound only.
 #[test]
 fn a_degree_two_composed_warp_makes_the_objective_term_jump_2695() {
     for amplitude in [1.0e-6_f64, 3.0e-2] {
