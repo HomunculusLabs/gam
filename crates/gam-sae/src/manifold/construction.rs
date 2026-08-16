@@ -342,6 +342,39 @@ pub(super) fn normalized_reconstruction_energy(
     Ok(energy)
 }
 
+/// Evaluate a per-ATOM post-fit certificate over every atom, in atom order.
+///
+/// The three certificates this serves (coordinate fidelity, decoder
+/// embeddedness, topology persistence) are pure reads of one atom each: they
+/// take `&SaeManifoldTerm` and an atom index, write nothing, and perform no
+/// cross-atom reduction. So the only thing the serial `(0..k).map(..)` they
+/// replace was buying is a fixed evaluation ORDER, and an indexed collect keeps
+/// that: slot `k` holds exactly what the serial sweep's `k`-th step produced,
+/// computed by the identical arithmetic on one thread. The result is
+/// bit-identical, not merely equal in distribution.
+///
+/// Worth doing because these are not cheap reads. The topology audit alone runs
+/// a Vietoris–Rips filtration over `C(m, 3)` triangles at the
+/// [`PERSISTENCE_H1_MAX_POINTS`](super::persistence::PERSISTENCE_H1_MAX_POINTS)
+/// cover — measured at ~17 s for one full-support atom — so the serial sweep is
+/// `K ×` that, on one core, which is precisely the "unparallelised, ~1.0 of 16
+/// cores" #2757 records against this function.
+///
+/// The nesting guard is the crate's standing rule: a caller already inside a
+/// rayon worker stays serial so the outer region keeps its cores. A single-atom
+/// model never fans out, since one work item cannot be shared.
+fn atom_certificates_in_parallel<T, F>(k_atoms: usize, certificate: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync + Send,
+{
+    if k_atoms <= 1 || rayon::current_thread_index().is_some() {
+        return (0..k_atoms).map(certificate).collect();
+    }
+    use rayon::prelude::*;
+    (0..k_atoms).into_par_iter().map(certificate).collect()
+}
+
 /// Standard floating-point accumulation factor `γ_k = kε/(1-kε)`.
 ///
 /// `None` means the first-order backward-error model is not informative for the
@@ -2281,12 +2314,30 @@ impl SaeManifoldTerm {
         // atom) and never gated by a flag.
         let atom_inference = crate::identifiability::atom_inference_reports(&certificate_model);
 
+        // The three remaining certificates are per-ATOM and mutually independent:
+        // each reads only `&self` and its own atom index, writes only its own
+        // slot, and performs no cross-atom reduction. They were three serial
+        // `map`s, which is the "~1.0 of 16 cores" #2757's body records against
+        // this function — and the topology audit alone measures ~17 s per atom
+        // at a full-support cover, so the serial sweep is `K` × that.
+        //
+        // `atom_certificates_in_parallel` runs them over atoms with an indexed
+        // collect, so the output vector is in atom order and every element is
+        // computed by the identical serial arithmetic — bit-identical to the
+        // sweep it replaces, not merely equal in distribution. The nesting guard
+        // keeps a caller already inside a rayon worker on the serial path so the
+        // outer region keeps its cores.
+        let k_atoms = self.k_atoms();
+
         // #2081 — per-atom coordinate-fidelity certificate (uniformity + arc-length
         // defect). Always populated (one entry per atom, `None` for non-`d = 1`
         // charts), never dispersion-gated: coordinate quality does not depend on the
         // reconstruction dispersion the incoherence report needs.
-        let coordinate_fidelity = (0..self.k_atoms())
-            .map(|atom_idx| atom_coordinate_fidelity(self, atom_idx))
+        let coordinate_fidelity =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_coordinate_fidelity(self, atom_idx)
+            })
+            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
         // #2518 item 2 — per-atom decoded-image embeddedness certificate. Every
@@ -2296,17 +2347,21 @@ impl SaeManifoldTerm {
         // that sees it. One entry per atom, `None` for atoms outside the `d = 1`
         // periodic family, and — like the fidelity report — a pure read that
         // feeds nothing back into the loss or criterion.
-        let decoder_embeddedness = (0..self.k_atoms())
-            .map(|atom_idx| atom_decoder_embeddedness(self, atom_idx))
+        let decoder_embeddedness =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_decoder_embeddedness(self, atom_idx)
+            })
+            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
         // Reviewer-F3 persistent-homology topology audit (one entry per atom,
         // `None` for caller-supplied or under-sampled atoms). A pure read of the
         // fitted decoder image and shared soft support measure; never gated by a flag and
         // feeds nothing back into the loss/criterion.
-        let topology_persistence = (0..self.k_atoms())
-            .map(|atom_idx| atom_topology_persistence(self, atom_idx))
-            .collect::<Vec<_>>();
+        let topology_persistence =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_topology_persistence(self, atom_idx)
+            });
 
         Ok(SaeManifoldFitDiagnostics {
             atom_two_lens,
