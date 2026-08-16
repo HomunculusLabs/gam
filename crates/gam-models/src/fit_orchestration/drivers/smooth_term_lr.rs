@@ -3774,6 +3774,57 @@ mod profiled_scale_reference_tests {
         }
     }
 
+    /// WHAT THE CORRECTION CANNOT COST: discriminating power.
+    ///
+    /// `c(w) = expm1((w − B)/n)` is strictly increasing in `w`, and
+    /// `P(Q − c·V > 0)` is strictly decreasing in `c`, so the profiled tail is
+    /// strictly decreasing in the statistic — exactly like the known-scale one.
+    /// Two strictly decreasing functions of the same `W` order the same data the
+    /// same way, so at a MATCHED size the two references are the same test:
+    /// everything the correction changes is calibration, and the power it gives
+    /// up is precisely the over-rejection it removes and nothing else.
+    ///
+    /// Measured offline at `n = 40, k = 6` on a planted alternative: raw power
+    /// `0.6675 → 0.6150` against a null size that moved `0.0642 → 0.0542`. This
+    /// test is that argument's premise, asserted rather than assumed, across the
+    /// whole statistic range including the exact branch at the bottom.
+    #[test]
+    fn the_profiled_reference_is_strictly_decreasing_in_the_statistic() {
+        let subject = reference(
+            vec![0.95_f64, 0.62, 0.31, 0.14, 0.05],
+            Some(SmoothLrProfiledScale {
+                observations: 40.0,
+                deterministic_offset: -0.17,
+                residual_weights: vec![0.9, 0.5, 0.2, 0.01],
+                residual_unit_dimension: 33.0,
+            }),
+        );
+        let mut previous = f64::INFINITY;
+        let mut statistic = -2.0_f64;
+        let mut strict_moves = 0usize;
+        while statistic < 60.0 {
+            let tail = subject.tail_probability(statistic);
+            assert!(
+                (0.0..=1.0).contains(&tail),
+                "W={statistic}: {tail} is not a probability"
+            );
+            assert!(
+                tail <= previous + 1e-9,
+                "W={statistic}: the tail rose from {previous} to {tail}"
+            );
+            if tail < previous - 1e-6 {
+                strict_moves += 1;
+            }
+            previous = tail;
+            statistic += 0.25;
+        }
+        assert!(
+            strict_moves > 100,
+            "the reference moved strictly only {strict_moves} times over the sweep — a tail \
+             that is flat almost everywhere orders nothing"
+        );
+    }
+
     /// The channel is available on the DEGRADED lanes too, because the two-moment
     /// summary is a one-term linear combination rather than a different shape.
     /// Without it, a fit that could not reach its own spectrum would silently
