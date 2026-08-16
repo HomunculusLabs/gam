@@ -30,7 +30,7 @@ use csv::StringRecord;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand_distr::{Distribution, Normal, Poisson};
+use rand_distr::{ChiSquared, Distribution, Normal, Poisson};
 
 const N: usize = 120;
 const K: usize = 8;
@@ -286,25 +286,134 @@ fn only_the_profiled_gaussian_carries_the_estimated_scale_channel() {
     );
 }
 
-/// THE WHOLE DISTRIBUTION, not one level. A size grid asks whether the tail
-/// mass at `α = 0.05` is right; a p-value that is wrong everywhere else can
-/// still pass that, and a reference that is wrong by a MONOTONE distortion — a
-/// scale, which is exactly what an unscored `V` is — moves the whole
-/// distribution rather than one point of it. So this arm reads the
-/// Kolmogorov–Smirnov distance of the pooled null p-values from `Uniform(0,1)`,
-/// which is the statement "the reference IS the statistic's law".
+/// THE TAIL ITSELF, against a direct simulation of the law it claims to be.
+///
+/// Every other gate in this module checks an INPUT to the reference — the
+/// algebra that produces `W`, the spectrum that produces `V`, the family gate.
+/// This one checks the OUTPUT, and it is the only gate here that is decisive on
+/// its own: given the published spectra, is `P(Q − c·V > 0)` the number the
+/// driver reports? `Q` and `V` are drawn from the published weights and the
+/// event is COUNTED, so the only thing shared with the driver is the two
+/// spectra — not the `expm1` inversion, not the signed Imhof quadrature, not
+/// the truncation bound.
+///
+/// Evaluated at four thresholds spanning the range a p-value is read in, chosen
+/// as multiples of `Σw/E[V]` (the ratio at which the tail is about a half) so
+/// the simulation resolves every one of them. The bar is the Monte-Carlo
+/// standard error of the count plus the accuracy the report itself certifies:
+/// four binomial standard errors is a false-failure rate of `6e-5` per
+/// threshold, and the seed is fixed, so this is a deterministic test with a
+/// derived tolerance rather than a flaky one.
+#[test]
+fn the_published_tail_matches_a_direct_simulation_of_its_own_law() {
+    init_parallelism();
+    const DRAWS: usize = 200_000;
+
+    let data = fixture(true);
+    let report = lr_report("gaussian", &data);
+    let reference = &report.ref_df_provenance;
+    let scale = reference
+        .profiled_scale
+        .as_ref()
+        .expect("a profiled-Gaussian fit carries the estimated-scale channel");
+
+    let numerator_mean: f64 = reference.weights.iter().sum();
+    let residual_mean: f64 =
+        scale.residual_weights.iter().sum::<f64>() + scale.residual_unit_dimension;
+    let half_tail_ratio = numerator_mean / residual_mean;
+    assert!(
+        half_tail_ratio.is_finite() && half_tail_ratio > 0.0,
+        "Σw = {numerator_mean}, E[V] = {residual_mean}"
+    );
+
+    let mut rng = StdRng::seed_from_u64(0x2672_51_5D_0000_0001);
+    let normal = Normal::new(0.0, 1.0).expect("standard normal");
+    let unit_block = ChiSquared::new(scale.residual_unit_dimension).expect("χ²_{n−p}");
+    // One set of draws, reused at every threshold: the thresholds are nested
+    // events on the same `(Q, V)` pair, so sharing the sample keeps them
+    // consistent with each other as well as with the reference.
+    let sample: Vec<(f64, f64)> = (0..DRAWS)
+        .map(|_| {
+            let q: f64 = reference
+                .weights
+                .iter()
+                .map(|&weight| {
+                    let z: f64 = normal.sample(&mut rng);
+                    weight * z * z
+                })
+                .sum();
+            let v: f64 = scale
+                .residual_weights
+                .iter()
+                .map(|&weight| {
+                    let z: f64 = normal.sample(&mut rng);
+                    weight * z * z
+                })
+                .sum::<f64>()
+                + unit_block.sample(&mut rng);
+            (q, v)
+        })
+        .collect();
+
+    for multiple in [0.5_f64, 1.0, 2.0, 4.0] {
+        let ratio = multiple * half_tail_ratio;
+        // Invert `c = expm1((w − B)/n)` to get the statistic this ratio is the
+        // threshold for, so the reference is asked in the units it takes.
+        let statistic = scale.observations * ratio.ln_1p() + scale.deterministic_offset;
+        let published = reference.conditional_tail_probability(statistic);
+        let counted =
+            sample.iter().filter(|(q, v)| q - ratio * v > 0.0).count() as f64 / DRAWS as f64;
+        let standard_error = (counted * (1.0 - counted) / DRAWS as f64).sqrt();
+        let bar = 4.0 * standard_error + report.p_value_bound;
+        eprintln!(
+            "[2672-simulation] c={ratio:.6e} W={statistic:.6} published={published:.6} \
+             counted={counted:.6} |Δ|={:.3e} bar={bar:.3e}",
+            (published - counted).abs()
+        );
+        assert!(
+            (published - counted).abs() <= bar,
+            "at c = {ratio:.6e} the reference reports {published} and a direct simulation of \
+             its own law counts {counted} ({DRAWS} draws, s.e. {standard_error:.3e}); the \
+             report certifies {}",
+            report.p_value_bound
+        );
+    }
+}
+
+/// THE WHOLE DISTRIBUTION, not one level, and end to end rather than on one
+/// fit's spectra.
+///
+/// A size grid asks whether the tail mass at `α = 0.05` is right. A p-value
+/// that is wrong everywhere else can still pass that, and a reference that is
+/// wrong by a MONOTONE distortion — a random scale, which is exactly what an
+/// unscored `V` is — moves the whole distribution rather than one point of it.
+/// So this arm reads the Kolmogorov–Smirnov distance of the pooled null
+/// p-values from `Uniform(0,1)`, which is the statement "the reference IS the
+/// statistic's law", on real fits with `λ` selected rather than pinned.
 ///
 /// The bar is derived, not chosen: `K(1.95) = 0.9990`, so `1.95/√R` is the
-/// distance an exactly-calibrated test exceeds once in a thousand runs. Both
-/// arms are reported so the comparison is in the output rather than in this
-/// comment — the known-scale reference is scored on the SAME p-values' own
-/// fits, so nothing but the reference differs.
+/// distance an exactly-calibrated test exceeds once in a thousand runs.
+///
+/// **What this arm is and is not powerful against.** KS is an omnibus statistic
+/// and at a CI-affordable `R` it is not the sharpest instrument for the
+/// specific monotone alternative this issue is about — measured offline at
+/// `n = 40, k = 6` on 1200 replicates, the known-scale reference reads `0.0525`
+/// against the ratio reference's `0.0149`, a separation that needs several
+/// hundred replicates to resolve. The sharp instruments are elsewhere and are
+/// deliberately not duplicated here: `the_published_tail_matches_a_direct_
+/// simulation_of_its_own_law` is decisive on one fit with no replication at
+/// all, and `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672`
+/// pools 480 replicates at the one level the defect was reported at. What this
+/// arm adds is the axis neither of those covers: the SHAPE of the null
+/// distribution, on fits that selected their own `λ`. Both references are
+/// scored on the same fits and both are printed, so the comparison lands in the
+/// output rather than in this comment.
 #[test]
 fn the_gaussian_null_p_values_are_uniform_under_the_estimated_scale() {
     init_parallelism();
-    const REPS: usize = 150;
-    const NULL_N: usize = 40;
-    const NULL_K: usize = 6;
+    const REPS: usize = 200;
+    const NULL_N: usize = 30;
+    const NULL_K: usize = 8;
 
     let mut published = Vec::<f64>::with_capacity(REPS);
     let mut known_scale = Vec::<f64>::with_capacity(REPS);

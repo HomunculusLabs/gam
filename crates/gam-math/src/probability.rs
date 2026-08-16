@@ -793,6 +793,13 @@ fn imhof_amplitude_bound(terms: &[WeightedChiSquareTerm], u: f64) -> Option<f64>
 /// the modelling error of any statistic being referenced against it. The
 /// achieved bound is returned rather than discarded, so a caller that lands in
 /// that corner can see it instead of inferring it.
+///
+/// The panel width is the smaller of the phase rule and
+/// [`imhof_amplitude_panel`], so the count above is a LOWER bound on what the
+/// sweep costs. It moves the corner slightly closer without changing which
+/// corner it is: the amplitude panel is `2/(|λ|_max·s(tol))`, independent of
+/// the statistic, so it binds where the phase rate is small — and a small phase
+/// rate is a small truncation point, which is the cheap end.
 pub const IMHOF_MAX_PANELS: usize = 1 << 21;
 
 fn imhof_survival(

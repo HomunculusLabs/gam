@@ -2764,6 +2764,14 @@ pub fn smooth_term_lr_inference_forspec(
 /// `σ̂² = D/ν` by construction, so `ν = D/σ̂²` inverts the fit's own convention
 /// whatever it was.
 ///
+/// The inversion is exact rather than approximate, and the reason is a
+/// type-level one: `ProfiledGaussian` implies the IDENTITY link, because
+/// `gam_spec`'s `legal_cell_kind` admits no other Gaussian cell — a
+/// `(Gaussian, log)` model is not constructible rather than merely unusual. The
+/// optimizer's weighted-RSS channel is wired for the identity link, so on every
+/// fit that reaches this function `D` IS `Σ w_i(y_i − μ_i)²` and `σ̂² = D/ν`
+/// holds by construction.
+///
 /// `None` when the two fields cannot produce a residual degrees of freedom that
 /// is finite, positive, and no larger than the sample size — a statement that
 /// this fit's `σ̂` is not the profiled residual one the identity above assumes,
