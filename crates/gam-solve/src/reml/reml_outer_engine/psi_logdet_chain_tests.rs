@@ -78,12 +78,24 @@ impl HessianDerivativeProvider for LinearBetaCurvature {
 
     fn hessian_second_derivative_correction(
         &self,
-        _v_k: &Array1<f64>,
-        _v_l: &Array1<f64>,
+        v_k: &Array1<f64>,
+        v_l: &Array1<f64>,
         u_kl: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
         // `D²_βM ≡ 0` for a curvature linear in β, so the whole second-order
-        // correction is the second mode response `D_βH[−u_kl]`.
+        // correction is the second mode response `D_βH[−u_kl]` and the two
+        // first-order responses enter only as a shape contract — checked here
+        // rather than ignored, because a length mismatch would otherwise be
+        // read as a legitimately different model.
+        for (name, vector) in [("v_k", v_k), ("v_l", v_l), ("u_kl", u_kl)] {
+            if vector.len() != self.axes.len() {
+                return Err(format!(
+                    "synthetic curvature: {name} has length {} against {} coefficient axes",
+                    vector.len(),
+                    self.axes.len()
+                ));
+            }
+        }
         Ok(Some(-self.directional(u_kl)))
     }
 
