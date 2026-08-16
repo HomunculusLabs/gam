@@ -1272,66 +1272,103 @@ impl CanonicalPenalty {
     }
 }
 
-/// Detect and report structurally identical (or near-identical) penalty pairs
-/// in the canonical bundle.
+/// Measure and report how close each pair of penalties in the canonical bundle
+/// comes to being proportional.
 ///
-/// Two penalties `S_i`, `S_j` with the same `col_range` are compared by their
-/// matrix cosine:
+/// Two penalties `S_i`, `S_j` with the same `col_range` are compared by the
+/// **relative defect of the proportionality claim itself**,
 ///
 /// ```text
-/// cos(S_i, S_j) = tr(S_i S_j) / sqrt(tr(S_i^2) * tr(S_j^2))
+///     delta(S_i, S_j) = min_c ||S_j - c S_i||_F / ||S_i||_F,
+///     attained at      c = <S_i, S_j>_F / ||S_i||_F^2,
 /// ```
 ///
-/// Because `local` is symmetric, `tr(A·B) = sum_{r,c} A[r,c] * B[r,c]` — i.e.,
-/// the Frobenius inner product. Pairs with different `col_range` cannot be
-/// functionally identical and are skipped.
+/// which is what `sum_i w_i S_i = 0` actually asks about. The cosine is the
+/// same information (`delta^2 = 1 - cos^2` for unit-normalized operators), but
+/// it is the WRONG COORDINATE to report it in and this issue is the cost of
+/// having done so: `delta` enters the cosine SQUARED, so a pair that is
+/// `1.9e-5` apart — five orders above any arithmetic — prints as
+/// `cos = 1.000000` and reads as an exact identity. #2676 ran on that reading
+/// for its whole life. Measured on `geo_disease_matern` (centers=10, n=1500,
+/// n_pcs=16, `examples/probe2676_penalty_map_defect`):
+///
+/// ```text
+///     length_scale   delta       certified nullity
+///       2.05e-2      2.079e-15          1     <- exact, to the residual's own round-off
+///       1.64e-1      1.874e-5           0     <- prints cos = 1.000000
+///       1.27e0       3.396e-1           0     <- what the fit realizes
+/// ```
+///
+/// so the "structural identity" that issue is named for is the small-length-
+/// scale LIMIT of two genuinely different operators, and it is not present at
+/// the geometry any of those fits settle on.
+/// Because `local` is symmetric, `<A, B>_F = sum_{r,c} A[r,c] * B[r,c] =
+/// tr(A·B)`. Pairs with different `col_range` cannot be proportional by
+/// construction and are skipped.
 ///
 /// # ⚠ This detector is a SCREEN, not the authority (#2676)
 ///
 /// It sees proportional PAIRS. The criterion's actual invariance is the null
 /// space of the penalty map's Gram, `{w : sum_i w_i S_i = 0}`, which contains
-/// every linear redundancy — including three-term ones no pairwise cosine can
+/// every linear redundancy — including three-term ones no pairwise measure can
 /// find. `gam_solve::penalty_invariance::PenaltyMapInvariance` computes that
 /// subspace and is what the curvature certificate and the smoothing correction
-/// consult. Use this function for the human-facing warning; do not use it to
+/// consult. Use this function for the human-facing report; do not use it to
 /// decide anything numeric.
 ///
-/// # ⚠ And it is NOT a saddle
+/// # ⚠ And an EXACT redundancy is not a saddle
 ///
 /// This warning used to say the redundancy makes the LAML cost carry "a
-/// Z₂-symmetric saddle". It does not. The criterion is EXACTLY CONSTANT along
-/// the redundancy in `lambda` — it is a flat direction, not a descending one —
-/// and every apparent negative curvature there is the chain-rule term of
+/// Z₂-symmetric saddle". It does not. Where the redundancy is EXACT the
+/// criterion is exactly constant along it in `lambda` — a flat direction, not
+/// a descending one — and every apparent negative curvature there is the
+/// chain-rule term of
 /// `H_rho = diag(lambda) H_lambda diag(lambda) + diag(g_rho)`, whose sign is
-/// the sign of a rounding residual (measured at `|sigma|/floor = 0.99925` on
-/// `geo_disease_matern`). An optimizer converging there has not converged to a
-/// saddle; it has converged to a point on a manifold of points that all give
-/// the SAME fit, because they all give the same assembled penalty. That is a
-/// non-identifiability of `lambda`, worth reporting, and not a defect in the
-/// answer.
+/// the sign of a rounding residual. An optimizer converging there has not
+/// converged to a saddle; it has converged to a point on a manifold of points
+/// that all give the SAME fit, because they all assemble the same penalty.
+/// That is a non-identifiability of `lambda`, worth reporting, and not a defect
+/// in the answer.
 ///
-/// Logging policy:
-/// - `cos > 1 - 1e-8` → `log::warn!` with `[PENALTY-REDUNDANCY]`. Every such
-///   pair is emitted because the smoothing parameters are then not separately
-///   identified: only their combination `lambda_i + c*lambda_j` is.
-/// - `0.99 < cos ≤ 1 - 1e-8` → `log::info!` with `[PENALTY-SIMILARITY]`.
-///   At large scale (`k > 64`) only the top-3 highest-cosine such pairs are
-///   logged to bound log volume.
+/// Where the redundancy is only NEAR-exact none of that holds: the criterion is
+/// not constant along the direction, it carries genuine curvature of order
+/// `delta^2`, and calling it "structurally identical" asserts a flatness the
+/// evidence does not support. Which of the two a pair is is decided below, at
+/// the residual's own arithmetic floor, and it is said in the message.
 ///
-/// Returns `Vec<(i, j, cos)>` for the **redundant** pairs (cos > 1 - 1e-8),
+/// # The exactness bar, and why it is derived rather than chosen
+///
+/// `delta` is computed as a residual norm over `m = block_dim^2` products of
+/// `O(1)` entries, so its own round-off is `sqrt(m) * EPSILON` — the error of
+/// the norm, not of the operators. A pair at or under that is proportional to
+/// everything this arithmetic can see; a pair above it is measurably not.
+/// Measured, the two populations sit ten orders apart (`2.079e-15` against
+/// `1.874e-5` on the sweep above, at `sqrt(m) * EPSILON = 2.2e-15` for
+/// `block_dim = 10`), so nothing rides on where in that gap the bar falls.
+///
+/// Logging policy, `delta`-denominated throughout:
+/// - `delta <= sqrt(m) * EPSILON` → `log::warn!` with `[PENALTY-REDUNDANCY]`.
+///   Only their combination `lambda_i + c*lambda_j` is identified.
+/// - `sqrt(m) * EPSILON < delta <= 1e-1` → `log::info!` with
+///   `[PENALTY-SIMILARITY]`, carrying `delta`. At large scale (`k > 64`) only
+///   the three smallest-`delta` such pairs are logged to bound log volume.
+///
+/// Returns `Vec<(i, j, delta)>` for the **exactly proportional** pairs,
 /// primarily to make this function unit-testable without a log capture.
 ///
 /// Performance: this is O(k² · block_dim²); intended to be called exactly
 /// once per fit (e.g. from `RemlState::newwith_offset_shared`).
 pub fn report_penalty_pair_redundancy(canonical: &[CanonicalPenalty]) -> Vec<(usize, usize, f64)> {
-    const REDUNDANCY_THRESHOLD: f64 = 1.0 - 1e-8;
-    const SIMILARITY_THRESHOLD: f64 = 0.99;
+    // A pair `delta` above this is measurably NOT proportional, and calling it
+    // "similar" past a tenth of the operator's own size says nothing. Purely a
+    // log-volume bound: no verdict is taken on it.
+    const SIMILARITY_REPORTING_DEFECT: f64 = 1e-1;
     const LARGE_SCALE_K_THRESHOLD: usize = 64;
     const TOP_SIMILARITY_PAIRS: usize = 3;
 
     let k = canonical.len();
     let mut redundant: Vec<(usize, usize, f64)> = Vec::new();
-    let mut similar: Vec<(usize, usize, f64)> = Vec::new();
+    let mut similar: Vec<(usize, usize, f64, f64)> = Vec::new();
 
     // Pre-compute tr(S_i^2) = sum of squares of S_i entries (Frobenius norm
     // squared). `local` is symmetric, so this equals tr(S_i^T S_i) = tr(S_i^2).
@@ -1348,9 +1385,9 @@ pub fn report_penalty_pair_redundancy(canonical: &[CanonicalPenalty]) -> Vec<(us
             if trace_sq[j] == 0.0 {
                 continue;
             }
-            // Different col_range → cannot be functionally identical by
-            // construction (the block-local matrices live in disjoint or
-            // mismatched parameter subspaces).
+            // Different col_range → cannot be proportional by construction (the
+            // block-local matrices live in disjoint or mismatched parameter
+            // subspaces).
             if canonical[i].col_range != canonical[j].col_range {
                 continue;
             }
@@ -1364,44 +1401,60 @@ pub fn report_penalty_pair_redundancy(canonical: &[CanonicalPenalty]) -> Vec<(us
                 .zip(canonical[j].local.iter())
                 .map(|(&a, &b)| a * b)
                 .sum();
-            let denom = (trace_sq[i] * trace_sq[j]).sqrt();
-            if denom == 0.0 {
-                continue;
-            }
-            let cos = inner / denom;
+            // The least-squares proportionality constant and the residual it
+            // leaves, formed DIRECTLY rather than through `1 - cos`: the cosine
+            // route squares `delta` and then subtracts from one, which loses
+            // every digit of a defect under `sqrt(EPSILON)` — the loss this
+            // whole issue is made of.
+            let scale = inner / trace_sq[i];
+            let residual_sq: f64 = canonical[i]
+                .local
+                .iter()
+                .zip(canonical[j].local.iter())
+                .map(|(&a, &b)| {
+                    let residual = b - scale * a;
+                    residual * residual
+                })
+                .sum();
+            let defect = (residual_sq / trace_sq[i]).sqrt();
+            let entries = canonical[i].local.len() as f64;
+            let arithmetic_floor = entries.sqrt() * f64::EPSILON;
 
-            if cos > REDUNDANCY_THRESHOLD {
-                redundant.push((i, j, cos));
-            } else if cos > SIMILARITY_THRESHOLD {
-                similar.push((i, j, cos));
+            if defect <= arithmetic_floor {
+                redundant.push((i, j, defect));
+            } else if defect <= SIMILARITY_REPORTING_DEFECT {
+                similar.push((i, j, defect, scale));
             }
         }
     }
 
-    // Always emit every redundancy — these are structural model errors.
-    for &(i, j, cos) in &redundant {
+    // Always emit every exact redundancy — these are structural model errors.
+    for &(i, j, defect) in &redundant {
         log::warn!(
-            "[PENALTY-REDUNDANCY] penalties i={i} j={j} are structurally identical \
-             (cos={cos:.6}) — only their COMBINATION is identified, so the criterion is \
-             exactly constant along their antisymmetric direction and lambda_{i} / lambda_{j} \
-             are not separately estimable. The fit itself is unaffected (every point of that \
-             manifold assembles the same penalty), and the curvature certificate deflates the \
-             direction rather than judging a chain-rule term there (#2676). Consider \
-             re-specifying (e.g. anisotropic→isotropic for spatial smoothers with weak axis \
-             signal) if you need the individual smoothing parameters to mean something."
+            "[PENALTY-REDUNDANCY] penalties i={i} j={j} are proportional to the arithmetic \
+             that formed them (relative defect min_c ||S_{j} - c S_{i}||_F / ||S_{i}||_F = \
+             {defect:.6e}) — only their COMBINATION is identified, so the criterion is exactly \
+             constant along their antisymmetric direction and lambda_{i} / lambda_{j} are not \
+             separately estimable. The fit itself is unaffected (every point of that manifold \
+             assembles the same penalty), and the curvature certificate deflates the direction \
+             rather than judging a chain-rule term there (#2676). Consider re-specifying (e.g. \
+             anisotropic→isotropic for spatial smoothers with weak axis signal) if you need the \
+             individual smoothing parameters to mean something."
         );
     }
 
     // Cap similarity log volume at large scale.
     if k > LARGE_SCALE_K_THRESHOLD && similar.len() > TOP_SIMILARITY_PAIRS {
-        similar.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        similar.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
         similar.truncate(TOP_SIMILARITY_PAIRS);
     }
-    for (i, j, cos) in similar {
+    for (i, j, defect, scale) in similar {
         log::info!(
-            "[PENALTY-SIMILARITY] penalties i={i} j={j} are near-identical \
-             (cos={cos:.6}) — outer Hessian may be ill-conditioned along their \
-             antisymmetric direction."
+            "[PENALTY-SIMILARITY] penalties i={i} j={j} are close but MEASURABLY distinct \
+             (relative defect {defect:.6e} at the best scale c={scale:.6e}) — the outer Hessian \
+             may be ill-conditioned along their antisymmetric direction, and the criterion \
+             carries genuine curvature of order defect^2 there. This is NOT an invariance: \
+             nothing is exactly constant along it and no direction is deflated for it (#2676)."
         );
     }
 
@@ -3912,11 +3965,68 @@ mod tests {
             "expected exactly one redundant pair, got {:?}",
             redundant
         );
-        let (i, j, cos) = redundant[0];
+        let (i, j, defect) = redundant[0];
         assert_eq!((i, j), (1, 2));
+        assert_eq!(
+            defect, 0.0,
+            "bit-identical penalties leave an EXACTLY zero residual, not a small one"
+        );
+    }
+
+    /// The regression this whole screen was rewritten for (#2676): a pair whose
+    /// relative defect is `1.9e-5` — the measured `geo_disease_matern` figure at
+    /// its cold geometry — must NOT be reported as proportional, even though its
+    /// cosine rounds to `1.000000` at six decimals.
+    ///
+    /// The two assertions are a pair. The first is the fix; the second is the
+    /// evidence that the OLD screen would have failed it, so the test cannot go
+    /// green for the boring reason that the fixture is not marginal.
+    #[test]
+    fn a_pair_1p9e_minus_5_apart_is_not_proportional_2676() {
+        const DEFECT: f64 = 1.874_020e-5;
+        let base = ndarray::array![[1.0, -0.5, 0.0], [-0.5, 2.0, -0.5], [0.0, -0.5, 1.0]];
+        let base_norm = base.iter().map(|v| v * v).sum::<f64>().sqrt();
+        // A perturbation ORTHOGONAL to `base` in the Frobenius inner product,
+        // so the defect is exactly the perturbation's relative size and no part
+        // of it is absorbed into the best scale `c`.
+        let mut direction = ndarray::array![[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let overlap = direction
+            .iter()
+            .zip(base.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            / (base_norm * base_norm);
+        direction = &direction - &(overlap * &base);
+        let direction_norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let perturbed = &base + &(direction * (DEFECT * base_norm / direction_norm));
+
+        let bundle = vec![
+            canonical_from_local(base.clone(), 0..3, 3),
+            canonical_from_local(perturbed.clone(), 0..3, 3),
+        ];
         assert!(
-            cos > 1.0 - 1e-12,
-            "cosine for identical penalties should be ~1.0, got {cos}"
+            report_penalty_pair_redundancy(&bundle).is_empty(),
+            "a pair {DEFECT:.3e} apart is measurably distinct and must not be called proportional"
+        );
+
+        // Negative control: the cosine the old screen thresholded on cannot see
+        // it. `1 - cos = defect^2/2 = 1.8e-10`, six orders under the `1e-8` bar
+        // that used to declare the pair "structurally identical".
+        let inner = base
+            .iter()
+            .zip(perturbed.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f64>();
+        let cosine =
+            inner / (base_norm * perturbed.iter().map(|v| v * v).sum::<f64>().sqrt());
+        assert!(
+            cosine > 1.0 - 1e-8,
+            "the fixture must be one the OLD cos > 1 - 1e-8 screen accepted; got cos = {cosine}"
+        );
+        assert_eq!(
+            format!("{cosine:.6}"),
+            "1.000000",
+            "and one whose six-decimal print is indistinguishable from an exact identity"
         );
     }
 
