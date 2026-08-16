@@ -1471,6 +1471,11 @@ pub(crate) fn try_tangent_projected_evaluate(
             return Ok(Some(result));
         }
     };
+    // #2765: the criterion below is `½log|ZᵀHZ|` on THIS face. Publish the face
+    // before recursing so an armed audit can state which subspace its
+    // determinant was taken on — and, across two displaced θ, whether it is the
+    // same subspace at all.
+    crate::estimate::outer_eval_capture::record_outer_tangent_basis(z.clone());
     let h_full = solution
         .hessian_op
         .assemble_h_dense_for_tangent_projection()?;

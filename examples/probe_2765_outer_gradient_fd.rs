@@ -257,10 +257,11 @@ fn main() {
         Some(curvature) => {
             eprintln!(
                 "[2765-FD] curvature: criterion_half_logdet={:+.9e} dense_half_logdet={:+.9e} \
-                 gap={:.3e}",
+                 gap={:.3e} tangent_dim={:?}",
                 curvature.criterion_half_logdet,
                 curvature.dense_half_logdet,
                 (curvature.criterion_half_logdet - curvature.dense_half_logdet).abs(),
+                curvature.tangent_dim,
             );
             for j in 0..curvature.drift_max_abs_error.len() {
                 let label = if j < audit.rho_dim {
@@ -270,11 +271,13 @@ fn main() {
                 };
                 eprintln!(
                     "[2765-FD] drift {label}: max_abs_err={:.6e} rel={:.3e} \
-                     |Hdot|max={:.6e} worst_entry={:?}",
+                     |Hdot|max={:.6e} worst_entry={:?} face_move={:.3e} face_dims={:?}",
                     curvature.drift_max_abs_error[j],
                     curvature.drift_relative_error[j],
                     curvature.analytic_drift_max_abs[j],
                     curvature.drift_worst_entry[j],
+                    curvature.face_drift_max_abs[j],
+                    curvature.displaced_tangent_dim[j],
                 );
             }
         }

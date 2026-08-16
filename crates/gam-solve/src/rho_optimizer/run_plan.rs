@@ -916,22 +916,48 @@ fn capture_outer_gradient_fd_at_seed(
     // evaluation published, which settles the drift outright and localizes a
     // failure to a coefficient block. It costs two extra inner profiles per θ
     // coordinate and runs only inside an armed audit window.
+    if analytic_curvature.is_none() {
+        log::info!(
+            "[2765-AUDIT] no analytic curvature snapshot at the audited seed; the criterion's \
+             log-determinant operator did not publish one"
+        );
+    }
     let curvature = analytic_curvature.as_ref().and_then(|base| {
         let theta_dim = rho_dim + psi_dim;
         if base.drifts.len() != theta_dim {
+            log::info!(
+                "[2765-AUDIT] curvature snapshot carries {} drifts against theta_dim={theta_dim}; \
+                 the last publication was a value-only evaluation",
+                base.drifts.len()
+            );
             return None;
         }
         let mut drift_max_abs_error = Array1::<f64>::from_elem(theta_dim, f64::NAN);
         let mut drift_relative_error = Array1::<f64>::from_elem(theta_dim, f64::NAN);
         let mut drift_worst_entry = vec![(0usize, 0usize); theta_dim];
         let mut analytic_drift_max_abs = Array1::<f64>::zeros(theta_dim);
+        let mut face_drift_max_abs = Array1::<f64>::from_elem(theta_dim, f64::NAN);
+        let mut displaced_tangent_dim = vec![(None, None); theta_dim];
+        // On an active inequality face the criterion is `½log|ZᵀHZ|`, so the
+        // object a `p`-space drift has to be differenced against is `ZᵀḢZ`
+        // against `d(ZᵀHZ)/dθ` — with the BASE face on both sides, because a
+        // comparison in two different bases measures the basis, not the drift.
+        let base_basis = base.tangent_basis.clone();
+        let to_face = |matrix: &Array2<f64>| -> Array2<f64> {
+            match base_basis.as_ref() {
+                Some(z) if z.nrows() == matrix.nrows() => z.t().dot(matrix).dot(z),
+                _ => matrix.clone(),
+            }
+        };
+        let projector = |z: Option<&Array2<f64>>| z.map(|basis| basis.dot(&basis.t()));
+        let base_projector = projector(base.tangent_basis.as_ref());
         for j in 0..theta_dim {
             let step = if j < rho_dim {
                 rho_block.as_ref().map_or(f64::NAN, |block| block.steps[j])
             } else {
                 psi_steps[j - rho_dim]
             };
-            let analytic_drift = &base.drifts[j];
+            let analytic_drift = to_face(&base.drifts[j]);
             analytic_drift_max_abs[j] = analytic_drift
                 .iter()
                 .fold(0.0_f64, |acc, value| acc.max(value.abs()));
@@ -952,14 +978,46 @@ fn capture_outer_gradient_fd_at_seed(
                 .ok()
                 .and_then(|(_, _, snapshot)| snapshot)
             };
-            let (Some(hessian_plus), Some(hessian_minus)) = (
+            let (Some(snapshot_plus), Some(snapshot_minus)) = (
                 curvature_at(&plus, &mut *obj),
                 curvature_at(&minus, &mut *obj),
             ) else {
                 continue;
             };
-            if hessian_plus.hessian.dim() != analytic_drift.dim()
-                || hessian_minus.hessian.dim() != analytic_drift.dim()
+            displaced_tangent_dim[j] = (
+                snapshot_plus.tangent_basis.as_ref().map(Array2::ncols),
+                snapshot_minus.tangent_basis.as_ref().map(Array2::ncols),
+            );
+            // Does the face itself move? Compared as PROJECTORS `ZZᵀ`, which are
+            // basis-rotation invariant, so an orthogonal re-parameterisation of
+            // the SAME face reads as zero rather than as motion.
+            let plus_projector = projector(snapshot_plus.tangent_basis.as_ref());
+            let minus_projector = projector(snapshot_minus.tangent_basis.as_ref());
+            face_drift_max_abs[j] = match (
+                base_projector.as_ref(),
+                plus_projector.as_ref(),
+                minus_projector.as_ref(),
+            ) {
+                (Some(base_p), Some(plus_p), Some(minus_p))
+                    if base_p.dim() == plus_p.dim() && base_p.dim() == minus_p.dim() =>
+                {
+                    let mut worst = 0.0_f64;
+                    for row in 0..base_p.nrows() {
+                        for col in 0..base_p.ncols() {
+                            worst = worst
+                                .max((plus_p[[row, col]] - base_p[[row, col]]).abs())
+                                .max((minus_p[[row, col]] - base_p[[row, col]]).abs());
+                        }
+                    }
+                    worst
+                }
+                (None, None, None) => 0.0,
+                _ => f64::INFINITY,
+            };
+            let measured_plus = to_face(&snapshot_plus.hessian);
+            let measured_minus = to_face(&snapshot_minus.hessian);
+            if measured_plus.dim() != analytic_drift.dim()
+                || measured_minus.dim() != analytic_drift.dim()
             {
                 continue;
             }
@@ -968,9 +1026,8 @@ fn capture_outer_gradient_fd_at_seed(
             let mut scale = 0.0_f64;
             for row in 0..analytic_drift.nrows() {
                 for col in 0..analytic_drift.ncols() {
-                    let measured = (hessian_plus.hessian[[row, col]]
-                        - hessian_minus.hessian[[row, col]])
-                        / (2.0 * step);
+                    let measured =
+                        (measured_plus[[row, col]] - measured_minus[[row, col]]) / (2.0 * step);
                     let error = (analytic_drift[[row, col]] - measured).abs();
                     scale = scale.max(measured.abs());
                     if error > worst {
@@ -1003,6 +1060,9 @@ fn capture_outer_gradient_fd_at_seed(
             drift_max_abs_error,
             drift_relative_error,
             drift_worst_entry,
+            face_drift_max_abs,
+            tangent_dim: base.tangent_basis.as_ref().map(Array2::ncols),
+            displaced_tangent_dim,
             analytic_drift_max_abs,
             dense_half_logdet,
             criterion_half_logdet: 0.5 * base.logdet,

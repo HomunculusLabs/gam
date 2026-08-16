@@ -33,6 +33,75 @@ fn penalty_logdet_trace_from_root(
     })
 }
 
+/// The dense curvature an armed finite-difference audit differences (#2765).
+///
+/// A backend that can hand out its assembled `H` does; the rest are recovered
+/// by inverting `H⁻¹ = solve_multi(I)`, which every backend implements because
+/// the mode response needs it. The second route is not a fallback of
+/// convenience: it returns the EFFECTIVE curvature the criterion's own kernels
+/// act through — a smooth spectral floor or a rank mask is already baked into
+/// `solve`, so the recovered matrix is the one whose log-determinant the cost
+/// is claiming to take, which is exactly what the audit wants to difference.
+///
+/// `None` only when the inverse is not invertible back, which is itself worth
+/// reporting rather than silently skipping.
+fn audited_dense_curvature(hop: &dyn HessianFactorization) -> Option<Array2<f64>> {
+    let dim = hop.dim();
+    if dim == 0 {
+        return None;
+    }
+    if let Ok(dense) = hop.assemble_h_dense_for_tangent_projection() {
+        log::info!("[2765-AUDIT] curvature from the backend's own dense assembly (dim={dim})");
+        return Some(dense);
+    }
+    use gam_linalg::faer_ndarray::FaerEigh;
+    let mut inverse = hop.solve_multi(&Array2::<f64>::eye(dim));
+    // `solve_multi` is symmetric in exact arithmetic; reduction order is not.
+    for row in 0..dim {
+        for col in 0..row {
+            let mean = 0.5 * (inverse[[row, col]] + inverse[[col, row]]);
+            inverse[[row, col]] = mean;
+            inverse[[col, row]] = mean;
+        }
+    }
+    let (values, vectors) = match inverse.eigh(faer::Side::Lower) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            log::info!("[2765-AUDIT] curvature snapshot skipped: eigh(H⁻¹) failed ({reason})");
+            return None;
+        }
+    };
+    // A masked direction leaves an exactly-zero eigenvalue of `H⁻¹`, which has
+    // no inverse — the honest reconstruction there is the pseudo-inverse, which
+    // is also the object the criterion's own masked kernels act through. Only a
+    // wholly degenerate spectrum is refused.
+    let scale = values.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    if !(scale > 0.0) {
+        log::info!("[2765-AUDIT] curvature snapshot skipped: H⁻¹ from solve_multi is identically 0");
+        return None;
+    }
+    let floor = scale * f64::EPSILON;
+    let mut kept = 0usize;
+    let mut scaled = Array2::<f64>::zeros((dim, dim));
+    for col in 0..dim {
+        if values[col].abs() <= floor {
+            continue;
+        }
+        kept += 1;
+        let inverse_value = 1.0 / values[col];
+        for row in 0..dim {
+            scaled[[row, col]] = vectors[[row, col]] * inverse_value;
+        }
+    }
+    log::info!(
+        "[2765-AUDIT] curvature recovered by inverting solve_multi(I): dim={dim} kept={kept} \
+         min_eig_inv={:.3e} max_eig_inv={:.3e}",
+        values.iter().fold(f64::INFINITY, |acc, &v| acc.min(v)),
+        scale,
+    );
+    Some(scaled.dot(&vectors.t()))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  The single evaluator
 // ═══════════════════════════════════════════════════════════════════════════
@@ -528,11 +597,12 @@ pub fn reml_laml_evaluate(
     // matrix-level comparison has nothing to difference. The drift half is
     // published further down, where the gradient assembly owns it.
     if crate::estimate::outer_eval_capture::outer_gradient_component_capture_enabled()
-        && let Ok(hessian) = hop.assemble_h_dense_for_tangent_projection()
+        && let Some(hessian) = audited_dense_curvature(hop)
     {
         crate::estimate::outer_eval_capture::record_outer_curvature_snapshot(
             crate::estimate::outer_eval_capture::OuterCurvatureSnapshot {
                 hessian,
+                tangent_basis: crate::estimate::outer_eval_capture::peek_outer_tangent_basis(),
                 logdet: log_det_h,
                 drifts: Vec::new(),
             },
@@ -1841,7 +1911,7 @@ pub fn reml_laml_evaluate(
     // instead of per contracted number. Densification is `O(p²)` per
     // coordinate and runs ONLY inside an armed audit window.
     if capture_logdet_trace_parts
-        && let Ok(hessian) = hop.assemble_h_dense_for_tangent_projection()
+        && let Some(hessian) = audited_dense_curvature(hop)
     {
         let densify = |drift: &DriftDerivResult| match drift {
             DriftDerivResult::Dense(matrix) => matrix.clone(),
@@ -1862,9 +1932,15 @@ pub fn reml_laml_evaluate(
                 hop.dim(),
             )));
         }
+        log::info!(
+            "[2765-AUDIT] curvature snapshot with drifts: dim={} coords={}",
+            hessian.nrows(),
+            drifts.len()
+        );
         crate::estimate::outer_eval_capture::record_outer_curvature_snapshot(
             crate::estimate::outer_eval_capture::OuterCurvatureSnapshot {
                 hessian,
+                tangent_basis: crate::estimate::outer_eval_capture::peek_outer_tangent_basis(),
                 logdet: log_det_h,
                 drifts,
             },

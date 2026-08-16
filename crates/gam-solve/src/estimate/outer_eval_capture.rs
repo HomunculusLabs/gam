@@ -106,6 +106,16 @@ pub struct OuterGradientFdRecord {
 pub struct OuterCurvatureSnapshot {
     /// The dense curvature whose log-determinant the `logdet_h` atom reports.
     pub hessian: Array2<f64>,
+    /// The orthonormal tangent basis `Z` of `null(A_act)` when the inner solve
+    /// returned on an active inequality face and the criterion is therefore the
+    /// TANGENT-projected `½log|ZᵀHZ|` (#2765).
+    ///
+    /// Recorded because it is the coordinate system the whole comparison lives
+    /// in: a drift stated in `p`-space says nothing about a determinant taken on
+    /// an `m`-dimensional face, and a face that MOVES between two displaced θ is
+    /// not a differentiable criterion at all — a distinction the contracted
+    /// scalar cannot express and the previous audit silently averaged over.
+    pub tangent_basis: Option<Array2<f64>>,
     /// `log|H|` as the criterion consumes it, i.e. the operator's own
     /// log-determinant plus any uniform-rescale correction. Recorded so a gap
     /// against `½ log det(hessian)` — a value/kernel disagreement rather than a
@@ -125,6 +135,15 @@ pub struct OuterCurvatureDriftAudit {
     pub drift_relative_error: Array1<f64>,
     /// `(row, col)` of the entry carrying `drift_max_abs_error`.
     pub drift_worst_entry: Vec<(usize, usize)>,
+    /// `‖Z₊Z₊ᵀ − Z₋Z₋ᵀ‖_max` per θ coordinate: how far the ACTIVE FACE the
+    /// criterion's determinant is taken on moves between the two displaced
+    /// evaluations. A non-zero entry means the finite difference straddles two
+    /// different criteria, so the analytic derivative is not wrong there — the
+    /// question is not well posed there.
+    pub face_drift_max_abs: Array1<f64>,
+    /// Tangent dimension at the base point, and at each coordinate's `θ ± h`.
+    pub tangent_dim: Option<usize>,
+    pub displaced_tangent_dim: Vec<(Option<usize>, Option<usize>)>,
     /// `‖Ḣ_i^analytic‖_max`, so a relative error can be read against a scale.
     pub analytic_drift_max_abs: Array1<f64>,
     /// `½ log det(H)` recomputed from the captured dense matrix, against the
@@ -262,6 +281,7 @@ struct OuterGradientFdCapture {
     psi_gram_anchor_deltas: Option<(f64, f64)>,
     selected_mode: Option<(Array1<f64>, Option<Array2<f64>>)>,
     curvature: Option<OuterCurvatureSnapshot>,
+    tangent_basis: Option<Array2<f64>>,
 }
 
 thread_local! {
@@ -318,6 +338,7 @@ fn arm_outer_gradient_fd_capture(min_psi_dim: usize, grade_rho: bool) {
             psi_gram_anchor_deltas: None,
             selected_mode: None,
             curvature: None,
+            tangent_basis: None,
         });
     });
 }
@@ -389,8 +410,35 @@ pub(crate) fn begin_outer_criterion_component_capture() {
             state.psi_gram_anchor_deltas = None;
             state.selected_mode = None;
             state.curvature = None;
+            state.tangent_basis = None;
         }
     });
+}
+
+/// Retain the tangent basis of the active inequality face this evaluation's
+/// criterion is projected onto (#2765).
+///
+/// Published by the tangent-projection entry BEFORE it recurses, so the
+/// recursion's curvature snapshot can state which subspace its determinant was
+/// taken on. Public because the projection lives in the outer-entry helpers
+/// rather than in the assembly that records the snapshot.
+pub fn record_outer_tangent_basis(z: Array2<f64>) {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+        {
+            state.tangent_basis = Some(z);
+        }
+    });
+}
+
+pub(crate) fn peek_outer_tangent_basis() -> Option<Array2<f64>> {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.tangent_basis.clone())
+    })
 }
 
 /// Retain the criterion's dense curvature and its analytic drifts for an armed
