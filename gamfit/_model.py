@@ -606,6 +606,26 @@ class Model:
         of the characteristic function. For an unpenalized block every
         :math:`w_j = 1` and this is exactly the textbook :math:`\\chi^2_q`.
 
+        **When the scale is estimated the reference is not that law** (#2672).
+        gam's profiled Gaussian log-likelihood is
+        :math:`\\ell = -\\tfrac12[n\\ln 2\\pi + n\\ln(D/\\nu) - \\sum\\ln w_i +
+        \\nu]`, so with no expansion anywhere
+        :math:`W = n\\ln(1 + Q/V) + B`, where :math:`Q = (D_0 - D_f)/\\sigma^2`
+        is the quantity ``reference_weights`` is the spectrum *of*,
+        :math:`V = D_f/\\sigma^2` is a random variable of the same data, and
+        :math:`B = n\\ln(\\nu_f/\\nu_0) + (\\nu_0 - \\nu_f)`. Scoring :math:`W`
+        against :math:`Q`'s law is anti-conservative at :math:`O(1/\\nu)` —
+        measured ``size@.05 = 0.0792`` against a nominal ``0.05`` at
+        :math:`n \\in \\{30, 50\\}`. Because the map is monotone it inverts
+        exactly: :math:`P(W > w) = P(Q - c(w)V > 0)` with
+        :math:`c(w) = \\mathrm{expm1}((w - B)/n)`, a linear combination of
+        independent chi-squares with a negative weight, evaluated at zero. It is
+        the same reason mgcv's smooth-term p-values take an :math:`F` reference
+        when the scale is estimated and a :math:`\\chi^2` when it is known.
+        ``reference_residual_df`` (:math:`\\nu`) and
+        ``reference_deterministic_offset`` (:math:`B`) are ``None`` on every
+        family that carries its dispersion in the IRLS weight instead.
+
         ``reference_source`` says which lane produced it: ``"null_spectrum"``
         (the exact law above, with ``reference_weights`` carrying :math:`w`),
         ``"spectral_moment_match"`` (the fit could supply only the spectrum's
@@ -621,6 +641,8 @@ class Model:
         denominated in — *not* a chi-square degrees of freedom),
         ``reference_weights``/``reference_source``, ``reference_chi_square_df``
         :math:`\\nu` and ``reference_scale`` :math:`g` (the two-moment summary),
+        ``reference_residual_df``/``reference_deterministic_offset`` (the
+        estimated-scale channel above, ``None`` off the profiled Gaussian),
         ``bartlett_factor``
         :math:`c`, ``statistic_corrected`` :math:`W^*`, ``p_value_uncorrected``,
         ``p_value_corrected`` (the magic-by-default value), ``material`` (the

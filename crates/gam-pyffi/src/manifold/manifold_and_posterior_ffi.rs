@@ -1725,6 +1725,23 @@ struct SmoothTermLrRow {
     /// should be at roundoff; it is published rather than assumed because both
     /// of its inputs have been published in the wrong basis before.
     reference_moment_residual: Option<f64>,
+    /// The residual degrees of freedom the fit's own profiled `σ̂` divided by,
+    /// or `None` on every family that does not estimate a Gaussian scale from a
+    /// residual sum of squares (gam#2672).
+    ///
+    /// When it is present the reference is NOT the known-scale law. gam's
+    /// profiled Gaussian LR statistic is `W = n·ln(1 + Q/V) + B` with
+    /// `Q = (D_0 − D_f)/σ²` — the quantity `reference_weights` is the spectrum
+    /// of — and `V = D_f/σ²` a random variable of the same data, so the p-value
+    /// is `P(Q − c·V > 0)` with `c = expm1((W − B)/n)`. Scoring `W` against
+    /// `Q`'s law instead is anti-conservative at `O(1/ν)`, which is what this
+    /// field lets a consumer see rather than infer: a small `ν` is a fit whose
+    /// p-value would have been materially wrong without it.
+    reference_residual_df: Option<f64>,
+    /// The deterministic part of `W`: `B = n·ln(ν_f/ν_0) + (ν_0 − ν_f)`, a
+    /// function of the two fits' residual degrees of freedom and of nothing
+    /// random. `None` alongside `reference_residual_df`.
+    reference_deterministic_offset: Option<f64>,
     /// The CONDITIONAL tail of the corrected statistic: what the fixed-`λ` law
     /// alone reports, before the λ̂-selection replay moves it.
     /// `p_value_corrected − p_value_conditional` is what treating `λ̂` as chosen
@@ -1951,6 +1968,14 @@ fn smooth_term_lr_inference_dataset_json_impl(
             reference_chi_square_df: r.ref_df_provenance.chi_square_df,
             reference_scale: r.ref_df_provenance.scale,
             reference_moment_residual: r.ref_df_provenance.moment_residual,
+            reference_residual_df: r.ref_df_provenance.profiled_scale.as_ref().map(|scale| {
+                scale.residual_weights.iter().sum::<f64>() + scale.residual_unit_dimension
+            }),
+            reference_deterministic_offset: r
+                .ref_df_provenance
+                .profiled_scale
+                .as_ref()
+                .map(|scale| scale.deterministic_offset),
             p_value_conditional: r.p_value_conditional,
             p_value_bound: r.p_value_bound,
             bartlett_factor: r.bartlett_factor,

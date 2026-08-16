@@ -1892,11 +1892,19 @@ pub struct SmoothLrReferenceDf {
 ///
 /// # What is approximated, stated plainly
 ///
-/// Two things, both inherited rather than introduced. `Q`'s spectrum is the
-/// reference's own claim, unchanged. And `Q` and `V` are taken INDEPENDENT —
-/// exact for the unpenalized linear model by Cochran, approximate under
-/// penalization, and the same independence every `F` reference for a penalized
-/// smooth rests on.
+/// Three things, all inherited rather than introduced, and none of them the
+/// `O(1/ν)` term this channel exists to remove.
+///
+/// * `Q`'s spectrum is the reference's own claim, unchanged.
+/// * `Q` and `V` are taken INDEPENDENT — exact for the unpenalized linear model
+///   by Cochran, approximate under penalization, and the same independence
+///   every `F` reference for a penalized smooth rests on.
+/// * `V` is taken CENTRAL. It is exactly central when the mean lies in the
+///   penalty's null space, which is what the tested term being null gives on
+///   its own block; a DIFFERENT term in the model carrying real signal that the
+///   penalty shrinks adds a non-centrality. That inflates `V`, which inflates
+///   the p-value — so the residual runs conservative, in the direction a test
+///   is allowed to be wrong.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SmoothLrProfiledScale {
     /// `n` — the multiplier the profiled `ln σ̂²` carries in the log-likelihood.
@@ -2392,6 +2400,15 @@ pub fn smooth_term_lr_inference_forspec(
     // The estimated-scale channel (#2672), assembled once because every part of
     // it except the deterministic offset is a property of the FULL fit and not
     // of which term is being tested.
+    //
+    // The observation count is the POSITIVE-WEIGHT row count, not the raw one.
+    // That is the count the optimizer's own `φ̂ = weighted_rss/(n − edf)` uses
+    // (#584: a zero-weight row is exactly an absent row, and counting it in the
+    // denominator while the numerator excludes it biases `φ̂` low), and it is
+    // also the count that multiplies `ln σ̂²` in the log-likelihood, since a
+    // zero-weight row's `−½(… − ln w_i …)` term is not summable at all. The two
+    // have to be the same number or `W = n·ln(D_0/D_f) + B` is not an identity.
+    let profiled_observations = weights.iter().filter(|weight| **weight > 0.0).count();
     let profiled_residual_shares = profiled_scale_residual_shares(
         &fitted_likelihood,
         hessian_inverse.as_ref(),
@@ -2400,14 +2417,17 @@ pub fn smooth_term_lr_inference_forspec(
     )?;
     let full_residual_df = profiled_residual_shares
         .as_ref()
-        .and(profiled_residual_degrees_of_freedom(&full.fit, n));
+        .and(profiled_residual_degrees_of_freedom(
+            &full.fit,
+            profiled_observations,
+        ));
     // `(v, h)`: the non-trivial residual weights and the degrees of freedom of
     // the weight-one block. On the exact rung that block is the `n − p`
     // directions no column reaches; on the summary rung the whole residual law
     // is folded into it at the fit's own `ν`.
     let profiled_residual = profiled_residual_shares.zip(full_residual_df).map(
         |(shares, residual_df)| match shares {
-            Some(weights) => (weights, n.saturating_sub(p_total) as f64),
+            Some(spectrum) => (spectrum, profiled_observations.saturating_sub(p_total) as f64),
             None => (Vec::new(), residual_df),
         },
     );
@@ -2581,7 +2601,8 @@ pub fn smooth_term_lr_inference_forspec(
                     .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
                 let mut eta = null.design.design.dot(&null.fit.beta);
                 eta += &null_offset;
-                let residual_df = profiled_residual_degrees_of_freedom(&null.fit, n);
+                let residual_df =
+                    profiled_residual_degrees_of_freedom(&null.fit, profiled_observations);
                 (w, Some(eta), residual_df)
             }
             _ => (f64::NAN, None, None),
@@ -2597,7 +2618,7 @@ pub fn smooth_term_lr_inference_forspec(
             && full_df > 0.0
             && null_df > 0.0
         {
-            let observations = n as f64;
+            let observations = profiled_observations as f64;
             reference.profiled_scale = Some(SmoothLrProfiledScale {
                 observations,
                 deterministic_offset: observations * (full_df / null_df).ln()

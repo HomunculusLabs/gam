@@ -38,9 +38,15 @@ const K: usize = 8;
 /// `y ~ x + s(z)` with a genuine — not null — smooth, so the statistic is well
 /// away from the degenerate corner and the identities are being checked
 /// somewhere they could fail.
+///
+/// The `w` column carries per-row training weights. Every row is weight one
+/// except a handful of exactly-ZERO rows, which is the one configuration where
+/// the observation count the reference needs (`Σ[w > 0]`, the count the
+/// optimizer's own `φ̂ = weighted_rss/(n − edf)` uses under #584) differs from
+/// the raw row count. `weight_column` is only set on the arms that ask for it.
 fn fixture(gaussian: bool) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(0x2672_5CA1_E000_0001);
-    let headers = vec!["y".to_string(), "x".to_string(), "z".to_string()];
+    let headers = ["y", "x", "z", "w"].iter().map(|s| s.to_string()).collect();
     let mut rows = Vec::<StringRecord>::with_capacity(N);
     for i in 0..N {
         let x = i as f64 / (N as f64 - 1.0);
@@ -51,18 +57,34 @@ fn fixture(gaussian: bool) -> gam::data::EncodedDataset {
         } else {
             Poisson::new(eta.exp()).expect("rate").sample(&mut rng) as f64
         };
+        let weight = if i % 17 == 3 { 0.0 } else { 1.0 };
         rows.push(StringRecord::from(vec![
             y.to_string(),
             x.to_string(),
             z.to_string(),
+            weight.to_string(),
         ]));
     }
     encode_recordswith_inferred_schema(headers, rows).expect("encode the #2672 fixture")
 }
 
+/// How many rows the fixture leaves at positive weight.
+fn positive_weight_rows() -> usize {
+    (0..N).filter(|i| i % 17 != 3).count()
+}
+
 fn lr_report(family: &str, data: &gam::data::EncodedDataset) -> SmoothTermLrInference {
+    lr_report_with(family, data, None)
+}
+
+fn lr_report_with(
+    family: &str,
+    data: &gam::data::EncodedDataset,
+    weight_column: Option<&str>,
+) -> SmoothTermLrInference {
     let cfg = FitConfig {
         family: Some(family.to_string()),
+        weight_column: weight_column.map(str::to_string),
         ..FitConfig::default()
     };
     let formula = format!("y ~ x + s(z, k={K})");
@@ -88,8 +110,17 @@ fn lr_report(family: &str, data: &gam::data::EncodedDataset) -> SmoothTermLrInfe
 /// `(deviance, ν = D/σ̂², edf_total, design columns)` for one formula, through
 /// the ordinary fit entry point.
 fn fit_summary(formula: &str, data: &gam::data::EncodedDataset) -> (f64, f64, f64, usize) {
+    fit_summary_with(formula, data, None)
+}
+
+fn fit_summary_with(
+    formula: &str,
+    data: &gam::data::EncodedDataset,
+    weight_column: Option<&str>,
+) -> (f64, f64, f64, usize) {
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
+        weight_column: weight_column.map(str::to_string),
         ..FitConfig::default()
     };
     let FitResult::Standard(standard) = fit_from_formula(formula, data, &cfg).expect("fit") else {
@@ -124,45 +155,62 @@ fn fit_summary(formula: &str, data: &gam::data::EncodedDataset) -> (f64, f64, f6
 fn the_profiled_gaussian_lr_statistic_is_the_log_deviance_ratio_plus_its_offset() {
     init_parallelism();
     let data = fixture(true);
-    let report = lr_report("gaussian", &data);
-    let scale = report
-        .ref_df_provenance
-        .profiled_scale
-        .as_ref()
-        .expect("a profiled-Gaussian fit carries the estimated-scale channel");
+    // Both arms of the observation count: unweighted, where it is the row
+    // count, and a fixture with exactly-zero-weight rows, where it is not. The
+    // count that multiplies `ln σ̂²` and the count `φ̂` divides by have to be the
+    // SAME number or this identity does not hold, and the zero-weight arm is
+    // the only place they could differ.
+    for (label, weight_column, observations) in [
+        ("unweighted", None, N),
+        ("zero-weight rows", Some("w"), positive_weight_rows()),
+    ] {
+        let report = lr_report_with("gaussian", &data, weight_column);
+        let scale = report
+            .ref_df_provenance
+            .profiled_scale
+            .as_ref()
+            .expect("a profiled-Gaussian fit carries the estimated-scale channel");
 
-    let (deviance_full, nu_full, _, _) = fit_summary(&format!("y ~ x + s(z, k={K})"), &data);
-    let (deviance_null, nu_null, _, _) = fit_summary("y ~ x", &data);
+        let (deviance_full, nu_full, _, _) =
+            fit_summary_with(&format!("y ~ x + s(z, k={K})"), &data, weight_column);
+        let (deviance_null, nu_null, _, _) = fit_summary_with("y ~ x", &data, weight_column);
 
-    let observations = N as f64;
-    let offset = observations * (nu_full / nu_null).ln() + (nu_null - nu_full);
-    let predicted = observations * (deviance_null / deviance_full).ln() + offset;
+        let observations = observations as f64;
+        let offset = observations * (nu_full / nu_null).ln() + (nu_null - nu_full);
+        let predicted = observations * (deviance_null / deviance_full).ln() + offset;
 
-    eprintln!(
-        "[2672-algebra] W={:.10} predicted={:.10} | D_f={deviance_full:.6} D_0={deviance_null:.6} \
-         ν_f={nu_full:.6} ν_0={nu_null:.6} | B(published)={:.10} B(recomputed)={offset:.10}",
-        report.statistic_lr, predicted, scale.deterministic_offset,
-    );
+        eprintln!(
+            "[2672-algebra:{label}] W={:.10} predicted={:.10} | D_f={deviance_full:.6} \
+             D_0={deviance_null:.6} ν_f={nu_full:.6} ν_0={nu_null:.6} | n={observations} \
+             B(published)={:.10} B(recomputed)={offset:.10}",
+            report.statistic_lr, predicted, scale.deterministic_offset,
+        );
 
-    assert_eq!(scale.observations, observations);
-    assert!(
-        (scale.deterministic_offset - offset).abs() <= 1e-9 * (1.0 + offset.abs()),
-        "the published deterministic offset {} is not n·ln(ν_f/ν_0) + (ν_0 − ν_f) = {offset}",
-        scale.deterministic_offset
-    );
-    // The two log-likelihoods are separately converged optimizations, so the
-    // identity is asserted at the resolution of the statistic rather than at
-    // machine precision — but four orders inside it, not at it.
-    assert!(
-        (report.statistic_lr - predicted).abs() <= 1e-6 * (1.0 + predicted.abs()),
-        "W = {} but n·ln(D_0/D_f) + B = {predicted}",
-        report.statistic_lr
-    );
-    // And the identity is not vacuous: the offset is a real part of `W`.
-    assert!(
-        offset.abs() > 1e-3,
-        "the fixture put the deterministic offset at {offset}, too small to be testing anything"
-    );
+        assert_eq!(
+            scale.observations, observations,
+            "{label}: the reference must count the rows the likelihood sums over"
+        );
+        assert!(
+            (scale.deterministic_offset - offset).abs() <= 1e-9 * (1.0 + offset.abs()),
+            "{label}: the published deterministic offset {} is not \
+             n·ln(ν_f/ν_0) + (ν_0 − ν_f) = {offset}",
+            scale.deterministic_offset
+        );
+        // The two log-likelihoods are separately converged optimizations, so the
+        // identity is asserted at the resolution of the statistic rather than at
+        // machine precision — but four orders inside it, not at it.
+        assert!(
+            (report.statistic_lr - predicted).abs() <= 1e-6 * (1.0 + predicted.abs()),
+            "{label}: W = {} but n·ln(D_0/D_f) + B = {predicted}",
+            report.statistic_lr
+        );
+        // And the identity is not vacuous: the offset is a real part of `W`.
+        assert!(
+            offset.abs() > 1e-3,
+            "{label}: the fixture put the deterministic offset at {offset}, too small to be \
+             testing anything"
+        );
+    }
 }
 
 /// THE RESIDUAL LAW. `V = ε'(I − A)²ε ~ Σ_i p_i²·χ²_1 + χ²_{n−p}` with `p_i` the
@@ -186,8 +234,7 @@ fn the_residual_spectrum_is_the_whole_models_penalty_shares() {
     assert_eq!(
         scale.residual_unit_dimension,
         (N - columns) as f64,
-        "the unit block must be n − p = {} − {columns}",
-        N
+        "the unit block must be n − p = {N} − {columns}"
     );
     assert_eq!(
         scale.residual_weights.len(),
