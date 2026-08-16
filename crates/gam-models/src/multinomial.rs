@@ -88,7 +88,10 @@ use gam_problem::{
     FixedLambdaStationarityEvidence, ResponseColumnKind,
 };
 use gam_runtime::resource::ProblemHints;
-use gam_solve::model_types::InferenceCovarianceMode;
+/// The covariance-definition axis, re-exported so a caller of this module's
+/// predict surface names the same enum `gam-predict` and the CLI do rather than
+/// reaching across crates for it.
+pub use gam_solve::model_types::InferenceCovarianceMode;
 use gam_terms::inference::formula_dsl::parse_formula;
 use gam_terms::smooth::{
     PenaltyBlockInfo, TermCollectionDesign, TermCollectionSpec, build_term_collection_design,
@@ -4631,7 +4634,9 @@ pub fn posterior_predict_multinomial_formula(
 }
 
 /// Predict posterior-mean class probabilities and integrated marginal
-/// standard deviations for a saved multinomial model on fresh data.
+/// standard deviations for a saved multinomial model on fresh data, under the
+/// best covariance definition the model can support (see
+/// [`MultinomialSavedModel::predict_probabilities_with_se`]).
 pub fn predict_multinomial_formula_with_se(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,
@@ -4639,6 +4644,23 @@ pub fn predict_multinomial_formula_with_se(
     model.validate()?;
     let x_dense = build_multinomial_predict_design(model, data)?;
     model.predict_probabilities_with_se(x_dense.view())
+}
+
+/// The same pair under an EXPLICITLY named covariance definition.
+///
+/// The conditional arm is reachable by name rather than only as a fallback,
+/// which is what lets the two modes be audited against each other: the
+/// difference between the two bands on one fit IS the smoothing-parameter
+/// uncertainty, and a gate that can only see the default cannot tell a
+/// correction that is present from one that is zero.
+pub fn predict_multinomial_formula_with_se_in_mode(
+    model: &MultinomialSavedModel,
+    data: &EncodedDataset,
+    mode: InferenceCovarianceMode,
+) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
+    model.validate()?;
+    let x_dense = build_multinomial_predict_design(model, data)?;
+    model.predict_probabilities_with_se_in_mode(x_dense.view(), mode)
 }
 
 #[derive(Debug, Clone)]
@@ -4685,6 +4707,22 @@ pub fn predict_multinomial_formula_with_intervals(
     data: &EncodedDataset,
     level: f64,
 ) -> Result<MultinomialPredictionIntervals, EstimationError> {
+    let source = if model.smoothing_correction_flat.is_some() {
+        InferenceCovarianceMode::SmoothingCorrected
+    } else {
+        InferenceCovarianceMode::Conditional
+    };
+    predict_multinomial_formula_with_intervals_in_mode(model, data, level, source)
+}
+
+/// The same band under an EXPLICITLY named covariance definition; see
+/// [`predict_multinomial_formula_with_se_in_mode`].
+pub fn predict_multinomial_formula_with_intervals_in_mode(
+    model: &MultinomialSavedModel,
+    data: &EncodedDataset,
+    level: f64,
+    covariance_source: InferenceCovarianceMode,
+) -> Result<MultinomialPredictionIntervals, EstimationError> {
     if !(level.is_finite() && level > 0.0 && level < 1.0) {
         crate::bail_invalid_estim!(
             "multinomial prediction interval level must be finite and in (0, 1), got {level}"
@@ -4692,8 +4730,8 @@ pub fn predict_multinomial_formula_with_intervals(
     }
     model.validate()?;
     let x_dense = build_multinomial_predict_design(model, data)?;
-    let (mean, standard_error, covariance_source) =
-        model.predict_probabilities_with_se_and_source(x_dense.view())?;
+    let (mean, standard_error) =
+        model.predict_probabilities_with_se_in_mode(x_dense.view(), covariance_source)?;
     let z = gam_math::probability::standard_normal_quantile(0.5 + 0.5 * level)
         .map_err(EstimationError::InvalidInput)?;
     let mut mean_lower = mean.clone();

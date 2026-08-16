@@ -1329,14 +1329,13 @@ impl MultinomialFamily {
                     stacked_design: None,
                     stacked_offset: None,
                 };
-                spec.jacobian_callback =
-                    Some(Arc::new(MultinomialClassChannelJacobian::new(
-                        AdditiveBlockJacobian {
-                            design: (*self.design).clone(),
-                            own_output: a,
-                            n_family_outputs: m,
-                        },
-                    )));
+                spec.jacobian_callback = Some(Arc::new(MultinomialClassChannelJacobian::new(
+                    AdditiveBlockJacobian {
+                        design: (*self.design).clone(),
+                        own_output: a,
+                        n_family_outputs: m,
+                    },
+                )));
                 spec
             })
             .collect()
@@ -1555,6 +1554,41 @@ impl MultinomialFamily {
         Ok(specs)
     }
 
+    /// Whether the solver's block specs describe the SAME geometry this family
+    /// will assemble its joint workspace from.
+    ///
+    /// This predicate gates the three `*_available` capability answers below,
+    /// and through them the solver's routing: `inner_blockwise_fit` reaches its
+    /// coupled joint-Newton path when the family has an HVP workspace OR when
+    /// there are at least two blocks.
+    ///
+    /// # What "workspace shape" is, and what it is not (gam#2612)
+    ///
+    /// The workspace assembles `X_aᵀ diag(w_ab) X_b` from the design, the row
+    /// weights and the block count this family captured. Those are the only
+    /// things it can disagree with a spec about, so those are the only things
+    /// checked: row count, column count, offset length, block count, and the
+    /// absence of a stacked design the workspace does not know how to index.
+    ///
+    /// It used to ALSO require `spec.penalties.len() == self.penalties.len()`
+    /// and the same of `initial_log_lambdas`. Penalties are not part of the
+    /// workspace's geometry — no penalty ever enters `X_aᵀ diag(w_ab) X_b`; the
+    /// solver adds `s_lambdas` and the joint bundle itself, from the specs, on
+    /// the other side of this call. The clause was a leftover from before
+    /// gam#1587 moved this family's entire smoothing onto the JOINT penalty and
+    /// made `build_block_specs` attach `penalties: Vec::new()` deliberately (see
+    /// its comment: "The per-class blocks attach NO smooth penalty").
+    ///
+    /// So from #1587 onward the predicate was FALSE for every penalized
+    /// multinomial — the family was declaring "I cannot serve a joint workspace"
+    /// about the workspace it does in fact serve. For `K ≥ 3` that is invisible
+    /// in the verdict (`specs.len() >= 2` reaches the joint path anyway) and
+    /// costs only the workspace gradient/log-likelihood fast paths. For `K = 2`
+    /// there is ONE block, so the stale clause was the whole routing decision:
+    /// a two-class smooth multinomial fell onto the block-coordinate path,
+    /// whose line search rejected every step, and the zero iterate was published
+    /// as a converged mode — `edf_per_class = 4.09` with `β ≡ 0`, so every
+    /// predicted probability was the uniform simplex.
     fn specs_match_workspace_shape(&self, specs: &[ParameterBlockSpec]) -> bool {
         let n = self.weights.len();
         let p = self.design.ncols();
@@ -1565,8 +1599,6 @@ impl MultinomialFamily {
                     && spec.offset.len() == n
                     && spec.stacked_design.is_none()
                     && spec.stacked_offset.is_none()
-                    && spec.initial_log_lambdas.len() == self.penalties.len()
-                    && spec.penalties.len() == self.penalties.len()
             })
     }
 
@@ -4144,7 +4176,6 @@ mod tests {
                 .map(|(index, value)| value * (1 + index % 17) as f64)
                 .sum()
         }
-
 
         /// Binding #932 release gate for multinomial higher-order production.
         ///
