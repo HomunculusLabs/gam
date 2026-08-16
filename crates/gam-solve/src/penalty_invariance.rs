@@ -456,10 +456,15 @@ impl PenaltyMapInvariance {
             .map(|penalty| penalty.local.len())
             .max()
             .unwrap_or(0) as f64;
+        // The largest operator norm in the group, NOT `max(1)`: the residual
+        // lives in the operators' own absolute units, and clamping the scale up
+        // would make the floor loose in exact proportion to how small the
+        // operators are. An all-zero map has scale zero, floor zero, and every
+        // pivot fails `> 0` — so every direction is null, which is what an
+        // all-zero penalty map means.
         let scale = norms
             .iter()
-            .fold(0.0_f64, |worst, value| worst.max(value.sqrt()))
-            .max(1.0);
+            .fold(0.0_f64, |worst, value| worst.max(value.sqrt()));
         let operator_error = entries.sqrt() * f64::EPSILON * scale;
         let defect_floor = |accepted: usize| operator_error * ((accepted + 1) as f64).sqrt();
 

@@ -52,7 +52,7 @@ use gam::terms::basis::{
 };
 use gam::terms::construction::CanonicalPenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam::{FitRequest, FitResult, StandardFitRequest};
+use gam::{FitRequest, FitResult, StandardFitRequest, StandardFitResult};
 use ndarray::{Array1, Array2};
 
 // Chosen by sweeping `examples/repro2676_geo_disease_matern` over
@@ -160,7 +160,7 @@ fn canonicalize(design: &TermCollectionDesign) -> (Vec<CanonicalPenalty>, usize)
     (canonical, p)
 }
 
-fn fit_at(length_scale: MaternLengthScale) -> Result<gam::FittedTermCollection, String> {
+fn fit_at(length_scale: MaternLengthScale) -> Result<StandardFitResult, String> {
     let (x, y) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
     let n = y.len();
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {
