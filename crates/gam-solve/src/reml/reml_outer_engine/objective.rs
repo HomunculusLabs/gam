@@ -522,6 +522,23 @@ pub fn reml_laml_evaluate(
         .into());
     }
 
+    // #2765: the value-side half of the curvature audit. A finite-difference
+    // capture differences the criterion through `eval_cost`, i.e. through this
+    // `ValueOnly` path, so the displaced `H` has to be published HERE or the
+    // matrix-level comparison has nothing to difference. The drift half is
+    // published further down, where the gradient assembly owns it.
+    if crate::estimate::outer_eval_capture::outer_gradient_component_capture_enabled()
+        && let Ok(hessian) = hop.assemble_h_dense_for_tangent_projection()
+    {
+        crate::estimate::outer_eval_capture::record_outer_curvature_snapshot(
+            crate::estimate::outer_eval_capture::OuterCurvatureSnapshot {
+                hessian,
+                logdet: log_det_h,
+                drifts: Vec::new(),
+            },
+        );
+    }
+
     if mode == EvalMode::ValueOnly {
         return Ok(RemlLamlResult {
             cost,
@@ -1813,6 +1830,46 @@ pub fn reml_laml_evaluate(
     // unified `kkt_theta_corrections.gradient` block above, and the `+=`
     // accumulation of the ext main entries here PRESERVES it rather than
     // overwriting — see the full-θ correction block before this loop.)
+
+    // #2765: hand the armed finite-difference audit the curvature and its
+    // analytic drifts as MATRICES, not just as the contracted scalars above.
+    //
+    // A `logdet_h` disagreement has three possible owners — `H`, `Ḣ_i`, or the
+    // kernel `K` the cost's log-determinant pairs with — and a scalar
+    // comparison cannot say which. Differencing `H` itself against `Ḣ_i`
+    // settles the middle one outright, and does it per coefficient block
+    // instead of per contracted number. Densification is `O(p²)` per
+    // coordinate and runs ONLY inside an armed audit window.
+    if capture_logdet_trace_parts
+        && let Ok(hessian) = hop.assemble_h_dense_for_tangent_projection()
+    {
+        let densify = |drift: &DriftDerivResult| match drift {
+            DriftDerivResult::Dense(matrix) => matrix.clone(),
+            DriftDerivResult::Operator(op) => op.mul_mat(&Array2::<f64>::eye(hop.dim())),
+        };
+        let mut drifts: Vec<Array2<f64>> = Vec::with_capacity(k + ext_dim);
+        for idx in 0..k {
+            drifts.push(densify(&penalty_total_drift_result(
+                &solution.penalty_coords[idx],
+                curvature_lambdas[idx],
+                rho_corrections[idx].as_ref(),
+            )));
+        }
+        for (ext_idx, coord) in solution.ext_coords.iter().enumerate() {
+            drifts.push(densify(&hyper_coord_total_drift_result(
+                &coord.drift,
+                ext_corrections[ext_idx].as_ref(),
+                hop.dim(),
+            )));
+        }
+        crate::estimate::outer_eval_capture::record_outer_curvature_snapshot(
+            crate::estimate::outer_eval_capture::OuterCurvatureSnapshot {
+                hessian,
+                logdet: log_det_h,
+                drifts,
+            },
+        );
+    }
 
     // Add prior gradient (ρ-only).
     if let Some((_, ref pg, _)) = prior_cost_gradient {

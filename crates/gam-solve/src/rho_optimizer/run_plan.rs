@@ -223,12 +223,40 @@ fn evaluate_fd_cost_with_criterion_components(
     theta: &Array1<f64>,
     decompose: bool,
 ) -> Result<(f64, Option<([f64; 4], Array1<f64>)>), EstimationError> {
+    evaluate_fd_cost_with_criterion_components_and_curvature(
+        obj, config, context, inner_seed, theta, decompose,
+    )
+    .map(|(cost, parts, _)| (cost, parts))
+}
+
+/// [`evaluate_fd_cost_with_criterion_components`] plus the dense curvature the
+/// `logdet_h` atom was taken on at this displaced θ (#2765).
+///
+/// Separate entry point because only the coordinate that differences the
+/// CURVATURE needs the `O(p²)` matrix; every other stencil consumer wants the
+/// scalars alone.
+fn evaluate_fd_cost_with_criterion_components_and_curvature(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    context: &str,
+    inner_seed: &Array1<f64>,
+    theta: &Array1<f64>,
+    decompose: bool,
+) -> Result<
+    (
+        f64,
+        Option<([f64; 4], Array1<f64>)>,
+        Option<crate::estimate::outer_eval_capture::OuterCurvatureSnapshot>,
+    ),
+    EstimationError,
+> {
     obj.reset();
     install_matching_initial_inner_seed(obj, config, inner_seed, context)?;
     crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
     let cost = obj.eval_cost(theta)?;
+    let curvature = crate::estimate::outer_eval_capture::take_outer_curvature_snapshot();
     if !decompose {
-        return Ok((cost, None));
+        return Ok((cost, None, curvature));
     }
     let (component_cost, components) =
         crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
@@ -248,7 +276,7 @@ fn evaluate_fd_cost_with_criterion_components(
                 "outer-gradient FD capture received no selected coefficient mode".to_string(),
             )
         })?;
-    Ok((cost, Some((components, beta))))
+    Ok((cost, Some((components, beta)), curvature))
 }
 
 /// The seed and the box it must stay inside, which is one fact about one point
@@ -616,6 +644,11 @@ fn capture_outer_gradient_fd_at_seed(
             analytic.cost
         )));
     }
+    // #2765: the curvature and its analytic drifts, taken from the SAME
+    // evaluation the analytic gradient came from. Drained here rather than at
+    // the end because every finite-difference probe below republishes the
+    // channel with its own displaced curvature.
+    let analytic_curvature = crate::estimate::outer_eval_capture::take_outer_curvature_snapshot();
     let analytic_rho_parts = if grade_rho {
         let audit = crate::estimate::outer_eval_capture::take_rho_outer_audit();
         if let Some(restored) = caller_rho_audit {
@@ -874,6 +907,107 @@ fn capture_outer_gradient_fd_at_seed(
     } else {
         None
     };
+    // #2765: difference the CURVATURE, not only the contracted scalar.
+    //
+    // `½ tr(K·Ḣ_i)` disagreeing with a finite difference of `½ log|H|` has
+    // three possible owners and the scalar names none of them. This pass
+    // differences `H` itself at the step each coordinate's Ridders ladder
+    // accepted and compares it entrywise to the analytic `Ḣ_i` the same
+    // evaluation published, which settles the drift outright and localizes a
+    // failure to a coefficient block. It costs two extra inner profiles per θ
+    // coordinate and runs only inside an armed audit window.
+    let curvature = analytic_curvature.as_ref().and_then(|base| {
+        let theta_dim = rho_dim + psi_dim;
+        if base.drifts.len() != theta_dim {
+            return None;
+        }
+        let mut drift_max_abs_error = Array1::<f64>::from_elem(theta_dim, f64::NAN);
+        let mut drift_relative_error = Array1::<f64>::from_elem(theta_dim, f64::NAN);
+        let mut drift_worst_entry = vec![(0usize, 0usize); theta_dim];
+        let mut analytic_drift_max_abs = Array1::<f64>::zeros(theta_dim);
+        for j in 0..theta_dim {
+            let step = if j < rho_dim {
+                rho_block.as_ref().map_or(f64::NAN, |block| block.steps[j])
+            } else {
+                psi_steps[j - rho_dim]
+            };
+            let analytic_drift = &base.drifts[j];
+            analytic_drift_max_abs[j] = analytic_drift
+                .iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            if !(step.is_finite() && step > 0.0) {
+                continue;
+            }
+            if seed[j] - step < lower[j] || seed[j] + step > upper[j] {
+                continue;
+            }
+            let mut plus = seed.clone();
+            let mut minus = seed.clone();
+            plus[j] += step;
+            minus[j] -= step;
+            let curvature_at = |theta: &Array1<f64>, obj: &mut dyn OuterObjective| {
+                evaluate_fd_cost_with_criterion_components_and_curvature(
+                    obj, config, context, seed, theta, false,
+                )
+                .ok()
+                .and_then(|(_, _, snapshot)| snapshot)
+            };
+            let (Some(hessian_plus), Some(hessian_minus)) = (
+                curvature_at(&plus, &mut *obj),
+                curvature_at(&minus, &mut *obj),
+            ) else {
+                continue;
+            };
+            if hessian_plus.hessian.dim() != analytic_drift.dim()
+                || hessian_minus.hessian.dim() != analytic_drift.dim()
+            {
+                continue;
+            }
+            let mut worst = 0.0_f64;
+            let mut worst_entry = (0usize, 0usize);
+            let mut scale = 0.0_f64;
+            for row in 0..analytic_drift.nrows() {
+                for col in 0..analytic_drift.ncols() {
+                    let measured = (hessian_plus.hessian[[row, col]]
+                        - hessian_minus.hessian[[row, col]])
+                        / (2.0 * step);
+                    let error = (analytic_drift[[row, col]] - measured).abs();
+                    scale = scale.max(measured.abs());
+                    if error > worst {
+                        worst = error;
+                        worst_entry = (row, col);
+                    }
+                }
+            }
+            drift_max_abs_error[j] = worst;
+            drift_relative_error[j] = worst / scale.max(analytic_drift_max_abs[j]).max(1e-300);
+            drift_worst_entry[j] = worst_entry;
+        }
+        // The plain `½ Σ log σ_j` of the captured matrix, against the `½log|H|`
+        // the criterion actually consumed. A gap says the operator's
+        // log-determinant is not this matrix's — a spectral floor, a rank mask
+        // or a uniform rescale is in play — which changes what kernel the
+        // trace has to contract, and is therefore worth separating from a
+        // derivative defect rather than folding into one.
+        let dense_half_logdet = {
+            use gam_linalg::faer_ndarray::FaerEigh;
+            base.hessian
+                .eigh(faer::Side::Lower)
+                .ok()
+                .filter(|(values, _)| values.iter().all(|&value| value > 0.0))
+                .map_or(f64::NAN, |(values, _)| {
+                    0.5 * values.iter().map(|value| value.ln()).sum::<f64>()
+                })
+        };
+        Some(crate::estimate::OuterCurvatureDriftAudit {
+            drift_max_abs_error,
+            drift_relative_error,
+            drift_worst_entry,
+            analytic_drift_max_abs,
+            dense_half_logdet,
+            criterion_half_logdet: 0.5 * base.logdet,
+        })
+    });
     obj.reset();
     crate::estimate::outer_eval_capture::record_outer_gradient_fd(
         crate::estimate::OuterGradientFdRecord {
@@ -922,6 +1056,7 @@ fn capture_outer_gradient_fd_at_seed(
                 }
             },
             rho: rho_block,
+            curvature,
         },
     );
     drop(full_fidelity_guard);

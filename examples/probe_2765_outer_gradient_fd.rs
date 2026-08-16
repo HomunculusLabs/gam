@@ -252,6 +252,33 @@ fn main() {
             }
         }
     }
+    match audit.curvature.as_ref() {
+        None => eprintln!("[2765-FD] no curvature audit (backend has no dense H)"),
+        Some(curvature) => {
+            eprintln!(
+                "[2765-FD] curvature: criterion_half_logdet={:+.9e} dense_half_logdet={:+.9e} \
+                 gap={:.3e}",
+                curvature.criterion_half_logdet,
+                curvature.dense_half_logdet,
+                (curvature.criterion_half_logdet - curvature.dense_half_logdet).abs(),
+            );
+            for j in 0..curvature.drift_max_abs_error.len() {
+                let label = if j < audit.rho_dim {
+                    format!("rho_{j}")
+                } else {
+                    format!("psi_{}", j - audit.rho_dim)
+                };
+                eprintln!(
+                    "[2765-FD] drift {label}: max_abs_err={:.6e} rel={:.3e} \
+                     |Hdot|max={:.6e} worst_entry={:?}",
+                    curvature.drift_max_abs_error[j],
+                    curvature.drift_relative_error[j],
+                    curvature.analytic_drift_max_abs[j],
+                    curvature.drift_worst_entry[j],
+                );
+            }
+        }
+    }
     match audit.decomposition.atoms() {
         None => eprintln!("[2765-FD] no atom breakdown: {:?}", audit.decomposition),
         Some(atoms) => {

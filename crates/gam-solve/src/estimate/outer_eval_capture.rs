@@ -83,6 +83,57 @@ pub struct OuterGradientFdRecord {
     /// coordinate costs a full Ridders ladder of inner profiles, and the shipped
     /// κ/geometry gates that consume the ψ block do not grade ρ.
     pub rho: Option<OuterGradientFdRhoBlock>,
+    /// The curvature the `logdet_h` atom is taken on, differenced as a MATRIX
+    /// against the analytic drift the same evaluation published (#2765).
+    ///
+    /// `None` when the backend cannot hand out a dense `H`. See
+    /// [`OuterCurvatureDriftAudit`] for why a scalar-only audit cannot decide
+    /// what this decides.
+    pub curvature: Option<OuterCurvatureDriftAudit>,
+}
+
+/// The criterion's own curvature and its per-θ-coordinate analytic drift, as
+/// MATRICES, at one evaluation point (#2765).
+///
+/// The scalar audit above compares `½ tr(K·Ḣ_i)` against a finite difference of
+/// `½ log|H|`. When those disagree, three objects could be at fault and the
+/// scalar cannot separate them: the curvature `H` itself, the drift `Ḣ_i`, or
+/// the trace kernel `K` the cost's log-determinant pairs with. Differencing `H`
+/// as a matrix and comparing it to `Ḣ_i` entry by entry answers the middle
+/// question outright, and answers it in a form that names WHICH block of the
+/// joint coefficient space is wrong rather than reporting one contracted number.
+#[derive(Clone, Debug)]
+pub struct OuterCurvatureSnapshot {
+    /// The dense curvature whose log-determinant the `logdet_h` atom reports.
+    pub hessian: Array2<f64>,
+    /// `log|H|` as the criterion consumes it, i.e. the operator's own
+    /// log-determinant plus any uniform-rescale correction. Recorded so a gap
+    /// against `½ log det(hessian)` — a value/kernel disagreement rather than a
+    /// derivative one — is visible instead of assumed absent.
+    pub logdet: f64,
+    /// Total analytic `Ḣ_i` per θ coordinate, ρ block first then ψ, densified.
+    pub drifts: Vec<Array2<f64>>,
+}
+
+/// Per-θ-coordinate evidence that the analytic drift IS the derivative of the
+/// curvature the criterion's log-determinant is taken on (#2765).
+#[derive(Clone, Debug)]
+pub struct OuterCurvatureDriftAudit {
+    /// `‖Ḣ_i^analytic − (H(θ+h) − H(θ−h))/2h‖_max` per θ coordinate.
+    pub drift_max_abs_error: Array1<f64>,
+    /// The same, relative to `‖Ḣ_i‖_max` of the two.
+    pub drift_relative_error: Array1<f64>,
+    /// `(row, col)` of the entry carrying `drift_max_abs_error`.
+    pub drift_worst_entry: Vec<(usize, usize)>,
+    /// `‖Ḣ_i^analytic‖_max`, so a relative error can be read against a scale.
+    pub analytic_drift_max_abs: Array1<f64>,
+    /// `½ log det(H)` recomputed from the captured dense matrix, against the
+    /// `logdet` the criterion actually consumed. A gap here means the operator's
+    /// log-determinant is not the plain one of this matrix (spectral
+    /// regularization, a rank mask, a uniform rescale), which changes what the
+    /// trace kernel has to be.
+    pub dense_half_logdet: f64,
+    pub criterion_half_logdet: f64,
 }
 
 /// Analytic-vs-finite-difference evidence for the ρ (log-smoothing) block at the
@@ -210,6 +261,7 @@ struct OuterGradientFdCapture {
     criterion_components: Option<(f64, [f64; 4])>,
     psi_gram_anchor_deltas: Option<(f64, f64)>,
     selected_mode: Option<(Array1<f64>, Option<Array2<f64>>)>,
+    curvature: Option<OuterCurvatureSnapshot>,
 }
 
 thread_local! {
@@ -265,6 +317,7 @@ fn arm_outer_gradient_fd_capture(min_psi_dim: usize, grade_rho: bool) {
             criterion_components: None,
             psi_gram_anchor_deltas: None,
             selected_mode: None,
+            curvature: None,
         });
     });
 }
@@ -335,8 +388,35 @@ pub(crate) fn begin_outer_criterion_component_capture() {
             state.criterion_components = None;
             state.psi_gram_anchor_deltas = None;
             state.selected_mode = None;
+            state.curvature = None;
         }
     });
+}
+
+/// Retain the criterion's dense curvature and its analytic drifts for an armed
+/// audit (#2765).
+///
+/// Called from the REML/LAML assembly, which is the only place that holds both
+/// the operator the log-determinant is taken on and the per-coordinate drift
+/// that claims to be its derivative. No-op unless a finite-difference audit
+/// armed this thread, so an ordinary fit pays one thread-local read.
+pub fn record_outer_curvature_snapshot(snapshot: OuterCurvatureSnapshot) {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+        {
+            state.curvature = Some(snapshot);
+        }
+    });
+}
+
+pub(crate) fn take_outer_curvature_snapshot() -> Option<OuterCurvatureSnapshot> {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.curvature.take())
+    })
 }
 
 /// Retain the final selected scalar-criterion decomposition for an armed
