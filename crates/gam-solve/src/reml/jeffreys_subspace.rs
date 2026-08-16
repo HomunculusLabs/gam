@@ -1987,6 +1987,21 @@ where
     AxesFn: FnOnce() -> Result<Option<Vec<Array2<f64>>>, String>,
 {
     let p = plan.coefficient_dim();
+    // TEMPORARY gam#2695 probe — the reduced spectrum, the gate and the floor
+    // that together produce Φ, so a jump in Φ can be charged to the matrix, to
+    // the gate, or to the floor regime.
+    log::info!(
+        "[P2695-PHI] active={} m={} lmin={:.12e} lmax={:.12e} gate={:.12e} floor={:.12e} \
+         rel_regime={} evals={:?}",
+        plan.is_active(),
+        plan.reduced_dim,
+        plan.lambda_min,
+        plan.lambda_max,
+        plan.gate_weight,
+        plan.floor,
+        plan.floor_in_relative_regime,
+        plan.evals.to_vec(),
+    );
     if !plan.is_active() {
         return Ok((0.0, Array1::zeros(p), Array2::zeros((p, p))));
     }

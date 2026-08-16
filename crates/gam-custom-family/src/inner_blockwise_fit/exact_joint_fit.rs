@@ -3293,11 +3293,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // cycle the trial, the step (H_Φ=0/∇Φ=0), and the residual all sit
             // on the SAME Φ=0 objective (gam#729/#715 sign fix; the baseline and
             // post-accept folds carry the matching skippable gate).
+            // TEMPORARY gam#2695 probe: keep the two halves of `trial_penalty`
+            // separable so a jump in the accept-test objective can be attributed
+            // to the quadratic penalty, to Φ, or to the likelihood.
+            let trial_quadratic_penalty = trial_penalty;
+            let mut trial_phi = 0.0_f64;
             if !jeffreys_skippable_this_cycle
                 && let Some(z_joint) = joint_jeffreys_subspace.as_ref()
             {
-                trial_penalty -=
+                trial_phi =
                     custom_family_joint_jeffreys_value(family, &states, specs, &ranges, z_joint);
+                trial_penalty -= trial_phi;
             }
             // Cheap-LL line-search path: rejected backtracking attempts
             // discard the exact-Newton workspace they build, so we evaluate
@@ -3430,6 +3436,22 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 }
             };
             let trialobjective = -trial_ll + trial_penalty;
+            // TEMPORARY gam#2695 probe — attribute the accept-test objective to
+            // its three terms at EVERY attempt, so a jump that is identical at
+            // every step length can be charged to one of them.
+            log::info!(
+                "[P2695-TERMS] cycle={cycle} attempt={trust_attempt} |d|inf={:.6e} \
+                 trial_obj={trialobjective:.12e} old_obj={old_objective:.12e} \
+                 d_obj={:.6e} | trial_ll={trial_ll:.12e} \
+                 trial_pen={trial_quadratic_penalty:.12e} trial_phi={trial_phi:.12e} \
+                 old_phi={old_phi:.12e} last_obj={lastobjective:.12e}",
+                trial_delta
+                    .iter()
+                    .copied()
+                    .map(f64::abs)
+                    .fold(0.0_f64, f64::max),
+                old_objective - trialobjective,
+            );
             if trust_attempt == 0 && trialobjective.is_finite() {
                 // Deterministic fixed-point signature (see declaration). The
                 // first attempt evaluates at the unshrunk pre-cycle β, so this
