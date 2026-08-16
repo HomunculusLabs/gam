@@ -65,6 +65,27 @@
   nothing, and a negative curvature is a resolution question, not a structure
   one.
 
+  Measured before/after through the real fit on the cell the mis-certification
+  fired on (`examples/repro2676_geo_disease_matern 24 4000 16 info base`,
+  first certification, everything else byte-identical):
+
+  ```
+  before  [PENALTY-REDUNDANCY] penalties i=0 j=2 are structurally identical (cos=1.000000)
+          [INDEF-HESS] active_rank=2/3 structural_zero=1 curvature_resolution=1.170e-8
+          [INDEF-HESS] classifications=["Z", "A", "A"]
+
+  after   [PENALTY-SIMILARITY] penalties i=0 j=2 are close but MEASURABLY distinct
+            (relative defect 1.238259e-8 at the best scale c=1.000000e0) ... NOT an invariance
+          [INDEF-HESS] active_rank=2/3 structural_zero=0 curvature_resolution=3.780e-16
+          [INDEF-HESS] classifications=["G", "A", "A"]
+  ```
+
+  Seven and a half orders of fictitious Hessian uncertainty removed, and the fit
+  still admits -- the direction is excused by the chain rule (`G`), which is what
+  it was always entitled to, rather than by a structure that was not there. The
+  cell where nothing was ever mis-certified (`10 1500 16`) is byte-identical
+  before and after, which is the control.
+
   That premise is what this issue ran on for its whole life, and the sweep that
   killed it is `examples/probe2676_penalty_map_defect`: the
   `geo_disease_*_matern` redundancy is a small-length-scale LIMIT of two
