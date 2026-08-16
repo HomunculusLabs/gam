@@ -106,6 +106,69 @@
   posterior, and the clamp DELETES the mass that fell outside, so a nominal 95%
   band could carry less than 95% while still reporting `level = 0.95`. `expit`
   is a bijection onto `(0, 1)`, so nothing is ever clipped.
+- **A corrected log-determinant and the kernel that differentiates it were two
+  fields, so a lane that dropped one kept the other (#2765).**
+  Two producers — the custom-family joint assembly and the dense GLM assembly —
+  compute the REML pseudo-log-determinant and its trace kernel from ONE
+  eigendecomposition of ONE matrix, and both handed them back as two unrelated
+  things: the scalar `projected_logdet - hessian_op.logdet()` into
+  `InnerSolution::hessian_logdet_correction`, whose documented meaning is a
+  UNIFORM CURVATURE RESCALE `-p*log(s)` and nothing else, and the kernel into
+  `penalty_subspace_trace`.
+
+  Two fields that travel separately can be separated, and the tangent-projection
+  entry separated them. When the inner solve returns on an active inequality
+  face the criterion becomes `1/2 log|Z^T H Z|` over that face;
+  `try_tangent_projected_evaluate` drops the kernel — correctly, a `p`-space
+  subspace kernel does not act on an `m`-dimensional face — while KEEPING the
+  scalar, rank-rescaled by `m/p` as though it were the other kind of correction.
+  The criterion's VALUE then carried a theta-varying term that no kernel
+  anywhere differentiates, and the outer gradient was short by exactly that
+  term's derivative, on every theta coordinate.
+
+  `PenaltySubspaceTrace` now carries its own `logdet_correction` and the
+  evaluator reads the value correction from the kernel, so the pairing is
+  structural: a lane that drops the kernel drops the correction with it. This
+  also removes, by construction, the collapse `joint_penalty_subspace_trace_parts`
+  documents in its own signature — when the route yields NO kernel the old code
+  still applied `0 - hop.logdet()` and silently deleted `1/2 log|H_pen|` from the
+  cost while the gradient kept its `1/2 tr(H^-1 dH)` derivative.
+
+- **The log-determinant operator carried a term whose drift is unobtainable
+  (#2765).**
+  `completion_in_operator` folded the Jeffreys second-order completion into
+  `hessian_op` whenever the projected-logdet route was going to own the value and
+  the traces — sound on its own terms (the operator is then used only for solves,
+  and its `logdet()` cancels exactly), and a PRECONDITION a downstream lane can
+  invalidate. On an active face the tangent evaluator takes its determinant from
+  that operator's dense assembly directly, so the completion lands in the value
+  while the drift that would differentiate it is `D_beta[completion][v]` — a
+  third directional derivative no family exposes. The term was not merely
+  missing, it was unobtainable, which is exactly why the completion is kept out
+  of the scalar everywhere else.
+
+  The completion now goes to the IFT operator unconditionally: the #2612
+  separation stated as an invariant instead of as a route-dependent convenience.
+  The tangent entry projects that operator onto the same face (`Z^T M_true Z`),
+  because on a face `dbeta/dtheta` lies in `range(Z)`; and the cost-side IFT
+  displacement `w = H^-1 r` reads `mode_response_operator()` rather than `hop`,
+  making true its own claim to be "bit-identical to the gradient side".
+
+  Measured on the #2765 survival marginal-slope fixture (`n=160`, 7.6 s), the
+  analytic outer gradient against its own Ridders finite difference:
+
+  ```text
+             BEFORE (rel)              AFTER (rel)
+    rho_0    8.256e-1  <- sign flip    1.767e-8
+    rho_1    1.434e-1                  1.775e-8
+    psi_0    9.435e-3                  5.677e-10
+    psi_1    8.848e-3                  4.957e-10
+  ```
+
+  and `tests/survival/.../survival_marginal_slope_outer_gradient_fd_1040.rs`,
+  whose own comment records "this is the analytic marginal-slope psi gradient,
+  and it is wrong", now passes its matern arm at `rel = 5.5e-5` against the
+  `1.377e-1` it recorded.
 
 - **The composed monotone warp was built one derivative short of the objective
   that differentiates it, so the inner objective had an O(1) JUMP (#2695).**
