@@ -364,6 +364,11 @@ mod tests_rank_charge_2101;
 #[cfg(test)]
 mod tests_frame_curvature_2757;
 
+/// #2757 — the phase-by-phase stopwatch on the post-fit certification. Every
+/// test in it is `#[ignore]`d; it is an instrument, not a gate.
+#[cfg(test)]
+mod probe_report_cost_2757;
+
 #[cfg(test)]
 mod tests_sure_dispersion_2133;
 

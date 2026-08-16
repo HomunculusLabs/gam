@@ -52,6 +52,23 @@ fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeMani
     planted_term_with_gate(n, p, k_atoms, dense_tail, 3.0)
 }
 
+/// The same fixture, shared with the #2757 cost probe
+/// ([`crate::manifold::probe_report_cost_2757`]) so the stopwatch and the gates
+/// measure the identical object.
+pub(crate) fn planted_term_for_probe(
+    n: usize,
+    p: usize,
+    k_atoms: usize,
+    dense_tail: bool,
+) -> SaeManifoldTerm {
+    planted_term(n, p, k_atoms, dense_tail)
+}
+
+/// The unit smoothing state the gates fit at, shared with the cost probe.
+pub(crate) fn unit_rho_for_probe(k_atoms: usize) -> SaeManifoldRho {
+    unit_rho(k_atoms)
+}
+
 /// As [`planted_term`], with an explicit gate logit so a caller can plant a term
 /// that claims no rows at all.
 fn planted_term_with_gate(
