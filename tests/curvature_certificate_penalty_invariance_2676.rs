@@ -161,6 +161,13 @@ fn canonicalize(design: &TermCollectionDesign) -> (Vec<CanonicalPenalty>, usize)
 }
 
 fn fit_at(length_scale: MaternLengthScale) -> Result<StandardFitResult, String> {
+    fit_at_with(length_scale, SpatialLengthScaleOptimizationOptions::default())
+}
+
+fn fit_at_with(
+    length_scale: MaternLengthScale,
+    kappa_options: SpatialLengthScaleOptimizationOptions,
+) -> Result<StandardFitResult, String> {
     let (x, y) = gam::test_support::synthetic::geo_disease_columns(N_ROWS, SEED);
     let n = y.len();
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {
@@ -181,7 +188,7 @@ fn fit_at(length_scale: MaternLengthScale) -> Result<StandardFitResult, String> 
             compute_inference: true,
             ..FitOptions::default()
         },
-        kappa_options: SpatialLengthScaleOptimizationOptions::default(),
+        kappa_options,
         wiggle: None,
         coefficient_groups: Vec::new(),
         penalty_block_gamma_priors: Vec::new(),
@@ -291,7 +298,20 @@ fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
 
     // And the fit at that geometry completes, with inference, so both the outer
     // certificate and the smoothing-correction inverse run on it.
-    let fitted = fit_at(MaternLengthScale::fixed(scale)).unwrap_or_else(|error| {
+    // The length-scale search is OFF for this arm, and that is load-bearing:
+    // with it on the fit walks off the redundant geometry entirely (measured:
+    // `ls = 4e-2` -> `1.27`, pair defect `1.6e-15` -> `3.4e-1`), so the point
+    // it certifies has nothing to deflate and the acceptance would pass for a
+    // reason that has nothing to do with the deflation. Pinning kappa is what
+    // makes the assertion below about the object it names.
+    let fitted = fit_at_with(
+        MaternLengthScale::fixed(scale),
+        SpatialLengthScaleOptimizationOptions {
+            enabled: false,
+            ..SpatialLengthScaleOptimizationOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| {
         panic!(
             "a Matern spatial fit whose penalty map carries an exact redundancy must not \
              refuse (ls={scale:.3e}): {error}\ntrail:\n  {}",
