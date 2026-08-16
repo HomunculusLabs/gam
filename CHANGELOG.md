@@ -148,10 +148,19 @@
   including `n = 30`. KS improves in every cell, so this is the whole p-value
   distribution and not one level.
 
+  The summary table's Wald smooth test has taken an `F` reference under an
+  estimated scale since #675 (`SmoothTestScale::Estimated`), so the two tests in
+  the same report disagreed about what estimating `σ` costs: one paid for it and
+  one did not. They now agree.
+
   Scope: `ProfiledGaussian` only. Every other family carries its dispersion in
   the IRLS weight, and the estimated-dispersion families that do not
   (Gamma, Beta, negative binomial, Tweedie) do not estimate through a residual
   sum of squares, so this derivation does not reach them.
+
+  `reference_residual_df` and `reference_deterministic_offset` join the
+  smooth-significance payload, so a consumer can see that a p-value was scored
+  against an estimated-scale reference instead of inferring it from the family.
 
 - **A ratio's tail is a signed weighted chi-square, and the Imhof panel rule was
   never resolving the amplitude (#2672).** `weighted_chi_square_sf` took
