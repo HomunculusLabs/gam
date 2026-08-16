@@ -1,5 +1,90 @@
 ## Unreleased
 
+- **The post-fit certification was 60.5 % of the fit, and after the half of it
+  that had been fixed it was still 99.96 % of `fit_diagnostics_report` — for a
+  completely different reason (#2757).** The issue was filed on a dense
+  symmetric eigendecomposition of a `param_dim x param_dim` curvature Gram
+  (3160.5 s / 45.97 GiB at `p = 4096`). Holding that curvature in the block
+  structure the decoder-frame parameterization gives it removed the
+  eigendecomposition on the branch a Euclidean metric takes. Nothing measured
+  what was left. Phase by phase at `n = 256, p = 64, charts = 32`:
+
+  ```text
+  [curvature build]                                  0.071s
+  [residual gauge: reduce + generators + verdicts]   0.195s
+  [coordinate fidelity]                              0.149s
+  [decoder embeddedness]                             0.014s
+  [topology persistence]                           547.387s   <====
+  ```
+
+  The whole of what the issue names is 0.195 s. The wall is
+  `atom_topology_persistence`, and it had never been timed.
+
+  **Root cause 1 — the filtration reduced the wrong matrix.** The persistent
+  homology of a Vietoris-Rips complex takes the `(d+1)`-simplices as its
+  reduction COLUMNS. At the `PERSISTENCE_H1_MAX_POINTS = 256` cover that is
+  `C(256,3) = 2 763 520` triangles, while its pivots are EDGES, of which there
+  are `C(256,2) = 32 640`. So at most ~32 000 columns can ever pair and
+  ~2 730 000 exist only to be ground down to zero, each costing a chain of
+  GF(2) column additions — 99 % of the filtration by measurement, with the
+  simplex construction 0.071 s of a 5.8 s call. Persistent COHOMOLOGY has the
+  same barcode and the opposite cost profile: its columns are the
+  `d`-simplices, the 32 640 edges, and the triangles appear only as entries
+  enumerated on demand as cofacets. At `m = 256` the engine now never
+  materializes a triangle at all. Clearing (a pivot of degree `d−1` is a death
+  partner whose own column is known to reduce to zero) becomes available in the
+  order the degrees are already computed, which is exactly what it is not in
+  the boundary direction; and the zero-length pairs that dominate a
+  Vietoris-Rips filtration resolve on a column's first iteration with no
+  addition, because the pivot is the EARLIEST entry.
+
+  **Root cause 2 — the per-atom certificates ran one after another.** The three
+  surviving per-atom reads (coordinate fidelity, decoder embeddedness, topology
+  persistence) each take `&self` and an atom index and write only their own
+  slot, so the serial `(0..k).map()` bought nothing but an evaluation order,
+  which an indexed collect keeps. This is the "unparallelised, ~1.0 of 16 cores"
+  the issue's own body records.
+
+  ```text
+  filtration, circle(160):    reference 9.001s -> 0.374s     24.1x
+  filtration, circle(256):    ~17s      -> 3.13s
+  topology phase, 32 charts:  547.387s  -> 95.46s
+  fit_diagnostics_report:     547.8s    -> 52.0s             10.5x
+  ```
+
+  The rewrite is judged against the PRE-#2757 engine, kept verbatim as a
+  control that shares none of its reasoning, differenced bar by bar on every
+  endpoint's bits across circle, Clifford torus (the `H2` tetrahedron branch),
+  line, separated clusters, exactly-tied filtration values, coincident and
+  identical points, a far outlier, the four-point floor, DTM-weighted and
+  flat-weighted arms, and a 12-member random family. Bars are compared as
+  multisets — a barcode is one, and cohomology finds the same pairs in a
+  different sequence — and the four functions that read a barcode are shown by
+  measurement to agree between the engines and to be unchanged when their own
+  bar list is reversed.
+
+  **And the original defect, on the branch the block fix never reached.** With a
+  metric that couples output coordinates (an output-Fisher or structured-residual
+  harvest), the builder still assembled the dense `param_dim`-square Gram
+  whenever `root_rows = n * metric_rank` exceeded `param_dim` — which at the
+  #2283 production row count means `m = 480 000` against `param_dim = 65 536`,
+  i.e. 1.0e15 flops and a 69 GiB peak. Those rows are now folded into a
+  `param_dim`-square upper-triangular factor `T` with `TᵀT = RᵀR`, so every
+  production representation carries a ROOT and every rank decision is taken on
+  `σ` rather than on `λ = σ²` floored at the eigensolver's own resolution
+  (`1.5e-11·λ_max` against `1e-16·λ_max` at that width). Peak memory halves:
+  `eigh` allocated a second `param_dim`-square array for eigenvectors the
+  reduction discarded.
+
+  This does not make a coupling metric affordable at production width, and the
+  module says so rather than implying otherwise: `H` there is a sum of
+  `n * metric_rank` rank-one terms with no exploitable structure, and
+  `min(rows, param_dim)²` is what an exact full spectrum costs from either side.
+  The route out is for the certificate to stop asking for one — of the three
+  things it reads off `H`, only `ξᵀHξ` and `λ_max` enter a verdict, and both are
+  streamable — which is a change to what the certificate reads, not to how the
+  curvature is stored.
+
 - **A two-class multinomial with a smooth term published `β ≡ 0` — every
   predicted probability was the uniform simplex, at `edf_per_class = 4.09`
   (#2612).** The fit was not refused and did not look degenerate from outside:
