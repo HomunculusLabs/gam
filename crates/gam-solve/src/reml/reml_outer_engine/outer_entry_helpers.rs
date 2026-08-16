@@ -1476,6 +1476,24 @@ pub(crate) fn try_tangent_projected_evaluate(
     // determinant was taken on — and, across two displaced θ, whether it is the
     // same subspace at all.
     crate::estimate::outer_eval_capture::record_outer_tangent_basis(z.clone());
+    // The state that decides whether the projected criterion is differentiable,
+    // reported only inside an armed audit window so an ordinary constrained fit
+    // pays nothing for it.
+    if crate::estimate::outer_eval_capture::outer_gradient_audit_capture_armed() {
+        log::info!(
+            "[OUTER tangent-face] p={p} m={} hessian_logdet_correction={:+.6e} \
+             subspace_trace={} subspace_correction={:+.6e} mode_response_op={} firth={}",
+            z.ncols(),
+            solution.hessian_logdet_correction,
+            solution.penalty_subspace_trace.is_some(),
+            solution
+                .penalty_subspace_trace
+                .as_ref()
+                .map_or(0.0, |kernel| kernel.logdet_correction),
+            solution.mode_response_op.is_some(),
+            solution.firth.is_some(),
+        );
+    }
     let h_full = solution
         .hessian_op
         .assemble_h_dense_for_tangent_projection()?;

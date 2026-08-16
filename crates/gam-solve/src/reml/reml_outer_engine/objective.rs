@@ -1952,11 +1952,6 @@ pub fn reml_laml_evaluate(
                 hop.dim(),
             )));
         }
-        log::info!(
-            "[2765-AUDIT] curvature snapshot with drifts: dim={} coords={}",
-            hessian.nrows(),
-            drifts.len()
-        );
         crate::estimate::outer_eval_capture::record_outer_curvature_snapshot(
             crate::estimate::outer_eval_capture::OuterCurvatureSnapshot {
                 hessian,
