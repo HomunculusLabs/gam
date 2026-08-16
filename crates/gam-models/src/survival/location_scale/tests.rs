@@ -2596,9 +2596,24 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
         )
         .expect("time step ceiling")
         .expect("time step should be bounded");
-    assert!((alpha - 0.04975).abs() <= 1e-12);
+    // The guard row is a unit row here, so scaled slack is `0.1` and the scaled
+    // drift of `-2.0` is `-2.0`: the exact fraction to the boundary is `0.05`.
+    // The clipped step stops one primal-feasibility tolerance short of the face
+    // in that metric — an ABSOLUTE retreat, `tol/|scaled drift|`, not a fraction
+    // of the step (gam#2695).
+    assert!(
+        (alpha - (0.05 - gam_problem::PRIMAL_FEASIBILITY_TOL / 2.0)).abs() <= 1e-12,
+        "alpha={alpha:.12e}"
+    );
     let feasible = states[0].beta[0] + alpha * -2.0;
     assert!(feasible >= 0.0);
+    // And the surviving margin is that tolerance, not a percentage of however
+    // far the step happened to travel.
+    assert!(
+        (feasible - gam_problem::PRIMAL_FEASIBILITY_TOL).abs()
+            <= 1.0e-3 * gam_problem::PRIMAL_FEASIBILITY_TOL,
+        "surviving margin {feasible:.6e} must be one primal-feasibility tolerance"
+    );
 }
 
 #[test]
