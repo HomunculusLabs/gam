@@ -44,6 +44,7 @@
 //! cannot see.
 
 use super::*;
+use crate::model_types::ActiveLinearConstraintBlock;
 use ndarray::{Array1, Array2, array};
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +115,9 @@ struct PsiModel {
     d1: Array1<f64>,
     d2: Array1<f64>,
     rho: f64,
+    /// Whether the mode sits on an active inequality face, so the criterion is
+    /// the TANGENT-projected `½log|ZᵀHZ|`.
+    face: bool,
 }
 
 impl PsiModel {
@@ -140,6 +144,7 @@ impl PsiModel {
             d1: array![0.31, 0.52, -0.44],
             d2: array![-0.18, 0.27, 0.36],
             rho: 0.2,
+            face: false,
         }
     }
 
@@ -206,6 +211,47 @@ impl PsiModel {
         0.5 * hop.trace_logdet_h_k(&drift, None)
     }
 
+    /// The same model, pinned onto an active inequality face, with the
+    /// pseudo-logdet route's kernel installed and carrying a ψ-VARYING
+    /// correction — the exact configuration `try_tangent_projected_evaluate`
+    /// has to survive (#2765).
+    ///
+    /// `A = e₀ᵀ` and the mode path is built with no `β₀` motion, so `β̂(ψ)`
+    /// genuinely lives on the face and `dβ̂/dψ` lies in `range(Z)`; the tangent
+    /// operator's own solve then reproduces it exactly, as the real constrained
+    /// inner solve does.
+    fn on_an_active_face() -> Self {
+        let mut model = Self::full();
+        model.d1[0] = 0.0;
+        model.d2[0] = 0.0;
+        model.face = true;
+        model
+    }
+
+    fn active_constraints(&self) -> Option<Arc<ActiveLinearConstraintBlock>> {
+        self.face.then(|| {
+            Arc::new(ActiveLinearConstraintBlock {
+                a: array![[1.0, 0.0, 0.0]],
+            })
+        })
+    }
+
+    /// A kernel whose correction MOVES with ψ. Under projection the criterion
+    /// switches to the direct tangent determinant and this whole object — value
+    /// correction included — has to go with it. If the correction survives the
+    /// projection (rank-rescaled, as it used to be) the criterion carries a
+    /// ψ-varying term no kernel differentiates, and the gradient is short by
+    /// exactly `∂_ψ` of it.
+    fn subspace_trace_at(&self, psi: f64) -> Option<Arc<PenaltySubspaceTrace>> {
+        self.face.then(|| {
+            Arc::new(PenaltySubspaceTrace {
+                u_s: Array2::<f64>::eye(3),
+                h_proj_inverse: Array2::<f64>::eye(3),
+                logdet_correction: 0.37 * psi,
+            })
+        })
+    }
+
     fn solution_at(&self, psi: f64) -> InnerSolution<'static> {
         let h = self.hessian_at(psi);
         let hop = Arc::new(DenseSpectralOperator::from_symmetric(&h).expect("synthetic H"));
@@ -230,7 +276,7 @@ impl PsiModel {
             }),
             firth: None,
             hessian_logdet_correction: 0.0,
-            penalty_subspace_trace: None,
+            penalty_subspace_trace: self.subspace_trace_at(psi),
             rho_curvature_scale: 1.0,
             rho_prior: gam_problem::RhoPrior::Flat,
             n_observations: 64,
@@ -262,7 +308,7 @@ impl PsiModel {
             contracted_psi_second_order: None,
             barrier_config: None,
             kkt_residual: None,
-            active_constraints: None,
+            active_constraints: self.active_constraints(),
             stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
         }
     }
@@ -357,5 +403,55 @@ fn psi_logdet_frozen_half_differences_the_criterion_2765() {
     assert!(
         (analytic - finite_difference).abs() <= 1.0e-7 * finite_difference.abs().max(1.0),
         "frozen half: analytic={analytic:.12e} fd={finite_difference:.12e}"
+    );
+}
+
+/// The tangent-projection lane: the criterion is `½log|ZᵀHZ|` on an active
+/// inequality face, and the pseudo-logdet route's kernel — with its own
+/// ψ-varying value correction — is dropped on the way in (#2765).
+///
+/// Dropping the kernel while KEEPING its correction, rank-rescaled by `m/p` as
+/// though it were the uniform-curvature-rescale correction it is not, is the
+/// defect this pins: the criterion's VALUE then carries a ψ-varying term that
+/// no kernel anywhere differentiates, and the analytic gradient is short by
+/// exactly that term's derivative. Measured on the #2765 survival
+/// marginal-slope fixture as the DOMINANT half of the `logdet_h` disagreement
+/// on every θ coordinate — `1.6e-2` to `1.4e-1` against analytic entries of
+/// `9.7e-3` to `4.2e-1`.
+#[test]
+fn psi_logdet_gradient_survives_the_tangent_projection_2765() {
+    let model = PsiModel::on_an_active_face();
+    let psi = 0.3_f64;
+
+    // The face has to be real: with `A = e₀ᵀ` the criterion is a 2×2
+    // determinant, not the 3×3 one the unconstrained arm takes.
+    let unconstrained = PsiModel::full();
+    assert!(
+        (model.criterion_logdet_h(psi) - unconstrained.criterion_logdet_h(psi)).abs() > 1.0e-3,
+        "the active face must actually change the criterion"
+    );
+
+    // The VALUE, stated directly: with `A = e₀ᵀ` the tangent space is
+    // `span{e₁, e₂}`, so the criterion's `logdet_h` is exactly the trailing 2×2
+    // block's half-log-determinant — and NOTHING else. A leftover route
+    // correction shows up here as a bare offset, before any derivative is taken.
+    let h = model.hessian_at(psi);
+    let face = h.slice(ndarray::s![1.., 1..]).to_owned();
+    let expected = 0.5 * (face[[0, 0]] * face[[1, 1]] - face[[0, 1]] * face[[1, 0]]).ln();
+    let published = model.criterion_logdet_h(psi);
+    assert!(
+        (published - expected).abs() <= 1.0e-9 * expected.abs().max(1.0),
+        "the tangent-projected logdet_h is not ½log|ZᵀHZ|: published={published:.12e} \
+         expected={expected:.12e} — a correction belonging to a dropped kernel survived the \
+         projection"
+    );
+
+    let analytic = model.analytic_psi_gradient(psi);
+    let finite_difference = model.finite_difference_logdet_h(psi, 1.0e-3);
+    assert!(
+        (analytic - finite_difference).abs() <= 1.0e-7 * finite_difference.abs().max(1.0),
+        "on an active face the ψ gradient does not differentiate the criterion's own logdet_h: \
+         analytic={analytic:.12e} fd={finite_difference:.12e} gap={:.3e}",
+        (analytic - finite_difference).abs()
     );
 }

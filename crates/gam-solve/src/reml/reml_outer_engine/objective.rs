@@ -207,7 +207,19 @@ pub fn reml_laml_evaluate(
 
     // ─── Shared intermediates (computed once, used by both cost and gradient) ───
 
-    let log_det_h = hop.logdet() + solution.hessian_logdet_correction;
+    // `hop.logdet()` is the operator's own determinant; the two corrections on
+    // top of it are DIFFERENT objects with different transformation laws.
+    // `hessian_logdet_correction` un-scales a uniform curvature rescale
+    // (`−p·log s`) and belongs to the solution. The pseudo-logdet route's
+    // correction belongs to the KERNEL that differentiates it, and is read from
+    // there, so a lane that drops the kernel cannot keep the value it corrected
+    // (#2765).
+    let log_det_h = hop.logdet()
+        + solution.hessian_logdet_correction
+        + solution
+            .penalty_subspace_trace
+            .as_ref()
+            .map_or(0.0, |kernel| kernel.logdet_correction);
     let log_det_s = solution.penalty_logdet.value;
     // The penalty-quadratic term `½ β̂ᵀSβ̂` enters the cost ONLY through this
     // atom (#931): its `value()` carries the production stable-basis scalar

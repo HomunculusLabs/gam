@@ -1460,7 +1460,15 @@ pub(crate) fn joint_outer_evaluate(
         }
     }
 
-    let (projected_logdet_correction, penalty_subspace_trace) = if project_hessian_logdet
+    // The pseudo-log-determinant this route installs and the kernel that
+    // differentiates it are ONE object (#2765): the correction rides on the
+    // kernel, so a consumer that declines the kernel cannot inherit a corrected
+    // value it has no derivative for. That also removes the collapse the
+    // `joint_penalty` doc above warns about — when the route yields no kernel
+    // (`rank == 0`, or every eigenpair below threshold) the old code still
+    // applied `0 − hop.logdet()` and silently deleted `½log|H_pen|` from the
+    // cost while the gradient kept its `½tr(H⁻¹∂H)` derivative.
+    let penalty_subspace_trace = if project_hessian_logdet
         && include_logdet_h
         && include_logdet_s
         && pseudo_logdet_mode == PseudoLogdetMode::Smooth
@@ -1474,18 +1482,17 @@ pub(crate) fn joint_outer_evaluate(
             scaled_robust_jeffreys_hphi.as_ref(),
             scaled_joint_penalty.as_ref(),
         )?;
-        let correction = projected_logdet - hessian_op.logdet();
-        if kernel.is_some() {
+        kernel.map(|mut kernel| {
+            kernel.logdet_correction = projected_logdet - hessian_op.logdet();
             log::debug!(
                 "[OUTER hessian-route] joint penalty subspace trace installed correction={:.6e}",
-                correction
+                kernel.logdet_correction
             );
-        }
-        (correction, kernel.map(Arc::new))
+            Arc::new(kernel)
+        })
     } else {
-        (0.0, None)
+        None
     };
-    let hessian_logdet_correction = hessian_logdet_correction + projected_logdet_correction;
 
     // gam#1587/#561: `unified_joint_cost_gradient` appends one coordinate per
     // full-width joint penalty (the centered `M⊗S_t` multinomial penalty) AFTER
@@ -1881,7 +1888,9 @@ pub(crate) fn joint_outer_evaluate_efs(
         )
     };
 
-    let (projected_logdet_correction, penalty_subspace_trace) = if project_hessian_logdet
+    // One object, as above (#2765): the corrected value rides on the kernel that
+    // differentiates it.
+    let penalty_subspace_trace = if project_hessian_logdet
         && include_logdet_h
         && include_logdet_s
         && pseudo_logdet_mode == PseudoLogdetMode::Smooth
@@ -1895,18 +1904,17 @@ pub(crate) fn joint_outer_evaluate_efs(
             None,
             scaled_joint_penalty.as_ref(),
         )?;
-        let correction = projected_logdet - hessian_op.logdet();
-        if kernel.is_some() {
+        kernel.map(|mut kernel| {
+            kernel.logdet_correction = projected_logdet - hessian_op.logdet();
             log::debug!(
                 "[OUTER hessian-route] joint EFS penalty subspace trace installed correction={:.6e}",
-                correction
+                kernel.logdet_correction
             );
-        }
-        (correction, kernel.map(Arc::new))
+            Arc::new(kernel)
+        })
     } else {
-        (0.0, None)
+        None
     };
-    let hessian_logdet_correction = hessian_logdet_correction + projected_logdet_correction;
 
     unified_joint_efs_eval(
         inner,

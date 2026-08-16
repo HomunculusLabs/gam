@@ -3529,6 +3529,147 @@ mod tests {
     /// `pert_hessian_dir(δ, e_a) = 0`. `H0` is engineered with one reduced eigenvalue
     /// BELOW the relative floor (a near-separating direction), exactly where the
     /// floored pseudo-inverse and its moving floor matter.
+    /// The PRODUCTION drift path, on an information that is genuinely NONLINEAR
+    /// in β (#2765).
+    ///
+    /// Two coverage holes met here. `perturbation_derivative_matches_finite_
+    /// difference_below_floor` grades the test-only per-direction oracle, not
+    /// `JeffreysHphiDriftBase::perturbation_derivative_batched_axes` — the object
+    /// the outer LAML gradient actually folds through
+    /// `JeffreysHphiAwareJointDerivatives`. And it plants `H(β) = H₀ + β₀A₀`, for
+    /// which `H²dot[δ, e_a] ≡ 0`: the entire second-directional half of the drift
+    /// is multiplied by zero, so a defect there passes. Every real family has a
+    /// non-zero `H²dot` — a row-streamed information is quadratic in β at least.
+    ///
+    /// Here `H(β) = H₀ + Σ_a β_a A_a + Σ_a β_a² B_a`, so `H²dot[u, v] = 2Σ_a u_a
+    /// v_a B_a` is non-zero and the drift is differenced against the value path's
+    /// own `H_Φ` on the same plan.
+    #[test]
+    pub(crate) fn batched_perturbation_derivative_matches_finite_difference_nonlinear_2765() {
+        let p = 3usize;
+        let z = Array2::<f64>::eye(p);
+        let make_sym = |seed: f64| -> Array2<f64> {
+            let mut a = Array2::<f64>::zeros((p, p));
+            for i in 0..p {
+                for j in 0..p {
+                    a[[i, j]] = (seed + 0.41 * (i as f64) - 0.23 * (j as f64)).sin()
+                        + 0.6 * ((i + j) as f64 * seed).cos();
+                }
+            }
+            let at = a.t().to_owned();
+            (&a + &at).mapv(|v| 0.5 * v)
+        };
+        // A well-separated spectrum with one direction three orders below the
+        // rest: the conditioning gate is fully open there, so the drift is the
+        // un-gated object and a defect cannot hide behind a zero weight.
+        let h0 = array![
+            [4.0e2, 3.0e0, 1.0e0],
+            [3.0e0, 2.5e2, 2.0e0],
+            [1.0e0, 2.0e0, 7.0e-1],
+        ];
+        let a_mats: Vec<Array2<f64>> = (0..p)
+            .map(|a| make_sym(2.3 + 1.7 * a as f64).mapv(|v| 3.0 * v))
+            .collect();
+        let b_mats: Vec<Array2<f64>> = (0..p)
+            .map(|a| make_sym(0.9 - 0.6 * a as f64).mapv(|v| 1.5 * v))
+            .collect();
+        let beta0 = array![0.31, -0.22, 0.17];
+        let mut delta: Array1<f64> = array![0.6, -0.45, 0.28];
+        let delta_norm = delta.dot(&delta).sqrt();
+        delta.mapv_inplace(|value| value / delta_norm);
+
+        let information_at = |beta: &Array1<f64>| -> Array2<f64> {
+            let mut h = h0.clone();
+            for a in 0..p {
+                h.scaled_add(beta[a], &a_mats[a]);
+                h.scaled_add(beta[a] * beta[a], &b_mats[a]);
+            }
+            h
+        };
+        // Hdot[d] = Σ_a d_a (A_a + 2β_a B_a).
+        let hdot_at = |beta: &Array1<f64>, d: &Array1<f64>| -> Array2<f64> {
+            let mut acc = Array2::<f64>::zeros((p, p));
+            for a in 0..p {
+                if d[a] == 0.0 {
+                    continue;
+                }
+                acc.scaled_add(d[a], &a_mats[a]);
+                acc.scaled_add(2.0 * d[a] * beta[a], &b_mats[a]);
+            }
+            acc
+        };
+        // H²dot[u, v] = 2 Σ_a u_a v_a B_a — the half the linear planting erases.
+        let h2dot = |u: &Array1<f64>, v: &Array1<f64>| -> Array2<f64> {
+            let mut acc = Array2::<f64>::zeros((p, p));
+            for a in 0..p {
+                acc.scaled_add(2.0 * u[a] * v[a], &b_mats[a]);
+            }
+            acc
+        };
+
+        let hphi_at = |t: f64| -> Array2<f64> {
+            let beta = &beta0 + &delta.mapv(|value| t * value);
+            let h = information_at(&beta);
+            joint_jeffreys_term(h.view(), z.view(), |axis: &Array1<f64>| {
+                Ok(Some(hdot_at(&beta, axis)))
+            })
+            .expect("value-path H_Φ")
+            .2
+        };
+        // Richardson-extrapolated central difference, so the oracle's own
+        // truncation sits far below the tolerance asserted.
+        let central = |h: f64| (&hphi_at(h) - &hphi_at(-h)).mapv(|v| v / (2.0 * h));
+        let coarse = central(1.0e-4);
+        let fine = central(0.5e-4);
+        let fd = (&fine.mapv(|v| 4.0 * v) - &coarse).mapv(|v| v / 3.0);
+
+        let base_axes: Vec<Array2<f64>> = (0..p)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(p);
+                axis[a] = 1.0;
+                hdot_at(&beta0, &axis)
+            })
+            .collect();
+        let base = JeffreysHphiDriftBase::prepare_with_axes(
+            information_at(&beta0).view(),
+            z.view(),
+            base_axes,
+        )
+        .expect("prepared drift base")
+        .expect("the conditioning gate is open on this spectrum");
+        let pert_axes: Vec<Array2<f64>> = (0..p)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(p);
+                axis[a] = 1.0;
+                h2dot(&delta, &axis)
+            })
+            .collect();
+        let analytic = base
+            .perturbation_derivative_batched_axes(&hdot_at(&beta0, &delta), Some(pert_axes))
+            .expect("batched H_Φ drift");
+
+        let scale = fd
+            .iter()
+            .chain(analytic.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            scale > 1.0e-6,
+            "the planted H_Φ drift must not be a trivial zero (scale={scale:.3e})"
+        );
+        let mut max_abs = 0.0_f64;
+        for i in 0..p {
+            for j in 0..p {
+                max_abs = max_abs.max((analytic[[i, j]] - fd[[i, j]]).abs());
+            }
+        }
+        assert!(
+            max_abs <= 1.0e-6 * scale,
+            "batched D_β H_Φ[δ] disagrees with a finite difference of the value path's own H_Φ \
+             on a β-nonlinear information: max_abs={max_abs:.6e} scale={scale:.6e}\nanalytic=\
+             {analytic:?}\nfd={fd:?}"
+        );
+    }
+
     #[test]
     pub(crate) fn perturbation_derivative_matches_finite_difference_below_floor() {
         let p = 3usize;

@@ -2125,6 +2125,9 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
         Some(PenaltySubspaceTrace {
             u_s: u_m,
             h_proj_inverse,
+            // Filled by the caller, which is the only place that holds the
+            // operator's own `logdet()` this pseudo-determinant replaces.
+            logdet_correction: 0.0,
         }),
     ))
 }

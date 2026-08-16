@@ -263,6 +263,10 @@ fn main() {
                 (curvature.criterion_half_logdet - curvature.dense_half_logdet).abs(),
                 curvature.tangent_dim,
             );
+            eprintln!(
+                "[2765-FD] face curvature ZtHZ = {:?}",
+                curvature.face_curvature
+            );
             for j in 0..curvature.drift_max_abs_error.len() {
                 let label = if j < audit.rho_dim {
                     format!("rho_{j}")
@@ -278,6 +282,14 @@ fn main() {
                     curvature.drift_worst_entry[j],
                     curvature.face_drift_max_abs[j],
                     curvature.displaced_tangent_dim[j],
+                );
+                eprintln!(
+                    "[2765-FD] drift {label} analytic ZtHdotZ = {:?}",
+                    curvature.analytic_face_drift[j]
+                );
+                eprintln!(
+                    "[2765-FD] drift {label} measured d(ZtHZ) = {:?}",
+                    curvature.measured_face_drift[j]
                 );
             }
         }

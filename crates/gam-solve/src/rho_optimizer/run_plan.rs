@@ -938,6 +938,8 @@ fn capture_outer_gradient_fd_at_seed(
         let mut analytic_drift_max_abs = Array1::<f64>::zeros(theta_dim);
         let mut face_drift_max_abs = Array1::<f64>::from_elem(theta_dim, f64::NAN);
         let mut displaced_tangent_dim = vec![(None, None); theta_dim];
+        let mut analytic_face_drift: Vec<Array2<f64>> = Vec::with_capacity(theta_dim);
+        let mut measured_face_drift: Vec<Array2<f64>> = Vec::with_capacity(theta_dim);
         // On an active inequality face the criterion is `½log|ZᵀHZ|`, so the
         // object a `p`-space drift has to be differenced against is `ZᵀḢZ`
         // against `d(ZᵀHZ)/dθ` — with the BASE face on both sides, because a
@@ -961,6 +963,9 @@ fn capture_outer_gradient_fd_at_seed(
             analytic_drift_max_abs[j] = analytic_drift
                 .iter()
                 .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            let empty = Array2::<f64>::zeros((0, 0));
+            analytic_face_drift.push(analytic_drift.clone());
+            measured_face_drift.push(empty);
             if !(step.is_finite() && step > 0.0) {
                 continue;
             }
@@ -1039,6 +1044,7 @@ fn capture_outer_gradient_fd_at_seed(
             drift_max_abs_error[j] = worst;
             drift_relative_error[j] = worst / scale.max(analytic_drift_max_abs[j]).max(1e-300);
             drift_worst_entry[j] = worst_entry;
+            measured_face_drift[j] = (&measured_plus - &measured_minus).mapv(|v| v / (2.0 * step));
         }
         // The plain `½ Σ log σ_j` of the captured matrix, against the `½log|H|`
         // the criterion actually consumed. A gap says the operator's
@@ -1063,6 +1069,9 @@ fn capture_outer_gradient_fd_at_seed(
             face_drift_max_abs,
             tangent_dim: base.tangent_basis.as_ref().map(Array2::ncols),
             displaced_tangent_dim,
+            analytic_face_drift,
+            measured_face_drift,
+            face_curvature: to_face(&base.hessian),
             analytic_drift_max_abs,
             dense_half_logdet,
             criterion_half_logdet: 0.5 * base.logdet,

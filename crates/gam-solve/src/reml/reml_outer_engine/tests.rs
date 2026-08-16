@@ -124,6 +124,7 @@ pub(crate) fn xt_projected_kernel_diagonal_iterator_matches_scalar_reference_bit
     let subspace = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: h_proj_inverse.clone(),
+        logdet_correction: 0.0,
     };
     let x = Array2::from_shape_fn((5, 4), |(i, j)| {
         ((i as f64 + 0.3) * 0.19 - (j as f64 + 0.6) * 0.37).sin()
@@ -151,6 +152,7 @@ pub(crate) fn projected_logdet_cross_reduced_uses_trace_product_reference() {
     let kernel = PenaltySubspaceTrace {
         u_s: Array2::<f64>::eye(3),
         h_proj_inverse: array![[1.4, 0.2, -0.1], [0.2, 1.9, 0.3], [-0.1, 0.3, 1.6]],
+        logdet_correction: 0.0,
     };
     let ra = Array2::from_shape_fn((3, 3), |(i, j)| {
         ((i as f64 + 0.6) * 0.22 - (j as f64 + 0.3) * 0.35).sin()
@@ -1290,6 +1292,7 @@ pub(crate) fn batched_penalty_subspace_traces_match_exact_kernel_on_ill_conditio
     let kernel = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: m,
+        logdet_correction: 0.0,
     };
     // Drift concentrated on the STIFFEST direction (kernel eval 1e-6):
     // A = σ_max · u₃u₃ᵀ + a mild symmetric background.
@@ -1434,6 +1437,7 @@ pub(crate) fn active_projected_kkt_residual_is_reduced_before_projected_ift() {
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 1.0e-8]).with_metadata(1.0e-6, 1);
@@ -1463,6 +1467,7 @@ pub(crate) fn active_projected_kkt_residual_drops_gauge_mass_of_any_magnitude() 
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 4.0]).with_metadata(1.0e-6, 1);
@@ -1488,6 +1493,7 @@ pub(crate) fn active_projected_kkt_residual_rejects_retained_range_leak() {
     let kernel = PenaltySubspaceTrace {
         u_s: array![[2.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 4.0]).with_metadata(1.0e-6, 1);
@@ -1543,6 +1549,7 @@ pub(crate) fn build_subspace_kernel(
     PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse,
+        logdet_correction: 0.0,
     }
 }
 
@@ -2665,6 +2672,7 @@ pub(crate) fn theta_mode_response_kernel_matches_preport_assembly_bitwise() {
     let trace = PenaltySubspaceTrace {
         u_s: array![[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
         h_proj_inverse: array![[0.5, 0.1], [0.1, 0.8]],
+        logdet_correction: 0.0,
     };
     let block = ActiveLinearConstraintBlock {
         a: array![[1.0, 1.0, 0.0]],
@@ -3628,6 +3636,7 @@ pub(crate) fn subspace_projected_leverage_and_adjoint_shortcut_match_dense() {
     let subspace = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: h_proj_inverse.clone(),
+        logdet_correction: 0.0,
     };
 
     let x_data = array![
@@ -3694,6 +3703,7 @@ pub(crate) fn subspace_base_h2_traces_match_scalar_projected_kernel_path() {
     let kernel = PenaltySubspaceTrace {
         u_s,
         h_proj_inverse: array![[5.0 / det, -0.1 / det], [-0.1 / det, 3.0 / det]],
+        logdet_correction: 0.0,
     };
 
     let dense_only = array![[0.4, 0.1, 0.0], [0.1, -0.2, 0.3], [0.0, 0.3, 0.6]];
@@ -3826,6 +3836,7 @@ pub(crate) fn outer_hessian_operator_matvec_matches_dense_subspace_with_null_alp
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s,
             h_proj_inverse,
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -3921,6 +3932,7 @@ pub(crate) fn projected_operator_hessian_matches_dense_subspace_trace() {
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h_proj]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -3993,6 +4005,7 @@ pub(crate) fn penalty_subspace_batched_reduction_matches_serial_operator_reducti
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0, 0.0], [0.2, 0.8], [-0.1, 0.6]],
         h_proj_inverse: array![[0.8, 0.1], [0.1, 0.6]],
+        logdet_correction: 0.0,
     };
     let dense = array![[0.4, 0.1, -0.2], [0.1, 0.7, 0.3], [-0.2, 0.3, 0.5]];
     let op_matrix = array![[0.3, -0.2, 0.1], [-0.2, 0.9, 0.4], [0.1, 0.4, 0.8]];
@@ -4070,6 +4083,7 @@ pub(crate) fn subspace_trace_large_k_routes_to_projected_operator() {
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h_proj]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -4823,6 +4837,7 @@ pub(crate) fn build_projected_rho_gradient_solution(rho: f64) -> InnerSolution<'
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h[[1, 1]]]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -7207,6 +7222,7 @@ pub(crate) fn build_leak_proof_solution(
         Some(Arc::new(PenaltySubspaceTrace {
             u_s,
             h_proj_inverse: h_proj_inv,
+            logdet_correction: 0.0,
         }))
     } else {
         None

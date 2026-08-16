@@ -1420,6 +1420,7 @@ mod tests {
         let kernel = Arc::new(PenaltySubspaceTrace {
             u_s: array![[1.0, 0.0], [0.0, 1.0]],
             h_proj_inverse: array![[0.5, 0.0], [0.0, 0.25]],
+            logdet_correction: 0.0,
         });
         let stratum = StratumFingerprint {
             kept_rank: 2,
@@ -2072,6 +2073,7 @@ mod tests {
         let kernel = Arc::new(PenaltySubspaceTrace {
             u_s: array![[1.0, 0.0], [0.0, 1.0]],
             h_proj_inverse: array![[0.5, 0.0], [0.0, 0.25]],
+            logdet_correction: 0.0,
         });
         let sensitivity = Arc::new(Sensitivity {
             kernel: kernel.clone(),

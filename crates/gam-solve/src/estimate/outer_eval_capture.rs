@@ -144,6 +144,14 @@ pub struct OuterCurvatureDriftAudit {
     /// Tangent dimension at the base point, and at each coordinate's `θ ± h`.
     pub tangent_dim: Option<usize>,
     pub displaced_tangent_dim: Vec<(Option<usize>, Option<usize>)>,
+    /// The two objects the comparison is between, retained per θ coordinate:
+    /// the analytic `ZᵀḢ_iZ` and the measured `d(ZᵀHZ)/dθ_i`. A max-abs number
+    /// says a drift is wrong; these say HOW — whether the error is a multiple
+    /// of the face curvature, a rank-one leak, or one block's own.
+    pub analytic_face_drift: Vec<Array2<f64>>,
+    pub measured_face_drift: Vec<Array2<f64>>,
+    /// `ZᵀHZ` itself, the curvature whose determinant the atom reports.
+    pub face_curvature: Array2<f64>,
     /// `‖Ḣ_i^analytic‖_max`, so a relative error can be read against a scale.
     pub analytic_drift_max_abs: Array1<f64>,
     /// `½ log det(H)` recomputed from the captured dense matrix, against the
