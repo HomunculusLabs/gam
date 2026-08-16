@@ -86,6 +86,14 @@
   cell where nothing was ever mis-certified (`10 1500 16`) is byte-identical
   before and after, which is the control.
 
+  Regression, on this host: `gam-solve --lib` 1930 passed / 0 failed (1726 s),
+  `gam-terms --lib` 947 passed / 0 failed, `penalty_invariance` 17 passed / 0
+  failed, and the issue's own acceptance 2 passed / 0 failed. `gam-models --lib`
+  is 1712 passed / 23 failed BOTH before and after -- the two failure sets are
+  identical name for name, measured by reverting exactly the four changed files
+  in the worktree and rerunning the same suite, so none of those 23 is this
+  lane's.
+
   That premise is what this issue ran on for its whole life, and the sweep that
   killed it is `examples/probe2676_penalty_map_defect`: the
   `geo_disease_*_matern` redundancy is a small-length-scale LIMIT of two
