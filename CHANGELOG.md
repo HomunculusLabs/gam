@@ -1,5 +1,81 @@
 ## Unreleased
 
+- **A penalty map within `1.5e-8` of a linear dependency was certified EXACTLY
+  dependent, because its rank was decided on the SQUARE of the defect (#2676).**
+  `PenaltyMapInvariance` licenses the curvature certificate's deflation by
+  certifying `sum_i w_i A_i = 0`, and it decided that by eigendecomposing the
+  Gram `G_ij = <A_i, A_j>_F` in `f64` and admitting eigenvalues at or under the
+  eigensolver's backward error. But `lambda_min(G) = min ||sum_i w_i A_i||_F^2 =
+  delta^2`, so the Gram carries the defect squared and a rank test at `G`'s own
+  `eps` is a defect test at `sqrt(eps)`.
+
+  Measured on this issue's own headline cell — `geo_disease_matern`,
+  `centers=24, n=4000`, via `examples/repro2676_geo_disease_matern`:
+
+  ```
+  [INDEF-HESS] pair=(0,2) relative_defect=1.238259e-8 best_scale=1.000000e0
+  [INDEF-HESS] active_rank=2/3 structural_zero=1 curvature_resolution=1.170e-8
+  [INDEF-HESS] classifications=["Z", "A", "A"]
+  [INDEF-HESS] reparam_split ... intrinsic=[-1.1702972950948233e-8, ...]
+  ```
+
+  `Z` is "certified null of the penalty map, excused by STRUCTURE". The pair is
+  `1.238e-8` apart. **And the error compounds:** with the direction deflated,
+  #2748's `invariance_residual_2norm` measures the residual of
+  `T' H_rho T = T' diag(g_rho) T` on it and hands the result to the certificate
+  as a MEASURED `||dH||_2`. On an exact invariance that residual is error and
+  only error — the whole licence for the instrument. On a `1.238e-8` near one it
+  is the criterion's genuine curvature, and the dump says so to four digits:
+  `curvature_resolution = 1.170e-8` IS `intrinsic = -1.1703e-8`. The certificate
+  was told its Hessian was uncertain to `1.17e-8` by a direction whose curvature
+  it had just declined to look at — an inflated resolution masking genuine
+  negative curvature up to that size at every site that spends it.
+
+  The repair is the classical one — never form the normal equations to get a
+  rank — taken in the currency the site can actually afford. Factoring the
+  operator stack directly costs `k * block^2` doubles, hundreds of megabytes on a
+  wide shared block; doing the same arithmetic in DOUBLE-DOUBLE costs a constant
+  factor of time and no memory. The Gram is accumulated with exact products
+  (`two_product`, one `mul_add`) and exactly renormalized sums, so an `O(1)`
+  entry carries `O(m*eps^2)` instead of `O(eps)`; its pivoted Cholesky runs in
+  the same precision, where the pivot `d_j` is the squared norm of `A_j`'s
+  residual against the span already accepted, so `sqrt(d_j)` IS that column's
+  defect to full relative accuracy at any magnitude down to `eps`; and the null
+  space comes out of the FACTOR (`L[:, 0..rank]' w = 0`, back substitution)
+  rather than out of an eigenvector of `G`. The boundary is denominated in the
+  defect: `sqrt(entries) * EPSILON * ||A||_F * sqrt(accepted + 1)`, one
+  operator-construction error per operator entering the residual, in quadrature.
+  Nothing is chosen — the model is the arithmetic, calibrated by the two
+  populations it separates (a pair known equal at `2.079e-15` against a floor of
+  `2.0e-15`; the nearest pair known distinct at `8.75e-9`, six orders away).
+
+  The same defect, in the same coordinate, was in the two human-facing
+  instruments and is fixed with it. `report_penalty_pair_redundancy`
+  thresholded `cos > 1 - 1e-8` and printed `cos` to six decimals, and
+  `1 - cos = delta^2 / 2` — so a pair `1.9e-5` apart printed as `cos = 1.000000`
+  and read as an exact identity, while the bar itself admitted anything closer
+  than `1.4e-4`. The `[INDEF-HESS]` dump printed
+  `structural_redundancy_detected pair=(0,2) cos=1.000000 one_minus_cos=2.42e-9`
+  — gated on `cos > 0.999`, a defect of `4.5e-2` — two lines below its own
+  `structural_zero=0`. Both are now denominated in `delta`, formed directly from
+  the residual at the least-squares scale, and both distinguish the exact case
+  (at the residual norm's own arithmetic floor) from the near one, which gets a
+  new `near_degenerate_not_an_invariance` line saying what it is: the criterion
+  carries genuine curvature of order `delta^2` there, the penalty map certifies
+  nothing, and a negative curvature is a resolution question, not a structure
+  one.
+
+  That premise is what this issue ran on for its whole life, and the sweep that
+  killed it is `examples/probe2676_penalty_map_defect`: the
+  `geo_disease_*_matern` redundancy is a small-length-scale LIMIT of two
+  genuinely different operators — `delta = 2.079e-15` below `4e-2`, `1.874e-5` at
+  the cold `Auto` geometry, `3.396e-1` at the geometry the fit settles on. The
+  end-to-end acceptance is re-derived accordingly: one arm finds a geometry where
+  the premise is true (by measurement, not by a pinned constant) and gates the
+  deflation there; the other pins the honest fact about the `Auto` geometry — the
+  fit certifies and NOTHING is deflated — so the false premise cannot return by
+  inheritance.
+
 - **The SAE inner solve had no mover for the block its own convergence measure
   removes, so it declared a fixed point while holding 559 stall-resolutions of
   objective decrease (#2762).** The chart-gauge orbit is an exact first-order
