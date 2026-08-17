@@ -492,6 +492,13 @@ mod tests_barrier_curvature_2731;
 #[cfg(test)]
 mod tests_gauge_frame_roundtrip_2720;
 
+/// #2720 — per-objective-term attribution of the chart-orbit directional
+/// derivative, by finite difference of the value functions the line search
+/// descends. Answers WHICH penalty breaks the orbit symmetry, which the single
+/// `|gᵀvᵢ|` scalar every prior measurement reports cannot.
+#[cfg(test)]
+mod tests_gauge_posterior_flatness_2720;
+
 #[cfg(test)]
 mod tests_rho_structural_layout_2253;
 
