@@ -177,7 +177,6 @@ fn linear_budget_escalation_2720() {
     );
 }
 
-
 /// Does the orbit mover engage on linear at the seed? poincare banks
 /// decrease=1.9977e2 over 13 rounds at its seed; if linear's mover also
 /// engages but the exit still carries 4.21x on the dilation direction, the
@@ -187,9 +186,7 @@ fn linear_budget_escalation_2720() {
 fn linear_orbit_mover_engages_postfix_2720() {
     let (mut term, rho, z) = linear_circle();
     let registry = AnalyticPenaltyRegistry::new();
-    let smooth = rho
-        .lambda_smooth_vec()
-        .expect("[linear-stall] smooth vec");
+    let smooth = rho.lambda_smooth_vec().expect("[linear-stall] smooth vec");
     let descent = term
         .descend_gauge_orbit(z.view(), &rho, Some(&registry), &smooth, 40)
         .expect("[linear-stall] descend_gauge_orbit failed at the seed");
