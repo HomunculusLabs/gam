@@ -8808,14 +8808,52 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
             ));
         }
     };
+    let exact_joint = require_available_spatial_optimization_result(Ok(Some(exact_joint)))?;
     let exact_score = fit_score(&exact_joint.fit);
-    let exact_joint = require_successful_spatial_optimization_result(
-        initial_score,
-        Ok(Some((exact_joint, exact_score))),
-    )?;
 
-    log_spatial_aniso_scales(&exact_joint.resolvedspec);
-    Ok(exact_joint)
+    // Keep whichever of the two SCORED fits is better (#2748). κ optimization
+    // is a refinement of a fit that already exists, so "the refinement did not
+    // improve on the incumbent" is an argument for shipping the incumbent, not
+    // for destroying it — which is what this site did, on a bar of
+    // `max(1e-6, |score|·1e-8)`, until `geo_disease_eas_matern_k6` lost all
+    // four of its non-flexible benchmark lanes to a `1.267594e3 → 1.267595e3`
+    // regression. It is also exactly the conclusion the sibling
+    // `DeclinedKeepIncumbent` arm above reaches when the joint route grades its
+    // own candidate one level in; two graders of one comparison must not reach
+    // opposite responses.
+    //
+    // An `argmin` over two measured numbers needs no tolerance and admits no
+    // drift argument: it cannot ship something worse than what it was handed.
+    // A tie goes to the candidate, because the refinement is what was asked
+    // for and a tied score means the two fits are equally supported.
+    if exact_score.is_finite() && exact_score <= initial_score {
+        log_spatial_aniso_scales(&exact_joint.resolvedspec);
+        return Ok(exact_joint);
+    }
+    log::info!(
+        "[spatial-kappa] the optimized-κ fit scores {exact_score:.12e} against the incumbent's \
+         {initial_score:.12e} (regression {:.3e}); shipping the INCUMBENT, which is the better \
+         of the two fits this call has in hand. A refinement that does not improve on the fit \
+         it refines is not a reason to have no fit (#2748).",
+        exact_score - initial_score,
+    );
+    let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+        data,
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &resolvedspec,
+        best.fit.lambdas.as_slice(),
+        family,
+        options,
+    )?;
+    Ok(FittedTermCollectionWithSpec {
+        fit: fitted.fit,
+        design: fitted.design,
+        resolvedspec,
+        adaptive_diagnostics: fitted.adaptive_diagnostics,
+        kappa_timing: None,
+    })
 }
 
 /// The end-to-end curvature-as-an-estimand report for one `curv(...)` smooth:

@@ -10,10 +10,10 @@
 //! `reml_score` that drifts a few REML units below the certified baseline
 //! score because it runs the full-inference path + adaptive spatial overlay
 //! rather than the superseded baseline path that produced `best`. The
-//! downstream gate `require_successful_spatial_optimization_result` compares
-//! the returned `fit_score` against `fit_score(&best.fit)`; before the fix the
-//! drift spuriously read as "spatial kappa optimization made REML score worse"
-//! and aborted the WHOLE fit with `RemlOptimizationFailed`.
+//! downstream gate compared the returned `fit_score` against
+//! `fit_score(&best.fit)`; before the fix the drift spuriously read as
+//! "spatial kappa optimization made REML score worse" and aborted the WHOLE
+//! fit with `RemlOptimizationFailed`.
 //!
 //! The fix stamps the certified baseline score onto the harvested fit (exactly
 //! as the optimized branch already stamps its certified `joint_final_value`),
@@ -22,6 +22,14 @@
 //! regression through `fit_from_formula` at both 3-D and 5-D and assert (a) the
 //! fit returns without error and (b) the helix signal is recovered (training R²
 //! well above the noise floor).
+//!
+//! #2748 removed the score comparison from that gate entirely — a refinement
+//! that does not improve on the fit it refines now ships the incumbent instead
+//! of destroying it, and `require_available_spatial_optimization_result` only
+//! surfaces "no candidate at all". These tests keep their value under that
+//! change: they assert the fit CONVERGES and RECOVERS THE SIGNAL, which a
+//! retreat-to-incumbent must also satisfy, so they still fail if the retreat
+//! ever ships a geometry that cannot fit the helix.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;

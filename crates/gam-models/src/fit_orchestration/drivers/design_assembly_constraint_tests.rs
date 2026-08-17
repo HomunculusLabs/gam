@@ -6526,31 +6526,31 @@ fn spatial_length_scale_optimization_runs_binomial_logit_matern_with_exact_laml_
 
 #[test]
 fn spatial_kappa_result_requires_exact_availability() {
-    let err = require_successful_spatial_optimization_result::<()>(0.0, Ok(None))
+    let err = require_available_spatial_optimization_result::<()>(Ok(None))
         .expect_err("missing exact spatial result must be surfaced");
     let msg = err.to_string();
     assert!(msg.contains("unavailable"), "unexpected error: {msg}");
 }
 
+/// A worse candidate is NOT this function's business any more (#2748). It used
+/// to turn one into a `RemlOptimizationFailed` and kill a fit that already
+/// existed; the caller now keeps whichever of the incumbent and the candidate
+/// scores better, which is monotone by construction and needs no bar. This
+/// asserts the removal rather than leaving it silent: a candidate arriving here
+/// is admitted, whatever its score, because the score decision happens where
+/// both fits are in hand.
 #[test]
-fn spatial_kappa_result_rejects_worse_exact_score() {
-    let err = require_successful_spatial_optimization_result(1.0, Ok(Some(((), 1.5))))
-        .expect_err("worse exact spatial result must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("made REML score worse"),
-        "unexpected error: {msg}"
-    );
-    assert!(msg.contains("1.000000e0"), "unexpected error: {msg}");
-    assert!(msg.contains("1.500000e0"), "unexpected error: {msg}");
+fn spatial_kappa_result_no_longer_grades_the_candidates_score() {
+    let value = require_available_spatial_optimization_result(Ok(Some("candidate")))
+        .expect("an available candidate must be admitted regardless of its score");
+    assert_eq!(value, "candidate");
 }
 
 #[test]
 fn spatial_kappa_result_surfaces_optimizer_failure() {
-    let err = require_successful_spatial_optimization_result::<()>(
-        0.0,
-        Err(EstimationError::InvalidInput("boom".to_string())),
-    )
+    let err = require_available_spatial_optimization_result::<()>(Err(
+        EstimationError::InvalidInput("boom".to_string()),
+    ))
     .expect_err("exact spatial optimizer failure must be surfaced");
     let msg = err.to_string();
     assert!(
