@@ -289,6 +289,63 @@
   `Φ(L) + 1 − Φ(U)` ± 4 binomial standard errors — measured `0.02355` against
   `0.02483`, with **0 of 25 600 draws** on a support endpoint.
 
+  **And the titled defect, which still reproduced.** While verifying the
+  predictive half through the release CLI, an ordinary CTN fit — lognormal
+  response, one smooth covariate, `n = 400` — refused with this issue's own
+  title, at `k = 3, 4, 5, 8`:
+
+  ```text
+  error: ... inner solve refused this trial point: physical reduced-face
+  first-order KKT failed (projected_residual_inf=9.736333e-1,
+  tolerance=1.162291e-6, trust_shift=0.000000e0, active_rows=1)
+  ```
+
+  `solve_physical_reduced_face` is an ACCELERATOR with a designed graceful
+  fallback — `Ok(None)`, "the general constrained QP owns this subproblem" —
+  which two of its conditions already used. Three more were `Err(trial_point)`,
+  which ends the fit, though every one of them is the fast path failing to FIND
+  a certifiable step rather than producing something that violates its own math.
+
+  The one the fixture died on grades a repair. When the face solve lands outside
+  a row it is holding as an equality, the candidate is clipped back along the
+  certified feasible chord and pushed forward as *"one representable value
+  outside its own wall"*, for the KKT residual to accept or reject. Instrumenting
+  the repair with `1 − t` on that chord says it is nothing of the kind:
+
+  ```text
+  face_rows=7 chord_repair=1.000000e0 projected_residual_inf=5.448715e-3 tol=2.040314e-6
+  face_rows=9 chord_repair=5.702202e-1 projected_residual_inf=2.299802e-1 tol=2.177172e-6
+  face_rows=6 chord_repair=1.000000e0 projected_residual_inf=2.408515e1 tol=2.799394e-5
+  face_rows=6 chord_repair=8.882834e-1 projected_residual_inf=1.086920e-1 tol=2.793391e-6
+  ```
+
+  `chord_repair = 1.0` is the chord clipped all the way back to the feasible
+  base — a ZERO step. Whole steps were being graded as one-ulp repairs, and the
+  verdict on a heuristic repair was being treated as a violated contract.
+
+  `chord_repair` is now carried with each candidate and the three
+  heuristic-failure conditions decline, each logging its own numbers: a
+  chord-repaired candidate that fails first-order KKT (one with
+  `chord_repair == 0` remains a hard error — that IS the Moré--Sorensen solve
+  failing to solve); a face whose minimum-norm point lies outside the trust ball
+  (`minimum_face_norm_sq = 3.745717e1` against `radius_sq = 1` — a statement
+  about a warm face and a shrunken radius); and a face that touches the trust
+  ball with a nonzero tangent, whose reduced ball is empty. Non-finiteness stays
+  a hard error and is split out of the ball test.
+
+  ```text
+  before   refuses in the inner solve: reduced-face first-order KKT, active_rows=1
+  after    325 declines, the outer smoothing search CONVERGES, and the fit reaches
+           `fit_custom_family final posterior assembly`
+  ```
+
+  What stops that fixture now is a different subsystem — `truncated moments for a
+  61-dimensional constraint face did not converge … max |correlation| between
+  constraint normals 1.000` — which is #2601, named in
+  `constrained_posterior.rs` and measured there on synthetic faces. The two
+  `ctn_*_2680` regressions and the `tram` quality arm die at exactly that point,
+  with the numbers they had before this change.
+
   **What this exposes rather than creates.** The fitted CTN puts mass on the whole
   line, so a strictly positive response can be extrapolated below zero:
   `h⁻¹(-4) = -3.5e-1` on the lognormal fixture, with `h(h⁻¹(-4)) = -4.000000`
