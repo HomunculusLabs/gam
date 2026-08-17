@@ -129,6 +129,44 @@ pub(crate) const DEFAULT_GAUGE_PRIORITY: u8 = 100;
 
 pub(crate) const LINK_WIGGLE_GAUGE_PRIORITY: u8 = 80;
 
+/// The gauge level at which the frozen, observation-space-residualized warp
+/// block yields to the mean block (#2748).
+///
+/// `audit_identifiability` calls a cross-block alias FATAL **only when the two
+/// blocks carry the same priority**, on the stated grounds that "two blocks
+/// contributing the same direction is only *unfittable* when no ordering exists
+/// to pick which one to drop". On the binomial mean link-wiggle path an
+/// ordering plainly exists, and the de-aliasing IS the proof of it: `B⊥` is by
+/// construction the part of `B(η̂)` the mean block does not explain, so a
+/// direction the two still share after that is one the mean block can represent
+/// and the warp is echoing. The mean block stays intact; the warp yields.
+///
+/// Both blocks reached the audit at `DEFAULT_GAUGE_PRIORITY`, so every such
+/// pair was unfittable-by-declaration. Measured on
+/// `geo_disease_eas3_matern_k12`: `FATAL: alias pair 'eta'[11] ~ 'wiggle'[0]
+/// overlap=0.6542 >= halt half-width 0.1739` at **joint rank 23 of 23 columns
+/// and 0 dropped columns** — a full-rank, merely ill-conditioned design refused
+/// outright.
+///
+/// Two properties make the demotion safe rather than merely permissive:
+///
+/// * at full rank nothing is dropped at all — the ordering only decides who
+///   would yield, and the fit proceeds with both blocks whole;
+/// * if a warp column IS dropped, monotonicity survives it. `dq/dη = 1 + Σ_j
+///   β_j B'_j` with `β_w ≥ 0` and `B'` an M-spline basis, so every retained
+///   term is still non-negative and the sum is still `≥ 1`. Dropping a column
+///   from the penalized mean smooth instead would silently change that
+///   smooth's span, which is the worse of the two.
+///
+/// The sibling `GaussianLocationScaleWiggleFamily` assigns
+/// [`LINK_WIGGLE_GAUGE_PRIORITY`] the OTHER way round — mean and log-σ yield to
+/// the wiggle — and that is not an inconsistency: its warp basis is dynamic and
+/// full-width with no residualization establishing precedence, so there the
+/// wiggle is the block that cannot afford to lose a column. Precedence follows
+/// from which block is defined as the residual, and on this path that is the
+/// warp.
+pub(crate) const DEALIASED_WARP_GAUGE_PRIORITY: u8 = LINK_WIGGLE_GAUGE_PRIORITY;
+
 pub(crate) fn initial_log_lambdas_orzeros(
     block: &ParameterBlockInput,
 ) -> Result<Array1<f64>, String> {
@@ -1645,6 +1683,95 @@ pub(crate) fn frozen_index_relaxation(dominant_multiplier: f64) -> f64 {
 }
 
 #[cfg(test)]
+mod dealiased_warp_gauge_priority_tests {
+    use super::*;
+
+    /// Two blocks that share a direction, at the geometry
+    /// `geo_disease_eas3_matern_k12` refused on: FULL joint rank, nothing to
+    /// drop, and a cross-block column overlap far above the leverage-based halt
+    /// band. At equal priorities `audit_identifiability` calls that FATAL — "no
+    /// ordering exists to pick which one to drop". Declaring the ordering the
+    /// de-aliasing already implements is the whole of the repair, so this gates
+    /// exactly that difference and nothing else: same designs, same overlap,
+    /// only the priorities move.
+    fn overlapping_blocks(warp_priority: u8) -> Vec<gam_problem::ParameterBlockSpec> {
+        let n = 400;
+        let mut mean = Array2::<f64>::zeros((n, 2));
+        let mut warp = Array2::<f64>::zeros((n, 2));
+        for row in 0..n {
+            let t = row as f64 / (n as f64 - 1.0);
+            mean[[row, 0]] = 1.0;
+            mean[[row, 1]] = t;
+            // ~0.65 overlap with `mean[.., 1]` by construction, plus an
+            // independent direction so the joint design stays full rank.
+            warp[[row, 0]] = t + 0.75 * (7.0 * t).sin();
+            warp[[row, 1]] = (3.0 * t).cos();
+        }
+        let mean_block = ParameterBlockInput {
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(mean)),
+            offset: Array1::zeros(n),
+            penalties: vec![],
+            nullspace_dims: vec![],
+            initial_log_lambdas: Some(Array1::zeros(0)),
+            initial_beta: None,
+        };
+        let warp_block = ParameterBlockInput {
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(warp)),
+            offset: Array1::zeros(n),
+            penalties: vec![],
+            nullspace_dims: vec![],
+            initial_log_lambdas: Some(Array1::zeros(0)),
+            initial_beta: None,
+        };
+        vec![
+            mean_block.intospec("eta").expect("eta spec"),
+            warp_block
+                .intospec_with_gauge_priority("wiggle", warp_priority)
+                .expect("wiggle spec"),
+        ]
+    }
+
+    #[test]
+    fn equal_priorities_make_a_full_rank_overlap_fatal() {
+        let specs = overlapping_blocks(DEFAULT_GAUGE_PRIORITY);
+        let audit = gam_identifiability::audit::audit_identifiability(&specs).expect("audit");
+        assert!(
+            audit.dropped_columns.is_empty(),
+            "the fixture must be full rank so the verdict is about the ORDERING, not a drop: {}",
+            audit.summary
+        );
+        assert!(
+            audit.fatal,
+            "the pre-#2748 declaration must still read as unfittable: {}",
+            audit.summary
+        );
+    }
+
+    #[test]
+    fn the_warp_yielding_to_the_mean_block_makes_the_same_overlap_fittable() {
+        let specs = overlapping_blocks(DEALIASED_WARP_GAUGE_PRIORITY);
+        let audit = gam_identifiability::audit::audit_identifiability(&specs).expect("audit");
+        assert!(
+            audit.dropped_columns.is_empty(),
+            "declaring an ordering must not itself drop a column at full rank: {}",
+            audit.summary
+        );
+        assert!(
+            !audit.fatal,
+            "an ordering exists on this path, so the same overlap is ill-conditioned rather \
+             than unfittable: {}",
+            audit.summary
+        );
+    }
+
+    /// And the ordering points the right way: the warp is the block that yields.
+    #[test]
+    fn the_warp_is_the_lower_priority_block() {
+        assert!(DEALIASED_WARP_GAUGE_PRIORITY < DEFAULT_GAUGE_PRIORITY);
+    }
+}
+
+#[cfg(test)]
 mod frozen_index_relaxation_tests {
     use super::*;
     use ndarray::array;
@@ -2258,9 +2385,14 @@ pub(crate) fn fit_binomial_mean_wiggle(
         )?;
         let eta_penalty_count = eta_block_warm.penalties.len();
         let wiggle_penalty_count = wiggle_block.penalties.len();
+        // The warp yields to the mean block when the two still share a
+        // direction after residualization; see
+        // [`DEALIASED_WARP_GAUGE_PRIORITY`] for why an ordering exists here at
+        // all, which is what decides whether such a pair is fatal (#2748).
         let blocks = vec![
             eta_block_warm.clone().intospec("eta")?,
-            wiggle_block.intospec("wiggle")?,
+            wiggle_block
+                .intospec_with_gauge_priority("wiggle", DEALIASED_WARP_GAUGE_PRIORITY)?,
         ];
         let mut fam = family.clone();
         fam.frozen_warp_design = Some(bda);
