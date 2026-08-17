@@ -4327,6 +4327,16 @@ fn exact_a_route_gap_is_two_coordinates_with_two_causes_2515() {
     );
 }
 
+/// The value site's RETIRED absolute floor coefficient (#2673).
+///
+/// Production no longer has this number. `1e-9 · max(λ_max(A), 1)` was the
+/// value path's classification band until the two floors became one predicate in
+/// one metric (`max(dim·ε·‖A‖₂, √ε·vᵀBv)`, `construction_exact_hessian.rs`), so
+/// it survives HERE, with the three tests that are the record of what the pair
+/// did and why it could not stand. Nothing else may read it: a test that needs
+/// production's band must ask production for it.
+pub(crate) const RETIRED_ABSOLUTE_PD_FLOOR_REL_2673: f64 = 1.0e-9;
+
 /// The #2673 overlap classification, as ONE predicate.
 ///
 /// Both the real-fixture probe and the synthetic control below run through this,
@@ -4433,7 +4443,7 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
     // λ_max = 1.0, so floor = 1e-9 · max(1, 1) = 1e-9 exactly as production forms it.
     let lambdas = [5.0e-10_f64, 1.0, 0.5];
     let max_eig = lambdas.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    let floor = RETIRED_ABSOLUTE_PD_FLOOR_REL_2673 * max_eig.max(1.0);
     assert!(
         (floor - 1.0e-9).abs() <= 1.0e-24,
         "#2673 control: floor must be 1e-9 here, got {floor:.6e}"
@@ -4486,13 +4496,13 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
     );
 }
 
-/// #2673 — the measurement `SAE_EXACT_A_PD_FLOOR_REL`'s own doc block asks for and
-/// says has never been taken.
+/// #2673 — the crossing count the retired constant's own doc block asked for,
+/// kept as the record of what the two floors did.
 ///
 /// Two floors classify directions of the SAME operator `A = B + ΔC`, in two
 /// different metrics:
 ///
-/// * `SAE_EXACT_A_PD_FLOOR_REL` (`1e-9 · max(λ_max(A), 1)`) on an ABSOLUTE
+/// * the retired `1e-9 · max(λ_max(A), 1)` on an ABSOLUTE
 ///   eigenvalue of `A`. Inside the band the direction is the radial-gauge
 ///   quotient null and is priced `log 1 = 0`; below `−floor` #2336's saddle
 ///   escape triggers.
@@ -4529,6 +4539,9 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
 pub(crate) struct TwoFloorState2673 {
     pub a: Array2<f64>,
     pub b: Array2<f64>,
+    /// Where the arrow layout's β border starts, so a test that wants to rescale
+    /// the border and nothing else does not have to guess at the split.
+    pub total_t: usize,
 }
 
 fn two_floor_state_2673() -> TwoFloorState2673 {
@@ -4550,7 +4563,7 @@ fn two_floor_state_2673() -> TwoFloorState2673 {
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("#2673 fixture: the periodic atom must build")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
@@ -4558,15 +4571,16 @@ fn two_floor_state_2673() -> TwoFloorState2673 {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("#2673 fixture: the softmax circle assignment must build");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("#2673 fixture: the manifold term must build");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
     let sys = term
         .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
+        .expect("#2673 fixture: the arrow system must assemble at this rho");
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
-    let (_dt, _db, cache) =
-        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+    let (_dt, _db, cache) = solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+        .expect("#2673 fixture: the undamped arrow factorization must succeed");
 
     let a = term
         .materialize_exact_hessian_dense(&rho, target.view(), &cache)
@@ -4603,7 +4617,7 @@ fn two_floor_state_2673() -> TwoFloorState2673 {
             b[[j, i]] = avg;
         }
     }
-    TwoFloorState2673 { a, b }
+    TwoFloorState2673 { a, b, total_t }
 }
 
 /// #2673 — the two floors are two DIFFERENT RULES, and this measures the gap
@@ -4616,7 +4630,7 @@ fn two_floor_state_2673() -> TwoFloorState2673 {
 /// threshold on the SAME quantity, `|λ|`:
 ///
 /// ```text
-///   value site    :  |λ| ≤ SAE_EXACT_A_PD_FLOOR_REL · max(λ_max, 1)   — ONE number, every direction
+///   value site    :  |λ| ≤ 1e-9 · max(λ_max, 1)   — ONE number, every direction
 ///   gradient site :  |λ| <  √ε · vᵀBv                                  — a DIFFERENT number per direction
 /// ```
 ///
@@ -4641,7 +4655,7 @@ fn the_two_floors_are_incommensurable_thresholds_on_one_operator_2673() {
     let (a_eigs, a_vecs) = strict_symmetric_eigh(&state.a, Side::Lower).expect("A spectrum");
     let dim = a_eigs.len();
     let max_eig = a_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let value_threshold = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    let value_threshold = RETIRED_ABSOLUTE_PD_FLOOR_REL_2673 * max_eig.max(1.0);
     let mu_floor = f64::EPSILON.sqrt();
 
     let mut ratios = Vec::with_capacity(dim);
@@ -4686,6 +4700,224 @@ fn the_two_floors_are_incommensurable_thresholds_on_one_operator_2673() {
         min_ratio < 1.0 && max_ratio > 1.0,
         "#2673: the ratio must straddle 1 for this state to witness that NEITHER rule is \
          uniformly the stricter one (ratio ∈ [{min_ratio:.6e}, {max_ratio:.6e}])"
+    );
+}
+
+/// #2673 — the classification the tree SHIPS is invariant under a
+/// reparametrization of `θ`; the one it retired was not, and here is the state
+/// where that difference produces the crossing this issue was filed about.
+///
+/// `θ = (t, β)` mixes chart coordinates with border coefficients, and rescaling
+/// the border alone is a real reparametrization: it is what scaling the target's
+/// units does to `β` while leaving the chart alone. Under `θ → Dθ` both Hessians
+/// transform congruently, `A → DAD` and `B → DBD`, so
+///
+/// * `μ(v) = vᵀAv / vᵀBv` is EXACTLY invariant — a `D⁻¹v` on the left cancels a
+///   `D` on either side — and so is the shipped predicate `|μ| ≥ √ε`, whose
+///   worst case over all directions is the smallest-magnitude eigenvalue of the
+///   pencil `(A, B)`;
+/// * `|λ| ≤ 1e-9·max(λ_max(A), 1)` is not, because `λ_max(A)` is a maximum over
+///   coordinates whose units are unrelated.
+///
+/// So the retired rule could be made to call any direction "gauge" by a change of
+/// units, and this test does exactly that: it shrinks the border by `1e-4`, which
+/// pushes the border-carrying eigenvalues under the retired band while their
+/// pencil curvature does not move at all. **That is the `value=gauge &
+/// gradient=resolved` crossing the thread has been looking for a fixture to
+/// produce** — it did not need an unusual state, only an unusual choice of units,
+/// which is the point.
+///
+/// The invariance asserted for the shipped rule is the identifiability term. The
+/// arithmetic term `dim·ε·‖A‖₂` is a property of the eigendecomposition rather
+/// than of the model and is not congruence-invariant; it is five orders below the
+/// identifiability term on both frames here, which is asserted rather than
+/// assumed, and `ExactHessianSpectralBlock::rank_floor` reports in production
+/// whenever it binds.
+#[test]
+fn the_classification_is_invariant_under_a_reparametrization_2673() {
+    use gam_linalg::faer_ndarray::{FaerCholesky, strict_symmetric_eigh};
+
+    /// The smallest-magnitude eigenvalue of the pencil `(A, B)`, i.e. the worst
+    /// case of `μ(v)` over every direction. `B = LLᵀ` is positive definite, so
+    /// this is the symmetric spectrum of `L⁻¹AL⁻ᵀ`.
+    fn min_abs_pencil_curvature(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
+        let dim = a.nrows();
+        let lower = b
+            .cholesky(Side::Lower)
+            .expect("B is the arrow factorization's own operator and is positive definite")
+            .lower_triangular();
+        // Forward substitution `L Y = X`, applied on both sides.
+        let forward = |x: &Array2<f64>| -> Array2<f64> {
+            let mut y = Array2::<f64>::zeros((dim, dim));
+            for column in 0..dim {
+                for row in 0..dim {
+                    let mut acc = x[[row, column]];
+                    for k in 0..row {
+                        acc -= lower[[row, k]] * y[[k, column]];
+                    }
+                    y[[row, column]] = acc / lower[[row, row]];
+                }
+            }
+            y
+        };
+        let whitened = forward(&forward(a).t().to_owned());
+        let symmetric = (&whitened + &whitened.t()) * 0.5;
+        let (mu, _) = strict_symmetric_eigh(&symmetric, Side::Lower).expect("pencil spectrum");
+        mu.iter().map(|value| value.abs()).fold(f64::INFINITY, f64::min)
+    }
+
+    let state = two_floor_state_2673();
+    let dim = state.a.nrows();
+    let (a_eigs, a_vecs) = strict_symmetric_eigh(&state.a, Side::Lower).expect("A spectrum");
+    // The arrow layout puts the β border after the `total_t` chart coordinates.
+    // Scale the border and nothing else — that is what a change in the target's
+    // units does, and it is a reparametrization of the model rather than a
+    // different model.
+    let border_width = dim - state.total_t;
+    assert!(
+        border_width > 0,
+        "#2673: the fixture must carry a β border for a border rescaling to be a rescaling"
+    );
+    let scale = 1.0e-4_f64;
+    let mut d = Array1::<f64>::ones(dim);
+    for index in state.total_t..dim {
+        d[index] = scale;
+    }
+    let congruent = |m: &Array2<f64>| -> Array2<f64> {
+        Array2::from_shape_fn((dim, dim), |(row, column)| d[row] * m[[row, column]] * d[column])
+    };
+    let a_scaled = congruent(&state.a);
+    let b_scaled = congruent(&state.b);
+
+    // 1. The shipped predicate does not move. Its worst case over all directions
+    //    is the pencil's smallest curvature, and congruence leaves the pencil
+    //    spectrum alone.
+    let mu_plain = min_abs_pencil_curvature(&state.a, &state.b);
+    let mu_scaled = min_abs_pencil_curvature(&a_scaled, &b_scaled);
+    let identifiability = f64::EPSILON.sqrt();
+    println!(
+        "[#2673 INVARIANCE] border scaled by {scale:.1e}  (dim={dim}, border_width={border_width})\n\
+         [#2673 INVARIANCE] min|μ| plain  = {mu_plain:.12e}\n\
+         [#2673 INVARIANCE] min|μ| scaled = {mu_scaled:.12e}   relative move = {:.3e}",
+        (mu_scaled - mu_plain).abs() / mu_plain
+    );
+    assert!(
+        (mu_scaled - mu_plain).abs() <= 1.0e-6 * mu_plain,
+        "#2673: the shipped classification is the pencil curvature and MUST be invariant under a \
+         congruence (plain {mu_plain:.12e}, scaled {mu_scaled:.12e})"
+    );
+    assert!(
+        mu_plain > identifiability && mu_scaled > identifiability,
+        "#2673: the shipped rule must resolve every direction in BOTH frames for the retired \
+         rule's flip below to be a disagreement rather than a shared verdict \
+         (min|μ| plain {mu_plain:.6e}, scaled {mu_scaled:.6e}, floor {identifiability:.6e})"
+    );
+
+    // 2. The retired rule flips. Same operator, same model, different units.
+    let retired_pinned = |eigs: &Array1<f64>| -> usize {
+        let max_eig = eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let floor = RETIRED_ABSOLUTE_PD_FLOOR_REL_2673 * max_eig.max(1.0);
+        eigs.iter().filter(|value| value.abs() <= floor).count()
+    };
+    let (scaled_eigs, scaled_vecs) =
+        strict_symmetric_eigh(&a_scaled, Side::Lower).expect("scaled A spectrum");
+    let pinned_plain = retired_pinned(&a_eigs);
+    let pinned_scaled = retired_pinned(&scaled_eigs);
+    println!(
+        "[#2673 INVARIANCE] retired rule pins {pinned_plain} of {dim} directions before the \
+         rescaling and {pinned_scaled} after"
+    );
+    assert_eq!(
+        pinned_plain, 0,
+        "#2673: the retired rule pins nothing on the unscaled state, which is why every previous \
+         crossing count on it was structurally zero"
+    );
+    assert!(
+        pinned_scaled > 0,
+        "#2673: rescaling the border must push at least one direction under the retired absolute \
+         band, or this state does not witness the crossing"
+    );
+
+    // 3. And the flipped directions are exactly the crossing: the value calls
+    //    them gauge, the gradient keeps their A⁻¹ response. Meanwhile the
+    //    SHIPPED rule pins nothing in either frame, direction by direction.
+    let shipped_pinned = |eigs: &Array1<f64>,
+                          vecs: &Array2<f64>,
+                          b: &Array2<f64>,
+                          label: &str|
+     -> (usize, usize) {
+        let norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let arithmetic = (dim as f64) * f64::EPSILON * norm;
+        let mut pinned = 0usize;
+        let mut arithmetic_binds = 0usize;
+        let mut worst_margin = f64::INFINITY;
+        for index in 0..dim {
+            let v = vecs.column(index);
+            let vbv = v.dot(&b.dot(&v));
+            let floor = arithmetic.max(identifiability * vbv);
+            if eigs[index].abs() <= floor {
+                pinned += 1;
+            }
+            if arithmetic > identifiability * vbv {
+                arithmetic_binds += 1;
+                worst_margin = worst_margin.min(eigs[index].abs() / arithmetic);
+            }
+        }
+        println!(
+            "[#2673 INVARIANCE] shipped rule on the {label} frame: pins {pinned} of {dim}; the \
+             arithmetic term binds on {arithmetic_binds} (there |λ| still clears it by \
+             {worst_margin:.3e}x, so the verdict is the identifiability verdict)"
+        );
+        (pinned, arithmetic_binds)
+    };
+    let (plain_pinned, _) = shipped_pinned(&a_eigs, &a_vecs, &state.b, "plain");
+    let (scaled_pinned, scaled_arithmetic_binds) =
+        shipped_pinned(&scaled_eigs, &scaled_vecs, &b_scaled, "rescaled");
+    assert_eq!(
+        (plain_pinned, scaled_pinned),
+        (0, 0),
+        "#2673: the shipped rule must reach the SAME verdict on every direction in both frames; \
+         a units change is not a modelling decision"
+    );
+
+    let retired_floor = RETIRED_ABSOLUTE_PD_FLOOR_REL_2673
+        * scaled_eigs
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max)
+            .max(1.0);
+    let mut crossings = 0usize;
+    for index in 0..dim {
+        let v = scaled_vecs.column(index);
+        let vbv = v.dot(&b_scaled.dot(&v));
+        let mu = scaled_eigs[index] / vbv;
+        if scaled_eigs[index].abs() <= retired_floor && mu.abs() >= identifiability {
+            crossings += 1;
+            println!(
+                "[#2673 INVARIANCE]   direction {index}: RETIRED VALUE RULE=gauge \
+                 (|λ|={:.6e} ≤ {retired_floor:.6e}) but GRADIENT=resolved \
+                 (|μ|={:.6e} ≥ {identifiability:.6e})",
+                scaled_eigs[index].abs(),
+                mu.abs()
+            );
+        }
+    }
+    assert!(
+        crossings > 0,
+        "#2673: the rescaled frame must exhibit the `value=gauge & gradient=resolved` crossing \
+         the issue was filed about"
+    );
+    // The arithmetic term is a property of the DECOMPOSITION, not of the model,
+    // so it is not congruence-invariant and this frame is where that shows: a
+    // 1e-4 border rescaling drops `vᵀBv` by 1e-8 on the border directions and the
+    // backward-error floor becomes the binding one for them. It does not move a
+    // single verdict (asserted above), which is exactly the claim made for it —
+    // it can only pin, never resurrect, and here it pins nothing because those
+    // eigenvalues still stand five orders clear of it.
+    assert!(
+        scaled_arithmetic_binds > 0,
+        "#2673: this frame is chosen so the arithmetic term BINDS somewhere, or the paragraph \
+         above is untested commentary"
     );
 }
 
@@ -4767,7 +4999,7 @@ fn two_floors_overlap_region_direction_count_2673() {
     // Site 1: the plain `A` spectrum and its absolute floor.
     let (a_eigs, a_vecs) = strict_symmetric_eigh(&a, Side::Lower).expect("A spectrum");
     let max_eig = a_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    let floor = RETIRED_ABSOLUTE_PD_FLOOR_REL_2673 * max_eig.max(1.0);
     let mu_floor = f64::EPSILON.sqrt();
 
     // Site 2 and the crossing count now go through ONE predicate

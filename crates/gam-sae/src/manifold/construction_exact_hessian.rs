@@ -74,6 +74,33 @@ pub(crate) fn sae_exact_a_identifiability_floor() -> f64 {
     f64::EPSILON.sqrt()
 }
 
+/// The null-band half-width, in `λ` units, for ONE direction of a dense
+/// exact-`A` block (#2673).
+///
+/// ```text
+///   floor = max( spectral_dim·ε·‖A‖₂ ,  √ε · vᵀBv )
+/// ```
+///
+/// This is the whole rule, as a scalar function of three measured numbers, so
+/// that every consumer applies the SAME rule while supplying its OWN operands.
+/// Production reaches it through [`ExactHessianSpectralBlock::rank_floor`]; the
+/// independent oracles that re-derive the classification from a separately built
+/// dense `A` call it directly, which keeps them oracles (their inputs are their
+/// own) without letting a second copy of the predicate drift from this one — the
+/// failure mode #2740 names and the one this issue is.
+///
+/// See [`sae_exact_a_identifiability_floor`] for why the metric is `B` and why
+/// the second term is the one that classifies.
+pub(crate) fn sae_exact_a_direction_floor(
+    spectral_dim: usize,
+    spectral_norm: f64,
+    b_quadratic_form: f64,
+) -> f64 {
+    let arithmetic = (spectral_dim as f64) * f64::EPSILON * spectral_norm;
+    let identifiability = sae_exact_a_identifiability_floor() * b_quadratic_form;
+    arithmetic.max(identifiability)
+}
+
 /// PATH C (#2253) CH5 — which subset of the joint θ-derivative operator
 /// `K_w = ∂H/∂θ_w` a dense θ-adjoint contraction assembles. The FULL set
 /// reconstructs `Γ_w = tr(inv·K_w)` (self-checked against the production
@@ -150,7 +177,7 @@ struct ExactHessianSpectralBlock {
 /// dense route already carries one `dim × dim` block and #2724/#2757 price that
 /// memory, so a second one would be paid for a scalar per direction.
 #[derive(Clone, Copy)]
-enum ArrowMetric<'a> {
+pub(crate) enum ArrowMetric<'a> {
     /// `B` on the joint `(t, β)` coordinates.
     Joint(&'a ArrowFactorCache),
     /// `H_tt`, `B`'s block-diagonal coordinate restriction.
@@ -158,7 +185,7 @@ enum ArrowMetric<'a> {
 }
 
 impl ArrowMetric<'_> {
-    fn quadratic_form(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
+    pub(crate) fn quadratic_form(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
         match self {
             Self::Joint(cache) => {
                 let total_t = cache.delta_t_len();
@@ -265,9 +292,11 @@ impl ExactHessianSpectralBlock {
     /// It is a FLOOR under the identifiability term, never a ceiling, so it can
     /// only pin directions, never resurrect one the gradient has deflated.
     fn rank_floor(&self, index: usize) -> f64 {
-        let arithmetic = (self.eigenvalues.len() as f64) * f64::EPSILON * self.spectral_norm;
-        let identifiability = sae_exact_a_identifiability_floor() * self.metric_scale[index];
-        arithmetic.max(identifiability)
+        sae_exact_a_direction_floor(
+            self.eigenvalues.len(),
+            self.spectral_norm,
+            self.metric_scale[index],
+        )
     }
 
     /// The one crossing the union floor cannot remove, reported rather than
@@ -4175,80 +4204,51 @@ impl SaeManifoldTerm {
         ))
     }
 
-    /// Shared PD-classification floor for the exact observed information
-    /// `A = B + ΔC` (#2330 / #2336). A converged inner mode is a genuine
-    /// exact-Laplace maximum iff every eigenvalue of `A` is `≥ −floor`, with
-    /// `floor = SAE_EXACT_A_PD_FLOOR_REL · max(max_eig, 1)`. The band
-    /// `[−floor, floor]` is the radial-gauge quotient null (an exact ρ-invariant
-    /// null of `A`, unit-pinned ⇒ `log 1 = 0`, `1/λ → 0`). #2330 ACCEPTS
-    /// `min_eig > −floor`; #2336's saddle-escape TRIGGERS on `min_eig < −floor` —
-    /// the same constant, so the two features cannot disagree in the band.
+    /// Classification of the exact observed information `A = B + ΔC` for the
+    /// value path (#2330 / #2336 / #2673).
     ///
-    /// TWO FLOORS, ONE OPERATOR (#2330 x #2253). This constant and
-    /// [`sae_ift_min_curvature_fraction`] both classify directions of the SAME
-    /// `A = B + dC`, and they are deliberately NOT the same number because they
-    /// are not the same quantity:
+    /// A converged inner mode is a genuine exact-Laplace maximum iff every
+    /// direction of `A` is `≥ −floor` in its own band, and that band is
+    /// [`ExactHessianSpectralBlock::rank_floor`] — ONE predicate, in the ONE
+    /// metric the gradient path classifies the same directions by. #2330 ACCEPTS
+    /// above `−floor`; #2336's clamp attribution TRIGGERS below it; both read
+    /// that one function, so they cannot disagree in the band.
     ///
-    /// * HERE: an absolute eigenvalue of `A`, floored relative to `lambda_max(A)`
-    ///   (`1e-9 * max(lambda_max, 1)`). It asks "is this direction's own
-    ///   curvature negative enough that `1/2 log|A|` is meaningless?"
-    /// * THERE: the generalized Rayleigh quotient `mu = x'Ax / x'Bx` of the IFT
-    ///   SOLUTION, floored at `sqrt(eps) ~ 1.49e-8`. That is a `B`-RELATIVE
-    ///   ratio, not an eigenvalue of anything. It asks "did `1/mu` amplify an
-    ///   unidentified near-null into `theta_rho`?"
+    /// **The absolute floor this used to be is gone (#2673).** It was
+    /// `1e-9 · max(λ_max(A), 1)`, a single number applied to every direction,
+    /// while the gradient path used `|μ| = |vᵀAv/vᵀBv| < √ε` — and both ran on
+    /// the same `A` inside one evaluation, with WHICH one the value path used
+    /// decided by `direct_logdet_admitted`, i.e. by ambient free memory. Written
+    /// as thresholds on the same `|λ|`, one was constant across directions and
+    /// the other varied by the spread of the `B`-Rayleigh quotient (24.13x
+    /// measured on the #2515 state, ratio straddling 1, so neither was even the
+    /// conservative one), `λ/λ_max(A)` was not a curvature (it moves under a
+    /// reparametrization `θ → Lθ` that leaves `μ` fixed, and `θ = (t, β)` mixes
+    /// chart coordinates with data-scaled border coefficients), and `1e-9` was
+    /// tuned where `√ε` is derived. See
+    /// [`sae_exact_a_identifiability_floor`] for the argument and
+    /// `tests::the_two_floors_are_incommensurable_thresholds_on_one_operator_2673`
+    /// for the measurement.
     ///
-    /// THE OVERLAP REGION IS REAL. It has now been measured twice (#2673): a
-    /// direct crossing count on the #2515 fixture, and a run of both PRODUCTION
-    /// solves on one state. Read
-    /// `tests::two_floors_overlap_region_direction_count_2673` for the count and
-    /// the population each counter can fire on — a zero crossing count on an
-    /// EMPTY population is an artefact, not agreement, which is why that test now
-    /// reports the population at risk alongside the count and is paired with
-    /// `two_floor_overlap_predicate_detects_both_crossings_2673`, a synthetic
-    /// control that drives this same predicate through a deliberately disputed
-    /// band and asserts both crossings fire.
-    ///
-    /// The crossing conditions themselves are unchanged. A direction `v` with
-    /// `lambda(v)` in `(-1e-9*lambda_max, 0)` sits inside THIS band and is
-    /// priced as the radial-gauge null (`log 1 = 0`), while its `mu` can sit far
-    /// ABOVE `sqrt(eps)` whenever `v'Bv << |lambda|/sqrt(eps)` - the value calls
-    /// the direction gauge, the gradient calls it a resolved negative-curvature
-    /// direction and keeps its `A^-1` response. The converse exists too:
-    /// `|lambda| >> floor` with `mu` below `sqrt(eps)` when `v'Bv` is large, so
-    /// the value prices a direction the gradient has projected out. Neither
-    /// crossing is DETECTED in production today; both are now measured in tests,
-    /// and both floors can run on the same `A` in one evaluation (see the call
-    /// chain on `tests_route_forced_classification_2673`).
-    ///
-    /// UNIFYING THEM IS A MEASUREMENT, NOT AN EDIT, which is why this commit
-    /// changes no number. The two collapse into one quantity only under a common
-    /// metric - compare `lambda` in the `B` metric (the pencil eigenvalues of
-    /// `(A, B)`) at BOTH sites, so "gauge null" and "unidentified" become the
-    /// same statement. What would settle it: on a fixture that actually refuses
-    /// with `IndefiniteObservedInformation`, dump the `(A, B)` pencil spectrum
-    /// beside the plain `A` spectrum and count the directions that change class
-    /// between the two normalizations. A nonzero count IS the defect; a zero
-    /// count says the split is harmless there and both constants may stand. The
-    /// refusal-site `log::debug!` in `exact_observed_information_log_dets` emits
-    /// the per-direction half of that dump.
-    /// #2674 — this band is now the ONLY null predicate on the exact-A route.
+    /// #2674 — the band is the ONLY null predicate on the exact-A route.
     /// `exact_hessian_spectral_block` used to delete the analytic chart-gauge
-    /// orbit structurally before the spectrum was ever classified, which made
-    /// the sentence above ("the band IS the radial-gauge quotient null") and the
-    /// code disagree about what had already been removed. The measurement that
-    /// settled which one to keep: on the #2336/#2330 stall the declared orbit
-    /// carried 86.6%–93.2% of the KKT gradient and per-direction slopes of the
-    /// PENALIZED objective at 8x, 10x and 210x the convergence tolerance, so it
-    /// was not a null of this operator at all — the priors are not invariant
-    /// along a symmetry of the reconstruction.
-    pub(crate) const SAE_EXACT_A_PD_FLOOR_REL: f64 = 1.0e-9;
-
+    /// orbit structurally before the spectrum was ever classified, which made two
+    /// null predicates own one eigenvalue array. The measurement that settled
+    /// which to keep: on the #2336/#2330 stall the declared orbit carried
+    /// 86.6%–93.2% of the KKT gradient and per-direction slopes of the PENALIZED
+    /// objective at 8x, 10x and 210x the convergence tolerance, so it was not a
+    /// null of this operator at all — the priors are not invariant along a
+    /// symmetry of the reconstruction.
+    ///
     /// #2330 Phase-2 — the EXACT observed-information Laplace log-determinants
     /// `(log|A|, log|A_tt|)` at the converged fixed-θ̂ mode, `A = ∇²_θθ L = B + ΔC`.
-    /// One symmetric eigendecomposition per block; kept eigenvalues (`λ > floor`)
-    /// contribute `ln λ`, the gauge quotient (`|λ| ≤ floor`) contributes 0, and a
-    /// strictly negative eigenvalue (`λ < −floor`) is a saddle ⇒ typed
-    /// `IndefiniteObservedInformation` refusal. `A_tt` drops the β border.
+    /// One symmetric eigendecomposition per block; kept eigenvalues
+    /// (`λ > floor(i)`) contribute `ln λ`, the null band (`|λ| ≤ floor(i)`)
+    /// contributes 0, and a strictly negative eigenvalue (`λ < −floor(i)`) the
+    /// ARD concave clamp cannot account for is a saddle ⇒ typed
+    /// `IndefiniteObservedInformation` refusal. `A_tt` drops the β border, and is
+    /// classified against `B`'s coordinate restriction rather than the whole
+    /// arrow operator.
     pub(crate) fn exact_observed_information_log_dets(
         &self,
         rho: &SaeManifoldRho,
@@ -4271,9 +4271,10 @@ impl SaeManifoldTerm {
         // curvature `λ + vᵀEv ≥ −floor`) is priced at that basin curvature instead
         // of refused. A negative direction the clamp cannot explain
         // (`λ + vᵀEv < −floor`) is a GENUINE saddle and still returns the typed
-        // IndefiniteObservedInformation refusal. No new constant: the SAME shared
-        // `SAE_EXACT_A_PD_FLOOR_REL` band, and a `|λ + vᵀEv| ≤ floor` result drops
-        // into the existing radial-gauge unit-stiffness deflation (`log 1 = 0`).
+        // IndefiniteObservedInformation refusal. No new constant: the SAME
+        // per-direction `ExactHessianSpectralBlock::rank_floor` band, and a
+        // `|λ + vᵀEv| ≤ floor` result drops into the existing radial-gauge
+        // unit-stiffness deflation (`log 1 = 0`).
         // The gradient twin is assembled by `priced_ard_adjoint_extras`: it adds
         // the switched-direction eigenvector response, explicit dE/dρ leg, and
         // implicit dE/dt θ-adjoint to the identically classified quotient inverse.
@@ -4342,11 +4343,11 @@ impl SaeManifoldTerm {
                             // exact curvature is negative by more than the clamp
                             // explains, and every one of those magnitudes is
                             // computed on this line and then discarded with the
-                            // eigenvector. They are the per-direction half of
-                            // the pencil-spectrum dump named on
-                            // `SAE_EXACT_A_PD_FLOOR_REL`: the coordinate-block
-                            // mass is what says whether the two floors would
-                            // have classified this direction the same way.
+                            // eigenvector. `v'Bv` is printed beside them
+                            // because it IS this direction's band now (#2673):
+                            // the refusal can be read against the metric that
+                            // decided it, rather than against a number taken
+                            // from somewhere else in the spectrum.
                             // Diagnostic only - no control flow, no numerics,
                             // and the typed refusal below is unchanged.
                             //
@@ -4445,13 +4446,13 @@ impl SaeManifoldTerm {
     /// tolerance, so quotienting them out handed the Newton step a right-hand
     /// side it was structurally unable to reduce and the inner solve stalled.
     ///
-    /// One predicate now owns the classification: `rank_floor`. Where the orbit
-    /// really is flat for the penalized operator its eigenvalue lands in
-    /// `[−floor, floor]` and the pseudoinverse discards it exactly as before —
-    /// which is what `SAE_EXACT_A_PD_FLOOR_REL`'s own doc, and the independent
-    /// oracle in `exact_observed_information_log_det_matches_eigendecomposition_2330`
-    /// (full-spectrum `eigh` of the dense `A`, keeping `λ > floor`), have always
-    /// said the band is.
+    /// One predicate owns the classification: [`Self::rank_floor`], which is
+    /// also the predicate the matrix-free gradient path applies to its own
+    /// solution direction (#2673). Where the orbit really is flat for the
+    /// penalized operator its eigenvalue lands in `[−floor(i), floor(i)]` and the
+    /// pseudoinverse discards it, which is what the independent oracle in
+    /// `exact_observed_information_log_det_matches_eigendecomposition_2330`
+    /// (full-spectrum `eigh` of the dense `A`, keeping `λ > floor(i)`) reads.
     fn exact_hessian_spectral_block(
         operator: Array2<f64>,
         e_diag: &Array1<f64>,
@@ -4800,7 +4801,10 @@ impl SaeManifoldTerm {
     /// missing that term and the conservation bisection stays red by exactly it.
     /// #2336 flag-1 — cluster-stable eigendecomposition for the E-attributability
     /// pricing. Within any eigenvalue cluster whose consecutive gaps sit below the
-    /// shared PD floor, `eigh`'s eigenvectors are arbitrary, so the per-vector price
+    /// eigenvector-resolution gap `√ε·‖A‖₂`, `eigh`'s eigenvectors are arbitrary
+    /// to leading order (an eigenvector's perturbation under a backward error
+    /// `‖E‖ ~ ε‖A‖₂` is `~ ‖E‖/gap`, so a gap at `√ε·‖A‖₂` already leaves the
+    /// direction determined only to `√ε`), so the per-vector price
     /// `e_i = vᵀEv` and the Daleckii–Krein denominators `(λ_i−λ_j)` are both
     /// ill-defined. This rotates the eigenbasis WITHIN each such cluster to
     /// diagonalize `E` restricted to it: `vᵀEv` becomes basis-unambiguous (the
@@ -4848,8 +4852,16 @@ impl SaeManifoldTerm {
             .eigh(Side::Lower)
             .map_err(|e| format!("cluster_stable_eigh_operator: eigh failed: {e:?}"))?;
         let dim = eigs.len();
-        let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+        // #2673 — this is a GAP threshold, not a classification floor, and it
+        // used to borrow the retired absolute PD constant for the job. What
+        // decides whether two computed eigenvectors are separable is the
+        // eigenvector perturbation `~ε‖A‖₂/gap`; a gap below `√ε·‖A‖₂` leaves
+        // the pair determined to no better than `√ε`, which is exactly when the
+        // cluster must be re-resolved against `E` instead of trusted. Both
+        // factors are derived: `‖A‖₂ = maxᵢ|λᵢ|` and the scalar type's own
+        // `√ε`.
+        let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let floor = sae_exact_a_identifiability_floor() * spectral_norm;
         let mut i = 0usize;
         while i < dim {
             let mut j = i + 1;
@@ -5639,7 +5651,13 @@ mod test_support {
                 .map_err(|e| format!("exact_a_spectrum_summary: eigh failed: {e:?}"))?;
             let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let min_eig = eigs.iter().copied().fold(f64::INFINITY, f64::min);
-            let floor = Self::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+            // #2673 — the arbiter only needs a scale-aware "is this decisively
+            // negative" cut, and the classification floor it used to borrow is
+            // per-direction now. `√ε·‖A‖₂` is the coarsest band any direction of
+            // this operator can have, so counting under it is an upper bound on
+            // the refusing population and cannot under-report.
+            let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+            let floor = super::sae_exact_a_identifiability_floor() * spectral_norm;
             let n_neg = eigs.iter().filter(|&&lambda| lambda < -floor).count();
             let mut sorted: Vec<f64> = eigs.to_vec();
             sorted.sort_by(|x, y| x.partial_cmp(y).expect("finite eigenvalues"));
@@ -6074,18 +6092,27 @@ mod tests_route_forced_classification_2673 {
 
     /// #2673 — FORCE both classification routes on ONE state and compare.
     ///
-    /// Two floors classify directions of the same `A = B + ΔC`:
-    /// `SAE_EXACT_A_PD_FLOOR_REL` on the dense spectral path, and
-    /// `sae_ift_min_curvature_fraction()` (`sqrt(EPSILON)`) inside
-    /// `solve_exact_stationarity_preconditioned`.
+    /// ## Why this test exists, and what it now guards
+    ///
+    /// Two floors used to classify directions of the same `A = B + ΔC`:
+    /// `SAE_EXACT_A_PD_FLOOR_REL` (`1e-9·max(λ_max(A), 1)`, absolute) on the
+    /// dense spectral path, and `√ε` on the pencil curvature
+    /// `μ = xᵀAx/xᵀBx` inside `solve_exact_stationarity_preconditioned`. They
+    /// are now ONE predicate in ONE metric — see
+    /// [`sae_exact_a_identifiability_floor`] and
+    /// [`ExactHessianSpectralBlock::rank_floor`] — so the two routes below
+    /// cannot classify a direction differently by construction, and this test is
+    /// the executable statement of that.
+    ///
+    /// ## The call chain that made it a live hazard rather than a tidiness one
     ///
     /// AN EARLIER VERSION OF THIS COMMENT CLAIMED "exactly one runs per
     /// evaluation ... they never coexist at a fixed state", and concluded the
     /// hazard was route-dependence (#2509/#2515) rather than the
-    /// value↔gradient contradiction #2673 was filed about. **That claim is
-    /// false, and it made a live hazard look structurally impossible.** It is
+    /// value↔gradient contradiction #2673 was filed about. **That claim was
+    /// false, and it made a live hazard look structurally impossible.** It was
     /// true only within one GRADIENT assembly; an evaluation is value AND
-    /// gradient, and on the streaming route both floors run on the same `A`:
+    /// gradient, and on the streaming route both floors ran on the same `A`:
     ///
     /// * VALUE, when `direct_logdet_admitted == false`:
     ///   `penalized_quasi_laplace_criterion_streaming_exact_with_cache`
@@ -6096,39 +6123,38 @@ mod tests_route_forced_classification_2673 {
     ///   `terminal_exact_newton_polish` (`:1317`, `:1748`) →
     ///   `solve_exact_stationarity` (`:2346`, **with no route gate**) →
     ///   `materialize_exact_stationarity_geometry` →
-    ///   `exact_hessian_spectral_block` → `SAE_EXACT_A_PD_FLOOR_REL`.
+    ///   `exact_hessian_spectral_block`.
     /// * GRADIENT, same evaluation: `matrix_free_system = Some(..)` →
     ///   `solve_exact_stationarity_matrix_free` →
-    ///   `solve_exact_stationarity_preconditioned` →
-    ///   `sae_ift_min_curvature_fraction()`.
+    ///   `solve_exact_stationarity_preconditioned`.
     ///
-    /// So the ORIGINAL framing on the constant's own doc block stands: the value
-    /// can call a direction gauge while the gradient keeps its `A⁻¹` response,
-    /// **within one evaluation**. Note the counterpart-floor comment on
-    /// [`sae_ift_min_curvature_fraction`] never stopped saying so ("for the value
-    /// path and the gradient path respectively") — the two doc sites disagreed,
-    /// which is this issue's own shape one level up.
-    ///
-    /// There is also no "massive-`K` threshold" to cross. The route predicate is
+    /// And there is no "massive-`K` threshold" to cross. The route predicate is
     /// a working-set comparison in `streaming_plan.rs:151` —
     /// `direct_peak_bytes <= in_core_budget_bytes || direct_fits_tiny` — so which
-    /// floor classifies the value path is a function of AMBIENT FREE MEMORY, not
-    /// of `K`. `K` enters only through `row_block_dim`.
+    /// floor classified the value path was a function of AMBIENT FREE MEMORY, not
+    /// of `K`. `K` enters only through `row_block_dim`. The same data on the same
+    /// build could be classified two ways on two differently-loaded machines,
+    /// which is why unification did not wait for a fixture that populates the
+    /// gauge band.
     ///
-    /// My earlier probe (`two_floors_overlap_region_direction_count_2673`)
-    /// reconstructed both rules in a test and found zero directions changing
-    /// class. This is the stronger arm it could not reach: drive the SAME state
-    /// through the two PRODUCTION solves — `solve_exact_stationarity` (dense
-    /// rank-revealing pseudoinverse) and `solve_exact_stationarity_matrix_free`
-    /// (`B`-preconditioned GMRES + the `μ` deflation loop) — with the same rhs,
-    /// and compare what each returns. If the two rules classify the same
+    /// ## What is compared
+    ///
+    /// The SAME state through the two PRODUCTION solves —
+    /// `solve_exact_stationarity` (dense rank-revealing pseudoinverse) and
+    /// `solve_exact_stationarity_matrix_free` (`B`-preconditioned GMRES + the `μ`
+    /// deflation loop) — with the same rhs. If the two rules classify the same
     /// directions the same way, the solutions agree.
     ///
-    /// Reported, not asserted equal: a disagreement here is the defect this issue
-    /// tracks, and asserting agreement would assert it absent. What IS asserted is
-    /// that the comparison is well posed — both routes reached a typed outcome on
-    /// one state, so the numbers below compare two answers rather than an answer
-    /// and a refusal.
+    /// Reported, not asserted equal. Agreement here is necessary but not
+    /// sufficient: this fixture's spectrum sits `2.8e7` bands away from any
+    /// classification boundary, so it exercises the routes, not the predicate.
+    /// The predicate's own arms are
+    /// `tests::the_two_floors_are_incommensurable_thresholds_on_one_operator_2673`
+    /// (what the old pair did) and
+    /// `tests::the_classification_is_invariant_under_a_reparametrization_2673`
+    /// (what the new one does). What IS asserted here is that the comparison is
+    /// well posed — both routes reached a typed outcome on one state, so the
+    /// numbers below compare two answers rather than an answer and a refusal.
     #[test]
     fn route_forced_stationarity_classification_agrees_2673() {
         let n = 24usize;
