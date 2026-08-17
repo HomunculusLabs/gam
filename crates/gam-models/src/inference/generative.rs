@@ -1122,14 +1122,10 @@ mod tests {
                 h_grid[[i, k]] = slopes[i] * (grid_y[k] - centers[i]);
             }
         }
-        // Both rows are exactly affine, so the tail slopes are the row slopes.
-        let table = CtnTransformTable::new(
-            grid_y.clone(),
-            h_grid,
-            Array1::from_vec(slopes.to_vec()),
-            Array1::from_vec(slopes.to_vec()),
-        )
-        .expect("affine transform table");
+        // Both rows are exactly affine, so every node slope is the row slope.
+        let slope_grid = Array2::from_shape_fn((2, g), |(i, _)| slopes[i]);
+        let table = CtnTransformTable::new(grid_y.clone(), h_grid, slope_grid)
+            .expect("affine transform table");
         let spec = GenerativeSpec {
             mean: Array1::from_vec(vec![centers[0], centers[1]]),
             noise: NoiseModel::TransformationNormalQuantile { table },

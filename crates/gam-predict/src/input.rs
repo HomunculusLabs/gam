@@ -494,17 +494,18 @@ fn transformation_normal_quantile_grid(
     let grid_y_ref = &grid_y;
     let coefficients_ref = &coefficients;
     let cov_mat_ref = &cov_mat;
-    let rows: Vec<Result<(Vec<f64>, f64, f64), String>> = (0..n)
+    let rows: Vec<Result<(Vec<f64>, Vec<f64>), String>> = (0..n)
         .into_par_iter()
         .map(|i| {
             let cov_row = cov_mat_ref.row(i);
             let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
-            // `h` from the one chart evaluator, plus `h'` at the two end nodes —
-            // which ARE the fitted support endpoints, so those two derivatives
-            // are the slopes of the transform's affine tails.
+            // `h` AND `h'` from the one chart evaluator, which computes both at
+            // every node anyway. The derivative is what makes the tabulated
+            // transform a Hermite interpolant rather than a chord, and its two
+            // END values are the slopes of the transform's affine tails (the
+            // first and last grid nodes ARE the fitted support endpoints).
             let mut h_row = vec![0.0_f64; GRID];
-            let mut tail_slope_lower = 0.0_f64;
-            let mut tail_slope_upper = 0.0_f64;
+            let mut slope_row = vec![0.0_f64; GRID];
             for k in 0..GRID {
                 let value_row = grid_value_ref.row(k);
                 let derivative_row = grid_derivative_ref.row(k);
@@ -520,17 +521,13 @@ fn transformation_normal_quantile_grid(
                     saved_ref.floors(grid_y_ref[k], offset[i]),
                 );
                 h_row[k] = geometry.h;
-                if k == 0 {
-                    tail_slope_lower = geometry.h_prime;
-                }
-                if k == GRID - 1 {
-                    tail_slope_upper = geometry.h_prime;
-                }
-                if !h_row[k].is_finite() {
+                slope_row[k] = geometry.h_prime;
+                if !(h_row[k].is_finite() && slope_row[k].is_finite()) {
                     let max_abs_cov = inf_norm(cov_row.iter().copied());
                     return Err(format!(
-                        "transformation-normal transform at row {i}, grid node {k} is not finite: h={:.6e}; max_abs_covariate_basis={max_abs_cov:.6e}",
-                        h_row[k]
+                        "transformation-normal transform at row {i}, grid node {k} is not finite: h={:.6e}, h'={:.6e}; max_abs_covariate_basis={max_abs_cov:.6e}",
+                        h_row[k],
+                        slope_row[k]
                     ));
                 }
             }
@@ -546,24 +543,23 @@ fn transformation_normal_quantile_grid(
                     ));
                 }
             }
-            Ok((h_row, tail_slope_lower, tail_slope_upper))
+            Ok((h_row, slope_row))
         })
         .collect();
     let mut h_grid = Array2::<f64>::zeros((n, GRID));
-    let mut tail_slope_lower = Array1::<f64>::zeros(n);
-    let mut tail_slope_upper = Array1::<f64>::zeros(n);
+    let mut slope_grid = Array2::<f64>::zeros((n, GRID));
     for (i, row) in rows.into_iter().enumerate() {
-        let (h_row, lower_slope, upper_slope) =
-            row.map_err(|reason| PredictInputError::InvalidInput {
-                reason: format!("prediction failed: {reason}"),
-            })?;
+        let (h_row, slope_row) = row.map_err(|reason| PredictInputError::InvalidInput {
+            reason: format!("prediction failed: {reason}"),
+        })?;
         for (k, v) in h_row.into_iter().enumerate() {
             h_grid[[i, k]] = v;
         }
-        tail_slope_lower[i] = lower_slope;
-        tail_slope_upper[i] = upper_slope;
+        for (k, v) in slope_row.into_iter().enumerate() {
+            slope_grid[[i, k]] = v;
+        }
     }
-    CtnTransformTable::new(grid_y, h_grid, tail_slope_lower, tail_slope_upper).map_err(|reason| {
+    CtnTransformTable::new(grid_y, h_grid, slope_grid).map_err(|reason| {
         PredictInputError::InvalidInput {
             reason: format!("prediction failed: {reason}"),
         }
