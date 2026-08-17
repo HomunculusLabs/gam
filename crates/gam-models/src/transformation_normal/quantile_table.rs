@@ -180,11 +180,6 @@ impl CtnTransformTable {
         self.h.view()
     }
 
-    /// `h'[[i, k]] = h'(grid_y[k] | x_i)`, the transform's density factor.
-    pub fn latent_slope(&self) -> ArrayView2<'_, f64> {
-        self.h_prime.view()
-    }
-
     /// `(h'(y_lo | x_i), h'(y_hi | x_i))` — the slopes of row `i`'s two affine
     /// tails, which are just the end columns of the derivative table.
     pub fn tail_slopes(&self, row: usize) -> (f64, f64) {
@@ -192,9 +187,13 @@ impl CtnTransformTable {
         (self.h_prime[[row, 0]], self.h_prime[[row, last]])
     }
 
-    /// `h(target | x_row)` — the tabulated transform itself, by the same Hermite
-    /// rule `invert` inverts. Provided so a caller can check a round trip
-    /// against the interpolant rather than against a different approximation.
+    /// `h(y | x_row)` — the tabulated transform itself, by the same rule
+    /// [`CtnTransformTable::invert`] inverts.
+    ///
+    /// The forward map is part of the contract, not a convenience: without it
+    /// "the inverse is the inverse of the interpolant" is not a statement anyone
+    /// can check, and the only available check would be against the exact chart,
+    /// which conflates a solver bug with an interpolation error.
     pub fn evaluate(&self, row: usize, y: f64) -> f64 {
         let g = self.grid_y.len();
         let h = self.h.row(row);
@@ -487,6 +486,27 @@ mod tests {
             fine_hermite * 20.0 < fine_chord,
             "at the production table size the Hermite inverse is not decisively tighter than \
              the chord: hermite={fine_hermite:.6e} chord={fine_chord:.6e}"
+        );
+    }
+
+    #[test]
+    fn the_inverse_inverts_the_interpolant_it_is_built_from() {
+        // Separates a solver bug from an interpolation error: whatever the
+        // Hermite interpolant is, `invert` must return its argument's preimage
+        // under exactly that interpolant, to round-off, on both tails and in
+        // every interior cell — including the strongly curved ones where the
+        // Newton iteration has to be safeguarded to stay in its bracket.
+        let table = log_table(17);
+        let mut worst = 0.0_f64;
+        for step in 0..=2000 {
+            let z = -9.0 + 18.0 * (step as f64) / 2000.0;
+            let y = table.invert(0, z);
+            worst = worst.max((table.evaluate(0, y) - z).abs());
+        }
+        eprintln!("#2600 table: max|H(H^-1(z)) - z| = {worst:.3e}");
+        assert!(
+            worst < 1.0e-12,
+            "invert is not the inverse of the interpolant it evaluates: {worst:.6e}"
         );
     }
 
