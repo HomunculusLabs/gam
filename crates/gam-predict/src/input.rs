@@ -20,8 +20,9 @@ use gam_models::survival::predict::{
     fit_result_from_saved_model_for_prediction, resolve_termspec_for_prediction,
 };
 use gam_models::transformation_normal::{
-    CTN_LOCATION_COLUMNS, CtnRowBases, CtnRowFloors, TRANSFORMATION_MONOTONICITY_EPS,
-    ctn_endpoint_bases, ctn_response_bases_at, ctn_row_geometry, transformation_normal_pit_score,
+    CTN_LOCATION_COLUMNS, CtnRowBases, CtnRowFloors, CtnTransformTable,
+    TRANSFORMATION_MONOTONICITY_EPS, ctn_endpoint_bases, ctn_response_bases_at, ctn_row_geometry,
+    transformation_normal_pit_score,
 };
 use gam_problem::BlockRole;
 use gam_terms::smooth::build_term_collection_design;
@@ -433,15 +434,19 @@ impl SavedCtnChart {
 /// `Y = h⁻¹(Z|x)` (generate, #1613) be built by inverting the SAME curve, so the
 /// two paths can never disagree on the underlying transform.
 ///
-/// Returns `(grid_y, h_grid)` with `grid_y` the strictly increasing length-`G`
-/// response grid and `h_grid[[i, k]] = h(grid_y[k] | x_i)`, strictly increasing
-/// in `k` for every row `i`.
+/// Returns the [`CtnTransformTable`]: the length-`G` response grid, the per-row
+/// latent `h(grid_y[k] | x_i)` (strictly increasing in `k`), and the two tail
+/// slopes `h'(y_lo | x_i)`, `h'(y_hi | x_i)` that make the transform invertible
+/// off the ends of the table. The tails are not an approximation — since
+/// gam#2600 the CTN transform is affine beyond the boundary knots at exactly
+/// those slopes — and carrying them in the same object is what stops a consumer
+/// from silently truncating the predictive law at the training range.
 fn transformation_normal_quantile_grid(
     model: &FittedModel,
     design: &gam_terms::smooth::TermCollectionDesign,
     n: usize,
     offset: &Array1<f64>,
-) -> Result<(Array1<f64>, Array2<f64>), PredictInputError> {
+) -> Result<CtnTransformTable, PredictInputError> {
     let offset = design
         .compose_offset(offset.view(), "transformation-normal prediction")
         .map_err(|error| PredictInputError::InvalidInput {
@@ -461,40 +466,45 @@ fn transformation_normal_quantile_grid(
     // A shared fine `y`-grid spanning the response support; the I-spline value
     // basis is evaluated once here and reused for every row, so the per-row
     // inversion is a cheap monotone lookup rather than a fresh basis build.
+    // The two end nodes are written exactly, not derived: they are the anchors
+    // the affine tails are measured from, and a last node a single ulp past
+    // `y_hi` would be read as an exterior point by the basis and pick up the
+    // tail branch instead of the boundary itself.
     const GRID: usize = TRANSFORMATION_NORMAL_INVERSION_GRID;
-    let grid_y: Array1<f64> = Array1::from_shape_fn(GRID, |k| {
-        y_lo + (y_hi - y_lo) * (k as f64) / ((GRID - 1) as f64)
+    let grid_y: Array1<f64> = Array1::from_shape_fn(GRID, |k| match k {
+        0 => y_lo,
+        k if k == GRID - 1 => y_hi,
+        k => y_lo + (y_hi - y_lo) * (k as f64) / ((GRID - 1) as f64),
     });
     let (grid_value, grid_derivative) = saved.bases_at(&grid_y)?;
 
-    // The CTM latent that is calibrated to N(0,1) is the finite-support PIT
-    // score, not the raw roughness transform `h` (see
-    // `calibrate_transformation_scores`). The inverse-transform consumers —
-    // `predict`'s `E[Y|x]` quadrature and the `generate` sampler — draw
-    // `Z ~ N(0,1)` and invert this grid, so it must carry the calibrated
-    // score. Returning the raw `h` (whose per-row range is an arbitrary,
-    // covariate-shifted interval that generally does not straddle the standard
-    // normal support) makes every `Z` node fall outside `[h_lo, h_hi]` and
-    // clamp to a response-support endpoint, collapsing `E[Y|x]` onto the two
-    // support bounds. Applying the model's own PIT here reuses the fit-time
-    // score semantics exactly, so prediction, generation, and fitting share a
-    // single latent scale.
+    // The tabulated latent is the raw transform `h`, NOT the clipped PIT score.
+    // Since gam#2600 the model's CDF is `F = Φ(h)`, so the two agree wherever
+    // the clip is inactive and differ only past `Φ⁻¹(clip_eps)` — and there the
+    // clip is exactly the wrong operation for an inversion table: it flattens
+    // the ends of a curve whose whole purpose here is to be inverted, which both
+    // destroys the strict monotonicity `CtnTransformTable` requires and
+    // re-imposes, one clip window further out, the very truncation this table
+    // exists to remove. The clip belongs where a *score* is reported
+    // (`transformation_normal_observed_scores`), which is the quantity a
+    // downstream consumer has to be able to represent; a quantile is not.
     let saved_ref = &saved;
     let grid_value_ref = &grid_value;
     let grid_derivative_ref = &grid_derivative;
     let grid_y_ref = &grid_y;
     let coefficients_ref = &coefficients;
     let cov_mat_ref = &cov_mat;
-    let rows: Vec<Result<Vec<f64>, String>> = (0..n)
+    let rows: Vec<Result<(Vec<f64>, f64, f64), String>> = (0..n)
         .into_par_iter()
         .map(|i| {
             let cov_row = cov_mat_ref.row(i);
             let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
-            // `h`, and the row's own support endpoints, from the one chart
-            // evaluator. `L`/`U` do not depend on the grid node, so they are
-            // taken from the first evaluation and reused.
+            // `h` from the one chart evaluator, plus `h'` at the two end nodes —
+            // which ARE the fitted support endpoints, so those two derivatives
+            // are the slopes of the transform's affine tails.
             let mut h_row = vec![0.0_f64; GRID];
-            let mut endpoints: Option<(f64, f64)> = None;
+            let mut tail_slope_lower = 0.0_f64;
+            let mut tail_slope_upper = 0.0_f64;
             for k in 0..GRID {
                 let value_row = grid_value_ref.row(k);
                 let derivative_row = grid_derivative_ref.row(k);
@@ -509,10 +519,13 @@ fn transformation_normal_quantile_grid(
                     },
                     saved_ref.floors(grid_y_ref[k], offset[i]),
                 );
-                if endpoints.is_none() {
-                    endpoints = Some((geometry.lower, geometry.upper));
-                }
                 h_row[k] = geometry.h;
+                if k == 0 {
+                    tail_slope_lower = geometry.h_prime;
+                }
+                if k == GRID - 1 {
+                    tail_slope_upper = geometry.h_prime;
+                }
                 if !h_row[k].is_finite() {
                     let max_abs_cov = inf_norm(cov_row.iter().copied());
                     return Err(format!(
@@ -533,34 +546,28 @@ fn transformation_normal_quantile_grid(
                     ));
                 }
             }
-            // Map the raw transform onto the calibrated N(0,1) latent scale.
-            // gam#2600: the fitted model's CDF is `F = Φ(h)`, so the PIT score
-            // is `h` itself, clipped to the representable quantile window — it
-            // is strictly increasing in `h`, so the calibrated row inherits the
-            // monotonicity just verified, and it no longer refuses a grid node
-            // whose transform leaves the fitted support.
-            let mut s_row = vec![0.0_f64; GRID];
-            for k in 0..GRID {
-                s_row[k] = transformation_normal_pit_score(h_row[k], saved_ref.clip_eps)
-                    .map_err(|err| {
-                        format!(
-                            "transformation-normal PIT calibration failed at row {i}, grid node {k}: {err}"
-                        )
-                    })?;
-            }
-            Ok(s_row)
+            Ok((h_row, tail_slope_lower, tail_slope_upper))
         })
         .collect();
     let mut h_grid = Array2::<f64>::zeros((n, GRID));
+    let mut tail_slope_lower = Array1::<f64>::zeros(n);
+    let mut tail_slope_upper = Array1::<f64>::zeros(n);
     for (i, row) in rows.into_iter().enumerate() {
-        let row = row.map_err(|reason| PredictInputError::InvalidInput {
-            reason: format!("prediction failed: {reason}"),
-        })?;
-        for (k, v) in row.into_iter().enumerate() {
+        let (h_row, lower_slope, upper_slope) =
+            row.map_err(|reason| PredictInputError::InvalidInput {
+                reason: format!("prediction failed: {reason}"),
+            })?;
+        for (k, v) in h_row.into_iter().enumerate() {
             h_grid[[i, k]] = v;
         }
+        tail_slope_lower[i] = lower_slope;
+        tail_slope_upper[i] = upper_slope;
     }
-    Ok((grid_y, h_grid))
+    CtnTransformTable::new(grid_y, h_grid, tail_slope_lower, tail_slope_upper).map_err(|reason| {
+        PredictInputError::InvalidInput {
+            reason: format!("prediction failed: {reason}"),
+        }
+    })
 }
 
 /// Evaluate the fitted CTM's calibrated latent score at one observed response
@@ -649,39 +656,6 @@ fn transformation_normal_observed_scores(
     Ok(Array1::from_vec(scores))
 }
 
-/// Invert a monotone increasing tabulated row `z = h_grid_row(grid_y)` at the
-/// latent value `target` by bracketing + linear interpolation; values outside
-/// the tabulated range clamp to the support endpoints. Shared by the CTM
-/// response-scale mean quadrature and (mirrored in the generative sampler) the
-/// inverse-transform draw, so both invert the transform identically.
-fn invert_transformation_normal_grid(
-    grid_y: &Array1<f64>,
-    h_grid: &Array2<f64>,
-    row: usize,
-    target: f64,
-) -> f64 {
-    let g = grid_y.len();
-    let h = h_grid.row(row);
-    if target <= h[0] {
-        return grid_y[0];
-    }
-    if target >= h[g - 1] {
-        return grid_y[g - 1];
-    }
-    let mut lo = 0usize;
-    let mut hi = g - 1;
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if h[mid] <= target {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let t = (target - h[lo]) / (h[hi] - h[lo]);
-    grid_y[lo] + t * (grid_y[hi] - grid_y[lo])
-}
-
 /// Number of latent-z nodes on which the CTM predict input tabulates the
 /// response-scale predictive quantile ladder `h⁻¹(z_j | x_i)`.
 pub(crate) const TRANSFORMATION_NORMAL_BAND_Z_NODES: usize = 65;
@@ -707,15 +681,21 @@ pub(crate) fn transformation_normal_band_z_nodes() -> Array1<f64> {
 }
 
 /// The response-scale conditional mean `E[Y|x] = E_{Z~N(0,1)}[h⁻¹(Z|x)]` for
-/// each row of a CTM transform grid, by averaging the grid inverse over a
+/// each row of a CTM transform table, by averaging the inverse over a
 /// standard-normal midpoint quadrature in probability space (see the predict
 /// branch for the derivation). Used by BOTH the predict mean (#1612) and the
 /// generate sampler's reference mean (#1613), so they agree by construction.
+///
+/// The outermost quadrature nodes routinely fall past the tabulated latent
+/// range — `Φ(h(y_lo|x))` is around `1/(n+1)` for a well-calibrated fit, and the
+/// extreme midpoint node sits at `1/(2·QUAD)` — so this average is only an
+/// average of the model's own quantile function because
+/// [`CtnTransformTable::invert`] continues through the affine tails instead of
+/// returning the support endpoint (gam#2600).
 fn transformation_normal_conditional_mean(
-    grid_y: &Array1<f64>,
-    h_grid: &Array2<f64>,
+    table: &CtnTransformTable,
 ) -> Result<Array1<f64>, PredictInputError> {
-    let n = h_grid.nrows();
+    let n = table.nrows();
     const QUAD: usize = TRANSFORMATION_NORMAL_MEAN_QUADRATURE;
     let z_nodes: Vec<f64> = (0..QUAD)
         .map(|k| {
@@ -727,7 +707,7 @@ fn transformation_normal_conditional_mean(
     let mean = Array1::<f64>::from_shape_fn(n, |i| {
         let mut acc = 0.0_f64;
         for &z in &z_nodes {
-            acc += invert_transformation_normal_grid(grid_y, h_grid, i, z);
+            acc += table.invert(i, z);
         }
         acc / (QUAD as f64)
     });
@@ -744,14 +724,11 @@ fn transformation_normal_conditional_mean(
 /// covariates — the public entry the `gam generate` path uses to build an
 /// inverse-transform sampler (#1613).
 pub struct TransformationNormalQuantileGrid {
-    /// Shared, strictly increasing response grid (length `g ≥ 2`).
-    pub grid_y: Array1<f64>,
-    /// The row-wise monotone CTM latent on the *calibrated* N(0,1) scale:
-    /// `h_grid[[i, k]] = s(grid_y[k] | x_i)`, where `s` is the finite-support
-    /// PIT of the raw roughness transform (strictly increasing in `k`). This is
-    /// the scale the inverse-transform sampler and the `E[Y|x]` quadrature draw
-    /// `Z ~ N(0,1)` against.
-    pub h_grid: Array2<f64>,
+    /// The fitted transform `h(·|x_i)`, tabulated on a shared response grid and
+    /// carrying the slopes of its two affine tails. This is the object both the
+    /// inverse-transform sampler and the `E[Y|x]` quadrature invert, so neither
+    /// can truncate the predictive law at the training range (gam#2600).
+    pub table: CtnTransformTable,
     /// Response-scale conditional mean `E[Y|x_i]` — the same value `predict`
     /// returns (#1612), provided so the generate spec's reference mean and the
     /// prediction mean cannot diverge.
@@ -793,13 +770,12 @@ pub fn build_transformation_normal_quantile_grid(
             offset.len()
         ));
     }
-    let (grid_y, h_grid) =
+    let table =
         transformation_normal_quantile_grid(model, &design, n, offset).map_err(String::from)?;
     let conditional_mean =
-        transformation_normal_conditional_mean(&grid_y, &h_grid).map_err(String::from)?;
+        transformation_normal_conditional_mean(&table).map_err(String::from)?;
     Ok(TransformationNormalQuantileGrid {
-        grid_y,
-        h_grid,
+        table,
         conditional_mean,
     })
 }
@@ -1061,8 +1037,8 @@ fn build_predict_input_for_model_inner(
             // Probability space keeps every node inside the finite I-spline
             // support (no normal-tail truncation) and needs no Gauss–Hermite
             // weights.
-            let (grid_y, h_grid) = transformation_normal_quantile_grid(model, &design, n, offset)?;
-            let conditional_mean = transformation_normal_conditional_mean(&grid_y, &h_grid)?;
+            let table = transformation_normal_quantile_grid(model, &design, n, offset)?;
+            let conditional_mean = transformation_normal_conditional_mean(&table)?;
             // Response-scale predictive quantile ladder: `Y|x = h⁻¹(Z|x)` with
             // `Z ~ N(0,1)`, so the p-quantile of `Y|x` is `h⁻¹(Φ⁻¹(p)|x)`.
             // Tabulating `h⁻¹` on the fixed z ladder lets the predictor build
@@ -1071,9 +1047,8 @@ fn build_predict_input_for_model_inner(
             // in latent-normal units, which is wrong by exactly the (unknown to
             // the predictor) scale of `h⁻¹`.
             let z_nodes = transformation_normal_band_z_nodes();
-            let quantile_ladder = Array2::from_shape_fn((n, z_nodes.len()), |(i, j)| {
-                invert_transformation_normal_grid(&grid_y, &h_grid, i, z_nodes[j])
-            });
+            let quantile_ladder =
+                Array2::from_shape_fn((n, z_nodes.len()), |(i, j)| table.invert(i, z_nodes[j]));
             // The predictor passes the offset through unchanged as `eta` and
             // `mean`, so storing E[Y|x] here yields a y-independent response-scale
             // prediction for both columns on a covariate-only frame.

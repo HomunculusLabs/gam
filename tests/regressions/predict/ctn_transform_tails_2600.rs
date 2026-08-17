@@ -52,11 +52,13 @@ fn probe_ctn_transform_tails_2600() {
     )
     .expect("quantile grid");
 
-    let g = grid.grid_y.len();
-    let y_lo = grid.grid_y[0];
-    let y_hi = grid.grid_y[g - 1];
-    let lower = grid.h_grid[[0, 0]];
-    let upper = grid.h_grid[[0, g - 1]];
+    let grid_y = grid.table.grid_y().to_owned();
+    let h_grid = grid.table.latent().to_owned();
+    let g = grid_y.len();
+    let y_lo = grid_y[0];
+    let y_hi = grid_y[g - 1];
+    let lower = h_grid[[0, 0]];
+    let upper = h_grid[[0, g - 1]];
     let y_min = y.iter().copied().fold(f64::INFINITY, f64::min);
     let y_max = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
@@ -73,12 +75,12 @@ fn probe_ctn_transform_tails_2600() {
 
     // How far does the tabulated grid say the fitted h moves per response unit
     // just inside the two boundaries?
-    let slope_lo_inside = (grid.h_grid[[0, 1]] - grid.h_grid[[0, 0]]) / (grid.grid_y[1] - y_lo);
-    let slope_hi_inside =
-        (grid.h_grid[[0, g - 1]] - grid.h_grid[[0, g - 2]]) / (y_hi - grid.grid_y[g - 2]);
+    let slope_lo_inside = (h_grid[[0, 1]] - h_grid[[0, 0]]) / (grid_y[1] - y_lo);
+    let slope_hi_inside = (h_grid[[0, g - 1]] - h_grid[[0, g - 2]]) / (y_hi - grid_y[g - 2]);
+    let (tail_lo, tail_hi) = grid.table.tail_slopes(0);
     eprintln!(
         "#2600 probe: boundary secant slopes  h'(y_lo+)~{slope_lo_inside:.6e}  \
-         h'(y_hi-)~{slope_hi_inside:.6e}"
+         h'(y_hi-)~{slope_hi_inside:.6e}   tail slopes carried: ({tail_lo:.6e}, {tail_hi:.6e})"
     );
 
     // The observed-score path, evaluated OUTSIDE the fitted support. The truth is
@@ -119,31 +121,23 @@ fn probe_ctn_transform_tails_2600() {
 
     // The predictive quantile ladder the CLI/py bands interpolate.
     for &target in &[-4.0_f64, -3.0, -2.0, 2.0, 3.0, 4.0] {
-        // Replicate `invert_transformation_normal_grid` semantics from outside.
-        let row = grid.h_grid.row(0);
-        let inverted = if target <= row[0] {
-            grid.grid_y[0]
-        } else if target >= row[g - 1] {
-            grid.grid_y[g - 1]
-        } else {
-            let mut lo = 0usize;
-            let mut hi = g - 1;
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                if row[mid] <= target {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            let t = (target - row[lo]) / (row[hi] - row[lo]);
-            grid.grid_y[lo] + t * (grid.grid_y[hi] - grid.grid_y[lo])
-        };
+        let inverted = grid.table.invert(0, target);
+        // Round trip through the model's OWN transform: the reported quantile
+        // must be the response whose latent is `target`.
+        let round = build_transformation_normal_observed_scores(
+            &model,
+            Array2::from_shape_vec((1, 1), vec![inverted]).expect("frame").view(),
+            &probe_map,
+            model.training_headers.as_ref(),
+            &Array1::from_vec(vec![inverted]),
+            &Array1::<f64>::zeros(1),
+        )
+        .expect("round-trip score")[0];
         eprintln!(
             "#2600 probe: z={target:+.1}  h^-1(z)={inverted:.6e}  truth exp(z)={:.6e}  \
-             clamped={}",
+             h(h^-1(z))={round:+.6}  clamped={}",
             target.exp(),
-            inverted == grid.grid_y[0] || inverted == grid.grid_y[g - 1]
+            inverted == grid_y[0] || inverted == grid_y[g - 1]
         );
     }
 }

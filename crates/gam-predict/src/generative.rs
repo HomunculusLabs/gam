@@ -656,10 +656,7 @@ pub fn generative_spec_for_saved_model(
             })?;
             Ok(GenerativeSpec {
                 mean: grid.conditional_mean,
-                noise: NoiseModel::TransformationNormalQuantile {
-                    grid_y: grid.grid_y,
-                    h_grid: grid.h_grid,
-                },
+                noise: NoiseModel::TransformationNormalQuantile { table: grid.table },
             })
         }
         PredictModelClass::Survival => survival_window_generative_spec(

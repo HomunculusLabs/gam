@@ -95,6 +95,7 @@ mod kronecker_design;
 mod operators;
 mod penalty_scaling;
 mod psi_operator;
+mod quantile_table;
 mod response_basis;
 mod scop_curvature;
 mod scop_density;
@@ -110,6 +111,7 @@ pub(crate) use kronecker_design::*;
 pub(crate) use operators::*;
 pub(crate) use penalty_scaling::*;
 pub use psi_operator::*;
+pub use quantile_table::*;
 pub use response_basis::effective_response_num_internal_knots;
 pub(crate) use response_basis::{
     affine_shape_direction, assert_rowwise_kronecker_dimensions, build_response_basis,
