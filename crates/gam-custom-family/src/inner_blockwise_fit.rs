@@ -974,25 +974,54 @@ fn certified_reduced_face_candidate(
         let ball_roundoff = f64::EPSILON.sqrt()
             * (p.max(1) as f64)
             * radius_sq.abs().max(particular_norm_sq.abs()).max(1.0);
-        if !particular_norm_sq.is_finite() || particular_norm_sq > radius_sq + ball_roundoff {
+        if !particular_norm_sq.is_finite() {
             return Err(CustomFamilyError::trial_point(format!(
-                "physical reduced face does not intersect the trust ball \
-                 (minimum_face_norm_sq={particular_norm_sq:.6e}, \
-                 radius_sq={radius_sq:.6e}, active_rows={})",
+                "physical reduced-face minimum-norm point is not finite \
+                 (minimum_face_norm_sq={particular_norm_sq:.6e}, active_rows={})",
                 working_active.len(),
             )));
+        }
+        if particular_norm_sq > radius_sq + ball_roundoff {
+            // The closest point of this face is outside the current trust
+            // region, so no step on it is admissible AT THIS RADIUS. That is a
+            // statement about the warm face and the radius, not about the
+            // problem: the face came from a previous iterate's active set and
+            // the radius has since shrunk. Declining is what the caller's
+            // general constrained QP is for; ending the fit on it makes an
+            // ordinary conditional-transformation-normal fit with one smooth
+            // covariate unfittable (gam#2600, measured
+            // `minimum_face_norm_sq = 3.745717e1` against `radius_sq = 1`).
+            log::warn!(
+                "[gam#2600 reduced-face] declining a face that does not intersect the trust \
+                 ball (face_rows={}, minimum_face_norm_sq={:.6e}, radius_sq={:.6e}); \
+                 the general constrained QP owns this subproblem",
+                working_active.len(),
+                particular_norm_sq,
+                radius_sq,
+            );
+            return Ok(None);
         }
 
         let face_step = if let Some(tangent) = tangent.as_ref() {
             let remaining_radius_sq = (radius_sq - particular_norm_sq).max(0.0);
             if remaining_radius_sq == 0.0 {
-                return Err(CustomFamilyError::trial_point(format!(
-                    "physical reduced face touches the trust ball with a nonzero tangent \
-                     (active_rows={}, tangent_dim={}); a trust multiplier cannot be \
-                     certified from an empty reduced ball",
+                // The face's minimum-norm point sits exactly on the trust
+                // sphere, so the reduced ball this tangent would search is
+                // empty and no trust multiplier can be certified from it.
+                // Again a statement about the face and the radius rather than
+                // about the problem, and again the general constrained QP is
+                // the designed owner (gam#2600).
+                log::warn!(
+                    "[gam#2600 reduced-face] declining a face that touches the trust ball with \
+                     a nonzero tangent (face_rows={}, tangent_dim={}, \
+                     minimum_face_norm_sq={:.6e}, radius_sq={:.6e}); the general constrained QP \
+                     owns this subproblem",
                     working_active.len(),
                     tangent.ncols(),
-                )));
+                    particular_norm_sq,
+                    radius_sq,
+                );
+                return Ok(None);
             }
             let mut reduced_hessian = tangent.t().dot(exact_hessian).dot(tangent);
             symmetrize_dense_in_place(&mut reduced_hessian);
@@ -1055,7 +1084,12 @@ fn certified_reduced_face_candidate(
         // Preserve both signs of a hard-case fill until feasibility is known.
         // If neither sign is feasible, the first exact chord blocker becomes a
         // new equality and the reduced spectrum is recomputed from physical H.
-        let mut feasible_candidates: Vec<(Array1<f64>, Array1<f64>, f64)> = Vec::new();
+        // `chord_repair` records how far the certified-feasible chord had to pull
+        // a candidate back, as `1 − t` on the chord from the feasible base. It is
+        // `0.0` for a candidate the face solve produced feasible outright, and it
+        // is what tells the first-order KKT check below whether it is grading the
+        // Moré--Sorensen solve or grading a repair.
+        let mut feasible_candidates: Vec<(Array1<f64>, Array1<f64>, f64, f64)> = Vec::new();
         let mut blocker_candidates: Vec<(usize, f64)> = Vec::new();
         for raw_delta in &face_step.deltas {
             let raw_candidate = beta + raw_delta;
@@ -1071,10 +1105,15 @@ fn certified_reduced_face_candidate(
                 )));
             }
             if violation <= 0.0 {
-                feasible_candidates.push((raw_candidate, raw_delta.clone(), model_gain(raw_delta)));
+                feasible_candidates.push((
+                    raw_candidate,
+                    raw_delta.clone(),
+                    model_gain(raw_delta),
+                    0.0,
+                ));
                 continue;
             }
-            let (clipped, blocker, _step) = clip_infeasible_candidate_to_certified_feasible_chord(
+            let (clipped, blocker, step) = clip_infeasible_candidate_to_certified_feasible_chord(
                 constraints,
                 &feasible_base,
                 &raw_candidate,
@@ -1088,11 +1127,14 @@ fn certified_reduced_face_candidate(
             let clipped_delta = &clipped - beta;
             let clipped_gain = model_gain(&clipped_delta);
             if working_active.contains(&blocker) {
-                // The equality solve landed one representable value outside its
-                // own wall. Keep the exactly feasible adjacent value and let
-                // the physical KKT residual decide whether that rounding repair
-                // is admissible.
-                feasible_candidates.push((clipped, clipped_delta, clipped_gain));
+                // The equality solve landed outside a wall it is HOLDING AS AN
+                // EQUALITY. Keep the exactly feasible adjacent value and let the
+                // physical KKT residual decide whether that repair is admissible
+                // — but carry how big the repair was, because "one representable
+                // value outside its own wall" and "a chord clipped back by a
+                // finite fraction" are different events with the same shape, and
+                // only the first is a rounding repair (gam#2600).
+                feasible_candidates.push((clipped, clipped_delta, clipped_gain, 1.0 - step));
             } else {
                 blocker_candidates.push((blocker, clipped_gain));
             }
@@ -1110,7 +1152,7 @@ fn certified_reduced_face_candidate(
             working_active.push(blocker);
             continue;
         }
-        let (candidate, delta, predicted_gain) = feasible_candidates
+        let (candidate, delta, predicted_gain, chord_repair) = feasible_candidates
             .into_iter()
             .max_by(|left, right| {
                 left.2
@@ -1169,11 +1211,40 @@ fn certified_reduced_face_candidate(
             .fold(1.0_f64, f64::max);
         let kkt_tolerance = f64::EPSILON.sqrt() * (p.max(1) as f64) * stationarity_scale;
         if !closure_inf.is_finite() || closure_inf > kkt_tolerance {
+            if chord_repair > 0.0 {
+                // The candidate that failed here is not the Moré--Sorensen
+                // solution: it is that solution pulled back along the certified
+                // feasible chord because the equality solve landed outside a row
+                // it was holding. A repair that large is not a rounding repair,
+                // and a heuristic repair failing its own certificate is not a
+                // violated contract — it is the same situation a cycled
+                // active-set exchange is in, and it gets the same answer:
+                // decline, and let the caller's general constrained QP own the
+                // subproblem, instead of ending the fit on this trial point.
+                //
+                // Grading the repair by the KKT residual and then treating the
+                // verdict as a contract violation is what made an ordinary
+                // conditional-transformation-normal fit with one smooth covariate
+                // unfittable: `projected_residual_inf = 9.736333e-1` against
+                // `tolerance = 1.162291e-6` at `active_rows = 1` (gam#2600).
+                log::warn!(
+                    "[gam#2600 reduced-face] declining a chord-repaired candidate that fails \
+                     its own first-order KKT (face_rows={}, chord_repair={:.6e}, \
+                     projected_residual_inf={:.6e}, tolerance={:.6e}, trust_shift={:.6e}); \
+                     the general constrained QP owns this subproblem",
+                    working_active.len(),
+                    chord_repair,
+                    closure_inf,
+                    kkt_tolerance,
+                    face_step.trust_shift,
+                );
+                return Ok(None);
+            }
             return Err(CustomFamilyError::trial_point(format!(
                 "physical reduced-face first-order KKT failed \
                  (projected_residual_inf={closure_inf:.6e}, \
                  tolerance={kkt_tolerance:.6e}, trust_shift={:.6e}, \
-                 active_rows={})",
+                 active_rows={}, chord_repair=0)",
                 face_step.trust_shift,
                 working_active.len(),
             )));

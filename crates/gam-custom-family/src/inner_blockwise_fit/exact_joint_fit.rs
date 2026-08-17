@@ -1262,8 +1262,11 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     lhs[[d, d]] += joint_solver_diagonal_ridge - trace_diagonal_ridge;
                 }
             }
-            check_linear_feasibility(&beta_joint, constraints)
-                .map_err(|e| CustomFamilyError::trial_point(format!("joint Newton constrained solve [cycle={cycle}]: {e}")))?;
+            check_linear_feasibility(&beta_joint, constraints).map_err(|e| {
+                CustomFamilyError::trial_point(format!(
+                    "joint Newton constrained solve [cycle={cycle}]: {e}"
+                ))
+            })?;
             let warm_joint_active =
                 flatten_joint_active_set(&cached_active_sets, &block_constraints);
             let lower_bounds = match extract_simple_lower_bounds(constraints, total_p) {
@@ -3086,12 +3089,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let joint_ball_bound_the_step =
                 joint_block_step_hit_trust_boundary(joint_step_norm, joint_trust_radius);
             let step_hit_trust_boundary = joint_ball_bound_the_step
-                || block_step_norms
-                    .iter()
-                    .zip(&joint_block_trust_radii)
-                    .any(|(step_norm, radius)| {
-                        joint_block_step_hit_trust_boundary(*step_norm, *radius)
-                    });
+                || block_step_norms.iter().zip(&joint_block_trust_radii).any(
+                    |(step_norm, radius)| joint_block_step_hit_trust_boundary(*step_norm, *radius),
+                );
             // Predicted reduction must use the TRUE penalized Hessian
             // (the one that appears in `f(β) = -ℓ + ½βᵀSβ + ½·joint_mode_diagonal_ridge·‖β‖²`),
             // NOT the SPD-stabilized version. The stabilizing shift
