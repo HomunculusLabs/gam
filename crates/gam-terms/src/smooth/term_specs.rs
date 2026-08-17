@@ -880,6 +880,44 @@ pub struct SmoothCollectionGauge {
     pub owner_terms: Vec<usize>,
     /// Whether the parametric block led `C`.
     pub has_parametric_block: bool,
+    /// The TERM-LOCAL identifiability chart the gauged block was derived ON —
+    /// `z_local`, before this gauge composed its own `T` on top of it (gam#2760).
+    ///
+    /// The term's `BasisMetadata` records the COMPOSITION `z_local · T`, which is
+    /// what a predict-time replay wants: predict does not move `ψ`, so replaying
+    /// the composed chart reproduces the fitted block exactly. A caller that DOES
+    /// move `ψ` re-derives `T` here and must therefore rebuild in `z_local`, not
+    /// in the composition — otherwise the collection's orthogonalization is
+    /// applied twice, once in the stale `ψ₀` chart carried by the spec and once
+    /// freshly by this gauge.
+    ///
+    /// Measured before this existed, on a one-Duchon-term collection with
+    /// `C = [1]` and the `Delete` arm: the replay spec carried
+    /// `FrozenTransform(12, 11)`, the doubly-charted rebuild had orthogonality
+    /// residual `1.5e-12` at the fit's own `ℓ` and `9.0e-1` one octave away, so
+    /// the gauge resolved a direction and deleted a column at every `ψ`. The
+    /// term reached the splice one column short and every κ fixture on a Duchon
+    /// term refused in 0.2 s. On the `Residualize` arm the second application is
+    /// idempotent, which is why the same defect was invisible on Matérn.
+    ///
+    /// `None` means the term-local build applied no chart of its own — the usual
+    /// case for the radial families, whose `OrthogonalToParametric` policy defers
+    /// entirely to this gauge.
+    ///
+    /// Like `C` and the arm, this is ψ-INDEPENDENT: it is a center-space
+    /// constraint (`1ᵀα = 0`, a linear-orthogonality frame) or a frozen replay
+    /// chart, never a function of the realized design.
+    pub local_identifiability_transform: Option<Array2<f64>>,
+    /// The width of the TERM-LOCAL block this gauge was derived on, before the
+    /// arm ran (gam#2760).
+    ///
+    /// The collection's realized width is this minus whatever the arm removed,
+    /// and both halves are needed to read a rebuild that comes out narrow. A
+    /// rebuild whose LOCAL width differs from this is not the same basis and is
+    /// a defect; a rebuild that matches here and still comes out narrow after the
+    /// arm has hit a ψ at which the realized design loses rank in this gauge's
+    /// chart — a statement about the trial point, not about the rebuild.
+    pub local_columns: usize,
 }
 
 #[derive(Debug, Clone)]

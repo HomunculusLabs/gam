@@ -935,6 +935,8 @@ impl GlobalIdentifiabilityPlan {
         &self,
         owner_terms: &[usize],
         has_parametric_block: bool,
+        local_identifiability_transform: Option<Array2<f64>>,
+        local_columns: usize,
     ) -> Option<SmoothCollectionGauge> {
         let (arm, block) = match self {
             Self::Absent => return None,
@@ -946,7 +948,65 @@ impl GlobalIdentifiabilityPlan {
             constraint_block: block.clone(),
             owner_terms: owner_terms.to_vec(),
             has_parametric_block,
+            local_identifiability_transform,
+            local_columns,
         })
+    }
+}
+
+/// The identifiability chart a basis's own build applied, read off its metadata.
+///
+/// This is `z_local` — the term-local half. After
+/// [`realize_smooth_collection_gauge`] runs, the metadata carries the
+/// COMPOSITION `z_local · T`, so this must be read BEFORE the gauge composes,
+/// which is exactly where [`SmoothCollectionGauge::local_identifiability_transform`]
+/// is filled from (gam#2760).
+///
+/// Every variant that can carry a chart is listed; the ones that cannot report
+/// `None` by construction rather than through a wildcard, so a new basis family
+/// has to decide this question rather than inherit an answer.
+fn basis_local_identifiability_transform(metadata: &BasisMetadata) -> Option<Array2<f64>> {
+    match metadata {
+        BasisMetadata::BSpline1D {
+            identifiability_transform,
+            ..
+        }
+        | BasisMetadata::CubicRegression1D {
+            identifiability_transform,
+            ..
+        }
+        | BasisMetadata::ThinPlate {
+            identifiability_transform,
+            ..
+        }
+        | BasisMetadata::Matern {
+            identifiability_transform,
+            ..
+        }
+        | BasisMetadata::Duchon {
+            identifiability_transform,
+            ..
+        }
+        | BasisMetadata::TensorBSpline {
+            identifiability_transform,
+            ..
+        } => identifiability_transform.clone(),
+        BasisMetadata::Sphere {
+            constraint_transform,
+            ..
+        }
+        | BasisMetadata::ConstantCurvature {
+            constraint_transform,
+            ..
+        }
+        | BasisMetadata::MeasureJet {
+            constraint_transform,
+            ..
+        } => constraint_transform.clone(),
+        BasisMetadata::Pca { .. }
+        | BasisMetadata::SphereHarmonics { .. }
+        | BasisMetadata::BySmooth { .. }
+        | BasisMetadata::FactorSmooth { .. } => None,
     }
 }
 
@@ -1564,7 +1624,15 @@ fn apply_global_smooth_identifiability(
         // therefore invariant under any move of THIS term's basis parameters.
         // The pair derived from them — `T` and `R` — is not, which is why the
         // gauge carries neither (#2747).
-        let collection_gauge = plan.as_gauge(&owner_indices, parametric_block.is_some());
+        // Read the term-local chart BEFORE the gauge composes its own into the
+        // metadata below (gam#2760): after `with_identifiability_transform` the
+        // two are one matrix and cannot be told apart.
+        let collection_gauge = plan.as_gauge(
+            &owner_indices,
+            parametric_block.is_some(),
+            basis_local_identifiability_transform(&term.metadata),
+            design_local.ncols(),
+        );
         let mut residualization: Option<crate::basis::ParametricResidualization> = None;
         let (design_constrained, z_opt) = if let Some(gauge) = collection_gauge.as_ref() {
             // This term takes a gauge, so it is realized through the one entry

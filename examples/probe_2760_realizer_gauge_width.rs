@@ -159,6 +159,44 @@ fn main() {
         }
         spec
     };
+    // Is the frozen rebuild even the SAME geometry? The metadata's centers are
+    // documented as living in the standardized frame; a spec that carries them
+    // as `UserProvided` while also pinning `input_scale` can standardize them a
+    // second time. Read both builds' realized centers and compare.
+    {
+        let frozen_at_seed =
+            gam_terms::smooth::build_single_local_smooth_term(x.view(), &frozen_spec(1.0), &mut ws)
+                .expect("frozen local build at the seed");
+        if let (
+            gam_terms::basis::BasisMetadata::Duchon {
+                centers: cold,
+                input_scale: cold_scale,
+                ..
+            },
+            gam_terms::basis::BasisMetadata::Duchon {
+                centers: warm,
+                input_scale: warm_scale,
+                ..
+            },
+        ) = (&local.metadata, &frozen_at_seed.metadata)
+        {
+            let ratio = if cold.is_empty() || warm.is_empty() {
+                f64::NAN
+            } else {
+                let cold_rms =
+                    (cold.iter().map(|v| v * v).sum::<f64>() / cold.len() as f64).sqrt();
+                let warm_rms =
+                    (warm.iter().map(|v| v * v).sum::<f64>() / warm.len() as f64).sqrt();
+                cold_rms / warm_rms
+            };
+            println!(
+                "[probe2760] centers @ ell=1.0: cold {}x{} rms-ratio(cold/frozen)={ratio:.6} \
+                 cold_input_scale={cold_scale:?} frozen_input_scale={warm_scale:?}",
+                cold.nrows(),
+                cold.ncols(),
+            );
+        }
+    }
     for ell in [
         1.0_f64, 0.5, 2.0, 1.0e-2, 3.0e-2, 1.0e-1, 3.0e-1, 3.0, 10.0, 30.0, 1.0e2,
     ] {
