@@ -2,6 +2,7 @@ mod beta_phi_frozen_at_null_predictor;
 mod ctn_chart_fit_predict_agreement_2680;
 mod ctn_crossfit_shared_response_support_2680;
 mod ctn_score_influence_jacobian_fd_2680;
+mod ctn_transform_tails_2600;
 mod dispersion_location_scale_generate_predict_variance_agreement;
 mod gaussian_location_scale_predict_sigma_response_scale_equivariant;
 mod predict_2_2;
