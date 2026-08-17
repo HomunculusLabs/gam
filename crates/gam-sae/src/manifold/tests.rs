@@ -4518,6 +4518,177 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
 /// defect this pins, and an assertion of zero would be an assertion that the
 /// defect is absent. What it asserts is that the comparison is well posed — both
 /// spectra exist, are finite, and are taken on the same directions.
+/// The #2673 state: the #2515 route-invariance fixture at its converged arrow
+/// factorization, with BOTH operators the two floors talk about materialised
+/// through the SAME appliers production uses.
+///
+/// `a` is the exact observed information `A = B + ΔC` (the operator both floors
+/// classify) and `b` is the majorizer `B` (the metric the second floor measures
+/// in). One builder, so the crossing count and the threshold comparison below
+/// cannot end up describing two different states.
+pub(crate) struct TwoFloorState2673 {
+    pub a: Array2<f64>,
+    pub b: Array2<f64>,
+}
+
+fn two_floor_state_2673() -> TwoFloorState2673 {
+    let n = 24usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_dt, _db, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+
+    let a = term
+        .materialize_exact_hessian_dense(&rho, target.view(), &cache)
+        .expect("dense exact observed information");
+    let dim = a.nrows();
+    let total_t = cache.delta_t_len();
+    let mut b = Array2::<f64>::zeros((dim, dim));
+    for col in 0..dim {
+        let mut vt = Array1::<f64>::zeros(total_t);
+        let mut vb = Array1::<f64>::zeros(cache.k);
+        if col < total_t {
+            vt[col] = 1.0;
+        } else {
+            vb[col - total_t] = 1.0;
+        }
+        let (out_t, out_b) = gam_solve::arrow_schur::matrix_free_arrow_operator_apply(
+            &sys,
+            &cache,
+            vt.view(),
+            vb.view(),
+        )
+        .expect("majorizer apply");
+        for row in 0..total_t {
+            b[[row, col]] = out_t[row];
+        }
+        for row in 0..cache.k {
+            b[[total_t + row, col]] = out_b[row];
+        }
+    }
+    for i in 0..dim {
+        for j in (i + 1)..dim {
+            let avg = 0.5 * (b[[i, j]] + b[[j, i]]);
+            b[[i, j]] = avg;
+            b[[j, i]] = avg;
+        }
+    }
+    TwoFloorState2673 { a, b }
+}
+
+/// #2673 — the two floors are two DIFFERENT RULES, and this measures the gap
+/// between them WITHOUT waiting for a direction to fall into it.
+///
+/// Every previous measurement on this issue counted directions that change
+/// class, found zero, and could not tell "the rules agree" from "the fixture
+/// never asked them" — both counters need a near-null of `A`, and no shipped
+/// fixture has one. That question is unnecessary. Write each rule as a
+/// threshold on the SAME quantity, `|λ|`:
+///
+/// ```text
+///   value site    :  |λ| ≤ SAE_EXACT_A_PD_FLOOR_REL · max(λ_max, 1)   — ONE number, every direction
+///   gradient site :  |λ| <  √ε · vᵀBv                                  — a DIFFERENT number per direction
+/// ```
+///
+/// The second varies across directions of one operator by exactly the spread of
+/// the `B`-Rayleigh quotient; the first does not vary at all. So the ratio
+/// between the two thresholds is a per-direction number, and:
+///
+/// * if that ratio is not constant, **no choice of the two constants can make
+///   the rules agree** — they are functionally different classifiers, and the
+///   crossing region is a property of the pair, not of any fixture;
+/// * if the ratio straddles 1, then on THIS state the value rule is the
+///   stricter one for some directions and the gradient rule is the stricter one
+///   for others, so neither is a conservative version of the other.
+///
+/// This asserts both, which is the non-vacuous statement the crossing counters
+/// could not make.
+#[test]
+fn the_two_floors_are_incommensurable_thresholds_on_one_operator_2673() {
+    use gam_linalg::faer_ndarray::strict_symmetric_eigh;
+
+    let state = two_floor_state_2673();
+    let (a_eigs, a_vecs) = strict_symmetric_eigh(&state.a, Side::Lower).expect("A spectrum");
+    let dim = a_eigs.len();
+    let max_eig = a_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let value_threshold = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    let mu_floor = f64::EPSILON.sqrt();
+
+    let mut ratios = Vec::with_capacity(dim);
+    let mut gradient_thresholds = Vec::with_capacity(dim);
+    for index in 0..dim {
+        let v = a_vecs.column(index);
+        let vbv = v.dot(&state.b.dot(&v));
+        assert!(
+            vbv.is_finite() && vbv > 0.0,
+            "#2673: B must be positive definite along every direction of A \
+             (direction {index}: vᵀBv={vbv:.6e})"
+        );
+        let gradient_threshold = mu_floor * vbv;
+        gradient_thresholds.push(gradient_threshold);
+        ratios.push(gradient_threshold / value_threshold);
+    }
+    let min_ratio = ratios.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_ratio = ratios.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_gradient = gradient_thresholds
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let max_gradient = gradient_thresholds
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    println!(
+        "[#2673 THRESHOLD] dim={dim} λ_max={max_eig:.6e}\n\
+         [#2673 THRESHOLD] value rule    : |λ| ≤ {value_threshold:.6e}   (one number, all {dim} directions)\n\
+         [#2673 THRESHOLD] gradient rule : |λ| < √ε·vᵀBv ∈ [{min_gradient:.6e}, {max_gradient:.6e}]\n\
+         [#2673 THRESHOLD] ratio gradient/value ∈ [{min_ratio:.6e}, {max_ratio:.6e}]  spread={:.6e}x",
+        max_ratio / min_ratio,
+    );
+
+    assert!(
+        max_ratio / min_ratio > 1.0 + 1.0e-9,
+        "#2673: if the two thresholds were one rule in two spellings their ratio would be \
+         constant across the directions of one operator; measured spread {:.6e}x",
+        max_ratio / min_ratio
+    );
+    assert!(
+        min_ratio < 1.0 && max_ratio > 1.0,
+        "#2673: the ratio must straddle 1 for this state to witness that NEITHER rule is \
+         uniformly the stricter one (ratio ∈ [{min_ratio:.6e}, {max_ratio:.6e}])"
+    );
+}
+
 #[test]
 fn two_floors_overlap_region_direction_count_2673() {
     use gam_linalg::faer_ndarray::strict_symmetric_eigh;
