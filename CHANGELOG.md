@@ -1,5 +1,101 @@
 ## Unreleased
 
+- **The `matern` benchmark cluster's failure moved subsystems, and what it moved
+  to is a projection taken in the wrong inner product (#2748).** The signature
+  this issue was chased on since 08-08 — `invert_identified_rho_hessian`
+  refusing a negative ρ-curvature against the eigensolver's backward error — is
+  gone from every cell. At benchmark run `31926616066` (head `5f6bddb16`, which
+  contains every commit of the measured-`‖δH‖₂` work through `8ae1f8ee5`) the
+  population is 20 → 8, and **seven of the eight fail only in the
+  `rust_matern_*_flexible` lanes**, i.e. only when the formula asks for
+  `link(type=flexible(logit))`. The identical scenario, identical data and
+  identical Matérn smooth mint in `rust_gam` / `rust_matern_decomposed` /
+  `rust_matern_standard`. The residual is not a `matern` phenomenon; it is
+  `matern` × *learnable link*, and `matern` is in the table only because
+  `_flexible` companion lanes are minted for `matern` scenarios.
+
+  | scenario | failing lane(s) | terminal cause |
+  |---|---|---|
+  | `geo_disease_matern` | `_flexible` only | `frozen-index fixed point did not converge in 60 outer iterations: delta=4.948e0, scale=8.824e0, tolerance=8.824e-5` |
+  | `geo_disease_eas3_matern_k12` | `_flexible` only | identifiability audit FATAL: `'eta'[11] ~ 'wiggle'[0] overlap=0.6542` |
+  | `geo_disease_eas_matern_k6` | all rust lanes | flexible: `de-aliasing left no identifiable warp direction`; non-flexible: `spatial kappa optimization made REML score worse (1.267594e3 -> 1.267595e3)` |
+  | `papuan_oce4_matern_k12`, `papuan_oce_matern_k12` | `_flexible` only | custom-family outer not stationary |
+  | `papuan_oce4_matern_k6`, `_k24` | `_flexible` only | wiggle exact spatial hyper NOT STATIONARY, `railed=[0..5]` |
+  | `haberman_5yr` | `rust_gam` | standard REML NOT STATIONARY — a separate population, as the issue body predicted |
+
+  **Root cause.** `fit_binomial_mean_wiggle` residualizes the frozen warp basis
+  against the mean block as `B⊥ = B − X·A`, `A = (XᵀX)⁺XᵀB`, to "keep the mean
+  block `X` full and identifiable". But *outside the mean column space* is
+  meaningless until an inner product says what **outside** means, and the
+  Euclidean one is a metric no part of the problem uses. With the basis frozen,
+  `q = Xβ + B⊥β_w` is linear in both blocks, so the joint negative-log-likelihood
+  Hessian the fit assembles is exactly
+
+  ```text
+  [X B⊥]ᵀ diag(m₂) [X B⊥] + penalties,      m₂ = ∂²(−ℓ)/∂q²
+  ```
+
+  (`bmw_static_hessian_operator`'s frozen arm has `dq_dq0 = 1` and
+  `basis_d1 = 0`, collapsing its four row coefficients to `m₂` everywhere). Its
+  cross block is `Xᵀ diag(m₂) B⊥`, and `A = (XᵀWX)⁺XᵀWB` with `W = diag(m₂)`
+  makes that block **zero by construction**. `W = I` makes it zero only when
+  every row is equally informative — never true for a binomial near saturation,
+  where `m₂ = w·μ(1−μ)` spans orders of magnitude.
+
+  **Why that is the outer loop's defect and not a tidiness point.** Freeze at
+  `η̂` and perturb by `δ`: `B(η̂+δ) ≈ B + diag(δ)B'`, so the design moves by
+  `(I−P)diag(s)δ` in `q` with `s = B'β_w`, and the refit answers with
+  `Δη = −H(I−P)diag(s)δ` for this fit's own penalized hat matrix
+  `H = X(XᵀWX + S)⁻¹XᵀW`. With `P` the `W`-projection,
+  `XᵀW(I−P) = XᵀW − XᵀWX(XᵀWX)⁻¹XᵀW = 0`, so `H(I−P) = 0` identically **for any
+  penalty `S`** and the leading term of the frozen-index map's derivative
+  vanishes. With `P` Euclidean it does not, and the map contracts only while
+  `max_i s_i` stays small — which nothing enforces: monotonicity bounds `β_w`
+  below at zero and not at all above. `delta/scale = 0.56` after sixty passes is
+  what a non-contraction looks like.
+
+  **Second repair: the loop never damped.** Sixty undamped passes, no
+  relaxation, no acceptance test, no measurement of its own contraction. With
+  `d_k = Φ(η_k) − η_k` and `M` the map's Jacobian, `M` commutes with `M − I`, so
+  `d_k = M d_{k−1}` exactly and `⟨d_k, d_{k−1}⟩/‖d_{k−1}‖²` is `M`'s dominant
+  eigenvalue read off two vectors the loop already computes. Relaxing to
+  `η + t(Φ(η) − η)` replaces `M` by `(1−t)I + tM`, and `t = 1/(1 − mu)`
+  annihilates the dominant mode — Aitken's Δ², written as a relaxation. The
+  implementation only ever **damps**: `min(1, 1/(1 − mu))` is exactly `1.0` for
+  every `mu ≥ 0` and for the first pass of every fit, so no converging fit moves
+  by an ulp. `mu ≥ 1` is a monotone repulsion no positive `t` stabilises, and
+  the refusal now reports the measured `mu` and says so instead of blaming a
+  budget.
+
+  Rejected: raising `outer_max_iter` (sixty passes of a non-contraction is not a
+  budget problem), loosening `outer_tol` (`0.56` is not a tolerance problem),
+  and extrapolating on `0 < mu < 1` (sound for the mode the Rayleigh quotient
+  sees, unsound for an equal-magnitude mode of opposite sign it cannot).
+
+  **Gates**, 12/12 green
+  (`cargo test -p gam-models --lib -- frozen_index_relaxation binomial_mean_wiggle_dealias_metric`).
+  The decisive one builds `H` with a NON-TRIVIAL ridge `S` — so the "for any
+  `S`" half of the derivation is exercised, not assumed — forms the forcing
+  `diag(s)·δ` at a warp slope above one, and measures `H(I−P)` on it: `≤ 1e-12`
+  of the unresidualized response under the curvature metric, `≥ 5e-2` of it
+  under the Euclidean one, the second **asserted from below** so the fixture
+  cannot quietly stop exercising the defect. Also: a constant metric reproduces
+  the Euclidean projection exactly (equally-informative rows do not move);
+  zero-curvature rows and a singular `XᵀWX` are handled; a negative weight is
+  refused rather than used; and a planted linear map whose undamped iteration
+  provably diverges (`|η| > 1e6` after 40 passes) reaches its fixed point to
+  `1e-12` under the derived damping.
+
+  `Zz2155Problem::solve_fixed_lambda_freeze_refit`, a deliberate mirror of the
+  production loop, carried its own closed-form Euclidean de-aliasing and now
+  calls the same primitive: one definition of the projection, not two.
+
+  **A negative result worth recording so nobody repeats it:** the flexible-lane
+  defect does not shrink to a fast cell. The same binary at `centers=8, n=1500,
+  n_pcs=6` never reaches the wiggle stage — it dies 21 minutes earlier in the
+  *pilot*, on `iso-kappa joint REML … hessian_psd=NO`. The reduced shape lands
+  in a different subsystem's refusal.
+
 - **A transformation model whose transformation saturates outside its knots has
   no tails, only a floor — and every reported quantile silently truncated at the
   training range (#2600).** #2600 removed the endpoint renormalizer, so the
