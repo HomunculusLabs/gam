@@ -128,16 +128,26 @@ pub(crate) fn seeded_term_of_kind(
 /// The atom kinds this module sweeps, with the latent dimension each one
 /// requires. #2720's own "Not established" section records that its central
 /// measurement was taken on `Periodic` atoms alone; this list is that gap
-/// closed. Every kind that emits a chart-gauge orbit at all is here:
+/// closed. Every kind that emits a chart-gauge orbit at all **and can be
+/// seeded through `sae_manifold_fit_minimal`** is here:
 ///
-/// * `Sphere` / `ProjectivePlane` ride the ambient cover and require `d = 3`;
-/// * `KleinBottle` and `Cylinder` require `d = 2`;
+/// * `Sphere` rides the ambient 3-vector cover, but `atom_dim` names the
+///   INTRINSIC dimension — `sae_build_atom_plans` requires `d == 2` for the
+///   sphere (the plan itself carries the ambient width 3), and the same
+///   intrinsic-dim reading holds for `ProjectivePlane`;
+/// * `KleinBottle` requires `d = 2`;
 /// * `Linear`, `EuclideanPatch`, `Poincare` and `Duchon` emit translation and
 ///   dilation fields per axis; `Periodic` / `Torus` emit the phase shift only.
 ///
-/// `Mobius`, `FiniteSet` and `Precomputed` emit no orbit by construction (their
-/// arms in `dense_step_gauge_vectors` say why), so they cannot contribute a
-/// direction to either span and are not swept.
+/// `Cylinder` emits an orbit (one continuous phase gauge on the `S¹` axis,
+/// `dense_step_gauge_vectors`) but is **not seedable through the minimal-seed
+/// path** — `sae_build_atom_plans` rejects it as a birth-discovered-only
+/// topology ("seed with periodic, duchon, sphere, torus, or euclidean_patch
+/// and let the structure search grow a cylinder by evidence"), so it cannot
+/// be constructed by this instrument and is excluded with that reason
+/// recorded. `Mobius`, `FiniteSet` and `Precomputed` emit no orbit by
+/// construction (their arms in `dense_step_gauge_vectors` say why), so they
+/// cannot contribute a direction to either span and are not swept.
 pub(crate) const GAUGE_SWEEP_KINDS: &[(&str, usize)] = &[
     ("periodic", 1),
     ("torus", 2),
@@ -145,8 +155,7 @@ pub(crate) const GAUGE_SWEEP_KINDS: &[(&str, usize)] = &[
     ("linear", 1),
     ("euclidean", 1),
     ("poincare", 1),
-    ("sphere", 3),
-    ("cylinder", 2),
+    ("sphere", 2),
     ("klein_bottle", 2),
 ];
 
