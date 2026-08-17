@@ -432,3 +432,243 @@ fn quotient_span_is_flat_for_the_penalized_objective_2720() {
         violations.join("\n  "),
     );
 }
+
+/// The largest `|gᵀvᵢ|` over a list of unit directions, plus the per-direction
+/// central-difference slopes of the penalized objective.
+fn slopes_along(
+    term: &mut SaeManifoldTerm,
+    target: ArrayView2<'_, f64>,
+    rho: &SaeManifoldRho,
+    registry: &AnalyticPenaltyRegistry,
+    directions: &[Array1<f64>],
+) -> Vec<f64> {
+    directions
+        .iter()
+        .map(|direction| {
+            directional_derivative_terms(term, target, rho, registry, direction, 1.0e-5)
+                .expect("directional derivative")
+                .total()
+        })
+        .collect()
+}
+
+/// #2720 OPTION 2, REFUTED: "extend the compensation to the priors" has no
+/// solution, and the reason is that a first-order zero of the prior derivative
+/// is a property of the STATE rather than of the field.
+///
+/// The issue offers, as its second shape of modelling fix, solving for the
+/// `(δt, δβ)` that cancels the reconstruction change *and* is first-order
+/// stationary for the priors, noting that it "is generally over-determined and
+/// may have no solution, which would itself be the finding". This test takes
+/// that finding.
+///
+/// The freedom available is exactly the choice of coordinate FIELD: once a field
+/// is fixed, `δβ` is the unique least-squares solution of an over-determined
+/// system (`n_active = 42` rows against `M ∈ {2,3}` columns here), so nothing
+/// downstream can be steered. On a patch atom the enumerated field family is
+/// two-dimensional — constant shift and dilation — and their prior slopes have
+/// OPPOSITE signs, so a combination with zero first-order prior derivative
+/// always exists at any single state. That combination is what option 2 would
+/// return.
+///
+/// The test then asks the only question that matters: is it a symmetry? A
+/// symmetry is flat at every state, so the combination is rebuilt from the
+/// freshly constructed fields at a DIFFERENT state and measured there. It is not
+/// flat — by orders of magnitude — because the two slopes do not move together
+/// as the state moves. There is therefore no field in the family whose flow
+/// leaves the posterior invariant, which is what "no posterior gauge exists
+/// here" means constructively.
+#[test]
+fn option_two_prior_aware_compensation_has_no_state_independent_solution_2720() {
+    let z = planted_circle_cloud();
+    let registry = AnalyticPenaltyRegistry::new();
+    let mut term = seeded_term_of_kind(z.view(), "linear", 1);
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
+    let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+    let dense_len = term.n_obs() * term.assignment.row_block_dim();
+
+    let at_state = |term: &mut SaeManifoldTerm| -> (Vec<Array1<f64>>, Vec<f64>) {
+        let directions: Vec<Array1<f64>> = term
+            .dense_step_gauge_vectors()
+            .expect("gauge vectors")
+            .into_iter()
+            .filter_map(unit_norm)
+            .collect();
+        let slopes = slopes_along(term, z.view(), &rho, &registry, &directions);
+        (directions, slopes)
+    };
+
+    let (home_directions, home_slopes) = at_state(&mut term);
+    assert_eq!(
+        home_directions.len(),
+        2,
+        "the linear patch must enumerate exactly the shift and dilation fields; option 2's \
+         freedom is that two-dimensional family and nothing else"
+    );
+    // The zero-slope combination option 2 would return, in the orthonormal frame
+    // the construction emits: `c = s1·v0 − s0·v1` has slope `s1·s0 − s0·s1 = 0`.
+    let (s0, s1) = (home_slopes[0], home_slopes[1]);
+    assert!(
+        s0 * s1 < 0.0,
+        "the two fields must pull the priors in OPPOSITE directions for a zero combination to \
+         exist at all: shift {s0:.6e}, dilation {s1:.6e}"
+    );
+    let combine = |dirs: &[Array1<f64>]| -> Array1<f64> {
+        let mut combined = dirs[0].mapv(|value| value * s1);
+        for index in 0..combined.len() {
+            combined[index] -= s0 * dirs[1][index];
+        }
+        unit_norm(combined).expect("a nonzero combination of two orthonormal directions")
+    };
+    let home_combination = combine(&home_directions);
+    let home_slope = slopes_along(
+        &mut term,
+        z.view(),
+        &rho,
+        &registry,
+        std::slice::from_ref(&home_combination),
+    )[0];
+    println!(
+        "[2720-opt2] home: shift={s0:.6e} dilation={s1:.6e} combination={home_slope:.6e} \
+         ({:.3}x tol {tolerance:.6e})",
+        home_slope.abs() / tolerance,
+    );
+    assert!(
+        home_slope.abs() <= 0.02 * s1.abs(),
+        "the constructed combination must actually be the first-order zero at its own state, or \
+         this test is refuting something other than option 2: {home_slope:.6e} against a \
+         dilation slope of {s1:.6e}"
+    );
+
+    // Move to a different state, INSIDE the likelihood-flat set, so the
+    // reconstruction is what it was and only the chart parametrisation moved.
+    // A symmetry of the posterior would be flat here too.
+    let travel = home_directions[0].clone();
+    term.apply_newton_step(
+        travel.slice(s![..dense_len]),
+        travel.slice(s![dense_len..]),
+        0.5,
+    )
+    .expect("a step along the shift field applies");
+
+    let (away_directions, away_slopes) = at_state(&mut term);
+    assert_eq!(away_directions.len(), 2, "the field family is state-independent in SIZE");
+    let away_combination = combine(&away_directions);
+    let away_slope = slopes_along(
+        &mut term,
+        z.view(),
+        &rho,
+        &registry,
+        std::slice::from_ref(&away_combination),
+    )[0];
+    println!(
+        "[2720-opt2] away: shift={:.6e} dilation={:.6e} combination={away_slope:.6e} \
+         ({:.3}x tol)",
+        away_slopes[0],
+        away_slopes[1],
+        away_slope.abs() / tolerance,
+    );
+
+    assert!(
+        away_slope.abs() > tolerance,
+        "option 2's compensation would be a symmetry, and this one is not: the combination that \
+         zeroes the prior derivative at one state carries |d f| = {away_slope:.6e} at another, \
+         which is at or below the convergence tolerance {tolerance:.6e}. If this ever fires, the \
+         field family HAS a state-independent prior-stationary member and #2720's option 2 is \
+         back on the table."
+    );
+    // The mechanism, stated as its own assertion so a future reader does not
+    // have to infer it: the two slopes do not move together, so no fixed
+    // combination of them can stay at zero.
+    let home_ratio = s0 / s1;
+    let away_ratio = away_slopes[0] / away_slopes[1];
+    println!(
+        "[2720-opt2] slope ratio shift/dilation: home {home_ratio:.6e} -> away {away_ratio:.6e}"
+    );
+    assert!(
+        (home_ratio - away_ratio).abs() > 0.01 * home_ratio.abs().max(away_ratio.abs()),
+        "the shift/dilation slope ratio moved by less than 1% ({home_ratio:.6e} -> \
+         {away_ratio:.6e}); a state-independent ratio would mean a fixed combination IS flat \
+         everywhere and option 2 has a solution after all"
+    );
+}
+
+/// #2720 — the defect cannot come back silently: the chart orbit must stay OUT
+/// of the span the convergence gates remove, on a fixture where it demonstrably
+/// carries live descent.
+///
+/// The two clauses are deliberately redundant with each other. The first is
+/// structural (the span excludes the orbit); the second is behavioural (the
+/// orbit is worth excluding). A change that re-merged the spans would fail the
+/// first; a change that made the orbit genuinely flat — the modelling fix this
+/// issue considered and rejected on the grounds that it makes the coordinate
+/// prior improper — would fail the second, and should, because it would mean
+/// the argument for the split needs re-deriving rather than re-asserting.
+#[test]
+fn chart_orbit_stays_out_of_the_convergence_quotient_and_is_worth_excluding_2720() {
+    let z = planted_circle_cloud();
+    let registry = AnalyticPenaltyRegistry::new();
+    let mut term = seeded_term_of_kind(z.view(), "linear", 1);
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
+    let lambda_smooth = rho.lambda_smooth_vec().expect("one block per atom");
+    let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+
+    let chart: Vec<Array1<f64>> = term
+        .dense_step_gauge_vectors()
+        .expect("gauge vectors")
+        .into_iter()
+        .filter_map(unit_norm)
+        .collect();
+    assert!(
+        !chart.is_empty(),
+        "the linear patch must enumerate a chart orbit, or this fixture cannot see the defect"
+    );
+    let quotient = term
+        .posterior_null_quotient_basis(&lambda_smooth)
+        .expect("quotient span");
+    let block = term
+        .likelihood_flat_block_basis(&lambda_smooth)
+        .expect("descent block");
+
+    for (index, direction) in chart.iter().enumerate() {
+        let mut residual = direction.clone();
+        for basis in &quotient {
+            let coeff = residual.dot(basis);
+            for i in 0..residual.len() {
+                residual[i] -= coeff * basis[i];
+            }
+        }
+        let retained = residual.dot(&residual).sqrt();
+        assert!(
+            retained >= 1.0 - 1.0e-9,
+            "chart direction {index} is (partly) inside the convergence quotient: the projection \
+             kept only {retained:.6e} of a unit vector. The gates would then be blind to \
+             {:.1}% of any residual along it.",
+            100.0 * (1.0 - retained),
+        );
+        let mut in_block = 0.0_f64;
+        for basis in &block {
+            let coeff = direction.dot(basis);
+            in_block += coeff * coeff;
+        }
+        assert!(
+            in_block >= 1.0 - 1.0e-9,
+            "chart direction {index} is not reachable by the descent block ({in_block:.6e} of \
+             its unit norm); it would then be a direction no mover reduces and no gate sees"
+        );
+    }
+
+    let slopes = slopes_along(&mut term, z.view(), &rho, &registry, &chart);
+    let worst = slopes.iter().fold(0.0_f64, |acc, s| acc.max(s.abs()));
+    println!(
+        "[2720-live] chart directions={} worst |d f|={worst:.6e} = {:.1}x tol {tolerance:.6e}",
+        chart.len(),
+        worst / tolerance,
+    );
+    assert!(
+        worst > 100.0 * tolerance,
+        "the chart orbit no longer carries live posterior descent on this fixture (worst \
+         |d f| = {worst:.6e} against tolerance {tolerance:.6e}), so the evidence that put it \
+         outside the convergence quotient no longer reproduces and the decision needs re-taking"
+    );
+}

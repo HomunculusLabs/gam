@@ -3018,12 +3018,33 @@ impl SaeManifoldTerm {
         // #2253: everything pushed above comes from `dense_step_gauge_vectors`
         // — the closed-form CHART gauge orbit (circle/torus phase, and the
         // translation/scale orbits of the linear/euclidean/duchon/poincaré
-        // patches). These are EXACT criterion symmetries (global motion +
-        // decoder compensation), flat by construction, unlike the empirical
-        // decoder-null candidates admitted below (which the Rayleigh floor
-        // exists to screen). Remember the boundary so the exact-gauge subspace
-        // can be deflated UNCONDITIONALLY, keeping the deflation COUNT stable
-        // across the ρ-walk.
+        // patches).
+        //
+        // #2720 — READ THE SCOPE OF "EXACT" HERE CAREFULLY. This comment used
+        // to call them "EXACT criterion symmetries … flat by construction",
+        // and that sentence is what put the same orbit into the inner
+        // CONVERGENCE quotient, where it certified non-stationary points at up
+        // to 76 170x the KKT tolerance. They are exact symmetries of the
+        // RECONSTRUCTION (measured `1e-16` relative) and NOT of the criterion:
+        // the ARD prior on `t` and the smoothness prior on `β` are written on
+        // the chart coordinates and move along the orbit — the dilation field
+        // by `−7.82` on an objective of `165`
+        // (`tests_gauge_posterior_flatness_2720`).
+        //
+        // What justifies deflating them HERE is a different property and a
+        // weaker one: this block runs only after the conditioning gate has
+        // already flagged a near-singular joint Hessian, and the orbit carries
+        // NO data-fit CURVATURE (only the priors'), so it is a genuine
+        // near-null direction OF THE OPERATOR BEING INVERTED. Deflation is then
+        // a pseudo-inverse choice on an ill-conditioned solve, not a claim that
+        // the criterion is flat. That distinction is the whole of #2720, and it
+        // is written here because this is the other site the claim reached.
+        //
+        // Remember the boundary so the exact-gauge subspace can be deflated
+        // UNCONDITIONALLY, keeping the deflation COUNT stable across the ρ-walk
+        // (a borderline eigenvalue flickering across the Rayleigh floor
+        // re-anchors ½log|H| and desyncs the fixed-ρ criterion gradient from
+        // its value).
         let n_exact_raw = raw_gauges.len();
         // #1051/#1273: admit the penalty-aware decoder-β null directions as
         // additional deflation candidates. A rank-deficient decoder design
@@ -3189,7 +3210,9 @@ impl SaeManifoldTerm {
         // patch translation/scale) it changes the deflation COUNT by ±1 and
         // re-anchors ½log|H|, desyncing the fixed-ρ criterion gradient from the
         // value (the K=1 circle non-stationary stall). The exact-gauge subspace
-        // is `gauge_span[0..exact_basis_count]` (flat by construction); add any
+        // is `gauge_span[0..exact_basis_count]` (reconstruction-flat by
+        // construction, hence data-fit-curvature-free — NOT criterion-flat, see
+        // the scope note at the candidate site above); add any
         // of its directions the floor loop dropped, orthogonalized against what
         // was already kept, so the deflation dimension is ρ-stable. When the
         // floor already kept a gauge, its residual here is ~0 and it is not
