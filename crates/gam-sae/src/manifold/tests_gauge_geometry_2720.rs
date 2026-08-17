@@ -313,14 +313,20 @@ fn measure_orbit_projection_2720(
                  (not the known convergence refusal): {note}"
             );
             // Validate the refusal telemetry rather than trusting it: a
-            // gauge_share outside [0,1] or non-finite refusal norms mean the
-            // refusal message itself is corrupt.
-            if let Some(idx) = note.find("gauge_share=") {
-                let tail = &note[idx + "gauge_share=".len()..];
-                let token: String = tail
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e')
-                    .collect();
+            // null_share outside [0,1] or non-finite refusal norms mean the
+            // refusal message itself is corrupt. The field was renamed
+            // `gauge_share` -> `null_share` when the chart orbit left the
+            // convergence quotient (a7aad87); parse either so a refusal on
+            // either side of that rename still gets validated.
+            let share_token = ["null_share=", "gauge_share="].iter().find_map(|key| {
+                note.find(key).map(|idx| {
+                    note[idx + key.len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e')
+                        .collect::<String>()
+                })
+            });
+            if let Some(token) = share_token {
                 if let Ok(share) = token.parse::<f64>() {
                     assert!(
                         share.is_finite() && (0.0..=1.0).contains(&share),
