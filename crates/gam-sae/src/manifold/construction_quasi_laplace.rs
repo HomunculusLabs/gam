@@ -3760,7 +3760,9 @@ impl SaeManifoldTerm {
     ///
     /// The Laplace criterion is `½log|∇²_θθ(objective)|`, and `A` IS that
     /// Hessian by construction. `B` is the positive-definite scale /
-    /// preconditioner for `A` (see `sae_ift_min_curvature_fraction`); a
+    /// preconditioner for `A` — and, since #2673, the METRIC every direction of
+    /// `A` is classified in at both the value and the gradient site (see
+    /// `sae_exact_a_identifiability_floor`); a
     /// preconditioner is not the operator it preconditions. Pricing `log|B|`
     /// here while the dense lane prices `log|A|` is exactly the defect: the same
     /// statistical state was ranked ~22 criterion units apart because a host

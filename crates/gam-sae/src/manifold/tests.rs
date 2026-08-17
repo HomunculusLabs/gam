@@ -4506,7 +4506,7 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
 ///   eigenvalue of `A`. Inside the band the direction is the radial-gauge
 ///   quotient null and is priced `log 1 = 0`; below `−floor` #2336's saddle
 ///   escape triggers.
-/// * `sae_ift_min_curvature_fraction()` (`sqrt(EPSILON)`) on the GENERALIZED
+/// * `sae_exact_a_identifiability_floor()` (`sqrt(EPSILON)`) on the GENERALIZED
 ///   Rayleigh quotient `μ = xᵀAx / xᵀBx` of the IFT solution — a `B`-relative
 ///   ratio, not an eigenvalue of anything.
 ///
