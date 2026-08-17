@@ -354,8 +354,9 @@ pub(crate) fn quotient_family_sizes(
 /// both are wrong (#2714).
 ///
 /// This is a property of the SPAN THE GATES REMOVE, not of the chart-gauge
-/// construction: it reads `gauge_quotient_basis`, the single source of truth
-/// for that span, so it fails whichever family contributes a live direction.
+/// construction: it reads `posterior_null_quotient_basis`, the single source of
+/// truth for that span, so it fails whichever family contributes a live
+/// direction.
 #[test]
 fn quotient_span_is_flat_for_the_penalized_objective_2720() {
     let z = planted_circle_cloud();
@@ -378,7 +379,7 @@ fn quotient_span_is_flat_for_the_penalized_objective_2720() {
         let (chart, beta_null, channel_null) =
             quotient_family_sizes(&term, &lambda_smooth).expect("family sizes");
         let basis = term
-            .gauge_quotient_basis(&lambda_smooth)
+            .posterior_null_quotient_basis(&lambda_smooth)
             .expect("the seeded fixture has a well-defined quotient span");
         println!(
             "\n[2720-gate] kind={kind} tol={tolerance:.6e} span={} \

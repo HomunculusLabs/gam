@@ -2414,65 +2414,84 @@ impl SaeManifoldTerm {
     }
 
     /// Norm² of a full-length `(n·q + β)` residual vector after projecting out
-    /// BOTH the chart reparametrisation orbit AND the rank-deficient decoder
-    /// β-null (#1051/#1117). Shared by the convergence STEP gate
-    /// ([`Self::quotient_newton_step_norm_sq`]) and the convergence GRADIENT gate
-    /// ([`Self::quotient_gradient_norm_sq`]) so both measure progress on the SAME
-    /// identified quotient — otherwise a rank-deficient circle whose only
-    /// remaining motion is gauge/null crawl is recognised as converged by the
-    /// step measure but rejected forever by the raw-gradient measure, burning the
-    /// inner refine budget (the #1117 stall).
+    /// the rank-deficient decoder null space (#1051/#1117). Shared by the
+    /// convergence STEP gate ([`Self::quotient_newton_step_norm_sq`]) and the
+    /// convergence GRADIENT gate ([`Self::quotient_gradient_norm_sq`]) so both
+    /// measure progress on the SAME identified quotient — otherwise a
+    /// rank-deficient circle whose only remaining motion is null crawl is
+    /// recognised as converged by the step measure but rejected forever by the
+    /// raw-gradient measure, burning the inner refine budget (the #1117 stall).
     ///
-    /// ## WHAT IS FLAT ALONG THE ORBIT, AND WHAT IS NOT (gam#2715)
+    /// ## WHY THE CHART ORBIT IS NOT IN THIS SPAN (gam#2720)
     ///
-    /// This doc previously said "along either the penalised joint objective is
-    /// flat, so a component there is gauge freedom, not un-converged motion".
-    /// **The first clause is false and the second does not follow.** Measured:
+    /// It used to be, on the premise that "along either the penalised joint
+    /// objective is flat, so a component there is gauge freedom, not
+    /// un-converged motion". The premise is false, and the measurement that
+    /// settles it is a per-objective-term central difference of the VALUE
+    /// functions along every direction this span used to contain
+    /// (`tests_gauge_posterior_flatness_2720`, on the planted-circle fixture at
+    /// four atom kinds):
     ///
-    /// * The orbit IS an exact first-order symmetry of the **likelihood**.
-    ///   [`Self::dense_step_gauge_vector_from_field`] cancels the reconstruction
-    ///   motion with a least-squares decoder compensation, and the residual of
-    ///   that solve — which is precisely the first-order reconstruction change —
-    ///   measured `1.29e-16 … 1.11e-15` RELATIVE over 1333 constructions on two
-    ///   fixtures. So the data-fit term really is flat here.
-    /// * The orbit is NOT a symmetry of the **posterior**. The ARD prior on `t`
-    ///   and the smoothness prior on `β` depend on those coordinates directly,
-    ///   not only through the reconstruction, and a chart reparametrisation moves
-    ///   them. Measured at one stall state: the directional derivatives of the
-    ///   PENALISED objective along the two orbit directions are `4.592144e-3` and
-    ///   `5.823201e-3` against a `5.574613e-4` convergence tolerance — **8.2x and
-    ///   10.4x**, and they reconstruct the projected gradient component
-    ///   (`hypot = 7.4160270e-3` vs `‖Π∥gauge g‖ = 7.416027e-3`) to `5.6e-10`.
+    /// | family | directions | worst \|d f\| / tolerance |
+    /// |---|---|---|
+    /// | `dense_step_gauge_vectors` (chart orbit) | 7 | **76 170** |
+    /// | `joint_decoder_beta_null_directions` | 704 | 0.00003 |
+    /// | `decoder_channel_null_directions` | — | 0.00003 |
     ///
-    /// A component along the orbit is therefore **likelihood-gauge but live
-    /// posterior descent**, and removing it from a convergence measure is only
-    /// sound where the priors are inactive along it. Any consumer that reads a
-    /// small quotient as "stationary" is relying on the false clause, not on this
-    /// one: the inner acceptance gate ([`Self::quotient_gradient_norm_sq`] via
-    /// `quasi_laplace_kkt_stationary`), the terminal Newton polish's stationarity
-    /// return, and `SaeInstalledInnerKktAudit::certifies()`, whose
-    /// `extensive OR intensive` disjunction reaches users as
-    /// `parameter_space.certifies()`.
+    /// The two kinds of direction are not the same object:
     ///
-    /// Worse, the omission is self-concealing: the solver can only move in the
-    /// complement, so it drives the complement component down and leaves the
-    /// orbit component alone, and the retained fraction `‖Π⊥g‖/‖g‖` therefore
-    /// tends to zero at ANY fixed point whether or not it is stationary
-    /// (measured on one trajectory at constant projector rank: `0.978` far out,
-    /// `0.500` at the stall, `0.00108` after a polish step). An acceptance
-    /// denominated in it is an eventual-acceptance guarantee rather than a test.
+    /// * the decoder nulls are machine-null eigenvectors of the **penalized**
+    ///   Gram `DᵀD + λS`, so the data fit AND the smoothness prior are flat
+    ///   along them by construction — measured at `3e-9` absolute, i.e. the
+    ///   roundoff of the value function. They are genuine posterior nulls and
+    ///   they belong in a convergence quotient.
+    /// * the chart orbit is a symmetry of the **likelihood** only. The
+    ///   compensating decoder solve makes the reconstruction change vanish to
+    ///   `1e-16` relative — re-measured through the value function, at
+    ///   `n_active = 42` against `M ∈ {2,3,32}`, so it is not the rank-trivial
+    ///   regime where that solve is exact for any field whatever. But the ARD
+    ///   prior on `t` and the smoothness prior on `β` are written on the chart
+    ///   coordinates, and they move: the constant-shift field moves ARD alone,
+    ///   the dilation field `δt = t` moves the smoothness prior by `−7.82` on an
+    ///   objective of `165` because shrinking the chart while inflating the
+    ///   decoder buys smoothness at no cost in fit.
     ///
-    /// This comment documents the state of the code; it does not fix it. The
-    /// precondition the accept path assumes — `maxᵢ |gᵀvᵢ| ≤ tolerance` over the
-    /// removed directions — is available here as `coeff` and is not checked.
-    /// Making the orbit a genuine posterior symmetry is a modelling change and is
-    /// tracked separately.
+    /// ### The modelling question #2720 asked, and its answer
+    ///
+    /// "Make the orbit a genuine posterior symmetry" would mean deleting the
+    /// prior's dependence on the chart coordinates. It cannot be done, and
+    /// should not be: the ARD coordinate prior IS the chart's identifiability
+    /// device — the standard mean-zero random-effect convention, with the
+    /// decoder's constant column absorbing the location — and the smoothness
+    /// prior is what fixes the chart's scale. A prior made invariant under
+    /// translation and dilation of `t` is improper along exactly those
+    /// directions and cannot shrink an unused axis, which is the entire purpose
+    /// of ARD. **There is no posterior gauge here and there should not be one.**
+    ///
+    /// ### Why removing it can only help, stated as an identity
+    ///
+    /// For the GRADIENT gate the quotient is a no-op precisely when it is valid:
+    /// subtracting `(gᵀv)v` changes `‖g‖` only insofar as `gᵀv ≠ 0`, which is
+    /// the precondition's own violation. So the chart orbit's presence in this
+    /// span could never do anything except weaken the gate exactly where the
+    /// gate was right. For the STEP gate the quotient is not a no-op — a step
+    /// along a genuinely flat direction is genuinely not progress — but that
+    /// argument needs the direction to BE flat, which is what the table above
+    /// refutes for the chart orbit and confirms for the decoder nulls.
+    ///
+    /// ### What the orbit gets instead
+    ///
+    /// A mover, not a blindfold: [`Self::descend_gauge_orbit`] minimizes the
+    /// penalized objective over [`Self::likelihood_flat_block_basis`], which
+    /// still contains the chart orbit. That is block-coordinate descent on the
+    /// real objective, so the orbit component of the residual is reduced rather
+    /// than hidden, and the raw gate can then see a genuinely stationary point.
     pub(crate) fn quotient_residual_norm_sq(
         &self,
         mut residual: Array1<f64>,
         penalized_gram_scale: &[f64],
     ) -> Result<f64, String> {
-        for basis in self.gauge_quotient_basis(penalized_gram_scale)? {
+        for basis in self.posterior_null_quotient_basis(penalized_gram_scale)? {
             if basis.len() != residual.len() {
                 continue;
             }
@@ -2484,57 +2503,100 @@ impl SaeManifoldTerm {
         Ok(residual.iter().map(|v| v * v).sum::<f64>())
     }
 
-    /// The ORTHONORMAL basis of the span every quotient measure removes, and
-    /// the SINGLE source of truth for it (#2762).
+    /// The ORTHONORMAL basis of the span every convergence quotient removes,
+    /// and the SINGLE source of truth for it (#2762/#2720).
     ///
-    /// This used to be inlined in [`Self::quotient_residual_norm_sq`], which
-    /// interleaved the Gram--Schmidt with the projection so the span existed
-    /// only as a side effect of measuring a residual against it. Nothing else
-    /// could name it — so the precondition that span's removal assumes
-    /// (`maxᵢ |gᵀvᵢ| ≤ tolerance`, documented at the projection site and never
-    /// checked) could not be evaluated, and the descent it hides could not be
-    /// taken. [`Self::descend_gauge_orbit`] minimizes the penalized objective
-    /// over exactly this basis, in exactly this order, so what is DESCENDED and
-    /// what is REMOVED are the same subspace by construction rather than by two
-    /// constructions that agree today.
+    /// Membership is decided by one question — **is the PENALIZED objective flat
+    /// along this direction?** — and both families here answer it structurally
+    /// rather than by measurement at a state: they are machine-null directions
+    /// of the penalized Gram `DᵀD + λS` (basis-column deficiency) and of the
+    /// decoder's realised column span (ambient-channel deficiency). The data fit
+    /// and the smoothness prior are both flat along them by construction, and
+    /// `tests_gauge_posterior_flatness_2720` measures the whole penalized
+    /// objective flat along every one of them to `3e-9`.
+    ///
+    /// The chart reparametrisation orbit is deliberately NOT here; see
+    /// [`Self::quotient_residual_norm_sq`] for the measurement and the modelling
+    /// argument. It lives in [`Self::likelihood_flat_block_basis`], which is
+    /// what the descent block minimizes over.
     ///
     /// Order is load-bearing (Gram--Schmidt is order-dependent) and is the
-    /// historical one: closed-form chart gauges, then the penalized joint
-    /// decoder β-null, then the decoder column-span channel null (#1051/#1273 —
-    /// so the inner convergence measure and the outer-gradient deflation
-    /// quotient the SAME identified subspace).
-    pub(crate) fn gauge_quotient_basis(
+    /// historical one within these two families: the penalized joint decoder
+    /// β-null, then the decoder column-span channel null (#1051/#1273).
+    pub(crate) fn posterior_null_quotient_basis(
         &self,
         penalized_gram_scale: &[f64],
     ) -> Result<Vec<Array1<f64>>, String> {
+        Ok(Self::orthonormalized(
+            self.joint_decoder_beta_null_directions(penalized_gram_scale)?
+                .into_iter()
+                .chain(self.decoder_channel_null_directions()?),
+        ))
+    }
+
+    /// The ORTHONORMAL basis of the span the penalized objective is flat along
+    /// **as a function of the reconstruction** — the chart reparametrisation
+    /// orbit followed by the posterior nulls (#2720).
+    ///
+    /// This is the block [`Self::descend_gauge_orbit`] minimizes over, and it is
+    /// deliberately WIDER than [`Self::posterior_null_quotient_basis`]. The two
+    /// spans answer two different questions and conflating them is what #2720
+    /// was opened on:
+    ///
+    /// * *what may be REMOVED from a convergence measure* — only directions the
+    ///   posterior cannot see, or the measure certifies non-stationary points;
+    /// * *what should be DESCENDED as its own block* — every direction the
+    ///   LIKELIHOOD cannot see, because those carry no data-fit curvature, so
+    ///   the only curvature on them is the priors' (tiny next to the transverse
+    ///   block) and every globalization in this solver is a step-SHORTENING
+    ///   device. Descending a direction is never unsound: it only ever lowers
+    ///   the same scalar every other mover lowers.
+    ///
+    /// Chart gauges come first so the Gram--Schmidt keeps the historical
+    /// ordering of the decoder-null families relative to each other.
+    pub(crate) fn likelihood_flat_block_basis(
+        &self,
+        penalized_gram_scale: &[f64],
+    ) -> Result<Vec<Array1<f64>>, String> {
+        Ok(Self::orthonormalized(
+            self.dense_step_gauge_vectors()?
+                .into_iter()
+                .chain(self.joint_decoder_beta_null_directions(penalized_gram_scale)?)
+                .chain(self.decoder_channel_null_directions()?),
+        ))
+    }
+
+    /// Modified Gram--Schmidt over a candidate stream, dropping anything that
+    /// collapses into the span already accumulated. Shared by the two span
+    /// constructors above so that "the descent block contains the quotient
+    /// span" is a property of one algorithm run on two inputs, not of two
+    /// implementations that agree today.
+    fn orthonormalized(candidates: impl Iterator<Item = Array1<f64>>) -> Vec<Array1<f64>> {
         let mut orthonormal: Vec<Array1<f64>> = Vec::new();
-        let gauges = self
-            .dense_step_gauge_vectors()?
-            .into_iter()
-            .chain(self.joint_decoder_beta_null_directions(penalized_gram_scale)?)
-            .chain(self.decoder_channel_null_directions()?);
-        for mut gauge in gauges {
+        for mut candidate in candidates {
             for basis in &orthonormal {
-                let coeff = gauge.dot(basis);
-                for i in 0..gauge.len() {
-                    gauge[i] -= coeff * basis[i];
+                let coeff = candidate.dot(basis);
+                for i in 0..candidate.len() {
+                    candidate[i] -= coeff * basis[i];
                 }
             }
-            let norm_sq = gauge.iter().map(|v| v * v).sum::<f64>();
+            let norm_sq = candidate.iter().map(|v| v * v).sum::<f64>();
             if norm_sq <= 1.0e-24 || !norm_sq.is_finite() {
                 continue;
             }
             let inv_norm = norm_sq.sqrt().recip();
-            for v in gauge.iter_mut() {
+            for v in candidate.iter_mut() {
                 *v *= inv_norm;
             }
-            orthonormal.push(gauge);
+            orthonormal.push(candidate);
         }
-        Ok(orthonormal)
+        orthonormal
     }
 
-    /// #2762 — MINIMIZE the penalized objective over the span every quotient
-    /// measure removes, instead of removing it and hoping it was flat.
+    /// #2762 — MINIMIZE the penalized objective over the span the LIKELIHOOD is
+    /// flat along ([`Self::likelihood_flat_block_basis`]), instead of removing
+    /// it from a convergence measure and hoping it was flat for the posterior
+    /// too.
     ///
     /// # Why this block exists at all
     ///
@@ -2574,19 +2636,22 @@ impl SaeManifoldTerm {
     /// # What this does, and why it changes no estimand
     ///
     /// It is plain block-coordinate descent on the objective's own parameter
-    /// space: minimize `f` over the removed span, let the Newton/MM movers have
-    /// the transverse block where they are well-conditioned. Both blocks
-    /// decrease the SAME scalar (`penalized_objective_total`, the exact function
-    /// the inner Armijo line search descends and the KKT gradient
+    /// space: minimize `f` over the likelihood-flat block, let the Newton/MM
+    /// movers have the transverse block where they are well-conditioned. Both
+    /// blocks decrease the SAME scalar (`penalized_objective_total`, the exact
+    /// function the inner Armijo line search descends and the KKT gradient
     /// differentiates), so the composition is monotone and a joint fixed point
     /// is stationary in both — which is full stationarity. Nothing about the
     /// model, the priors, or the likelihood changes; the gauge coordinate stops
     /// being arbitrary and starts being CHOSEN by the objective.
     ///
-    /// The consequence for the gate is the point of the exercise: at a state
-    /// this has converged on, `Π∥gauge g ≈ 0`, so the quotient norm and the raw
-    /// norm agree and the precondition `quotient_residual_norm_sq`'s removal
-    /// assumes holds BY CONSTRUCTION rather than by assertion.
+    /// The consequence for the gate is the point of the exercise, and #2720
+    /// sharpened what that consequence is. This block is the ONLY thing that
+    /// reduces the orbit component of `g`, because the orbit is no longer
+    /// removed from any convergence measure: at a state this has converged on,
+    /// `Π∥gauge g ≈ 0` is a MEASURED property of the iterate rather than an
+    /// assumption a projection made on its behalf, and the raw gate reads it
+    /// directly.
     ///
     /// # The line search, and why every bound in it is derived
     ///
@@ -2658,7 +2723,7 @@ impl SaeManifoldTerm {
                 return Ok(outcome);
             }
 
-            let basis = self.gauge_quotient_basis(penalized_gram_scale)?;
+            let basis = self.likelihood_flat_block_basis(penalized_gram_scale)?;
             outcome.dimension = basis.len();
             let mut direction = Array1::<f64>::zeros(gradient.len());
             let mut max_directional = 0.0_f64;

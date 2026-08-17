@@ -1,22 +1,23 @@
-//! #2762 — the span every quotient measure removes must be MINIMIZED over, not
-//! assumed flat.
+//! #2762 — the span the likelihood is flat along must be MINIMIZED over, not
+//! assumed flat for the posterior.
 //!
-//! `quotient_residual_norm_sq` projects the chart-gauge orbit and the decoder
-//! nulls out of the KKT residual before the inner gate reads it, on the premise
-//! that the penalized objective is flat along them. The orbit is an exact
-//! first-order symmetry of the RECONSTRUCTION and not of the penalized
-//! objective — the ARD prior on `t` and the smoothness prior on `β` are written
-//! on the chart coordinates — so the premise is false wherever those priors are
-//! active, and the failure is self-concealing: the solver can only descend the
-//! transverse block, so the retained fraction tends to zero at any fixed point
-//! whether or not it is stationary.
+//! `quotient_residual_norm_sq` used to project the chart-gauge orbit out of the
+//! KKT residual alongside the decoder nulls, on the premise that the penalized
+//! objective is flat along all of them. The orbit is an exact first-order
+//! symmetry of the RECONSTRUCTION and not of the penalized objective — the ARD
+//! prior on `t` and the smoothness prior on `β` are written on the chart
+//! coordinates — so the premise was false wherever those priors are active, and
+//! the failure was self-concealing: the solver can only descend the transverse
+//! block, so the retained fraction tends to zero at any fixed point whether or
+//! not it is stationary. #2720 removed the orbit from that projection; this
+//! module owns the block that DESCENDS it instead.
 //!
 //! The measurement that forced [`SaeManifoldTerm::descend_gauge_orbit`] is on
 //! that function's own doc. These are its properties, gated from three angles
 //! that do not share a failure mode:
 //!
-//! 1. the basis the descent minimizes over IS the basis the projection removes
-//!    (an identity between two functions, checked as an identity);
+//! 1. the basis the descent minimizes over CONTAINS the basis the projection
+//!    removes, strictly (an identity and a containment, both checked as such);
 //! 2. a call that commits nothing leaves the state bit-for-bit (so an inert
 //!    call can never be the thing that moved a fit);
 //! 3. on a state whose orbit carries live slope, the descent cashes a decrease
@@ -80,18 +81,23 @@ fn dense_gradient(term: &mut SaeManifoldTerm, z: &Array2<f64>, rho: &SaeManifold
     gradient
 }
 
-/// ANGLE 1 — the descent and the projection must be talking about one subspace.
+/// ANGLE 1 — the projection removes EXACTLY the posterior-null span, and the
+/// descent block strictly CONTAINS it.
 ///
-/// `gauge_quotient_basis` was factored out of `quotient_residual_norm_sq`, which
-/// had interleaved its Gram--Schmidt with the projection. This pins the two
-/// halves of that refactor as an IDENTITY rather than as a code reading: the
-/// returned vectors are orthonormal, and the shipped quotient norm equals
-/// `‖r‖² − Σᵢ (r·vᵢ)²` on a residual that has support on every block. If a
-/// future edit changes the span, the order, or the Gram--Schmidt, this fails —
-/// which is the point, because the descent's guarantee is that it minimizes over
-/// exactly what the gate removes.
+/// `posterior_null_quotient_basis` was factored out of
+/// `quotient_residual_norm_sq`, which had interleaved its Gram--Schmidt with the
+/// projection. This pins the halves of that refactor as an IDENTITY rather than
+/// as a code reading: the returned vectors are orthonormal, and the shipped
+/// quotient norm equals `‖r‖² − Σᵢ (r·vᵢ)²` on a residual that has support on
+/// every block.
+///
+/// #2720 split the one span into two, and the second clause here is that split
+/// stated as a containment: every direction the gate REMOVES is a direction the
+/// descent MINIMIZES over, but not conversely — the chart orbit is descended and
+/// not removed, because the penalized objective is not flat along it. A refactor
+/// that re-merges them fails this test on whichever side it collapses.
 #[test]
-fn gauge_quotient_basis_is_orthonormal_and_reproduces_the_shipped_projection_2762() {
+fn quotient_span_is_orthonormal_reproduces_the_projection_and_sits_inside_the_descent_block_2762() {
     let k = 2usize;
     let (mut term, z, rho) = seeded_two_circle_term(36, 12, k);
     let lambda_smooth = rho
@@ -101,11 +107,41 @@ fn gauge_quotient_basis_is_orthonormal_and_reproduces_the_shipped_projection_276
     // against, exactly as every production caller does.
     let gradient = dense_gradient(&mut term, &z, &rho);
     let basis = term
-        .gauge_quotient_basis(&lambda_smooth)
-        .expect("the seeded fixture has a well-defined gauge span");
+        .posterior_null_quotient_basis(&lambda_smooth)
+        .expect("the seeded fixture has a well-defined posterior-null span");
+    let descent_block = term
+        .likelihood_flat_block_basis(&lambda_smooth)
+        .expect("the seeded fixture has a well-defined descent block");
     assert!(
-        !basis.is_empty(),
-        "K={k} periodic atoms must contribute at least one chart-gauge direction"
+        !descent_block.is_empty(),
+        "K={k} periodic atoms must contribute at least one chart-gauge direction to the \
+         descent block"
+    );
+    // Containment, checked as a projection identity rather than by comparing
+    // vectors: each quotient direction must be reproduced by its own components
+    // in the descent block's orthonormal frame.
+    for (index, vector) in basis.iter().enumerate() {
+        let mut residual = vector.clone();
+        for other in &descent_block {
+            let coeff = residual.dot(other);
+            for i in 0..residual.len() {
+                residual[i] -= coeff * other[i];
+            }
+        }
+        let leak = residual.dot(&residual).sqrt();
+        assert!(
+            leak <= 1.0e-9,
+            "quotient direction {index} leaves the descent block by {leak:.6e}; every direction \
+             removed from a convergence measure must be one the descent block can act on, or \
+             there is a direction the gate ignores and no mover reduces"
+        );
+    }
+    assert!(
+        descent_block.len() > basis.len(),
+        "the descent block ({}) must be STRICTLY wider than the quotient span ({}) on a \
+         periodic fixture: the chart orbit is descended and deliberately not removed (#2720)",
+        descent_block.len(),
+        basis.len(),
     );
 
     for (i, left) in basis.iter().enumerate() {
@@ -223,8 +259,8 @@ fn zz2762_removed_span_slope_and_layout_census() {
         .expect("finite");
     let gradient = dense_gradient(&mut term, &z, &rho);
     let basis = term
-        .gauge_quotient_basis(&lambda_smooth)
-        .expect("gauge span");
+        .likelihood_flat_block_basis(&lambda_smooth)
+        .expect("descent block");
     eprintln!(
         "[zz2762] seed objective={seed_objective:.9e} ‖g‖={:.6e} span_dim={}",
         gradient.dot(&gradient).sqrt(),
@@ -261,8 +297,8 @@ fn zz2762_removed_span_slope_and_layout_census() {
             .expect("finite");
         let after = dense_gradient(&mut term, &z, &rho);
         let recomputed = term
-            .gauge_quotient_basis(&lambda_smooth)
-            .expect("gauge span at the planted state");
+            .likelihood_flat_block_basis(&lambda_smooth)
+            .expect("descent block at the planted state");
         let mut recomputed_max = 0.0_f64;
         let mut recomputed_at = usize::MAX;
         let mut best_overlap = 0.0_f64;
@@ -297,8 +333,8 @@ fn zz2762_removed_span_slope_and_layout_census() {
         .expect("finite");
     let planted_gradient = dense_gradient(&mut term, &z, &rho);
     let planted_basis = term
-        .gauge_quotient_basis(&lambda_smooth)
-        .expect("gauge span");
+        .likelihood_flat_block_basis(&lambda_smooth)
+        .expect("descent block");
     eprintln!(
         "[zz2762] planted objective={planted_objective:.9e} (rise {:.6e}) ‖g‖={:.6e} span_dim={}",
         planted_objective - seed_objective,
@@ -363,8 +399,8 @@ fn removed_span_max_slope(
 ) -> f64 {
     let gradient = dense_gradient(term, z, rho);
     let basis = term
-        .gauge_quotient_basis(lambda_smooth)
-        .expect("the gauge span is well-defined");
+        .likelihood_flat_block_basis(lambda_smooth)
+        .expect("the descent block is well-defined");
     let mut max_slope = 0.0_f64;
     for vector in &basis {
         if vector.len() == gradient.len() {
