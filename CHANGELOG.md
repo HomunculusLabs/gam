@@ -69,12 +69,14 @@
     set every step-SHORTENING globalization serves badly. `descend_gauge_orbit`
     takes this one, so the orbit keeps its mover and loses only its blindfold.
 
-  For the gradient gate the old removal was structurally pure defect:
-  subtracting `(gᵀv)v` changes `‖g‖` only insofar as `gᵀv ≠ 0`, which is the
-  precondition's own violation, so the orbit's presence could never do anything
-  except weaken the gate exactly where the gate was right. For the step gate the
-  removal is not a no-op, but it requires the direction to BE flat — granted for
-  the decoder nulls, refused for the orbit.
+  For the gradient gate the old removal bought nothing and could cost
+  everything. The quotient removes `Σᵢ (gᵀvᵢ)²` from `‖g‖²`, so the precondition
+  `maxᵢ |gᵀvᵢ| ≤ τ` bounds what it can ever remove at `√m·τ` over `m`
+  directions — on the measured span that is `√704 · 3e-9 = 8e-8` against
+  `τ = 7.5e-5`, i.e. nothing. Where the precondition fails the removal is
+  unbounded, and it failed by four orders of magnitude. For the step gate the
+  removal is not bounded that way and is the point, but it requires the
+  direction to BE flat — granted for the decoder nulls, refused for the orbit.
 
   Refusal messages that named `‖Π⊥gauge g‖` and `gauge_share` now name
   `‖Π⊥null g‖` and `null_share`, because the span they measure no longer

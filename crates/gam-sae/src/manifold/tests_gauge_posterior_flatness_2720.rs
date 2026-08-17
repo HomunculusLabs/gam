@@ -39,6 +39,7 @@
 // declaration.
 #![cfg(test)]
 use super::*;
+use crate::manifold::fit_drivers::JointFitTermination;
 
 /// The #2253/#2234 planted circle, verbatim from
 /// `tests_gauge_frame_roundtrip_2720` (same LCG, same seed, same shape) so every
@@ -768,4 +769,116 @@ fn quotient_span_is_flat_with_decoder_frames_active_2720() {
          penalized objective:\n  {}",
         violations.join("\n  "),
     );
+}
+
+/// #2720's acceptance criterion, bullet 1, satisfied where it means something:
+/// AT A FIXED POINT.
+///
+/// The issue asks for a fixture on which "the directional derivative of the
+/// penalized objective along every constructed orbit direction is at or below
+/// the convergence tolerance". Read as a demand for a SYMMETRY — flat at every
+/// state — that is option 1, and option 1 makes the coordinate prior improper
+/// along the very directions ARD needs in order to prune. Read as a demand
+/// about the point the solver stops at, it is exactly what stationarity means,
+/// it is checkable, and it is what this test checks.
+///
+/// The mechanism that makes it true is `descend_gauge_orbit`: the orbit carries
+/// no data-fit curvature, so its only curvature is the priors' — tiny next to
+/// the transverse block — and every globalization in this solver shortens
+/// steps. The block-coordinate descent is the one mover that can take the long
+/// step the orbit needs, and #2762 wired it into all three fixed-point claims.
+///
+/// CONDITIONAL on the exit claiming a fixed point, and that is not hedging: an
+/// exit on iteration budget claims nothing, and asserting stationarity there
+/// would be asserting that a truncated optimization is optimal. The
+/// unconditional half — the measurement itself, and the fit descending — runs
+/// either way and is printed.
+#[test]
+fn at_an_inner_fixed_point_the_chart_orbit_slope_is_within_the_kkt_tolerance_2720() {
+    let z = planted_circle_cloud();
+    let mut term = seeded_term_of_kind(z.view(), "periodic", 1);
+    let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
+    let entry = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective at the seed");
+    let outcome = term
+        .run_joint_fit_arrow_schur_with_termination_policy(
+            z.view(),
+            &mut rho,
+            None,
+            512,
+            0.05,
+            1.0e-6,
+            1.0e-6,
+            // The EVIDENCE lane: its `NoStrictDecrease` exit is the one the
+            // refine loop turns into `criterion_fixed_point`.
+            false,
+        )
+        .expect("the planted-circle fixture fits");
+    let settled = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective at the exit");
+    let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+
+    let system = term
+        .assemble_arrow_schur(z.view(), &rho, None)
+        .expect("the exit state assembles");
+    let n = term.n_obs();
+    let q = term.assignment.row_block_dim();
+    let dense_len = n * q;
+    let mut gradient = Array1::<f64>::zeros(dense_len + system.gb.len());
+    for (row_index, row) in system.rows.iter().enumerate() {
+        let base = system.row_offsets[row_index];
+        for (axis, &value) in row.gt.iter().enumerate() {
+            gradient[base + axis] = value;
+        }
+    }
+    for (index, &value) in system.gb.iter().enumerate() {
+        gradient[dense_len + index] = value;
+    }
+    drop(system);
+
+    let orbit: Vec<Array1<f64>> = term
+        .dense_step_gauge_vectors()
+        .expect("gauge vectors at the exit state")
+        .into_iter()
+        .filter_map(unit_norm)
+        .collect();
+    assert!(
+        !orbit.is_empty(),
+        "the periodic atom must still enumerate a phase orbit at the exit state, or there is \
+         nothing for this test to be about"
+    );
+    let mut worst = 0.0_f64;
+    for direction in &orbit {
+        if direction.len() == gradient.len() {
+            worst = worst.max(gradient.dot(direction).abs());
+        }
+    }
+    println!(
+        "[2720-fixed] termination={:?} objective {entry:.9e} -> {settled:.9e}  \
+         ‖g‖={:.6e}  maxᵢ|gᵀvᵢ| over the chart orbit = {worst:.6e} ({:.4}x tol {tolerance:.6e})",
+        outcome.termination,
+        gradient.dot(&gradient).sqrt(),
+        worst / tolerance,
+    );
+    assert!(
+        settled < entry,
+        "the fit must strictly descend for its exit state to be worth grading: \
+         {entry} -> {settled}"
+    );
+    if matches!(
+        outcome.termination,
+        JointFitTermination::Heuristic | JointFitTermination::NoStrictDecrease
+    ) {
+        assert!(
+            worst <= tolerance,
+            "the inner fit claimed a FIXED POINT ({:?}) while the chart orbit still carries \
+             maxᵢ|gᵀvᵢ| = {worst:.6e} = {:.3}x the convergence tolerance {tolerance:.6e}. That is \
+             #2720's acceptance criterion failing at the only state where it is a statement \
+             about stationarity rather than about a symmetry the model does not have.",
+            outcome.termination,
+            worst / tolerance,
+        );
+    }
 }

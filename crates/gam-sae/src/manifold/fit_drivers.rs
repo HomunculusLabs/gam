@@ -2468,16 +2468,23 @@ impl SaeManifoldTerm {
     /// directions and cannot shrink an unused axis, which is the entire purpose
     /// of ARD. **There is no posterior gauge here and there should not be one.**
     ///
-    /// ### Why removing it can only help, stated as an identity
+    /// ### Why removing it can only help, stated exactly
     ///
-    /// For the GRADIENT gate the quotient is a no-op precisely when it is valid:
-    /// subtracting `(gᵀv)v` changes `‖g‖` only insofar as `gᵀv ≠ 0`, which is
-    /// the precondition's own violation. So the chart orbit's presence in this
-    /// span could never do anything except weaken the gate exactly where the
-    /// gate was right. For the STEP gate the quotient is not a no-op — a step
-    /// along a genuinely flat direction is genuinely not progress — but that
-    /// argument needs the direction to BE flat, which is what the table above
-    /// refutes for the chart orbit and confirms for the decoder nulls.
+    /// The gradient quotient removes `Σᵢ (gᵀvᵢ)²` from `‖g‖²`, so the
+    /// precondition `maxᵢ |gᵀvᵢ| ≤ τ` bounds what it can ever remove at
+    /// `√m · τ` over `m` directions — the gate is then at worst `√m`-loose, and
+    /// on the measured span that bound is `√704 · 3e-9 = 8e-8` against
+    /// `τ = 7.5e-5`, i.e. nothing. Where the precondition FAILS the removal is
+    /// unbounded, and it failed here by four orders of magnitude. So the chart
+    /// orbit's presence in this span bought the gate nothing it did not already
+    /// have and cost it everything at exactly the states where the gate was
+    /// right.
+    ///
+    /// For the STEP gate the quotient is not bounded that way — a step along a
+    /// genuinely flat direction is genuinely not progress, and removing it is
+    /// the point — but that argument needs the direction to BE flat, which is
+    /// what the table above refutes for the chart orbit and confirms for the
+    /// decoder nulls.
     ///
     /// ### What the orbit gets instead
     ///
