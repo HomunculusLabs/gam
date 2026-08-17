@@ -219,4 +219,6 @@ pub use stochastic_trace::*;
 #[cfg(test)]
 mod logdet_lane_agreement_2457_tests;
 #[cfg(test)]
+mod psi_logdet_chain_tests;
+#[cfg(test)]
 mod tests;

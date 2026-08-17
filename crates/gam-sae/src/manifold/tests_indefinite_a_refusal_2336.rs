@@ -4,6 +4,7 @@
 //! `SaeCriterionError::IndefiniteObservedInformation` variant that #2330 Phase-2a
 //! introduced when it made `½log|A|` the ranked value.
 
+use super::construction::{ArrowMetric, sae_exact_a_direction_floor};
 use super::tests::*;
 use super::*;
 use gam_solve::rho_optimizer::OuterObjective;
@@ -139,12 +140,22 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
         .expect("materialize the clamp-attribution diagonal");
     let (eigs, vecs) =
         SaeManifoldTerm::cluster_stable_eigh(&a, &e_diag, total_t).expect("stable exact-A eigh");
-    let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    // #2673 — the band is per direction, in the `B` metric both the value and
+    // the gradient classify in. This probe supplies its own eigenvectors and its
+    // own `B`-applies and shares only the scalar rule.
+    let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    let joint_metric = ArrowMetric::Joint(&cache);
+    let floor_at = |idx: usize| -> f64 {
+        let vbv = joint_metric
+            .quadratic_form(vecs.column(idx))
+            .expect("B quadratic form");
+        sae_exact_a_direction_floor(eigs.len(), spectral_norm, vbv)
+    };
     let switched = eigs
         .iter()
         .enumerate()
         .filter(|(idx, lambda)| {
+            let floor = floor_at(*idx);
             if **lambda >= -floor {
                 return false;
             }
@@ -312,7 +323,7 @@ fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
 /// gate forms
 ///
 /// ```text
-/// floor = SAE_EXACT_A_PD_FLOOR_REL · max(max_eig, 1)
+/// floor = max(dim·ε·‖A‖₂, √ε·vᵀBv)        (#2673 — per direction, in the B metric)
 /// basin = λ + vᵀEv        (E = the ARD concave-clamp diagonal, zero on the β border)
 /// basin < −floor  ⇒  genuine saddle, typed IndefiniteObservedInformation refusal
 /// basin ≥ −floor  ⇒  clamp-attributable, PRICED at the basin curvature
@@ -354,10 +365,20 @@ fn zz_measure_best_seen_classification_2228() {
                 .expect("A eigendecomposition (gate-identical clustering)");
             let min_eig = eigs.iter().copied().fold(f64::INFINITY, f64::min);
             let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+            let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+            let joint_metric = ArrowMetric::Joint(&cache);
+            let floors: Vec<f64> = (0..eigs.len())
+                .map(|idx| {
+                    let vbv = joint_metric
+                        .quadratic_form(vecs.column(idx))
+                        .expect("B quadratic form");
+                    sae_exact_a_direction_floor(eigs.len(), spectral_norm, vbv)
+                })
+                .collect();
+            let floor = floors.iter().copied().fold(0.0_f64, f64::max);
             eprintln!(
                 "2228-MEASURE: Ok(value={value:.9e}) certified; min_eig={min_eig:.6e} \
-                 max_eig={max_eig:.6e} floor={floor:.6e}"
+                 max_eig={max_eig:.6e} widest floor={floor:.6e}"
             );
             // A CERTIFIED best-seen mode is only meaningful if the numbers it is
             // certified on are well-posed: a finite criterion value, a finite
@@ -379,6 +400,7 @@ fn zz_measure_best_seen_classification_2228() {
             );
             // Every direction the gate examined, with the quantity it decided on.
             for (idx, &lambda) in eigs.iter().enumerate() {
+                let floor = floors[idx];
                 if lambda >= -floor {
                     continue;
                 }

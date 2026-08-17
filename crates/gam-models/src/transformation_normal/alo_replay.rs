@@ -1,5 +1,4 @@
 use super::chart::{CtnRowBases, CtnRowFloors, ctn_component_sensitivity, ctn_row_geometry};
-use super::log_normal_cdf_diff_derivatives;
 use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2, ArrayView1};
 
@@ -124,10 +123,12 @@ pub fn transformation_normal_alo_row_geometry(
             "transformation-normal ALO row derivative must be positive, got {h_prime}"
         ));
     }
-    let endpoint = log_normal_cdf_diff_derivatives(upper, lower)?;
+    // gam#2600: the fitted likelihood is the untruncated MLT density, so the ALO
+    // replay uses the same one — `f(y) = φ(h)·h'`, with no renormalization by
+    // the mass between the saved support endpoints.
     let weight = input.prior_weight;
-    let negative_log_likelihood = weight
-        * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln() + endpoint.log_z);
+    let negative_log_likelihood =
+        weight * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln());
 
     let mut dh = vec![0.0; dimension];
     let mut dh_prime = vec![0.0; dimension];
@@ -152,18 +153,11 @@ pub fn transformation_normal_alo_row_geometry(
     let mut nll_score = Array1::<f64>::zeros(dimension);
     let mut observed_hessian = Array2::<f64>::zeros((dimension, dimension));
     for left in 0..dimension {
-        let endpoint_first = endpoint.first[0] * dupper[left] + endpoint.first[1] * dlower[left];
-        nll_score[left] =
-            weight * (h * dh[left] - dh_prime[left] * inverse_h_prime + endpoint_first);
+        nll_score[left] = weight * (h * dh[left] - dh_prime[left] * inverse_h_prime);
         for right in 0..dimension {
-            let endpoint_second = endpoint.second[0][0] * dupper[left] * dupper[right]
-                + endpoint.second[0][1] * dupper[left] * dlower[right]
-                + endpoint.second[1][0] * dlower[left] * dupper[right]
-                + endpoint.second[1][1] * dlower[left] * dlower[right];
             observed_hessian[[left, right]] = weight
                 * (dh[left] * dh[right]
-                    + dh_prime[left] * dh_prime[right] * inverse_h_prime_squared
-                    + endpoint_second);
+                    + dh_prime[left] * dh_prime[right] * inverse_h_prime_squared);
         }
     }
     if !negative_log_likelihood.is_finite()
@@ -182,29 +176,27 @@ pub fn transformation_normal_alo_row_geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transformation_normal::{TRANSFORMATION_MONOTONICITY_EPS, log_normal_cdf_diff};
+    use crate::transformation_normal::TRANSFORMATION_MONOTONICITY_EPS;
 
+    /// gam#2600: the replayed row density is the untruncated MLT density
+    /// `log φ(h) + log h'`. The endpoint bases and floors the row input carries
+    /// still define the certified support of the saved model, but they are no
+    /// longer a term of the likelihood — so this independent reconstruction
+    /// does not mention them, and the fixture below feeds deliberately
+    /// asymmetric ones (`[1.0, 0.1]` / `[1.0, 0.9]`, floors `−0.04` / `0.06`)
+    /// so that any endpoint contribution surviving in the production path shows
+    /// up here as a mismatch rather than cancelling.
     fn scalar_nll(alpha: [f64; 2]) -> f64 {
         let value = [1.0, 0.4];
         let derivative = [0.0, 0.7];
-        let lower_basis = [1.0, 0.1];
-        let upper_basis = [1.0, 0.9];
         let offset = -0.15;
         let floor = 0.02;
-        let lower_floor = -0.04;
-        let upper_floor = 0.06;
         let weight = 1.3;
         let h = value[0] * alpha[0] + value[1] * alpha[1] + offset + floor;
         let h_prime = TRANSFORMATION_MONOTONICITY_EPS
             + derivative[0] * alpha[0]
             + derivative[1] * alpha[1];
-        let lower =
-            lower_basis[0] * alpha[0] + lower_basis[1] * alpha[1] + offset + lower_floor;
-        let upper =
-            upper_basis[0] * alpha[0] + upper_basis[1] * alpha[1] + offset + upper_floor;
-        weight
-            * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln()
-                + log_normal_cdf_diff(upper, lower).expect("finite endpoint mass"))
+        weight * (0.5 * h * h + 0.5 * (2.0 * std::f64::consts::PI).ln() - h_prime.ln())
     }
 
     #[test]

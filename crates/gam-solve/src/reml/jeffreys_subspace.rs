@@ -8,15 +8,31 @@
 //! would double-regularize and bias the smooth fit. This module produces the
 //! orthonormal basis `Z_J` of that span for one parameter block.
 //!
-//! The under-identified span is the FULL identifiable coefficient span of the
-//! (post-rank-deficiency-removal) reduced block — `Z_J = I_p` — NOT the penalty
-//! null space `ker(S)`. The Jeffreys penalty is self-limiting (its `O(1)` score
-//! is dominated by the data's `O(n)` Fisher information), so on a data-identified
-//! direction (penalized OR not) its only effect is the `O(1/n)` Firth bias
-//! correction; it bites only where the information is near-singular. Using the
-//! full span — rather than scoping to `ker(S)` — lets it reach a near-separation
-//! on a penalized spline direction too (the residual BMS-probit pathology). The
-//! aggregate penalty is consulted only to pick up the block dimension `p`.
+//! Three answers to "which directions" have shipped here, and a reader needs to
+//! know which one is live for which caller, because the module has carried two
+//! contradictory rationales at once:
+//!
+//!   1. **The FULL identifiable span** (`Z_J = I_p`), justified by the penalty
+//!      being self-limiting: its `O(1)` score is dominated by the data's `O(n)`
+//!      Fisher information, so on a data-identified direction its only effect is
+//!      the `O(1/n)` Firth bias correction. This is still the DEFAULT, and it is
+//!      what reaches a near-separation on a penalized spline direction (the
+//!      residual BMS-probit pathology). Its premise fails wherever the data's
+//!      information is not `O(n)` in any direction — a quasi-separated softmax
+//!      has `W = diag(p) − ppᵀ ≈ 0.005` per row (gam#2612).
+//!   2. **`ker(S_aggregate)`** ([`jeffreys_subspace_from_penalty`]), for a family
+//!      that states its aggregate: penalized directions already carry a proper
+//!      wiggliness prior, so a second one there is a duplicate. True for any
+//!      `λ > 0`, and false in MAGNITUDE when the selected `λ` rails at its floor
+//!      (gam#2612).
+//!   3. **The MEASURED span** ([`under_identified_subspace`]): the directions
+//!      whose `H + S_λ` curvature is under one observation-equivalent, at the
+//!      smoothing actually selected. This is what (1) and (2) each approximate
+//!      from one side, and it is what a caller with a certified mode should use.
+//!
+//! Everything here is pure linear algebra; the caller owns the constancy
+//! contract, since `Z_J` must not move while `Φ`'s derivative tower is being
+//! differentiated.
 //!
 //! Both tiers of the robustness machinery consume the SAME `Z_J`:
 //!   * Tier A (single-eta GLM via `FirthDenseOperator`) scopes the Fisher
@@ -31,7 +47,7 @@
 //! a well-conditioned fit) is the only "apply where needed" mechanism.
 
 use faer::Side;
-use gam_linalg::faer_ndarray::FaerEigh;
+use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
 use gam_linalg::lanczos::{SymmetricLanczosOptions, symmetric_lanczos_eigenpairs};
 use ndarray::{Array1, Array2, ArrayView2};
 use std::collections::HashMap;
@@ -1049,6 +1065,261 @@ pub fn jeffreys_subspace_from_penalty(
         }
     }
     Ok(JeffreysSubspace { columns })
+}
+
+/// The directions a symmetric curvature `A` fails to bound: an orthonormal basis
+/// of `A`'s eigenvectors whose eigenvalue is below ONE observation-equivalent
+/// (gam#2612).
+///
+/// # Why this is the object the Jeffreys span should be built from
+///
+/// The two derived spans this module has shipped are the two endpoints of one
+/// question, and both are wrong for the same reason — they answer it structurally
+/// instead of measuring it:
+///
+/// * the FULL identifiable span says "the model bounds nothing", justified by
+///   "the Jeffreys score is `O(1)` against the data's `O(n)` Fisher
+///   information". On a quasi-separated softmax the data's information is not
+///   `O(n)` in any direction (`W = diag(p) − ppᵀ ≈ 0.005` per row), so the
+///   premise fails and the term acts at full strength on directions the penalty
+///   bounds up to `2298`;
+/// * `ker(S_aggregate)` says "the model bounds `range(S)`", justified by
+///   `(H + S_λ)v = Hv + λSv`. True for any `λ > 0` and false in magnitude when
+///   `λ` rails at its floor: on the penguins witness the worst-bounded direction
+///   carries `5.1e-5` of curvature and is NOT in the kernel.
+///
+/// The measured set answers the question directly, with the threshold the module
+/// already owns: `CONDITIONING_GATE_ABSOLUTE` is this codebase's statement of how
+/// much curvature one observation contributes to a unit-scale direction, and it
+/// already decides whether the term FIRES. Deciding the term's SUPPORT with the
+/// same number asks one question once rather than two questions that can
+/// disagree — and the measured set contains the separating members of the kernel
+/// while excluding its well-determined ones, so it is strictly better than either
+/// endpoint on both sides.
+///
+/// The caller owns the constancy contract: `A` moves with `β` and `ρ`, so a
+/// caller that reads this LIVE would break every `Φ` derivative formula (all of
+/// which hold `Z_J` fixed). The multinomial caller measures it once, at the
+/// unbiased probe's certified mode and its selected `λ`, and freezes it for the
+/// armed refit.
+pub fn under_identified_subspace(a: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    let p = a.nrows();
+    if a.ncols() != p {
+        return Err(format!(
+            "under_identified_subspace: curvature must be square, got {}x{}",
+            a.nrows(),
+            a.ncols()
+        ));
+    }
+    if p == 0 {
+        return Ok(Array2::zeros((0, 0)));
+    }
+    let mut symmetric = a.to_owned();
+    symmetrize_contiguous(&mut symmetric);
+    let (eigenvalues, eigenvectors) = symmetric.eigh(Side::Lower).map_err(|e| {
+        format!("under_identified_subspace: curvature eigendecomposition failed: {e}")
+    })?;
+    Ok(select_under_identified_columns(&eigenvalues, &eigenvectors))
+}
+
+/// The same measurement, taken in a METRIC rather than in the raw coordinates:
+/// the span of generalized eigenvectors of `A v = μ G v` with `μ` below one
+/// observation-equivalent, returned as an orthonormal basis.
+///
+/// # Why a metric is not optional for a gauge-carrying family
+///
+/// An eigenvalue threshold is a statement about coordinates. When the model's
+/// own parameterization is a GAUGE CHOICE, the same physical direction has
+/// different curvature in different gauges, and a threshold on the raw spectrum
+/// selects a different physical subspace in each — which is a fit that depends on
+/// an arbitrary convention.
+///
+/// The multinomial is exactly that case. Its coefficients live in the ALR frame
+/// anchored at an arbitrary reference class; relabelling classes acts on `θ` by a
+/// NON-orthogonal contrast change `R`, so the likelihood information transforms
+/// by congruence `H ↦ R⁻ᵀ H R⁻¹` and its eigenvalues move. `ker(S_λ)` survives
+/// that (a kernel is congruence-invariant) which is why the derived span never
+/// had this problem; a threshold does not. Measured on
+/// `multinomial_fit_is_invariant_to_reference_class_1587`, three labelings of one
+/// dataset: predicted-probability drift `4.093e-3` against a `1e-3` bar, with
+/// refit noise `0.0` — structural, not numerical.
+///
+/// The repair is the metric gam#1587 already owns. `G` must transform the same
+/// way as `A` (`G ↦ R⁻ᵀ G R⁻¹`); then `G^{-1/2} A G^{-1/2}` is orthogonally
+/// similar across gauges, so its spectrum — and the subspace this selects — is a
+/// property of the model rather than of the labelling. For the multinomial that
+/// `G` is the centered class metric `M ⊗ I_P`, the closed-form CLR whitening
+/// factor of the softmax gauge and the same `M` the reference-symmetric penalty
+/// `M ⊗ S_t` is built from.
+///
+/// The returned basis is orthonormalized in the ORDINARY inner product, because
+/// that is what `Z_JᵀHZ_J` is defined against. Orthonormalising a fixed span is a
+/// within-span rotation, so it changes `log|Z_JᵀHZ_J|` only by a `β`-independent
+/// constant — it moves no mode and no gradient.
+pub fn under_identified_subspace_in_metric(
+    a: ArrayView2<'_, f64>,
+    g: ArrayView2<'_, f64>,
+) -> Result<Array2<f64>, String> {
+    let p = a.nrows();
+    if a.ncols() != p {
+        return Err(format!(
+            "under_identified_subspace_in_metric: curvature must be square, got {}x{}",
+            a.nrows(),
+            a.ncols()
+        ));
+    }
+    if g.nrows() != p || g.ncols() != p {
+        return Err(format!(
+            "under_identified_subspace_in_metric: metric is {}x{}, expected {p}x{p}",
+            g.nrows(),
+            g.ncols()
+        ));
+    }
+    if p == 0 {
+        return Ok(Array2::zeros((0, 0)));
+    }
+    let mut metric = g.to_owned();
+    symmetrize_contiguous(&mut metric);
+    let chol = metric.cholesky(Side::Lower).map_err(|e| {
+        format!(
+            "under_identified_subspace_in_metric: the metric is not positive definite ({e}); a              gauge metric that is singular does not define which directions are unit-scale"
+        )
+    })?;
+    let lower = chol.lower_triangular();
+    // `W = L⁻¹ A L⁻ᵀ`, formed by two triangular solves rather than by inverting.
+    let mut symmetric = a.to_owned();
+    symmetrize_contiguous(&mut symmetric);
+    let half = solve_lower_triangular(&lower, &symmetric)?;
+    // `.as_standard_layout()` before `.to_owned()`: a transposed view's
+    // `to_owned` keeps the view's order, and `symmetrize_contiguous` below
+    // requires a standard-layout buffer.
+    let half_transposed = half.t().as_standard_layout().to_owned();
+    let mut whitened = solve_lower_triangular(&lower, &half_transposed)?;
+    symmetrize_contiguous(&mut whitened);
+    let (eigenvalues, eigenvectors) = whitened.eigh(Side::Lower).map_err(|e| {
+        format!("under_identified_subspace_in_metric: whitened eigendecomposition failed: {e}")
+    })?;
+    let selected = select_under_identified_columns(&eigenvalues, &eigenvectors);
+    if selected.ncols() == 0 {
+        return Ok(selected);
+    }
+    // Back to the model's own coordinates: `v = L⁻ᵀ w`.
+    let unwhitened = solve_upper_triangular_transpose(&lower, &selected)?;
+    orthonormalize_columns(&unwhitened)
+}
+
+/// Columns of `eigenvectors` whose eigenvalue is below one observation-equivalent.
+///
+/// Written as the NEGATION of "is bounded" rather than as `< threshold` so a
+/// non-finite eigenvalue lands in the span rather than out of it. A curvature
+/// this function cannot read is not a curvature that bounds anything, and the
+/// safe direction for a prior's support is to include the direction it cannot
+/// vouch for.
+fn select_under_identified_columns(
+    eigenvalues: &Array1<f64>,
+    eigenvectors: &Array2<f64>,
+) -> Array2<f64> {
+    let p = eigenvectors.nrows();
+    let columns_wanted: Vec<usize> = (0..eigenvalues.len())
+        .filter(|&i| !(eigenvalues[i] >= CONDITIONING_GATE_ABSOLUTE))
+        .collect();
+    let mut columns = Array2::<f64>::zeros((p, columns_wanted.len()));
+    for (target, &source) in columns_wanted.iter().enumerate() {
+        for row in 0..p {
+            columns[[row, target]] = eigenvectors[[row, source]];
+        }
+    }
+    columns
+}
+
+/// `L⁻¹ B` for a lower-triangular `L`, by forward substitution.
+fn solve_lower_triangular(lower: &Array2<f64>, b: &Array2<f64>) -> Result<Array2<f64>, String> {
+    let n = lower.nrows();
+    if b.nrows() != n {
+        return Err(format!(
+            "triangular solve: right-hand side has {} rows, expected {n}",
+            b.nrows()
+        ));
+    }
+    let mut x = b.to_owned();
+    for column in 0..x.ncols() {
+        for row in 0..n {
+            let mut value = x[[row, column]];
+            for k in 0..row {
+                value -= lower[[row, k]] * x[[k, column]];
+            }
+            let pivot = lower[[row, row]];
+            if pivot == 0.0 {
+                return Err("triangular solve: zero pivot in the metric's Cholesky".to_string());
+            }
+            x[[row, column]] = value / pivot;
+        }
+    }
+    Ok(x)
+}
+
+/// `L⁻ᵀ B` for a lower-triangular `L`, by back substitution.
+fn solve_upper_triangular_transpose(
+    lower: &Array2<f64>,
+    b: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    let n = lower.nrows();
+    if b.nrows() != n {
+        return Err(format!(
+            "triangular solve: right-hand side has {} rows, expected {n}",
+            b.nrows()
+        ));
+    }
+    let mut x = b.to_owned();
+    for column in 0..x.ncols() {
+        for row in (0..n).rev() {
+            let mut value = x[[row, column]];
+            for k in (row + 1)..n {
+                value -= lower[[k, row]] * x[[k, column]];
+            }
+            let pivot = lower[[row, row]];
+            if pivot == 0.0 {
+                return Err("triangular solve: zero pivot in the metric's Cholesky".to_string());
+            }
+            x[[row, column]] = value / pivot;
+        }
+    }
+    Ok(x)
+}
+
+/// Modified Gram-Schmidt, twice, so the returned columns are orthonormal to
+/// working precision even when the input is ill-conditioned. Columns that
+/// collapse are dropped rather than kept as noise: a span is what this returns,
+/// and a numerically dependent column is not part of it.
+fn orthonormalize_columns(columns: &Array2<f64>) -> Result<Array2<f64>, String> {
+    let rows = columns.nrows();
+    let mut kept: Vec<Array1<f64>> = Vec::with_capacity(columns.ncols());
+    for column in 0..columns.ncols() {
+        let mut v = columns.column(column).to_owned();
+        let initial = v.dot(&v).sqrt();
+        if !(initial > 0.0) || !initial.is_finite() {
+            continue;
+        }
+        for _pass in 0..2 {
+            for basis in kept.iter() {
+                let projection = basis.dot(&v);
+                v.scaled_add(-projection, basis);
+            }
+        }
+        let norm = v.dot(&v).sqrt();
+        // `1e-8` of the column's own entering length is the standard
+        // reorthogonalization cutoff: below it the column is a rounding artefact
+        // of the ones already kept, not a direction.
+        if !(norm > 1e-8 * initial) || !norm.is_finite() {
+            continue;
+        }
+        kept.push(v.mapv(|value| value / norm));
+    }
+    let mut basis = Array2::<f64>::zeros((rows, kept.len()));
+    for (index, column) in kept.iter().enumerate() {
+        basis.column_mut(index).assign(column);
+    }
+    Ok(basis)
 }
 
 /// One authoritative reduced-information artifact for a joint Jeffreys term.
@@ -2902,6 +3173,140 @@ mod tests {
     use super::*;
     use ndarray::array;
 
+    /// The measured span is what the gate's own threshold says, on the nose:
+    /// strictly below one observation-equivalent is in, at or above is out.
+    #[test]
+    fn the_measured_span_is_the_directions_under_one_observation_equivalent_2612() {
+        // Diagonal, so the eigenvectors ARE the axes and the answer is readable.
+        let curvature = array![
+            [5.0e-5, 0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, CONDITIONING_GATE_ABSOLUTE, 0.0],
+            [0.0, 0.0, 0.0, 2298.0],
+        ];
+        let span = under_identified_subspace(curvature.view()).expect("diagonal curvature");
+        assert_eq!(
+            span.ncols(),
+            2,
+            "exactly the two axes under one observation-equivalent belong in the span; the axis              AT the threshold and the 2298 one do not"
+        );
+        // Which two, checked by the mass each column puts on each axis.
+        let mut mass = [0.0_f64; 4];
+        for column in 0..span.ncols() {
+            for axis in 0..4 {
+                mass[axis] += span[[axis, column]] * span[[axis, column]];
+            }
+        }
+        assert!(
+            mass[0] > 0.99 && mass[1] > 0.99,
+            "the span must be the 5e-5 and 0.5 axes, got axis masses {mass:?}"
+        );
+        assert!(
+            mass[2] < 1e-12 && mass[3] < 1e-12,
+            "a direction the model bounds must not be in the span, got axis masses {mass:?}"
+        );
+    }
+
+    /// The metric-aware measurement is GAUGE-INVARIANT: the same physical
+    /// subspace comes back after a non-orthogonal change of coordinates, which
+    /// is exactly what the raw-spectrum version cannot promise and what
+    /// `multinomial_fit_is_invariant_to_reference_class_1587` measured it
+    /// failing.
+    #[test]
+    fn the_metric_aware_span_survives_a_non_orthogonal_change_of_gauge_2612() {
+        // Two under-identified directions (0.90, 0.95) and one the model bounds.
+        let curvature = array![[0.90, 0.0, 0.0], [0.0, 0.95, 0.0], [0.0, 0.0, 5.0]];
+        let metric = Array2::<f64>::eye(3);
+        let span = under_identified_subspace_in_metric(curvature.view(), metric.view())
+            .expect("identity metric");
+        assert_eq!(span.ncols(), 2);
+
+        // A non-orthogonal gauge change, under which BOTH the curvature and the
+        // metric transform by congruence — which is the multinomial's situation
+        // exactly: relabelling classes is a contrast change, and `H + S_λ` and
+        // `M ⊗ I_P` both follow it.
+        let r = array![[1.0, 0.0, 0.0], [-3.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let r_inv = array![[1.0, 0.0, 0.0], [3.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let curvature_gauged = r_inv.t().dot(&curvature.dot(&r_inv));
+        let metric_gauged = r_inv.t().dot(&metric.dot(&r_inv));
+        let span_gauged =
+            under_identified_subspace_in_metric(curvature_gauged.view(), metric_gauged.view())
+                .expect("gauged metric");
+        assert_eq!(span_gauged.ncols(), 2, "the DIMENSION must survive the gauge");
+
+        // And it is the same PHYSICAL subspace: `R` maps the original span onto
+        // the gauged one. Compared as projectors, so the comparison does not
+        // depend on which orthonormal basis either call happened to return.
+        let mapped = orthonormalize_columns(&r.dot(&span)).expect("mapped span");
+        let projector_a = mapped.dot(&mapped.t());
+        let projector_b = span_gauged.dot(&span_gauged.t());
+        let worst = projector_a
+            .iter()
+            .zip(projector_b.iter())
+            .fold(0.0_f64, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            worst < 1e-10,
+            "the metric-aware span must map to itself under the gauge change; worst projector \
+             entry differs by {worst:.3e}"
+        );
+
+        // The CONTROL that makes the assertion above mean something: taken in the
+        // RAW spectrum the same gauge change selects a different subspace — here
+        // it does not even keep the dimension, because congruence preserves
+        // inertia but not the count below a positive threshold. Without this the
+        // test could pass on a fixture where the metric does nothing.
+        let raw = under_identified_subspace(curvature.view()).expect("raw");
+        let raw_gauged = under_identified_subspace(curvature_gauged.view()).expect("raw gauged");
+        assert_eq!(
+            raw.ncols(),
+            2,
+            "the raw measurement agrees with the metric-aware one BEFORE the gauge change"
+        );
+        assert_eq!(
+            raw_gauged.ncols(),
+            1,
+            "and disagrees after it — that disagreement is the defect the metric removes"
+        );
+    }
+
+    /// A model that bounds every direction gets no span, which is the caller's
+    /// signal to leave the prior disarmed.
+    #[test]
+    fn a_bounded_curvature_has_an_empty_measured_span_2612() {
+        let curvature = array![[3.0, 0.4], [0.4, 7.0]];
+        let span = under_identified_subspace(curvature.view()).expect("bounded curvature");
+        assert_eq!(span.ncols(), 0);
+    }
+
+    /// The measured span and `ker(S_λ)` are DIFFERENT sets, and this is the
+    /// fixture that says so in both directions at once — which is the whole
+    /// content of #2612's span repair.
+    ///
+    /// Axis 0 is unpenalized and well determined by the data (an intercept the
+    /// rows pin): in `ker(S_λ)`, NOT under-identified. Axis 1 is penalized but
+    /// its `λ` railed at the floor, so the model bounds it with `8e-4`
+    /// pseudo-observations: NOT in `ker(S_λ)`, and under-identified.
+    #[test]
+    fn the_measured_span_and_the_penalty_kernel_disagree_in_both_directions_2612() {
+        let penalty = array![[0.0, 0.0], [0.0, 2.0e-4]];
+        let information = array![[40.0, 0.0], [0.0, 1.0e-6]];
+        let penalized = &information + &penalty;
+
+        let kernel = jeffreys_subspace_from_penalty(penalty.view()).expect("kernel");
+        assert_eq!(kernel.span_dim(), 1, "ker(S_lambda) is the unpenalized axis");
+        assert!(
+            kernel.columns[[0, 0]].abs() > 0.99,
+            "and that axis is axis 0, the one the DATA determines"
+        );
+
+        let measured = under_identified_subspace(penalized.view()).expect("measured");
+        assert_eq!(measured.ncols(), 1, "one direction is under-identified");
+        assert!(
+            measured[[1, 0]].abs() > 0.99,
+            "and it is axis 1 — penalized, railed, and bounded by 2e-4: the direction the kernel              route cannot reach and the full-span route reaches only by also arming axis 0"
+        );
+    }
+
     #[test]
     fn fused_ambient_eigenbasis_congruence_matches_two_stage_definition_2612() {
         let matrix = array![
@@ -3109,6 +3514,147 @@ mod tests {
     /// `pert_hessian_dir(δ, e_a) = 0`. `H0` is engineered with one reduced eigenvalue
     /// BELOW the relative floor (a near-separating direction), exactly where the
     /// floored pseudo-inverse and its moving floor matter.
+    /// The PRODUCTION drift path, on an information that is genuinely NONLINEAR
+    /// in β (#2765).
+    ///
+    /// Two coverage holes met here. `perturbation_derivative_matches_finite_
+    /// difference_below_floor` grades the test-only per-direction oracle, not
+    /// `JeffreysHphiDriftBase::perturbation_derivative_batched_axes` — the object
+    /// the outer LAML gradient actually folds through
+    /// `JeffreysHphiAwareJointDerivatives`. And it plants `H(β) = H₀ + β₀A₀`, for
+    /// which `H²dot[δ, e_a] ≡ 0`: the entire second-directional half of the drift
+    /// is multiplied by zero, so a defect there passes. Every real family has a
+    /// non-zero `H²dot` — a row-streamed information is quadratic in β at least.
+    ///
+    /// Here `H(β) = H₀ + Σ_a β_a A_a + Σ_a β_a² B_a`, so `H²dot[u, v] = 2Σ_a u_a
+    /// v_a B_a` is non-zero and the drift is differenced against the value path's
+    /// own `H_Φ` on the same plan.
+    #[test]
+    pub(crate) fn batched_perturbation_derivative_matches_finite_difference_nonlinear_2765() {
+        let p = 3usize;
+        let z = Array2::<f64>::eye(p);
+        let make_sym = |seed: f64| -> Array2<f64> {
+            let mut a = Array2::<f64>::zeros((p, p));
+            for i in 0..p {
+                for j in 0..p {
+                    a[[i, j]] = (seed + 0.41 * (i as f64) - 0.23 * (j as f64)).sin()
+                        + 0.6 * ((i + j) as f64 * seed).cos();
+                }
+            }
+            let at = a.t().to_owned();
+            (&a + &at).mapv(|v| 0.5 * v)
+        };
+        // A well-separated spectrum with one direction three orders below the
+        // rest: the conditioning gate is fully open there, so the drift is the
+        // un-gated object and a defect cannot hide behind a zero weight.
+        let h0 = array![
+            [4.0e2, 3.0e0, 1.0e0],
+            [3.0e0, 2.5e2, 2.0e0],
+            [1.0e0, 2.0e0, 7.0e-1],
+        ];
+        let a_mats: Vec<Array2<f64>> = (0..p)
+            .map(|a| make_sym(2.3 + 1.7 * a as f64).mapv(|v| 3.0 * v))
+            .collect();
+        let b_mats: Vec<Array2<f64>> = (0..p)
+            .map(|a| make_sym(0.9 - 0.6 * a as f64).mapv(|v| 1.5 * v))
+            .collect();
+        let beta0 = array![0.31, -0.22, 0.17];
+        let mut delta: Array1<f64> = array![0.6, -0.45, 0.28];
+        let delta_norm = delta.dot(&delta).sqrt();
+        delta.mapv_inplace(|value| value / delta_norm);
+
+        let information_at = |beta: &Array1<f64>| -> Array2<f64> {
+            let mut h = h0.clone();
+            for a in 0..p {
+                h.scaled_add(beta[a], &a_mats[a]);
+                h.scaled_add(beta[a] * beta[a], &b_mats[a]);
+            }
+            h
+        };
+        // Hdot[d] = Σ_a d_a (A_a + 2β_a B_a).
+        let hdot_at = |beta: &Array1<f64>, d: &Array1<f64>| -> Array2<f64> {
+            let mut acc = Array2::<f64>::zeros((p, p));
+            for a in 0..p {
+                if d[a] == 0.0 {
+                    continue;
+                }
+                acc.scaled_add(d[a], &a_mats[a]);
+                acc.scaled_add(2.0 * d[a] * beta[a], &b_mats[a]);
+            }
+            acc
+        };
+        // H²dot[u, v] = 2 Σ_a u_a v_a B_a — the half the linear planting erases.
+        let h2dot = |u: &Array1<f64>, v: &Array1<f64>| -> Array2<f64> {
+            let mut acc = Array2::<f64>::zeros((p, p));
+            for a in 0..p {
+                acc.scaled_add(2.0 * u[a] * v[a], &b_mats[a]);
+            }
+            acc
+        };
+
+        let hphi_at = |t: f64| -> Array2<f64> {
+            let beta = &beta0 + &delta.mapv(|value| t * value);
+            let h = information_at(&beta);
+            joint_jeffreys_term(h.view(), z.view(), |axis: &Array1<f64>| {
+                Ok(Some(hdot_at(&beta, axis)))
+            })
+            .expect("value-path H_Φ")
+            .2
+        };
+        // Richardson-extrapolated central difference, so the oracle's own
+        // truncation sits far below the tolerance asserted.
+        let central = |h: f64| (&hphi_at(h) - &hphi_at(-h)).mapv(|v| v / (2.0 * h));
+        let coarse = central(1.0e-4);
+        let fine = central(0.5e-4);
+        let fd = (&fine.mapv(|v| 4.0 * v) - &coarse).mapv(|v| v / 3.0);
+
+        let base_axes: Vec<Array2<f64>> = (0..p)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(p);
+                axis[a] = 1.0;
+                hdot_at(&beta0, &axis)
+            })
+            .collect();
+        let base = JeffreysHphiDriftBase::prepare_with_axes(
+            information_at(&beta0).view(),
+            z.view(),
+            base_axes,
+        )
+        .expect("prepared drift base")
+        .expect("the conditioning gate is open on this spectrum");
+        let pert_axes: Vec<Array2<f64>> = (0..p)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(p);
+                axis[a] = 1.0;
+                h2dot(&delta, &axis)
+            })
+            .collect();
+        let analytic = base
+            .perturbation_derivative_batched_axes(&hdot_at(&beta0, &delta), Some(pert_axes))
+            .expect("batched H_Φ drift");
+
+        let scale = fd
+            .iter()
+            .chain(analytic.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            scale > 1.0e-6,
+            "the planted H_Φ drift must not be a trivial zero (scale={scale:.3e})"
+        );
+        let mut max_abs = 0.0_f64;
+        for i in 0..p {
+            for j in 0..p {
+                max_abs = max_abs.max((analytic[[i, j]] - fd[[i, j]]).abs());
+            }
+        }
+        assert!(
+            max_abs <= 1.0e-6 * scale,
+            "batched D_β H_Φ[δ] disagrees with a finite difference of the value path's own H_Φ \
+             on a β-nonlinear information: max_abs={max_abs:.6e} scale={scale:.6e}\nanalytic=\
+             {analytic:?}\nfd={fd:?}"
+        );
+    }
+
     #[test]
     pub(crate) fn perturbation_derivative_matches_finite_difference_below_floor() {
         let p = 3usize;
@@ -3257,31 +3803,61 @@ mod tests {
         assert!(degenerate.is_under_identified() && degenerate.is_active());
     }
 
+    /// `jeffreys_subspace_from_penalty` returns `ker(S)`, and its three regimes
+    /// are pinned here because the middle one is the whole reason the function
+    /// takes an argument.
+    ///
+    /// This test previously asserted the OPPOSITE — that the span is the full
+    /// identity "regardless of penalty" — which was true when the aggregate was
+    /// consulted only to pick up the block dimension. gam#2612 gave the argument
+    /// meaning and left this assertion behind; it has been red on `main` ever
+    /// since (`MASTER_FAILURES.md`, `gam-solve ::
+    /// jeffreys_subspace::tests::full_span_is_identity_regardless_of_penalty`).
+    /// A test asserting a retired contract is worse than no test: it reads as
+    /// coverage of the live one.
+    ///
+    /// The zero-penalty row is not a degenerate case to tolerate — it is the
+    /// reason an unpenalised quasi-separated design still arms. `S = 0` reaches
+    /// nothing, so every direction is fair game, and the identity is returned
+    /// EXACTLY (no eigensolver rotation) so that historical callers are
+    /// byte-identical rather than merely equivalent.
     #[test]
-    pub(crate) fn full_span_is_identity_regardless_of_penalty() {
-        // The principled cure: Z_J is the FULL identifiable span (the entire
-        // reduced block), i.e. the identity, irrespective of the penalty's null
-        // space. Jeffreys is self-limiting, so this does not bias identified
-        // directions; it only bounds near-separating ones.
-        for s in [
-            Array2::<f64>::zeros((3, 3)), // pure parametric
-            {
-                let mut s = Array2::<f64>::zeros((3, 3));
-                s[[2, 2]] = 5.0; // rank-deficient (ker dim 2)
-                s
-            },
-            Array2::<f64>::eye(4) * 2.0, // full-rank penalty
+    pub(crate) fn the_penalty_kernel_span_is_the_directions_no_lambda_reaches() {
+        let rank_deficient = {
+            let mut s = Array2::<f64>::zeros((3, 3));
+            s[[2, 2]] = 5.0;
+            s
+        };
+        for (s, expected_dim, why) in [
+            (
+                Array2::<f64>::zeros((3, 3)),
+                3usize,
+                "S = 0 reaches nothing, so the span is the whole block",
+            ),
+            (
+                rank_deficient,
+                2usize,
+                "a rank-1 penalty on a 3-block leaves a 2-dimensional kernel",
+            ),
+            (
+                Array2::<f64>::eye(4) * 2.0,
+                0usize,
+                "a full-rank penalty reaches every direction, so nothing is left                  for the term to bound",
+            ),
         ] {
             let p = s.nrows();
             let z = jeffreys_subspace_from_penalty(s.view()).unwrap();
-            assert_eq!(z.span_dim(), p, "full span must equal the block dimension");
+            assert_eq!(z.span_dim(), expected_dim, "{why}");
             assert_eq!(z.columns.nrows(), p);
-            // Identity ⇒ orthonormal columns spanning the whole space.
+            // Orthonormal columns, whichever regime produced them.
             let gram = z.columns.t().dot(&z.columns);
-            for i in 0..p {
-                for j in 0..p {
+            for i in 0..z.span_dim() {
+                for j in 0..z.span_dim() {
                     let expected = if i == j { 1.0 } else { 0.0 };
-                    assert!((gram[[i, j]] - expected).abs() < 1e-12);
+                    assert!(
+                        (gram[[i, j]] - expected).abs() < 1e-12,
+                        "the span basis must be orthonormal ({why})"
+                    );
                 }
             }
         }

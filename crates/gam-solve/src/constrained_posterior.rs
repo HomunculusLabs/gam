@@ -81,8 +81,55 @@
 //! standardized slack `s_j = (a_jᵀβ_unc − b_j)/sd_j` and its contribution
 //! varies smoothly with it, so a row at slack `1e-9` and a row at slack `0`
 //! give nearly the same answer instead of differing by a full `σ²`. The only
-//! cut is dropping rows whose truncated mass `Φ̄(s_j)` is below double-precision
-//! resolution, a bound read off `f64::EPSILON` rather than tuned.
+//! cut on TIGHTNESS is dropping rows whose truncated mass `Φ̄(s_j)` is below
+//! double-precision resolution, a bound read off `f64::EPSILON` rather than
+//! tuned.
+//!
+//! # Which rows the answer is built from
+//!
+//! There is a second cut, and it is about independence rather than tightness. A
+//! shape constraint is normally imposed at every data row — a monotone survival
+//! baseline arrives as one derivative-guard row per observed exit time — so the
+//! system can carry far more rows than the coefficient block has columns, and
+//! `W = A Σ Aᵀ` is then rank-deficient by construction. Its `q × q` inverse is
+//! not a quantity double precision has.
+//!
+//! So the correction is built on a RETAINED FACE. Rows are walked in ascending
+//! standardized slack and one joins only while its constraint normal is
+//! independent enough of those already accepted for the lift `G = Σ Aᵀ W⁻¹` to
+//! be solved to the accuracy the moments are reported to; the assembled face is
+//! then checked as a whole, because per-row independence is necessary and not
+//! sufficient, and its least independent row is dropped until the check passes.
+//!
+//! The two halves of that cut cost different amounts, and it is worth being
+//! exact about which is which.
+//!
+//! * The PER-ROW floor is nearly free. A row it refuses lies within `O(θ)` of
+//!   the span of the rows already accepted, with `θ` below `5e-7` radians at
+//!   the floor, and the accepted row it is nearly parallel to has the SMALLER
+//!   standardized slack because the walk is ordered by slack — so its wall is
+//!   the binding one and the refused row imposes nothing new. The exception is
+//!   a row ANTI-parallel to an accepted one, which carries no new direction
+//!   while genuinely halving the support; that one is kept, as the far wall of
+//!   a two-sided bound, rather than dropped.
+//!
+//! * The WHOLE-FACE check is not free, and no `O(θ)` argument covers it. It
+//!   fires exactly when every row cleared the floor and the face is still worse
+//!   conditioned than any of its rows, and the direction it then drops can sit
+//!   at a genuinely resolvable angle — `pivot/diagonal = 1e-3` is `θ ≈ 0.03`
+//!   radians, not `5e-7`. What is dropped there is a real constraint, and the
+//!   reported truncation is the one carried by the retained face.
+//!
+//! That trade is deliberate and it is the honest one available. The moments are
+//! computed for a BOX in the retained coordinates; a face that kept mutually
+//! dependent rows would cut the same region along diagonals, which is a general
+//! polyhedron and not something `box_truncated_moments` computes — and the lift
+//! that carries the answer back out of those coordinates cannot be formed at
+//! all when `W` is numerically singular. The alternatives are therefore a
+//! subset-truncated posterior or none, not a subset-truncated posterior or an
+//! exact one. Which rows survived is reported (`log::info!`) whenever the
+//! whole-face check dropped anything, so the choice is visible on the fit that
+//! made it rather than inferable from this file.
 
 use gam_math::probability::{
     normal_cdf, normal_logsf, signed_probit_logcdf_and_mills_ratio, standard_normal_quantile,
@@ -1356,56 +1403,86 @@ pub fn constrained_posterior_correction(
     }
 
     // The retention floor is the accuracy the retained face must deliver, and
-    // the first pass asks for exactly the accuracy this module reports its
-    // moments to. When the assembled face misses that, the floor is raised and
-    // the face rebuilt.
+    // it asks for exactly the accuracy this module reports its moments to. It
+    // is necessary and not sufficient (see [`assemble_retained_face`]), so when
+    // the assembled face's lift misses the identity that defines it, a row has
+    // to come out and the face has to be rebuilt.
     //
-    // THE LADDER STEPS TO THE NEXT DISTINCT FACE, NOT TO A FLOOR INFERRED FROM
-    // THE DEPARTURE (#2714). The obvious rule — `demanded_accuracy /=
-    // departure/tolerance`, "the amount the face missed by IS the factor its
-    // floor was short by" — reads that factor off the per-row error model
-    // `departure ≈ ε·diagonal/pivot`, which this very filter documents as
-    // "necessary and NOT sufficient": `min pivot/diagonal` bounds `W`'s smallest
-    // eigenvalue only when the elimination is ordered by pivot magnitude, and
-    // this walk is ordered by slack. When the face is worse conditioned than its
-    // worst row (which is the only case the ladder ever runs in) the inferred
-    // factor is not an estimate of anything, and a single pass can carry
-    // `demanded_accuracy` from `1e-3` to below `f64::EPSILON` — past every
-    // intermediate face, straight out of the loop, and into a terminal message
-    // claiming a ladder that took exactly one rung. That is the state the
-    // #2714 witness reaches at final posterior assembly.
+    // THE LADDER IS INDEXED BY THE FACE, NOT BY A FLOOR (#2714). Two rules have
+    // been tried here and both failed for the same underlying reason — the
+    // quantity being searched over was a real number that only stands in for
+    // the face:
     //
-    // Retention is a STEP function of the floor: a row is kept iff
-    // `pivot > (k+1)·ε·diagonal/d`, so the retained set changes only at the
-    // finitely many `d_r = (k+1)·ε·diagonal_r/pivot_r` of the accepted rows.
-    // Between `max_r d_r` and the current `d` the face is bit-identical, so
-    // stepping straight to `max_r d_r` skips nothing and drops exactly the
-    // worst-conditioned accepted row (its test becomes `pivot > pivot`).
+    // 1. `demanded_accuracy /= departure/tolerance` read its step size off the
+    //    PER-ROW error model `departure ≈ ε·diagonal/pivot`, which holds only
+    //    when the face is no worse conditioned than its worst row — i.e. never,
+    //    in the only case the ladder runs in. One pass could carry the floor
+    //    from `1e-3` past every intermediate face to below `f64::EPSILON`.
     //
-    // Termination is stronger than before, not weaker. Every accepted row has
-    // `d > d_r`, so the step is a strict decrease; each one drops at least one
-    // row, so there are at most `q` passes rather than ~40; and the walk ends at
-    // a single retained row, where `W` is `1×1`, its lift is exact, and the
-    // departure gate cannot fail. `demanded_accuracy >= f64::EPSILON` stays as a
-    // backstop that no longer carries the argument.
-    let mut demanded_accuracy = ORTHANT_MOMENT_RELATIVE_TOLERANCE;
+    // 2. Stepping to `max_r d_r`, with `d_r = (k+1)·ε·diagonal_r/pivot_r` the
+    //    floor at which accepted row `r` drops, is exact in real arithmetic —
+    //    the test becomes `pivot > pivot` — and is NOT exact in floating point.
+    //    `d_r` is a rounded quotient and the retention test recomputes
+    //    `(k+1)·ε·diagonal_r/d_r`, a second rounded quotient; that round trip
+    //    lands strictly below `pivot_r` for about 5% of `(k, diagonal, pivot)`
+    //    triples, so the row the step was aimed at is retained, the rebuilt
+    //    face is bit-identical, `max_r d_r` recomputes to the value it already
+    //    has, and the walk stops descending. Inverting a floating-point
+    //    comparison to name the next face cannot be made reliable by rounding
+    //    the quotient the other way either: the retention test is the
+    //    definition of the face, and only the test can decide it.
+    //
+    // So the walk carries the face itself. A rejected face names the accepted
+    // row whose `pivot/diagonal` is smallest — the most nearly dependent one,
+    // which is both the row rule 2 was trying to reach and the row that
+    // contributes least constraint information — and that row is EXCLUDED by
+    // index, together with any opposite face folded into it, before the face is
+    // rebuilt at the unchanged floor. What leaves is a DIRECTION, not a row:
+    // promoting an excluded row's anti-parallel partner in its place would
+    // report the slacker of two walls as a one-sided bound.
+    //
+    // Termination is now structural rather than numerical. The excluded set
+    // gains at least one row per pass, never re-adds one (an excluded row is
+    // skipped before it can be accepted or folded), and is a subset of the
+    // candidates — so there are at most `candidates.len()` passes; the first
+    // unexcluded row always clears the floor (`accepted = 0` makes
+    // `pivot = diagonal` and the floor `ε·diagonal/1e-3`), so a nonempty
+    // unexcluded set always yields a nonempty face; and the last such face is a
+    // single row, whose `1×1` lift is exact and whose departure gate cannot
+    // fail. No float comparison is inverted anywhere on that argument.
+    //
+    // Excluding at the UNCHANGED floor is also strictly less lossy than rule 2,
+    // which tightened the floor for every surviving row as a side effect of
+    // dropping one. Every face rule 2 could reach is still reachable here — run
+    // the walk excluding precisely the rows that floor rejected, and each
+    // surviving row clears the looser floor a fortiori — while faces that only
+    // a tighter floor would have destroyed are kept.
+    let demanded_accuracy = ORTHANT_MOMENT_RELATIVE_TOLERANCE;
     let mut first_pass = true;
     let mut faces_tried = 0usize;
-    while demanded_accuracy >= f64::EPSILON {
+    let mut ladder: Vec<LadderRung> = Vec::new();
+    let mut excluded: Vec<usize> = Vec::new();
+    let mut last_refused: Option<RefusedFace> = None;
+    while excluded.len() <= candidates.len() {
         let Some(face) = assemble_retained_face(
             &candidates,
             demanded_accuracy,
             constraints,
             unconstrained_center,
+            &excluded,
         )?
         else {
             if first_pass {
                 return Ok(None);
             }
+            report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
             return Err(format!(
-                "no constraint face survives the accuracy its own lift must deliver: raising \
-                 the retention floor to {demanded_accuracy:.3e} relative left no retained row \
-                 after {faces_tried} face(s)"
+                "no constraint face survives the accuracy its own lift must deliver: excluding \
+                 {} of {} candidate row(s) at the retention floor {demanded_accuracy:.3e} left \
+                 no retained row after {faces_tried} face(s){}",
+                excluded.len(),
+                candidates.len(),
+                render_ladder(&ladder, candidates.len())
             ));
         };
         first_pass = false;
@@ -1414,36 +1491,43 @@ pub fn constrained_posterior_correction(
         // `Gᵀ` at a time: `W Gᵀ_col = (Σ Aᵀ)ᵀ_col`.
         let lift = cholesky_solve_right(&face.factor, &face.sigma_at)?;
         let departure = lift_identity_departure(&lift, constraints, &face.rows)?;
+        ladder.push(LadderRung {
+            excluded: excluded.len(),
+            retained: face.rows.len(),
+            departure,
+        });
         if departure > ORTHANT_MOMENT_RELATIVE_TOLERANCE {
+            last_refused = Some(RefusedFace {
+                rows: face.rows.clone(),
+                w: face.w.clone(),
+            });
             if face.rows.len() == 1 {
+                report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
                 return Err(format!(
                     "a single retained constraint row still misses the identity that defines \
                      its lift: max|A G - I| = {departure:.6e} exceeds \
                      {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}, which one row cannot be \
-                     ill-conditioned enough to cause"
+                     ill-conditioned enough to cause{}",
+                    render_ladder(&ladder, candidates.len())
                 ));
             }
-            // Step to the accuracy at which this face's worst-conditioned row
-            // drops. Nothing between here and there is a different face.
-            let Some(next) = face.next_accuracy_that_changes_the_face else {
+            // Drop the most nearly dependent accepted DIRECTION — that row and
+            // any opposite face folded into it — and rebuild. A face with two
+            // or more rows always names one, so the empty case is a statement
+            // about `assemble_retained_face`, not a fallback.
+            if face.least_independent_direction.is_empty() {
+                report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
                 return Err(format!(
                     "the constraint face misses the identity that defines its lift \
                      (max|A G - I| = {departure:.6e} against \
-                     {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}) and reports no accuracy at \
-                     which it would change, so the retention floor has nothing to step to: \
-                     {} retained row(s) after {faces_tried} face(s)",
-                    face.rows.len()
+                     {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}) over {} retained row(s), and \
+                     names no least-independent direction to drop, after {faces_tried} \
+                     face(s){}",
+                    face.rows.len(),
+                    render_ladder(&ladder, candidates.len())
                 ));
-            };
-            // Guaranteed by construction (every accepted row cleared the floor
-            // built from the current `demanded_accuracy`), and asserted because
-            // an equal or larger value would make this loop spin at one face.
-            assert!(
-                next < demanded_accuracy,
-                "constraint-face ladder failed to descend: next {next:.6e} is not below \
-                 the current {demanded_accuracy:.6e}"
-            );
-            demanded_accuracy = next;
+            }
+            excluded.extend_from_slice(&face.least_independent_direction);
             continue;
         }
 
@@ -1465,6 +1549,22 @@ pub fn constrained_posterior_correction(
         gam_linalg::matrix::symmetrize_in_place(&mut removed);
         certify_removed_variance(&removed, &face.w)?;
 
+        if !excluded.is_empty() {
+            // The walk ran, so the reported truncation is carried by a SUBSET
+            // of the rows the user asked for. That is a fact about the answer,
+            // not about the solve — the dropped rows are within `O(θ)` of the
+            // span of the retained ones, but "within `O(θ)`" is a claim the
+            // reader is entitled to see stated on their own fit.
+            log::info!(
+                "[CONSTRAINED-FACE] {} of {} candidate constraint row(s) retained after \
+                 dropping {} nearly dependent direction(s) over {faces_tried} face(s); the \
+                 retained lift satisfies its identity to {departure:.3e}",
+                face.rows.len(),
+                candidates.len(),
+                excluded.len()
+            );
+        }
+
         return Ok(Some(ConstrainedPosteriorCorrection {
             lift,
             removed_normal_variance: removed,
@@ -1473,13 +1573,121 @@ pub fn constrained_posterior_correction(
             normal_upper_limits: face.upper,
         }));
     }
+    report_terminal_refusal(last_refused.as_ref(), &ladder, excluded.len());
     Err(format!(
         "the constraint-normal lift never reached the accuracy it is certified to: \
-         {faces_tried} distinct constraint face(s) were tried and the retention floor \
-         reached double-precision resolution. The ladder walks every distinct face, so \
-         this says the SINGLE-ROW face was not reached — which it must be, since each \
-         step drops at least one accepted row."
+         {faces_tried} constraint face(s) were tried and every candidate row was excluded. \
+         The walk drops one accepted direction per pass and a single-row face's lift is \
+         exact, so this says the single-row face was never reached — which it must be.{}",
+        render_ladder(&ladder, candidates.len())
     ))
+}
+
+/// Print the evidence a terminal refusal of the retention walk rests on: the
+/// last face it refused, at full precision, and the trail that got there.
+fn report_terminal_refusal(
+    last_refused: Option<&RefusedFace>,
+    ladder: &[LadderRung],
+    excluded: usize,
+) {
+    let Some(face) = last_refused else {
+        return;
+    };
+    let departure = ladder.last().map_or(f64::NAN, |rung| rung.departure);
+    log_refused_face(face, departure, excluded);
+}
+
+/// One rung of the retention walk: how many rows had been excluded when it ran,
+/// the face that produced, and how far that face's lift missed the identity
+/// that defines it.
+///
+/// Recorded because every terminal refusal in this walk is a statement about a
+/// TRAJECTORY — "the walk never reached a face whose lift is accurate" — and a
+/// message that reports only its last rung cannot be told apart from one that
+/// took a single wrong step. #2714's witness reached the terminal message after
+/// exactly one rung under the pre-`92332c45c` rule, and the message said
+/// nothing that would have distinguished that from forty.
+struct LadderRung {
+    excluded: usize,
+    retained: usize,
+    departure: f64,
+}
+
+/// Render the ladder trail for a terminal message, newest rung last.
+///
+/// The walk can take one pass per candidate row, and a message carrying two
+/// hundred rungs is one nobody reads, so the ends are printed and the middle is
+/// counted. The ends are what carry the diagnosis: the first rung is the face
+/// the retention floor produced on its own and the last is the one the walk
+/// died on. The middle is not summarizable beyond its count — the RETAINED
+/// count is not monotone, because excluding a nearly dependent row raises the
+/// pivots of the rows after it and can admit ones the floor had refused — but
+/// the `excluded` column is, and it is the walk's actual index.
+fn render_ladder(ladder: &[LadderRung], candidates: usize) -> String {
+    const SHOWN_AT_EACH_END: usize = 4;
+    let mut rendered = format!(" [walk over {candidates} candidate row(s):");
+    let render_rung = |rung: &LadderRung, into: &mut String| {
+        into.push_str(&format!(
+            " (excluded={} retained={} departure={:.3e})",
+            rung.excluded, rung.retained, rung.departure
+        ));
+    };
+    if ladder.len() <= 2 * SHOWN_AT_EACH_END + 1 {
+        for rung in ladder {
+            render_rung(rung, &mut rendered);
+        }
+    } else {
+        for rung in &ladder[..SHOWN_AT_EACH_END] {
+            render_rung(rung, &mut rendered);
+        }
+        rendered.push_str(&format!(
+            " ... {} further rung(s) ...",
+            ladder.len() - 2 * SHOWN_AT_EACH_END
+        ));
+        for rung in &ladder[ladder.len() - SHOWN_AT_EACH_END..] {
+            render_rung(rung, &mut rendered);
+        }
+    }
+    rendered.push(']');
+    rendered
+}
+
+/// Emit a refused face itself, at full precision, on the diagnostic channel.
+///
+/// Called ONLY from the walk's terminal error paths, not per rung. Dropping
+/// rows is the walk working, not the walk failing — a `q × q` matrix printed on
+/// every rung would be a megabyte of warnings for a correction that then
+/// succeeds — while a terminal refusal is unreproducible without the face,
+/// because the walk's decisions are a function of `W` alone and the fit that
+/// produced `W` costs three quarters of an hour to reach this line on the
+/// #2714 witness. Printing it there turns that refusal into a unit fixture.
+fn log_refused_face(face: &RefusedFace, departure: f64, excluded: usize) {
+    if !log::log_enabled!(log::Level::Warn) {
+        return;
+    }
+    let q = face.rows.len();
+    let mut rendered = String::new();
+    for i in 0..q {
+        for j in 0..q {
+            rendered.push_str(&format!("{:.17e},", face.w[[i, j]]));
+        }
+    }
+    log::warn!(
+        "[CONSTRAINED-FACE] refused excluded={excluded} departure={departure:.6e} \
+         q={q} rows={:?} w=[{rendered}]",
+        face.rows
+    );
+}
+
+/// The last face the walk refused, kept so a terminal error can print it.
+///
+/// Only `rows` and `W` are retained: they are what makes the refusal
+/// reproducible, and keeping the whole [`RetainedFace`] alive across a pass
+/// would hold its `p × q` block and its factor for a walk that may run once per
+/// candidate row.
+struct RefusedFace {
+    rows: Vec<usize>,
+    w: Array2<f64>,
 }
 
 /// The constraint rows that can still move a moment, in the order the rank
@@ -1548,32 +1756,57 @@ struct RetainedFace {
     sigma_at: Array2<f64>,
     /// Upper limit per retained coordinate, `f64::INFINITY` for a half-line.
     upper: Vec<f64>,
-    /// The largest `demanded_accuracy` strictly below the one that produced this
-    /// face at which the RETAINED SET changes, or `None` when nothing can drop.
+    /// The retained row whose `pivot/diagonal` is smallest, together with every
+    /// refused row whose far wall was folded into it. Empty for an empty face.
     ///
-    /// A row is retained iff `pivot > (k+1)·ε·diagonal/d`, i.e. iff
-    /// `d > d_r := (k+1)·ε·diagonal/pivot`. So the retained set is a step
-    /// function of `d` whose breakpoints are exactly the accepted rows' own
-    /// `d_r`, and the next distinct face begins at `max_r d_r` — where the
-    /// worst-conditioned accepted row's test becomes `pivot > pivot`, false.
+    /// `pivot/diagonal` is the squared sine of the angle between a row's
+    /// constraint normal and the span of the rows accepted before it, in the
+    /// `Σ` metric, so the minimizer is the retained row that is most nearly
+    /// dependent on the others — the one carrying the least constraint
+    /// information and the most of the face's ill-conditioning. It is what the
+    /// retention walk drops when the assembled face's lift misses its own
+    /// identity, and it is reported BY INDEX so that decision is a set
+    /// operation rather than the inversion of a floating-point comparison
+    /// (#2714).
     ///
-    /// Every accepted row satisfies `d > d_r`, so this is always strictly below
-    /// the `d` that built the face: the ladder cannot stall.
-    next_accuracy_that_changes_the_face: Option<f64>,
+    /// The FOLDED rows travel with it because the walk drops a DIRECTION, not a
+    /// row. A row anti-parallel to an accepted one is refused as a direction and
+    /// keeps its wall as that row's upper limit (see
+    /// [`record_opposed_face_limit`]); if the accepted row is then dropped for
+    /// being nearly dependent, its opposite face is the same nearly dependent
+    /// direction and is no more liftable. Leaving it behind would let the next
+    /// pass accept it in the dropped row's place — with the SLACKER of the two
+    /// walls, since the walk is ordered by slack, and with nothing to fold its
+    /// own far wall into — turning a two-sided bound into a one-sided one on
+    /// the wrong side.
+    ///
+    /// The first accepted row has an empty forward-substitution column, hence
+    /// `pivot == diagonal` and a ratio of exactly `1`, which is the maximum the
+    /// ratio can take; combined with the walk's tie-break toward the later (and
+    /// therefore slacker) row, that makes the tightest wall the one row a face
+    /// of two or more can never drop.
+    least_independent_direction: Vec<usize>,
 }
 
 /// Greedy pivoted-Cholesky rank filter on `W = A Σ Aᵀ`, walking the candidates
-/// in their slack order.
+/// in their slack order and skipping any whose constraint-row index appears in
+/// `excluded`.
 ///
 /// The factor is built incrementally here and handed back, so the face is
 /// factorized exactly once: a second factorization of the same `W` under a
 /// different guard would let one matrix be judged by two standards, and near the
 /// retention floor those two standards disagree.
+///
+/// `excluded` is the caller's record of the rows its previous faces already
+/// judged too nearly dependent to lift accurately. It is a plain index list
+/// rather than a set because it is walked once per candidate and never holds
+/// more entries than the face had rows.
 fn assemble_retained_face(
     candidates: &[(usize, f64, Array1<f64>)],
     demanded_accuracy: f64,
     constraints: &LinearInequalityConstraints,
     unconstrained_center: &Array1<f64>,
+    excluded: &[usize],
 ) -> Result<Option<RetainedFace>, String> {
     let columns = constraints.a.ncols();
     // Each of `cross[k]`, `W_kk` and `diagonal` is one length-`p` inner product
@@ -1584,12 +1817,18 @@ fn assemble_retained_face(
     // same direction, reversed" stops being decidable in double precision.
     let antiparallel_tolerance = 4.0 * (columns as f64 + 1.0) * f64::EPSILON;
     let mut rows: Vec<usize> = Vec::new();
-    let mut next_accuracy: Option<f64> = None;
+    let mut least_independent: Option<(usize, f64)> = None;
     let mut sigma_a_columns: Vec<Array1<f64>> = Vec::new();
     let mut upper: Vec<f64> = Vec::new();
+    // Per accepted position, the refused rows whose far wall was folded into
+    // it. Parallel to `rows` and `upper`.
+    let mut folded: Vec<Vec<usize>> = Vec::new();
     let mut w_accepted = Array2::<f64>::zeros((0, 0));
     let mut factor = Array2::<f64>::zeros((0, 0));
     for (row_index, _, sigma_row) in candidates {
+        if excluded.contains(row_index) {
+            continue;
+        }
         let row = constraints.a.row(*row_index);
         let accepted = rows.len();
         let diagonal = row.dot(sigma_row);
@@ -1623,12 +1862,12 @@ fn assemble_retained_face(
         // constraint the retained one does not already impose.
         //
         // This is necessary and NOT sufficient, which is why the caller checks
-        // the assembled face and raises `demanded_accuracy` when it falls short:
-        // `min pivot / diagonal` is the smallest pivot of the correlation matrix
-        // and bounds its smallest eigenvalue only when the elimination is ordered
-        // by pivot magnitude. This walk is ordered by slack, so every row can
-        // clear the floor while the face as a whole does not.
-        let critical_accuracy = (accepted + 1) as f64 * f64::EPSILON * diagonal / pivot;
+        // the assembled face and excludes its least independent row when it
+        // falls short: `min pivot / diagonal` is the smallest pivot of the
+        // correlation matrix and bounds its smallest eigenvalue only when the
+        // elimination is ordered by pivot magnitude. This walk is ordered by
+        // slack, so every row can clear the floor while the face as a whole
+        // does not.
         let rank_floor = (accepted + 1) as f64 * f64::EPSILON * diagonal / demanded_accuracy;
         if !(pivot.is_finite() && pivot > rank_floor) {
             // Redundant AS A DIRECTION. That is not the same as redundant as a
@@ -1644,7 +1883,7 @@ fn assemble_retained_face(
             // row, so the accepted row's `slack/sd` is the smaller, which is
             // exactly the statement that its wall is the binding one. Those
             // still drop, unchanged.
-            record_opposed_face_limit(
+            if let Some(position) = record_opposed_face_limit(
                 *row_index,
                 &cross,
                 diagonal,
@@ -1656,7 +1895,9 @@ fn assemble_retained_face(
                     antiparallel_tolerance,
                 },
                 &mut upper,
-            )?;
+            )? {
+                folded[position].push(*row_index);
+            }
             continue;
         }
         let mut grown = Array2::<f64>::zeros((accepted + 1, accepted + 1));
@@ -1683,10 +1924,22 @@ fn assemble_retained_face(
         rows.push(*row_index);
         sigma_a_columns.push(sigma_row.clone());
         upper.push(f64::INFINITY);
-        if critical_accuracy.is_finite() {
-            next_accuracy = Some(next_accuracy.map_or(critical_accuracy, |best: f64| {
-                best.max(critical_accuracy)
-            }));
+        folded.push(Vec::new());
+        // The independence ratio of the row just accepted. `diagonal > 0` is
+        // guaranteed by `constraint_face_candidates`, and `pivot > rank_floor > 0`
+        // by the branch above, so the ratio is a finite positive number and the
+        // comparison never sees a NaN.
+        //
+        // `<=` keeps the LAST minimizer, and the rows arrive in ascending slack
+        // order, so a tie is broken toward the slacker row. That matters at the
+        // one tie that is structural rather than accidental: the first accepted
+        // row has an empty `new_column`, hence `pivot == diagonal` and a ratio
+        // of exactly `1`, so on a face whose rows are all mutually orthogonal
+        // in the `Σ` metric every ratio is `1` and a `<` rule would drop the
+        // TIGHTEST wall.
+        let independence = pivot / diagonal;
+        if least_independent.is_none_or(|(_, best)| independence <= best) {
+            least_independent = Some((rows.len() - 1, independence));
         }
     }
     if rows.is_empty() {
@@ -1699,13 +1952,21 @@ fn assemble_retained_face(
     for (position, column) in sigma_a_columns.iter().enumerate() {
         sigma_at.column_mut(position).assign(column);
     }
+    let least_independent_direction = match least_independent {
+        Some((position, _)) => {
+            let mut direction = vec![rows[position]];
+            direction.extend_from_slice(&folded[position]);
+            direction
+        }
+        None => Vec::new(),
+    };
     Ok(Some(RetainedFace {
         rows,
         factor,
         w: w_accepted,
         sigma_at,
         upper,
-        next_accuracy_that_changes_the_face: next_accuracy,
+        least_independent_direction,
     }))
 }
 
@@ -1751,13 +2012,18 @@ struct AcceptedFace<'a> {
 /// they were before. That is a narrower repair than "every dependent row", and
 /// deliberately so: a row depending on two or more accepted normals at once cuts
 /// the face along a diagonal, which no per-coordinate limit can represent.
+///
+/// Returns the accepted POSITION the wall was folded into, so the caller can
+/// keep the pair together: the folded row is the opposite face of that accepted
+/// row's direction, and if the retention walk later drops the direction the far
+/// wall has to go with it rather than be promoted in its place (#2714).
 fn record_opposed_face_limit(
     row_index: usize,
     cross: &Array1<f64>,
     diagonal: f64,
     face: &AcceptedFace<'_>,
     upper: &mut [f64],
-) -> Result<(), String> {
+) -> Result<Option<usize>, String> {
     let mut opposed: Option<(usize, f64, f64)> = None;
     for position in 0..face.rows.len() {
         let w_kk = face.w_accepted[[position, position]];
@@ -1781,7 +2047,7 @@ fn record_opposed_face_limit(
         }
     }
     let Some((position, _, gamma)) = opposed else {
-        return Ok(());
+        return Ok(None);
     };
     let accepted_row = face.rows[position];
     let delta = (face.constraints.a.row(row_index).dot(face.unconstrained_center)
@@ -1802,7 +2068,7 @@ fn record_opposed_face_limit(
     if limit < upper[position] {
         upper[position] = limit;
     }
-    Ok(())
+    Ok(Some(position))
 }
 
 /// `max |A G - I|` over the retained rows.
@@ -3366,29 +3632,53 @@ mod tests {
         );
     }
 
-    /// #2714: the ladder must return the LARGEST admissible face, not the first
-    /// one below a floor inferred from an error model the filter itself
-    /// documents as not tight.
+    /// The retained-face walk and its oracle, sharing one face assembler.
     ///
-    /// The retained set is a step function of the retention floor `d`: a row is
-    /// kept iff `pivot > (k+1)·ε·diagonal/d`, so the set changes only at the
-    /// accepted rows' own `d_r = (k+1)·ε·diagonal_r/pivot_r`. Stepping by
-    /// `d /= departure/tolerance` reads its step size off `departure ≈
-    /// ε·diagonal/pivot`, a PER-ROW bound that holds exactly when the face is no
-    /// worse conditioned than its worst row — i.e. never, in the only case the
-    /// ladder runs in. So it skipped faces, and on a badly conditioned face it
-    /// could carry `d` from `1e-3` to below `f64::EPSILON` in ONE pass, out of
-    /// the loop, and into a terminal message claiming a ladder that took one
-    /// rung.
+    /// `excluded` is the set of constraint-row indices held out of the greedy
+    /// walk. Returns the retained rows and whether their lift satisfies the
+    /// identity that defines it, or `None` when the exclusion leaves no face.
+    fn face_at_exclusion(
+        candidates: &[(usize, f64, Array1<f64>)],
+        constraints: &LinearInequalityConstraints,
+        center: &Array1<f64>,
+        excluded: &[usize],
+    ) -> Option<(Vec<usize>, bool)> {
+        let face = assemble_retained_face(
+            candidates,
+            ORTHANT_MOMENT_RELATIVE_TOLERANCE,
+            constraints,
+            center,
+            excluded,
+        )
+        .expect("face assembly")?;
+        let lift = cholesky_solve_right(&face.factor, &face.sigma_at).expect("lift solve");
+        let departure =
+            lift_identity_departure(&lift, constraints, &face.rows).expect("identity departure");
+        Some((face.rows, departure <= ORTHANT_MOMENT_RELATIVE_TOLERANCE))
+    }
+
+    /// #2714: the walk must return the LARGEST admissible face, and it must
+    /// reach it by a rule that terminates.
     ///
-    /// The oracle is brute force over the same control: sweep `d` on a fine
-    /// geometric grid, assemble the face at each, and keep the largest retained
-    /// set whose lift satisfies its own identity. Both sides use the SAME
-    /// `constraint_face_candidates` / `assemble_retained_face`, so this compares
-    /// two search strategies over one face family rather than two
-    /// implementations of the face.
+    /// Two earlier rules searched a REAL NUMBER — the retention floor — where
+    /// the object being chosen is a SET of rows, and both failed on that:
+    ///
+    /// * `demanded_accuracy /= departure/tolerance` stepped by a factor read off
+    ///   a per-row error model the filter itself documents as not tight, so it
+    ///   skipped faces and could leave the loop in one pass;
+    /// * stepping to `max_r (k+1)·ε·diagonal_r/pivot_r` is exact in real
+    ///   arithmetic and not in floating point — see
+    ///   `the_floor_round_trip_retains_the_row_it_was_aimed_at_2714`, which
+    ///   measures the round trip directly.
+    ///
+    /// The oracle here is brute force over EVERY exclusion set, which is the
+    /// full family the walk searches (128 of them at `ROWS = 7`), rather than
+    /// the floor-indexed subfamily the previous version of this test swept.
+    /// Both sides use the SAME `constraint_face_candidates` /
+    /// `assemble_retained_face`, so this compares search strategies over one
+    /// face family rather than two implementations of the face.
     #[test]
-    fn the_ladder_returns_the_largest_admissible_face_2714() {
+    fn the_walk_returns_the_largest_admissible_face_2714() {
         const ROWS: usize = 7;
         const DIMENSION: usize = 8;
         const DEGREE: usize = 5;
@@ -3415,61 +3705,349 @@ mod tests {
         let sigma_at = covariance.dot(&constraints.a.t());
         let candidates = constraint_face_candidates(sigma_at.view(), &center, &constraints)
             .expect("candidate rows");
+        let candidate_rows: Vec<usize> = candidates.iter().map(|(row, _, _)| *row).collect();
 
-        // 64 samples per octave over the whole usable range of the floor: fine
-        // enough that no breakpoint between two distinct faces can hide inside
-        // one step, since the faces themselves are separated by orders.
-        let mut best: Option<Vec<usize>> = None;
-        let mut floors_scanned = 0usize;
+        let mut admissible_faces: Vec<Vec<usize>> = Vec::new();
         let mut distinct_faces: Vec<Vec<usize>> = Vec::new();
-        let mut demanded = ORTHANT_MOMENT_RELATIVE_TOLERANCE;
-        let step = 0.5_f64.powf(1.0 / 64.0);
-        while demanded >= f64::EPSILON {
-            floors_scanned += 1;
-            if let Some(face) =
-                assemble_retained_face(&candidates, demanded, &constraints, &center)
-                    .expect("face assembly")
-            {
-                if distinct_faces.last() != Some(&face.rows) {
-                    distinct_faces.push(face.rows.clone());
-                }
-                let lift =
-                    cholesky_solve_right(&face.factor, &face.sigma_at).expect("lift solve");
-                let departure = lift_identity_departure(&lift, &constraints, &face.rows)
-                    .expect("identity departure");
-                if departure <= ORTHANT_MOMENT_RELATIVE_TOLERANCE
-                    && best.as_ref().is_none_or(|rows| face.rows.len() > rows.len())
-                {
-                    best = Some(face.rows.clone());
-                }
+        for mask in 0..(1u32 << candidate_rows.len()) {
+            let excluded: Vec<usize> = candidate_rows
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| mask & (1 << position) != 0)
+                .map(|(_, row)| *row)
+                .collect();
+            let Some((rows, admissible)) =
+                face_at_exclusion(&candidates, &constraints, &center, &excluded)
+            else {
+                continue;
+            };
+            if !distinct_faces.contains(&rows) {
+                distinct_faces.push(rows.clone());
             }
-            demanded *= step;
+            if admissible && !admissible_faces.contains(&rows) {
+                admissible_faces.push(rows);
+            }
         }
-        let best = best.expect("some face on the grid must satisfy its own identity");
+        let largest = admissible_faces
+            .iter()
+            .map(Vec::len)
+            .max()
+            .expect("some exclusion set must yield a face satisfying its own identity");
 
-        // Non-vacuity: the fixture has to make the ladder WORK. If the first
+        // Non-vacuity: the fixture has to make the walk WORK. If the unexcluded
         // face were already admissible, or if only one face existed, this test
-        // would pass on a ladder that never ran.
+        // would pass on a walk that never ran.
         assert!(
             distinct_faces.len() >= 3,
-            "#2714: the grid saw only {} distinct face(s) over {floors_scanned} floors, so \
-             the fixture does not exercise a ladder: {distinct_faces:?}",
+            "#2714: the exclusion sweep saw only {} distinct face(s), so the fixture does not \
+             exercise a walk: {distinct_faces:?}",
             distinct_faces.len()
         );
+        let (unexcluded, unexcluded_admissible) =
+            face_at_exclusion(&candidates, &constraints, &center, &[])
+                .expect("the unexcluded face");
         assert!(
-            distinct_faces[0].len() > best.len(),
-            "#2714: the first face {:?} is already the answer, so the ladder is not \
-             exercised",
-            distinct_faces[0]
+            !unexcluded_admissible,
+            "#2714: the unexcluded face {unexcluded:?} already satisfies its own lift identity, \
+             so the walk is not exercised"
+        );
+        assert!(
+            unexcluded.len() > largest,
+            "#2714: the unexcluded face {unexcluded:?} is no larger than the {largest}-row \
+             answer, so nothing had to be dropped"
         );
 
+        // The walk's face must BE one of the admissible faces — this is what
+        // says it returned a face it can actually lift — and it must be one of
+        // the largest, which is what says it stopped dropping as soon as it
+        // could. Asserting membership plus size rather than equality with one
+        // enumerated face is deliberate: several distinct faces reach the
+        // maximum, so an equality would be pinning the oracle's enumeration
+        // order, not a property of the walk.
+        assert!(
+            admissible_faces.contains(&correction.rows),
+            "#2714: the walk returned {:?}, which is not among the {} faces whose lift satisfies \
+             its own identity: {admissible_faces:?}",
+            correction.rows,
+            admissible_faces.len()
+        );
         assert_eq!(
-            correction.rows, best,
-            "#2714: the ladder returned {:?} where the largest face satisfying its own lift \
-             identity is {best:?}. Stepping the retention floor by a factor read off the \
-             departure skips faces; stepping it to the next value at which the retained set \
-             changes cannot.",
+            correction.rows.len(),
+            largest,
+            "#2714: the walk returned the {}-row face {:?} where an admissible face of {largest} \
+             rows exists. Dropping the least independent accepted row is the step that reaches \
+             the largest one; stepping a retention floor cannot, because the floor is a proxy \
+             for the face and the proxy is not injective.",
+            correction.rows.len(),
             correction.rows
+        );
+        // And among the largest, the one the SLACK ordering asks for: the walk
+        // opens on the tightest candidate row and only ever drops rows that are
+        // nearly dependent on rows already accepted, so the binding wall cannot
+        // be the row that leaves. An enumeration over exclusion sets has no
+        // such preference — on this fixture it also reaches a maximum-size face
+        // that drops the tightest row — so this is the assertion that separates
+        // the walk from "any largest face".
+        assert_eq!(
+            correction.rows.first(),
+            candidate_rows.first(),
+            "#2714: the walk returned {:?}, which does not retain the tightest candidate row \
+             {:?}. The slack ordering is the reason a dropped row imposes no constraint the \
+             retained ones do not; dropping the binding wall would relax the posterior by a \
+             multiple of its own standard deviation.",
+            correction.rows,
+            candidate_rows.first()
+        );
+    }
+
+    /// The production entry point on the geometry #2714's witness actually has:
+    /// far MORE constraint rows than the coefficient block has columns, so
+    /// `W = A Σ Aᵀ` is structurally rank-deficient and the retention walk is the
+    /// only thing between the fit and a face it can lift.
+    ///
+    /// A shape-constrained survival fit imposes its monotonicity guard at every
+    /// observed exit time — one constraint row per data row, on a time block of
+    /// a few coefficients — and the rows are near-collinear because adjacent
+    /// times give near-identical derivative-basis rows. This fixture is that
+    /// shape with the data removed: 40 Vandermonde rows at closely spaced nodes
+    /// on 5 columns, identity covariance, every row within the resolution
+    /// horizon of its wall. Nothing here is a recorded spectrum; the geometry
+    /// is written down and the numbers follow from it.
+    ///
+    /// The old retention ladder PANICS on this input. Its step
+    /// `d ← max_r (k+1)·ε·diagonal_r/pivot_r` retains the row it was aimed at
+    /// on pass 26, rebuilds a bit-identical face, recomputes the same step, and
+    /// trips `assert!(next < demanded_accuracy)` — which is why this test's
+    /// primary assertion is that the call RETURNS. `constrained_posterior_correction`
+    /// is reached from the terminal geometry of every constrained fit, so a
+    /// panic there is a panic in a library, on data.
+    #[test]
+    fn a_rank_deficient_constraint_system_still_yields_a_liftable_face_2714() {
+        const ROWS: usize = 40;
+        const DIMENSION: usize = 5;
+        const SPACING: f64 = 2.0e-2;
+
+        let mut a = Array2::<f64>::zeros((ROWS, DIMENSION));
+        for row in 0..ROWS {
+            let node = row as f64 * SPACING;
+            for power in 0..DIMENSION {
+                a[[row, power]] = node.powi(power as i32);
+            }
+        }
+        let constraints = LinearInequalityConstraints::new(a, Array1::<f64>::zeros(ROWS))
+            .expect("clustered Vandermonde rows");
+        let covariance = Array2::<f64>::eye(DIMENSION);
+        // Every row's value at the centre is its constant term, so every row
+        // sits one unit above its wall in unscaled units and inside the
+        // resolution horizon once divided by its own spread: all 40 are
+        // candidates, against 5 columns.
+        let mut center = Array1::<f64>::zeros(DIMENSION);
+        center[0] = 1.0;
+
+        let sigma_at = covariance.dot(&constraints.a.t());
+        let candidates = constraint_face_candidates(sigma_at.view(), &center, &constraints)
+            .expect("candidate rows");
+        assert!(
+            candidates.len() > DIMENSION,
+            "#2714: the fixture must be rank-deficient to exercise the walk, and it offers only \
+             {} candidate row(s) against {DIMENSION} columns",
+            candidates.len()
+        );
+        let (unexcluded, unexcluded_admissible) =
+            face_at_exclusion(&candidates, &constraints, &center, &[])
+                .expect("the unexcluded face");
+        assert!(
+            !unexcluded_admissible,
+            "#2714: the unexcluded face {unexcluded:?} already satisfies its own lift identity, \
+             so the walk never runs and this fixture asserts nothing"
+        );
+
+        let correction =
+            constrained_posterior_correction_from_covariance(&covariance, &center, &constraints)
+                .expect("a rank-deficient constraint system must still produce a face")
+                .expect("an active face inside the horizon");
+
+        // The face it settled on has to satisfy the identity that DEFINES the
+        // lift, recomputed here from the returned `lift` rather than from the
+        // walk's own bookkeeping.
+        let departure = lift_identity_departure(&correction.lift, &constraints, &correction.rows)
+            .expect("identity departure of the returned lift");
+        assert!(
+            departure <= ORTHANT_MOMENT_RELATIVE_TOLERANCE,
+            "#2714: the returned {}-row face {:?} misses the identity that defines its lift by \
+             {departure:.6e}, above {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}",
+            correction.rows.len(),
+            correction.rows
+        );
+        assert!(
+            correction.rows.len() < unexcluded.len(),
+            "#2714: the walk returned {:?}, which is not smaller than the inadmissible \
+             unexcluded face {unexcluded:?} — so it accepted a face it had already rejected",
+            correction.rows
+        );
+        assert_eq!(
+            correction.rows.first(),
+            candidates.first().map(|(row, _, _)| row),
+            "#2714: the walk dropped the tightest candidate row"
+        );
+    }
+
+    /// #2714: the walk drops a DIRECTION, and a two-sided bound is one
+    /// direction.
+    ///
+    /// A row anti-parallel to an accepted one is refused as a direction and
+    /// keeps its wall as that row's upper limit (#2523), so a two-sided bound
+    /// reaches the moments as one retained row carrying a finite `upper`. If
+    /// the retention walk then drops that row for being nearly dependent and
+    /// leaves its partner in the candidate pool, the next pass accepts the
+    /// PARTNER in its place — with a full half-line and nothing to fold its own
+    /// far wall into, because the row that carried it is excluded. The bound
+    /// silently becomes one-sided, and on the wrong side: the walk is ordered
+    /// by ascending slack, so the row that leaves is the tighter wall.
+    ///
+    /// The fixture is the rank-deficient geometry with every row given an
+    /// opposite face, and the assertion is the invariant rather than one
+    /// hand-picked pair: NO retained row may report an infinite upper limit,
+    /// because every candidate direction in this system is two-sided.
+    #[test]
+    fn dropping_a_direction_takes_its_opposite_face_with_it_2714() {
+        const NODES: usize = 40;
+        const DIMENSION: usize = 5;
+        const SPACING: f64 = 2.0e-2;
+        // The far wall, in the same units as the near one. Every row's value at
+        // the centre is `1`, so `3` leaves a two-unit-wide feasible slab in
+        // every constraint-normal direction — wide enough that the region is
+        // not near-empty and narrow enough that the far wall is inside the
+        // resolution horizon and therefore a live candidate.
+        const FAR_WALL: f64 = 3.0;
+
+        let mut a = Array2::<f64>::zeros((2 * NODES, DIMENSION));
+        let mut b = Array1::<f64>::zeros(2 * NODES);
+        for node in 0..NODES {
+            let position = node as f64 * SPACING;
+            for power in 0..DIMENSION {
+                let entry = position.powi(power as i32);
+                a[[node, power]] = entry;
+                a[[NODES + node, power]] = -entry;
+            }
+            b[node] = 0.0;
+            b[NODES + node] = -FAR_WALL;
+        }
+        let constraints =
+            LinearInequalityConstraints::new(a, b).expect("two-sided Vandermonde slabs");
+        let covariance = Array2::<f64>::eye(DIMENSION);
+        let mut center = Array1::<f64>::zeros(DIMENSION);
+        center[0] = 1.0;
+
+        let sigma_at = covariance.dot(&constraints.a.t());
+        let candidates = constraint_face_candidates(sigma_at.view(), &center, &constraints)
+            .expect("candidate rows");
+        assert_eq!(
+            candidates.len(),
+            2 * NODES,
+            "#2714: both walls of every slab must be candidates, or the fixture is not \
+             two-sided where the walk runs"
+        );
+        let (unexcluded, unexcluded_admissible) =
+            face_at_exclusion(&candidates, &constraints, &center, &[])
+                .expect("the unexcluded face");
+        assert!(
+            !unexcluded_admissible,
+            "#2714: the unexcluded face {unexcluded:?} already satisfies its own lift identity, \
+             so no direction is ever dropped and this fixture asserts nothing"
+        );
+
+        let correction =
+            constrained_posterior_correction_from_covariance(&covariance, &center, &constraints)
+                .expect("a two-sided rank-deficient system must still produce a face")
+                .expect("an active face inside the horizon");
+
+        // Non-vacuity: the folding has to have happened at all.
+        assert_eq!(
+            correction.normal_upper_limits.len(),
+            correction.rows.len(),
+            "#2714: one upper limit per retained row"
+        );
+        for (position, &row) in correction.rows.iter().enumerate() {
+            assert!(
+                correction.normal_upper_limits[position].is_finite(),
+                "#2714: retained row {row} reports an infinite upper limit on a system where \
+                 EVERY direction is two-sided. Its opposite face was left in the candidate pool \
+                 when the direction that carried the fold was dropped, so a two-sided bound is \
+                 being reported as a half-line: rows {:?}, limits {:?}",
+                correction.rows,
+                correction.normal_upper_limits
+            );
+        }
+        // And the near wall is the one that survived: every retained row is a
+        // NEAR wall (index below `NODES`), never the far wall promoted in its
+        // place.
+        for &row in &correction.rows {
+            assert!(
+                row < NODES,
+                "#2714: the walk retained far-wall row {row}, which sits at slack {FAR_WALL} \
+                 against the near wall's 1 — the slacker of the pair replaced the binding one: \
+                 {:?}",
+                correction.rows
+            );
+        }
+    }
+
+    /// The measurement that kills the retention-floor step (#2714), stated as a
+    /// property of `f64` rather than as a story about one fit.
+    ///
+    /// The previous rule named the next face by the floor `d_r =
+    /// (k+1)·ε·diagonal/pivot` at which accepted row `r` drops, because the
+    /// retention test `pivot > (k+1)·ε·diagonal/d` then reads `pivot > pivot`.
+    /// It does not: both sides are ROUNDED quotients, and the round trip lands
+    /// strictly below `pivot` often enough to be reached by any fit. When it
+    /// does, the rebuilt face is bit-identical, the recomputed step is the value
+    /// the floor already has, and the walk stops descending — which the old code
+    /// caught with a debug assertion, i.e. by panicking inside a library.
+    ///
+    /// The sweep is over the same three quantities the filter forms, across the
+    /// magnitudes a penalized posterior actually produces. A single surviving
+    /// triple is enough to refute the step rule; the count is reported so a
+    /// change in the arithmetic cannot silently make this vacuous.
+    #[test]
+    fn the_floor_round_trip_retains_the_row_it_was_aimed_at_2714() {
+        let mut retained = 0usize;
+        let mut exact_stalls = 0usize;
+        let mut examined = 0usize;
+        for accepted in 0..12usize {
+            for diagonal_exponent in -8i32..=4 {
+                for pivot_decades in 1..=15i32 {
+                    for tweak in 0..64u32 {
+                        let diagonal = 10.0_f64.powi(diagonal_exponent)
+                            * (1.0 + f64::from(tweak) / 64.0);
+                        let pivot = diagonal * 10.0_f64.powi(-pivot_decades);
+                        let scale = (accepted + 1) as f64 * f64::EPSILON * diagonal;
+                        let step = scale / pivot;
+                        let rebuilt_floor = scale / step;
+                        examined += 1;
+                        if pivot > rebuilt_floor {
+                            retained += 1;
+                            // The face is then unchanged, so the next step is
+                            // recomputed from the same three numbers.
+                            if scale / pivot == step {
+                                exact_stalls += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            retained > 0,
+            "#2714: the floor round trip never retained the row it was aimed at across \
+             {examined} triples, which would make this refutation vacuous"
+        );
+        assert_eq!(
+            retained, exact_stalls,
+            "#2714: {retained} of {examined} triples retained the row the step was aimed at, and \
+             {exact_stalls} of those recompute the same step. Every retention IS a stall — the \
+             face is bit-identical, so the step is a function of unchanged inputs — and the old \
+             rule's descent assertion fires on each one."
         );
     }
 

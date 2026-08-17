@@ -67,13 +67,33 @@
 //!   the cheap representation is also the accurate one (a Gram squares the
 //!   condition number under a rank tolerance chosen to sit just above an SVD's
 //!   backward error).
+//! * [`TriangularRootAccumulator`] — the same streaming discipline for the
+//!   branch where the metric DOES couple output coordinates and no block
+//!   structure survives: the root's rows are folded into one
+//!   `param_dim`-square upper-triangular factor `T` with `TᵀT = RᵀR`.
 //! * [`ResidualGaugeCurvature`] — the curvature as the builder is able to
 //!   produce it: output-coordinate block roots plus the pin's dense rows when
-//!   the metric does not couple output coordinates; the stacked root `R` when
-//!   `H = RᵀR` has fewer rows than columns; and the dense Gram only when
-//!   neither applies, which is also the only representation whose rank decision
-//!   must be taken on `λ = σ²`.
+//!   the metric does not couple output coordinates, and otherwise the root —
+//!   whole when it has fewer rows than columns, folded into `T` when it has
+//!   more. **Every production representation now carries a ROOT**, so every
+//!   rank decision is taken on `σ`; [`ResidualGaugeCurvature::DenseGram`]
+//!   survives only for callers that hand-build a Gram, and is the one
+//!   representation forced onto `λ = σ²`.
 //! * [`BlockPlusRowsSpectrum`] — the inertia machinery above.
+//!
+//! # What is not solved here, and cannot be
+//!
+//! A metric that couples output coordinates leaves `H` with no exploitable
+//! structure at all: it is a sum of `n · metric_rank` rank-one terms in
+//! `param_dim` dimensions, and its exact spectrum costs
+//! `min(rows, param_dim)²` memory whichever side it is taken from. The fold
+//! above removes the factor of two (`eigh` allocates eigenvectors the reduction
+//! discards; a values-only SVD allocates none), removes the squared rank
+//! tolerance, and removes the second representation — but the surviving
+//! `param_dim²` is the price of asking for an exact full spectrum, not an
+//! artifact of how it is asked for. At production width that branch needs the
+//! certificate to stop asking, which is a change to what
+//! [`super::residual_gauge_inner`] reads rather than to how this module stores.
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use ndarray::{Array2, Array3, ArrayView1, ArrayViewMut2, s};
@@ -350,6 +370,87 @@ impl OutputBlockRootAccumulator {
         let param_dim = self.layout.param_dim();
         self.finish_with_rows(Array2::<f64>::zeros((0, param_dim)), root_rows)
             .expect("an empty dense-row block is conformable with any layout")
+    }
+}
+
+/// Streaming accumulator for a curvature root with NO output-coordinate
+/// structure to exploit — the branch where the metric couples output
+/// coordinates, so `H`'s off-block entries are genuinely nonzero.
+///
+/// # What it replaces and why
+///
+/// That branch used to fork on whether the root had more rows than columns.
+/// With fewer, it kept the root whole. With more — which at any production row
+/// count is always, since the root has `n · metric_rank` rows — it assembled the
+/// dense `param_dim × param_dim` **Gram** instead, and the certificate then read
+/// its spectrum through a symmetric eigendecomposition. That is #2757's own
+/// defect, verbatim, surviving on the half of the fork the block-structured
+/// curvature never reached.
+///
+/// The Gram is the wrong object on both counts the certificate cares about:
+///
+/// * **Resolution.** [`gram_spectral_rank`](super::gram_spectral_rank) has to
+///   take the rank decision on `λ = σ²` against a threshold `τ²` that lands
+///   below a symmetric eigensolver's own backward error, so it is floored at
+///   `ε·param_dim·λ_max` and cannot resolve below it — at `param_dim = 65 536`
+///   that is `1.5e-11·λ_max`, where the root-side decision resolves
+///   `(α·ε·N)² ≈ 1e-16·λ_max`. Folding rows in keeps `σ` to full precision
+///   instead of squaring the condition number, exactly as
+///   [`OutputBlockRootAccumulator`] already argues for the block case.
+/// * **Peak memory.** The Gram is `param_dim²`, and `eigh` allocates a second
+///   `param_dim²` for eigenvectors the reduction discards. A values-only SVD of
+///   the triangular factor allocates neither.
+///
+/// # What it does NOT fix, stated plainly
+///
+/// This does not make a coupling metric affordable at production width. `H` for
+/// such a metric is a sum of `n · metric_rank` rank-one terms in `param_dim`
+/// dimensions with no exploitable structure — the per-row Jacobian is
+/// output-coordinate diagonal, but `M_n` couples those coordinates, so the
+/// product is dense — and its exact spectrum costs `min(rows, param_dim)²`
+/// memory whichever side it is taken from. What this removes is the factor of
+/// two, the squared rank tolerance, and the second representation; the
+/// remaining `param_dim²` is a property of asking for an exact full spectrum at
+/// all, not of how it is asked for.
+pub struct TriangularRootAccumulator {
+    factor: Array2<f64>,
+}
+
+impl TriangularRootAccumulator {
+    pub fn new(param_dim: usize) -> Self {
+        Self {
+            factor: Array2::<f64>::zeros((param_dim, param_dim)),
+        }
+    }
+
+    /// Fold one root row into the factor. `row` is consumed (left as the
+    /// annihilated residual) so the caller may reuse one buffer.
+    ///
+    /// A row of the wrong width is a caller that built its root against a
+    /// different parameterization, which the fold would silently absorb into
+    /// the leading columns; it is refused rather than folded.
+    pub fn push_root_row(&mut self, row: &mut [f64]) -> Result<(), String> {
+        if row.len() != self.factor.ncols() {
+            return Err(format!(
+                "residual gauge curvature: root row has {} entries but the factor is over {} \
+                 parameters",
+                row.len(),
+                self.factor.ncols()
+            ));
+        }
+        let mut view = self.factor.view_mut();
+        fold_row_into_triangular_factor(&mut view, row);
+        Ok(())
+    }
+
+    /// Close the accumulation. `root_rows` is the number of rows that were
+    /// folded in — the true row count of `R`, which is what sets the rank
+    /// tolerance's scale, not the `param_dim` rows the factor happens to have.
+    pub fn finish(self, root_rows: usize) -> ResidualGaugeCurvature {
+        ResidualGaugeCurvature::DualRoot {
+            root: self.factor,
+            root_rows,
+        }
     }
 }
 

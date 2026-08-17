@@ -563,7 +563,6 @@ impl CustomFamily for TransformationNormalFamily {
                 row.alpha.view(),
                 row.h.view(),
                 row.h_prime.view(),
-                row.endpoint_q.as_slice(),
                 None,
             )?;
         let hessian_psi_psi_operator: Arc<dyn HyperOperator> =
@@ -581,7 +580,6 @@ impl CustomFamily for TransformationNormalFamily {
                 Arc::clone(&row.alpha),
                 Arc::clone(&row.h),
                 Arc::clone(&row.h_prime),
-                Arc::clone(&row.endpoint_q),
             ));
 
         // Result-validation gate. A trial point can still make the SCOP row

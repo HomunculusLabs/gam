@@ -2,7 +2,7 @@
 //!
 //! The behavior-anchored two-block SAE fit's inner (t, β) solve does not certify
 //! convergence on real 600-row data: the latest REAL verdict (GHA validate-one
-//! 29144079962) froze at `‖g‖=1.410137` / `‖Π⊥gauge g‖=1.387610` against a tight
+//! 29144079962) froze at `‖g‖=1.410137` / `‖Π⊥null g‖=1.387610` against a tight
 //! `2.76e-3` tolerance after 1050 inner iterations, with raw ≈ gauge (only
 //! ~0.023 gauge mass) so the residual is PHYSICAL, not a gauge-nullspace artifact.
 //!
@@ -13,7 +13,7 @@
 //! 600-row case — NOT the near-exact 48-row H2-degenerate regime that misleads.
 //!
 //! 1. `inner_gnorm_vs_budget_trajectory_2015` — run the inner solve at increasing
-//!    iteration budgets and log ‖g‖ / ‖Π⊥gauge g‖ at each. If ‖g‖ keeps dropping
+//!    iteration budgets and log ‖g‖ / ‖Π⊥null g‖ at each. If ‖g‖ keeps dropping
 //!    → under-budgeted (raise the cap). If ‖g‖ FLOORS regardless of budget →
 //!    genuine wall (solver-side 2nd-order/trust-region fix, or envelope-accept).
 //!
@@ -149,7 +149,7 @@ fn inner_gnorm_vs_budget_trajectory_2015() {
         base.n_obs() * base.k_atoms(),
     );
     eprintln!(
-        "[2015-TRAJ] budget | ‖g‖(raw) | ‖Π⊥gauge g‖ | pen_obj | max|coord| | reseeds | \
+        "[2015-TRAJ] budget | ‖g‖(raw) | ‖Π⊥null g‖ | pen_obj | max|coord| | reseeds | \
          decnorm[min,max] | fp"
     );
 

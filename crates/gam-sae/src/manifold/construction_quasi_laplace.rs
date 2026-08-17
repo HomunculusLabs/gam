@@ -892,6 +892,12 @@ impl SaeManifoldTerm {
         // round re-arms, so a plateau the polish cannot unlock refuses on its
         // second visit with the polish disarmed.
         let mut terminal_newton_polish_armed = true;
+        // #2762 — whether the gauge-orbit block descent is armed for the NEXT
+        // objective-stall fixed-point claim of THIS loop. Same discipline as the
+        // polish above and as the joint fit's own arming: consulting disarms,
+        // and only a materially-descending refine round re-arms, so a plateau
+        // the block cannot unlock refuses on its second visit.
+        let mut gauge_block_armed = true;
         loop {
             let mut sys = self
                 .assemble_arrow_schur(target, rho, registry)
@@ -1065,8 +1071,8 @@ impl SaeManifoldTerm {
                 )?;
                 log::debug!(
                     "SAE criterion factor accepted at KKT stationarity: ‖g‖={grad_norm:.6e} \
-                     ‖Π⊥gauge g‖={quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
-                     ‖Δ‖={:.6e} ‖Π⊥gauge Δ‖={:.6e} after {total_inner_iter} inner iterations",
+                     ‖Π⊥null g‖={quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
+                     ‖Δ‖={:.6e} ‖Π⊥null Δ‖={:.6e} after {total_inner_iter} inner iterations",
                     step_norm_sq.sqrt(),
                     quotient_step_norm_sq.sqrt(),
                 );
@@ -1312,7 +1318,7 @@ impl SaeManifoldTerm {
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          KKT entered its admission band (raw ‖g‖={grad_norm:.6e}, quotient \
-                         ‖Π⊥gauge g‖={quotient_grad_norm:.6e}, tolerance {grad_tolerance:.6e}) \
+                         ‖Π⊥null g‖={quotient_grad_norm:.6e}, tolerance {grad_tolerance:.6e}) \
                          but an evidence-only re-entry still made a strict state/objective move \
                          after {total_inner_iter} granted iterations ({intensive}). Refusing to \
                          differentiate a non-idempotent inner map.",
@@ -1480,33 +1486,44 @@ impl SaeManifoldTerm {
                     };
                     // gam#2080/#2627: this refusal has two regimes that need different
                     // fixes, and the raw norms alone do not separate them. Measured over
-                    // the occurrences that print both: ~10/14 sit at `gauge_share < 0.5`
+                    // the occurrences that print both: ~10/14 sit at `null_share < 0.5`
                     // (the solve is genuinely far from a KKT point in the directions it
-                    // can move) and ~4/14 at `gauge_share > 0.5` (the remainder within a
+                    // can move) and ~4/14 at `null_share > 0.5` (the remainder within a
                     // few x of tolerance — close in the directions that matter, held off
                     // by gauge content). Report the ratios that discriminate so any
                     // occurrence can be bucketed without parsing the norms pairwise.
                     //
-                    // gam#2715 — WHAT `gauge_share` IS, AND WHAT IT IS NOT. It is
-                    // `1 − ‖Π⊥gauge g‖/‖g‖`, i.e. one minus the RETAINED fraction. It is
-                    // NOT the share of the gradient lying in the gauge: the two components
-                    // are orthogonal, so norms add in QUADRATURE and
-                    // `‖Π∥gauge g‖/‖g‖ = sqrt(1 − retained²)`, which is strictly larger.
-                    // MEASURED at one refusal state: `gauge_share = 0.4999` while the gauge
-                    // actually holds 0.8660 of the norm and 0.7500 of the energy — reading
-                    // the field as "about half the gradient is gauge" understates it badly,
-                    // and has already misled a reader. So emit the projected component
-                    // ITSELF next to the other two norms; then `‖g‖² = ‖Π∥‖² + ‖Π⊥‖²`
-                    // is checkable from the message and no ratio has to be inferred from a
-                    // field name. (`gauge_share` keeps its definition — other consumers
-                    // parse it — and note `retained + gauge_share = 1` is an identity, so
-                    // agreement between those two numbers is never evidence of anything.)
-                    let gauge_share = if grad_norm > 0.0 {
+                    // gam#2720 — WHAT `Π` PROJECTS OFF, since the field names used to
+                    // say `gauge` and the span no longer contains one. It is
+                    // `posterior_null_quotient_basis`: the decoder β-null and
+                    // decoder-channel-null families, i.e. directions the PENALIZED
+                    // objective is flat along. The chart reparametrisation orbit was
+                    // removed from it — the priors are written on the chart coordinates
+                    // and are not flat there — so these fields no longer describe it and
+                    // no longer claim to. A reader diagnosing an orbit-dominated refusal
+                    // wants `orbit_best_objective_drop` from the gauge-orbit block, which
+                    // is emitted separately.
+                    //
+                    // gam#2715 — WHAT `null_share` IS, AND WHAT IT IS NOT. It is
+                    // `1 − ‖Π⊥null g‖/‖g‖`, i.e. one minus the RETAINED fraction. It is
+                    // NOT the share of the gradient lying in the null span: the two
+                    // components are orthogonal, so norms add in QUADRATURE and
+                    // `‖Π∥null g‖/‖g‖ = sqrt(1 − retained²)`, which is strictly larger.
+                    // MEASURED at one refusal state: `null_share = 0.4999` while the
+                    // removed span actually holds 0.8660 of the norm and 0.7500 of the
+                    // energy — reading the field as "about half the gradient is removed"
+                    // understates it badly, and has already misled a reader. So emit the
+                    // projected component ITSELF next to the other two norms; then
+                    // `‖g‖² = ‖Π∥‖² + ‖Π⊥‖²` is checkable from the message and no ratio
+                    // has to be inferred from a field name. (Note `retained + null_share
+                    // = 1` is an identity, so agreement between those two numbers is
+                    // never evidence of anything.)
+                    let null_share = if grad_norm > 0.0 {
                         1.0 - quotient_grad_norm / grad_norm
                     } else {
                         f64::NAN
                     };
-                    let gauge_component = (grad_norm * grad_norm
+                    let null_component = (grad_norm * grad_norm
                         - quotient_grad_norm * quotient_grad_norm)
                         .max(0.0)
                         .sqrt();
@@ -1519,9 +1536,9 @@ impl SaeManifoldTerm {
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          neither the KKT gradient ‖g‖={grad_norm:.6e} nor the quotient KKT gradient \
-                         ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
+                         ‖Π⊥null g‖={quotient_grad_norm:.6e} met tolerance {grad_tolerance:.6e} \
                          after {total_inner_iter} inner iterations \
-                         (‖Π∥gauge g‖={gauge_component:.6e}, gauge_share={gauge_share:.4}, \
+                         (‖Π∥null g‖={null_component:.6e}, null_share={null_share:.4}, \
                          quotient_over_tol={quotient_over_tol:.3e}, \
                          {intensive}). \
                          Refusing to rank an off-optimum Laplace criterion.",
@@ -1708,7 +1725,7 @@ impl SaeManifoldTerm {
                     let predicted_relative_decrease = 0.5 * newton_decrement_sq / objective_scale;
                     log::debug!(
                         "SAE inner stall certificate: ‖g‖={stationary_grad_norm:.6e} \
-                         ‖Π⊥gauge g‖={stationary_quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
+                         ‖Π⊥null g‖={stationary_quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
                          λ²={newton_decrement_sq:.6e} ½λ²/scale={predicted_relative_decrease:.6e} \
                          obj_scale={objective_scale:.6e} accept_tol={SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL:.6e}"
                     );
@@ -1805,6 +1822,59 @@ impl SaeManifoldTerm {
                         continue;
                     }
                 }
+                // #2762 — THE THIRD FIXED-POINT CLAIM, and the one this issue's
+                // refusals are actually raised at.
+                //
+                // The two claims inside `run_joint_fit_arrow_schur` (its
+                // objective-stall shortcut and its no-strict-decrease exit) now
+                // consult the gauge-orbit block, but this loop makes its OWN
+                // fixed-point claim on top of theirs, over whole refine ROUNDS,
+                // and it makes it at a state the joint fit may never have left
+                // the block stationary at — the terminal refusal below reports
+                // `best_seen`, the ½λ²/scale-minimizing iterate, which is a
+                // different state from wherever the last joint fit stopped.
+                //
+                // Measured on `zz2015` after the two joint-fit sites landed: the
+                // refusal still carried `orbit_best_objective_drop = 6.426e-3`,
+                // relative `3.30e-7` — 33x the `1e-8` resolution this same branch
+                // calls "no meaningful change". A stall over refine rounds is a
+                // fixed point only if it is one in BOTH blocks, so ask the block
+                // here too, on the same arming discipline as the polish above: a
+                // materially-descending round re-arms it, so a plateau the block
+                // cannot unlock refuses on its second visit with both movers
+                // disarmed.
+                if gauge_block_armed {
+                    gauge_block_armed = false;
+                    let orbit = self.descend_gauge_orbit(
+                        target,
+                        rho_fixed,
+                        registry,
+                        &lambda_smooth,
+                        // Same bound as the joint fit's: the block returns at the
+                        // first round that cannot commit a material decrease, so
+                        // this caps a loop that terminates on its own. The refine
+                        // loop has no per-iteration counter to borrow, so the
+                        // block's own budget is the stall streak it is answering.
+                        SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS.max(1),
+                    )?;
+                    if orbit.moved() {
+                        *criterion_fixed_point = false;
+                        consecutive_objective_stalls = 0;
+                        saw_refine_progress = true;
+                        log::debug!(
+                            "SAE inner refine loop: gauge-orbit descent recovered {:.6e} over \
+                             {} round(s) at the objective-stall fixed point (span dim {}, \
+                             maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations) after \
+                             {total_inner_iter} inner iterations",
+                            orbit.objective_decrease,
+                            orbit.rounds,
+                            orbit.dimension,
+                            orbit.max_directional_derivative,
+                            orbit.evaluations,
+                        );
+                        continue;
+                    }
+                }
                 // Persistent objective-stall fixed point (`STALL_MIN_ROUNDS`
                 // consecutive stalled rounds) without KKT stationarity. Surface
                 // the typed refusal that the outer bridge treats as an infeasible
@@ -1838,19 +1908,19 @@ impl SaeManifoldTerm {
                     // emitted its value, so an occurrence could not be bucketed
                     // without re-running it under instrumentation. The sibling
                     // iteration-budget refusal above already reports
-                    // `‖Π⊥gauge g‖` with `gauge_share` / `quotient_over_tol`;
+                    // `‖Π⊥null g‖` with `null_share` / `quotient_over_tol`;
                     // emit the identical fields here so the two terminal inner
                     // refusals are read the same way. See the sibling site above
-                    // for what `gauge_share` is and is not (gam#2715): it is
+                    // for what `null_share` is and is not (gam#2715): it is
                     // `1 − retained`, NOT the gauge's share of the gradient, and
-                    // `‖Π∥gauge g‖` is emitted beside it so no ratio has to be
+                    // `‖Π∥null g‖` is emitted beside it so no ratio has to be
                     // inferred from a field name.
                     //
                     // CORRECTION (gam#2715) to this comment as first landed: it
-                    // said `gauge_share` "is the share of ‖g‖ the projection
+                    // said `null_share` "is the share of ‖g‖ the projection
                     // removes, MEASURED at 0.87 and 0.93". Those 0.87/0.93 are
-                    // `‖Π∥gauge g‖/‖g‖` from the #2674 solver-side probe, a
-                    // DIFFERENT quantity — at that same state `gauge_share` reads
+                    // `‖Π∥null g‖/‖g‖` from the #2674 solver-side probe, a
+                    // DIFFERENT quantity — at that same state `null_share` reads
                     // 0.4999. The load-bearing part of that note survives and is
                     // restated correctly here: the removed directions carry
                     // directional derivatives 8x-10x the tolerance at this state
@@ -1865,12 +1935,12 @@ impl SaeManifoldTerm {
                     // overstates what is actually being removed there.
                     //
                     // Diagnostic only: no gate, bound or trajectory moves.
-                    let gauge_share = if grad_norm > 0.0 {
+                    let null_share = if grad_norm > 0.0 {
                         1.0 - quotient_grad_norm / grad_norm
                     } else {
                         f64::NAN
                     };
-                    let gauge_component = (grad_norm * grad_norm
+                    let null_component = (grad_norm * grad_norm
                         - quotient_grad_norm * quotient_grad_norm)
                         .max(0.0)
                         .sqrt();
@@ -1880,14 +1950,16 @@ impl SaeManifoldTerm {
                         f64::INFINITY
                     };
                     let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
+                    let orbit =
+                        self.gauge_orbit_descent_diagnostic(target, rho, registry, &lambda_smooth);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
                          objective stalled for {consecutive_objective_stalls} consecutive refine \
                          rounds, but neither the raw KKT gradient ‖g‖={grad_norm:.6e} nor the \
-                         quotient KKT gradient ‖Π⊥gauge g‖={quotient_grad_norm:.6e} met tolerance \
-                         {grad_tolerance:.6e} (‖Π∥gauge g‖={gauge_component:.6e}, \
-                         gauge_share={gauge_share:.4}, \
-                         quotient_over_tol={quotient_over_tol:.3e}, {intensive}). Objective \
+                         quotient KKT gradient ‖Π⊥null g‖={quotient_grad_norm:.6e} met tolerance \
+                         {grad_tolerance:.6e} (‖Π∥null g‖={null_component:.6e}, \
+                         null_share={null_share:.4}, \
+                         quotient_over_tol={quotient_over_tol:.3e}, {intensive}, {orbit}). Objective \
                          stagnation and a finite deflated factor are diagnostic only; refusing to \
                          rank or differentiate an off-optimum Laplace criterion.",
                         ProbeRefusalKind::inner_not_converged_marker()
@@ -1899,6 +1971,7 @@ impl SaeManifoldTerm {
                 // re-arms the terminal polish for the next plateau (#2132).
                 consecutive_objective_stalls = 0;
                 terminal_newton_polish_armed = true;
+                gauge_block_armed = true;
             }
         }
     }
@@ -2111,6 +2184,227 @@ impl SaeManifoldTerm {
         )
     }
 
+    /// #2762 PROBE — what the quotient removes, priced as objective motion.
+    ///
+    /// `quotient_residual_norm_sq` projects the KKT residual onto the complement
+    /// of the chart-gauge orbit + decoder nulls before the gate reads it, on the
+    /// premise that the penalized objective is flat along the removed span.
+    /// `quotient_gradient_norm_sq`'s own doc records that the premise is FALSE
+    /// (gam#2715/#2720: the orbit is a symmetry of the likelihood, not of the
+    /// posterior) and that the precondition `maxᵢ |gᵀvᵢ| ≤ tolerance` is
+    /// available at the projection site and never checked.
+    ///
+    /// This diagnostic checks it, and goes one step further: a nonzero `gᵀv` is
+    /// a first-order statement, and a first-order statement about a direction
+    /// with near-zero curvature does not say whether any FINITE motion along it
+    /// actually lowers the objective. So each removed direction is also walked
+    /// with a two-sided geometric line search on `penalized_objective_total` —
+    /// the exact scalar the inner solve descends — and the best realized
+    /// decrease is reported next to the first-order derivative.
+    ///
+    /// Diagnostic only: nothing here gates, accepts, or relaxes anything. It is
+    /// paid on the refusal path, which is already returning `Err`.
+    fn gauge_orbit_descent_diagnostic(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        lambda_smooth: &[f64],
+    ) -> String {
+        let system = match self.assemble_arrow_schur(target, rho, registry) {
+            Ok(system) => system,
+            Err(reason) => return format!("orbit=unresolved(assembly: {reason})"),
+        };
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let dense_len = n.saturating_mul(q);
+        let border_dim = self.factored_border_dim();
+        if system.rows.len() != n || system.row_offsets.len() != n + 1 || system.gb.len() != border_dim
+        {
+            return "orbit=unresolved(non-dense layout)".to_string();
+        }
+        let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+        for (row_index, row) in system.rows.iter().enumerate() {
+            let base = system.row_offsets[row_index];
+            let dim = system.row_dims[row_index];
+            if base + dim > dense_len || row.gt.len() < dim {
+                return "orbit=unresolved(row layout)".to_string();
+            }
+            for axis in 0..dim {
+                gradient[base + axis] = row.gt[axis];
+            }
+        }
+        for (index, &value) in system.gb.iter().enumerate() {
+            gradient[dense_len + index] = value;
+        }
+
+        // Same span, same order, same Gram--Schmidt as the projection the gate
+        // reads, so what is measured here is exactly what is removed there.
+        let gauges = match (
+            self.dense_step_gauge_vectors(),
+            self.joint_decoder_beta_null_directions(lambda_smooth),
+            self.decoder_channel_null_directions(),
+        ) {
+            (Ok(chart), Ok(beta_null), Ok(channel_null)) => chart
+                .into_iter()
+                .chain(beta_null)
+                .chain(channel_null)
+                .collect::<Vec<_>>(),
+            (Err(reason), _, _) | (_, Err(reason), _) | (_, _, Err(reason)) => {
+                return format!("orbit=unresolved(gauge basis: {reason})");
+            }
+        };
+        let mut orthonormal: Vec<Array1<f64>> = Vec::new();
+        for mut gauge in gauges {
+            if gauge.len() != gradient.len() {
+                continue;
+            }
+            for basis in &orthonormal {
+                let coeff = gauge.dot(basis);
+                for index in 0..gauge.len() {
+                    gauge[index] -= coeff * basis[index];
+                }
+            }
+            let norm_sq = gauge.iter().map(|value| value * value).sum::<f64>();
+            if norm_sq <= 1.0e-24 || !norm_sq.is_finite() {
+                continue;
+            }
+            let inv_norm = norm_sq.sqrt().recip();
+            for value in gauge.iter_mut() {
+                *value *= inv_norm;
+            }
+            orthonormal.push(gauge);
+        }
+        if orthonormal.is_empty() {
+            return "orbit=empty(no direction removed)".to_string();
+        }
+        let mut max_derivative = 0.0_f64;
+        for basis in &orthonormal {
+            max_derivative = max_derivative.max(gradient.dot(basis).abs());
+        }
+
+        // The steepest removed direction is the projection of `−g` onto the
+        // removed span: one line search on it bounds what the whole span offers.
+        let mut descent = Array1::<f64>::zeros(gradient.len());
+        for basis in &orthonormal {
+            let coeff = gradient.dot(basis);
+            for index in 0..descent.len() {
+                descent[index] -= coeff * basis[index];
+            }
+        }
+        let descent_norm = descent.dot(&descent).sqrt();
+        if !(descent_norm.is_finite() && descent_norm > 0.0) {
+            return format!(
+                "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, orbit_descent=degenerate",
+                orthonormal.len(),
+            );
+        }
+        for value in descent.iter_mut() {
+            *value /= descent_norm;
+        }
+        let base_objective = match self.penalized_objective_total(target, rho, registry, 1.0) {
+            Ok(value) => value,
+            Err(reason) => return format!("orbit=unresolved(objective: {reason})"),
+        };
+        let snapshot = self.snapshot_mutable_state();
+        let mut best_decrease = 0.0_f64;
+        let mut best_alpha = 0.0_f64;
+        let mut alpha = 1.0e-8_f64;
+        while alpha <= 1.0e3 {
+            let applied = self
+                .apply_newton_step(
+                    descent.slice(s![..dense_len]),
+                    descent.slice(s![dense_len..]),
+                    alpha,
+                )
+                .is_ok();
+            if applied
+                && let Ok(trial) = self.penalized_objective_total(target, rho, registry, 1.0)
+                && trial.is_finite()
+                && base_objective - trial > best_decrease
+            {
+                best_decrease = base_objective - trial;
+                best_alpha = alpha;
+            }
+            if self.restore_mutable_state(&snapshot).is_err() {
+                return format!(
+                    "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, \
+                     orbit_descent=unresolved(restore failed at α={alpha:.3e})",
+                    orthonormal.len(),
+                );
+            }
+            alpha *= 10.0;
+        }
+        let relative = if base_objective.abs() > 0.0 {
+            best_decrease / base_objective.abs()
+        } else {
+            f64::INFINITY
+        };
+
+        // THE AMBIENT CONTROL, and it is the one that decides what this refusal
+        // means. `g ≠ 0` on a differentiable objective makes `−g/‖g‖` a descent
+        // direction, so if NO step along it lowers `penalized_objective_total`,
+        // the assembled gradient is not the gradient of the scalar the line
+        // search descends — an objective↔gradient desync — and no amount of
+        // solver work can close a gap the two functions disagree about. The
+        // one-sided finite difference is reported beside the analytic slope so
+        // the two are compared rather than asserted.
+        let mut steepest = gradient.clone();
+        let steepest_norm = steepest.dot(&steepest).sqrt();
+        let ambient = if steepest_norm.is_finite() && steepest_norm > 0.0 {
+            for value in steepest.iter_mut() {
+                *value /= -steepest_norm;
+            }
+            let analytic_slope = gradient.dot(&steepest);
+            let mut ambient_best_drop = 0.0_f64;
+            let mut ambient_best_alpha = 0.0_f64;
+            let mut finite_difference = f64::NAN;
+            let mut alpha = 1.0e-8_f64;
+            while alpha <= 1.0e3 {
+                let applied = self
+                    .apply_newton_step(
+                        steepest.slice(s![..dense_len]),
+                        steepest.slice(s![dense_len..]),
+                        alpha,
+                    )
+                    .is_ok();
+                if applied && let Ok(trial) = self.penalized_objective_total(target, rho, registry, 1.0)
+                {
+                    if (alpha - 1.0e-6).abs() < 1.0e-18 && trial.is_finite() {
+                        finite_difference = (trial - base_objective) / alpha;
+                    }
+                    if trial.is_finite() && base_objective - trial > ambient_best_drop {
+                        ambient_best_drop = base_objective - trial;
+                        ambient_best_alpha = alpha;
+                    }
+                }
+                if self.restore_mutable_state(&snapshot).is_err() {
+                    break;
+                }
+                alpha *= 10.0;
+            }
+            let ratio = if analytic_slope != 0.0 {
+                finite_difference / analytic_slope
+            } else {
+                f64::NAN
+            };
+            format!(
+                "ambient_slope={analytic_slope:.6e}, ambient_fd_slope={finite_difference:.6e} \
+                 (fd/analytic {ratio:.6e}), ambient_best_objective_drop={ambient_best_drop:.6e} \
+                 at α={ambient_best_alpha:.3e}"
+            )
+        } else {
+            "ambient=degenerate".to_string()
+        };
+
+        format!(
+            "orbit_dim={}, orbit_max_dderiv={max_derivative:.6e}, \
+             orbit_best_objective_drop={best_decrease:.6e} at α={best_alpha:.3e} \
+             (objective {base_objective:.6e}, relative {relative:.6e}), {ambient}",
+            orthonormal.len(),
+        )
+    }
+
     pub(crate) fn quasi_laplace_kkt_stationary(
         grad_norm: f64,
         quotient_grad_norm: f64,
@@ -2295,7 +2589,7 @@ impl SaeManifoldTerm {
     /// idempotence certificate remain the SOLE acceptance authority — this
     /// phase mints nothing).
     /// A residual measured in the two currencies the inner gate speaks: the
-    /// gauge-QUOTIENT merit `½‖Π⊥gauge r‖²` — which is what
+    /// gauge-QUOTIENT merit `½‖Π⊥null r‖²` — which is what
     /// [`Self::quasi_laplace_kkt_stationary`] is a bound on, since the quotient
     /// norm is clamped at or below the raw one — and the AMBIENT merit `½‖r‖²`.
     ///
@@ -2463,9 +2757,7 @@ impl SaeManifoldTerm {
             else {
                 log::debug!(
                     "terminal Newton bail: every direction of A is inside its own null band at \
-                     ‖g‖={grad_norm:.6e} (floor {:.6e}) — no step of this operator can move the \
-                     residual",
-                    geometry.rank_floor,
+                     ‖g‖={grad_norm:.6e} — no step of this operator can move the residual",
                 );
                 break;
             };
@@ -2604,7 +2896,7 @@ impl SaeManifoldTerm {
             // every entry at the worst case.
             //
             // The gate this phase is trying to reach bounds
-            // `min(‖g‖, ‖Π⊥gauge g‖)`, so that is the quantity to extrapolate,
+            // `min(‖g‖, ‖Π⊥null g‖)`, so that is the quantity to extrapolate,
             // and it is read off the system the accepted trial already
             // assembled — the test costs nothing and fires one whole
             // eigendecomposition earlier than it could at the next loop top. At
@@ -2737,12 +3029,33 @@ impl SaeManifoldTerm {
         // #2253: everything pushed above comes from `dense_step_gauge_vectors`
         // — the closed-form CHART gauge orbit (circle/torus phase, and the
         // translation/scale orbits of the linear/euclidean/duchon/poincaré
-        // patches). These are EXACT criterion symmetries (global motion +
-        // decoder compensation), flat by construction, unlike the empirical
-        // decoder-null candidates admitted below (which the Rayleigh floor
-        // exists to screen). Remember the boundary so the exact-gauge subspace
-        // can be deflated UNCONDITIONALLY, keeping the deflation COUNT stable
-        // across the ρ-walk.
+        // patches).
+        //
+        // #2720 — READ THE SCOPE OF "EXACT" HERE CAREFULLY. This comment used
+        // to call them "EXACT criterion symmetries … flat by construction",
+        // and that sentence is what put the same orbit into the inner
+        // CONVERGENCE quotient, where it certified non-stationary points at up
+        // to 76 170x the KKT tolerance. They are exact symmetries of the
+        // RECONSTRUCTION (measured `1e-16` relative) and NOT of the criterion:
+        // the ARD prior on `t` and the smoothness prior on `β` are written on
+        // the chart coordinates and move along the orbit — the dilation field
+        // by `−7.82` on an objective of `165`
+        // (`tests_gauge_posterior_flatness_2720`).
+        //
+        // What justifies deflating them HERE is a different property and a
+        // weaker one: this block runs only after the conditioning gate has
+        // already flagged a near-singular joint Hessian, and the orbit carries
+        // NO data-fit CURVATURE (only the priors'), so it is a genuine
+        // near-null direction OF THE OPERATOR BEING INVERTED. Deflation is then
+        // a pseudo-inverse choice on an ill-conditioned solve, not a claim that
+        // the criterion is flat. That distinction is the whole of #2720, and it
+        // is written here because this is the other site the claim reached.
+        //
+        // Remember the boundary so the exact-gauge subspace can be deflated
+        // UNCONDITIONALLY, keeping the deflation COUNT stable across the ρ-walk
+        // (a borderline eigenvalue flickering across the Rayleigh floor
+        // re-anchors ½log|H| and desyncs the fixed-ρ criterion gradient from
+        // its value).
         let n_exact_raw = raw_gauges.len();
         // #1051/#1273: admit the penalty-aware decoder-β null directions as
         // additional deflation candidates. A rank-deficient decoder design
@@ -2908,7 +3221,9 @@ impl SaeManifoldTerm {
         // patch translation/scale) it changes the deflation COUNT by ±1 and
         // re-anchors ½log|H|, desyncing the fixed-ρ criterion gradient from the
         // value (the K=1 circle non-stationary stall). The exact-gauge subspace
-        // is `gauge_span[0..exact_basis_count]` (flat by construction); add any
+        // is `gauge_span[0..exact_basis_count]` (reconstruction-flat by
+        // construction, hence data-fit-curvature-free — NOT criterion-flat, see
+        // the scope note at the candidate site above); add any
         // of its directions the floor loop dropped, orthogonalized against what
         // was already kept, so the deflation dimension is ρ-stable. When the
         // floor already kept a gauge, its residual here is ~0 and it is not
@@ -3479,7 +3794,9 @@ impl SaeManifoldTerm {
     ///
     /// The Laplace criterion is `½log|∇²_θθ(objective)|`, and `A` IS that
     /// Hessian by construction. `B` is the positive-definite scale /
-    /// preconditioner for `A` (see `sae_ift_min_curvature_fraction`); a
+    /// preconditioner for `A` — and, since #2673, the METRIC every direction of
+    /// `A` is classified in at both the value and the gradient site (see
+    /// `sae_exact_a_identifiability_floor`); a
     /// preconditioner is not the operator it preconditions. Pricing `log|B|`
     /// here while the dense lane prices `log|A|` is exactly the defect: the same
     /// statistical state was ranked ~22 criterion units apart because a host

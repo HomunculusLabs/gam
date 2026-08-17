@@ -122,7 +122,7 @@ pub(super) fn independent_two_circle_phases(n: usize, row: usize) -> (f64, f64) 
     )
 }
 
-fn two_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
+pub(super) fn two_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
     let mut fa = Array2::<f64>::zeros((2, p));
     let mut fb = Array2::<f64>::zeros((2, p));
     for j in 0..p {
@@ -1821,7 +1821,7 @@ fn zz_measure_k2_wide_p_inner_trajectory_2080() {
         base.n_obs() * base.assignment.row_block_dim(),
     );
     eprintln!(
-        "[2080-K2] budget | ‖g‖ | ‖Π⊥gauge g‖ | tol | pen_obj | contraction/iter | wall_s"
+        "[2080-K2] budget | ‖g‖ | ‖Π⊥null g‖ | tol | pen_obj | contraction/iter | wall_s"
     );
 
     let budgets = [8usize, 16, 32, 64, 128, 256, 512];

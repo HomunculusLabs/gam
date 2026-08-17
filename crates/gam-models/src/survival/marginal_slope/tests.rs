@@ -4682,7 +4682,14 @@ fn time_block_max_feasible_step_uses_synthesized_qd1_rows() {
         .expect("synthesized qd1 step ceiling")
         .expect("binding synthesized qd1 row");
 
-    assert_relative_eq!(alpha, 0.398, epsilon = 1e-12);
+    // Synthesized guard row `[1, 0]` with offset and guard both `1e-6`, a unit
+    // row: scaled slack `0.4`, scaled drift `-1`, exact fraction `0.4`, and the
+    // clipped step stops one primal-feasibility tolerance short (gam#2695).
+    assert_relative_eq!(
+        alpha,
+        0.4 - gam_problem::PRIMAL_FEASIBILITY_TOL,
+        epsilon = 1e-12
+    );
 }
 
 #[test]
@@ -4744,7 +4751,19 @@ fn coupled_qd1_guard_limits_time_step_before_post_update_projection() {
         .expect("coupled qd1 step limit")
         .expect("binding coupled row");
 
-    assert_relative_eq!(alpha, 0.199, epsilon = 1e-12);
+    // Row `[1, 1]` against guard `1.0`, so in the unit-normalized metric the
+    // slack is `(1.2 - 1.0)/√2` and the drift of `[-1, 0]` is `-1/√2`: the exact
+    // fraction to the boundary is `0.2`. The clipped step stops one
+    // primal-feasibility tolerance short of the face IN THAT METRIC, so the
+    // retreat is `tol/|scaled drift|` and NOT a fraction of `0.2` (gam#2695 — a
+    // multiplicative backoff leaves `0.005·slack` behind every time, which no
+    // number of steps ever exhausts).
+    let scaled_drift = 1.0_f64 / 2.0_f64.sqrt();
+    assert_relative_eq!(
+        alpha,
+        0.2 - gam_problem::PRIMAL_FEASIBILITY_TOL / scaled_drift,
+        epsilon = 1e-12
+    );
 }
 
 #[test]
@@ -4817,7 +4836,15 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
         .max_feasible_step_size(&states, 0, &array![0.0, -1.0])
         .expect("timewiggle tail step ceiling")
         .expect("negative tail step should be bounded");
-    assert_relative_eq!(alpha, 0.4975, epsilon = 1e-12);
+    // The binding row is the timewiggle tail's own `β₁ ≥ 0`, a unit row, so the
+    // scaled slack is `0.5` and the scaled drift of `[0, -1]` is `-1`: the exact
+    // fraction is `0.5` and the clipped step stops one primal-feasibility
+    // tolerance short of the face (gam#2695).
+    assert_relative_eq!(
+        alpha,
+        0.5 - gam_problem::PRIMAL_FEASIBILITY_TOL,
+        epsilon = 1e-12
+    );
 }
 
 #[test]

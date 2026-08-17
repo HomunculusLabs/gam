@@ -226,6 +226,40 @@ impl FrameProjection {
         }
     }
 
+    /// Project ONE atom's full-`B` block (`M·p` values, basis-major) through
+    /// that atom's frame into its own `M·r` border block — local in, local out.
+    ///
+    /// The `_into` forms above index their output by the atom's GLOBAL border
+    /// offset, so moving a single per-atom run across the frame with them costs
+    /// a full-border allocation per run. A carrier whose support is a handful of
+    /// atom blocks (#2731's separation-barrier curvature) has one run per atom
+    /// and wants exactly this: the same arithmetic, in the same accumulation
+    /// order, writing `M·r` values.
+    pub(crate) fn project_atom_block(&self, atom: usize, block: &[f64]) -> Vec<f64> {
+        let m = self.basis_sizes[atom];
+        let r = self.ranks[atom];
+        let mut out = vec![0.0_f64; m * r];
+        for basis_col in 0..m {
+            let base_b = basis_col * self.p;
+            let base_c = basis_col * r;
+            match &self.frames[atom] {
+                None => {
+                    out[base_c..base_c + r].copy_from_slice(&block[base_b..base_b + r]);
+                }
+                Some(uk) => {
+                    for j in 0..r {
+                        let mut acc = 0.0;
+                        for i in 0..self.p {
+                            acc += uk[[i, j]] * block[base_b + i];
+                        }
+                        out[base_c + j] = acc;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) fn project_local_atom_vec_into(
         &self,
         atom: usize,

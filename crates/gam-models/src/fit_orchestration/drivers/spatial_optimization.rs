@@ -1420,7 +1420,12 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
             .map(|dir| vec![dir])
     }
 
-    fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), String> {
+    /// Realize `theta`'s ψ tail on the cached design.
+    ///
+    /// Typed (gam#2760): see `apply_log_kappa` — a trial ψ the collection's model
+    /// cannot be realized at is a domain wall, not a fatal error, and only the
+    /// error VARIANT can carry that.
+    fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), EstimationError> {
         if self
             .current_theta
             .as_ref()
@@ -3077,7 +3082,7 @@ impl<'d> SpatialJointContext<'d> {
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                cache.ensure_theta(&theta_probe)?;
+                cache.ensure_theta(&theta_probe).map_err(|e| e.to_string())?;
                 Ok(cache.design().design.clone())
             },
             frozen_w.view(),
@@ -3086,8 +3091,7 @@ impl<'d> SpatialJointContext<'d> {
             psi_hi,
         );
         self.cache
-            .ensure_theta(theta)
-            .map_err(EstimationError::InvalidInput)?;
+            .ensure_theta(theta)?;
         self.frozen_glm_tensor_attempted = true;
         if let Some(tensor) = tensor {
             self.frozen_glm_tensor = Some(tensor);
@@ -3273,8 +3277,7 @@ impl<'d> SpatialJointContext<'d> {
             );
         } else {
             self.cache
-                .ensure_theta(theta)
-                .map_err(EstimationError::InvalidInput)?;
+                .ensure_theta(theta)?;
         }
         let warm_beta = self.evaluator.current_beta();
         self.ensure_frozen_glm_tensor(theta, warm_beta.as_ref())?;
@@ -3358,8 +3361,7 @@ impl<'d> SpatialJointContext<'d> {
 
     fn eval_efs(&mut self, theta: &Array1<f64>) -> Result<gam_problem::EfsEval, EstimationError> {
         self.cache
-            .ensure_theta(theta)
-            .map_err(EstimationError::InvalidInput)?;
+            .ensure_theta(theta)?;
         let kind = self.kind;
         let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
             self.data,
@@ -3487,9 +3489,8 @@ impl<'d> SpatialJointContext<'d> {
         // #2481: preserve the derivative-lane contract. A basis or inner-solve
         // refusal at this trial is a recoverable domain wall; layout, topology,
         // and arbitrary invalid-input failures are fatal evaluation failures.
-        if !skip_value_realization && let Err(message) = self.cache.ensure_theta(theta) {
+        if !skip_value_realization && let Err(error) = self.cache.ensure_theta(theta) {
             self.value_realization_failures += 1;
-            let error = EstimationError::InvalidInput(message);
             let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
             if is_recoverable_trial_point_error(&error) {
                 log::debug!(
@@ -3882,7 +3883,7 @@ fn run_exact_joint_spatial_optimization(
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                cache.ensure_theta(&theta_probe)?;
+                cache.ensure_theta(&theta_probe).map_err(|e| e.to_string())?;
                 Ok(cache.design().design.clone())
             },
             weights,
@@ -4712,7 +4713,6 @@ pub fn constant_curvature_term_indices(spec: &TermCollectionSpec) -> Vec<usize> 
 struct SingleSmoothTermRealization {
     design_local: DesignMatrix,
     term: SmoothTerm,
-    dropped_penaltyinfo: Vec<DroppedPenaltyBlockInfo>,
 }
 
 /// Wrap a fresh `LocalSmoothTermBuild` (produced by `build_single_local_smooth_term`)
@@ -4731,15 +4731,6 @@ fn wrap_local_build_as_realization(
     } else {
         None
     };
-
-    let dropped_penaltyinfo = local
-        .dropped_penalties
-        .iter()
-        .map(|info| DroppedPenaltyBlockInfo {
-            termname: Some(termspec.name.clone()),
-            penalty: info.clone(),
-        })
-        .collect();
 
     // Stage-2 joint-null absorption rotation, same logic as the main
     // aggregation loop in `build_smooth_design_withworkspace_unvalidated`:
@@ -4788,7 +4779,11 @@ fn wrap_local_build_as_realization(
     };
 
     let smooth_term = SmoothTerm {
-            parametric_residualization: None,
+        parametric_residualization: None,
+        // A single-term realization decides no gauge. The caller splices this
+        // into a collection design and re-applies THAT collection's gauge
+        // (#2747); it must never claim one of its own.
+        collection_gauge: None,
         name: termspec.name.clone(),
         coeff_range: 0..p_local,
         shape: termspec.shape,
@@ -4807,7 +4802,6 @@ fn wrap_local_build_as_realization(
     Ok(SingleSmoothTermRealization {
         design_local: local.design,
         term: smooth_term,
-        dropped_penaltyinfo,
     })
 }
 
@@ -4864,6 +4858,16 @@ fn freeze_geometry_from_metadata(
         ) => {
             spec.center_strategy = CenterStrategy::UserProvided(centers.clone());
             *spec_scale = Some(*metadata_scale);
+            // The #1355 data-metric radial chart `V` is NOT re-frozen here, and
+            // that is deliberate (gam#2760): the realizer's replay spec already
+            // carries it from `freeze_term_collection_from_design`, which copies
+            // `radial_reparam` off the same metadata. Setting it a second time
+            // would give one fact two owners — the defect class this file is
+            // otherwise removing. Measured while chasing this issue's blocker:
+            // a rebuild that re-DERIVES `V` prunes radial modes as the kernel
+            // flattens (12 → 10 → 7 → 5 columns over ℓ = 1 … 100 on the
+            // `kappa_loop_n_scaling` spec), so the replay is load-bearing — it
+            // is simply already in force by the time this runs.
             Some(frozen)
         }
         (
@@ -4884,6 +4888,82 @@ fn freeze_geometry_from_metadata(
         }
         // Family mismatch (e.g. ThinPlate auto-promotion to Duchon) leaves the
         // cache empty; we'll retry materialization on the next κ apply.
+        _ => None,
+    }
+}
+
+/// Put a replay spec's identifiability back to the TERM-LOCAL chart the
+/// collection gauge was derived on (gam#2760).
+///
+/// Used for exactly one thing: a term whose collection applied a
+/// [`gam_terms::smooth::SmoothCollectionGauge`], whose `(T, R)` pair is re-derived
+/// at every ψ rebuild and must therefore not ALSO arrive frozen inside the spec.
+/// `Some(z)` replays the term's own chart verbatim (a center sum-to-zero frame,
+/// a linear-orthogonality frame, a caller's frozen chart — all ψ-independent);
+/// `None` states that the local build applied none, which is the radial families'
+/// ordinary case, where `OrthogonalToParametric` defers to the gauge entirely.
+///
+/// Only the families the spatial outer search rebuilds are listed. A gauged term
+/// of any other family is never re-realized by this realizer, so its replay spec
+/// is left exactly as the freeze wrote it.
+fn restore_local_identifiability_chart(
+    replay: &mut SmoothBasisSpec,
+    local_chart: Option<&Array2<f64>>,
+) {
+    let spatial = |chart: Option<&Array2<f64>>| match chart {
+        Some(transform) => SpatialIdentifiability::FrozenTransform {
+            transform: transform.clone(),
+        },
+        None => SpatialIdentifiability::None,
+    };
+    if let SmoothBasisSpec::Duchon { spec, .. } = &mut *replay {
+        spec.identifiability = spatial(local_chart);
+    }
+    if let SmoothBasisSpec::ThinPlate { spec, .. } = &mut *replay {
+        spec.identifiability = spatial(local_chart);
+    }
+    if let SmoothBasisSpec::Matern { spec, .. } = &mut *replay {
+        spec.identifiability = match local_chart {
+            Some(transform) => MaternIdentifiability::FrozenTransform {
+                transform: transform.clone(),
+            },
+            None => MaternIdentifiability::None,
+        };
+    }
+    // These two families have no "no chart" policy — their local build always
+    // applies a center sum-to-zero section — so a `None` here would be a claim
+    // the enum cannot express. It is left alone instead of invented, and a
+    // gauged term of theirs whose metadata carried no transform keeps whatever
+    // the freeze wrote (which is that same `CenterSumToZero` default).
+    if let (SmoothBasisSpec::ConstantCurvature { spec, .. }, Some(transform)) =
+        (&mut *replay, local_chart)
+    {
+        spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::FrozenTransform {
+            transform: transform.clone(),
+        };
+    }
+    if let (SmoothBasisSpec::MeasureJet { spec, .. }, Some(transform)) = (&mut *replay, local_chart)
+    {
+        spec.identifiability = gam_terms::basis::MeasureJetIdentifiability::FrozenTransform {
+            transform: transform.clone(),
+        };
+    }
+}
+
+/// Shape of the frozen radial chart a rebuild spec carries, for diagnostics.
+fn spatial_frozen_radial_chart_shape(termspec: &SmoothTermSpec) -> Option<(usize, usize)> {
+    match &termspec.basis {
+        SmoothBasisSpec::Duchon { spec, .. } => spec.radial_reparam.as_ref().map(|v| v.dim()),
+        SmoothBasisSpec::ThinPlate { spec, .. } => spec.radial_reparam.as_ref().map(|v| v.dim()),
+        _ => None,
+    }
+}
+
+/// Shape of the radial chart a realized basis reports, for diagnostics.
+fn spatial_realized_radial_chart_shape(metadata: &BasisMetadata) -> Option<(usize, usize)> {
+    match metadata {
+        BasisMetadata::Duchon { radial_reparam, .. } => radial_reparam.as_ref().map(|v| v.dim()),
+        BasisMetadata::ThinPlate { radial_reparam, .. } => radial_reparam.as_ref().map(|v| v.dim()),
         _ => None,
     }
 }
@@ -5249,8 +5329,59 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // Freeze once at this ownership boundary so value rebuilds, analytic
         // derivatives, and the geometry cache all start from the same centers,
         // scaling, identifiability transform, and penalty topology.
-        let spec = freeze_term_collection_from_design(&spec, &design)
+        //
+        // EXCEPT the half a collection GAUGE owns (gam#2760). `#2747` made the
+        // gauge — `C` and the arm — the object that travels, and its `(T, R)`
+        // pair RE-DERIVED at every rebuild, precisely because `T = null((XᵀC)ᵀ)`
+        // is a function of the design and therefore of the ψ this realizer
+        // exists to move. The freeze above writes the metadata's identifiability
+        // transform into the replay spec, and for a gauged term that transform
+        // IS that same step, already composed. Both then run: the term-local
+        // rebuild applies the frozen ψ₀ chart and `replace_term_realization`
+        // applies a freshly derived one on top.
+        //
+        // MEASURED on the `kappa_loop_n_scaling` fixture's own spec
+        // (`examples/probe_2760_replay_gauge_double_apply`, 12 centers, n = 600,
+        // one Duchon term, `arm=Delete`, `C = [1]`, replay chart
+        // `FrozenTransform(12, 11)`) — the orthogonality residual of the
+        // singly-charted rebuild against the gauge's own block:
+        //
+        //   ℓ = 1.0 (the fit's own)   1.5e-12   the frozen chart is right here
+        //   ℓ = 0.5                   9.0e-1    and stale everywhere else
+        //   ℓ = 2.0                   9.5e-1
+        //
+        // so the gauge resolves a direction and DELETES one, at every ψ
+        // including the seed. The term then reaches the splice one column short
+        // (11 → 10 against a cached 11) and every κ fixture on a Duchon term
+        // refuses in 0.2 s with `incremental realizer width mismatch`. On the
+        // `Residualize` arm the second application is idempotent (`P² = P`),
+        // which is why the Matérn fixture the gauge work was verified on stayed
+        // green while every Duchon one went red.
+        //
+        // So a gauged term's replay spec is put back into the TERM-LOCAL chart
+        // the gauge was derived on — which the gauge itself now carries, because
+        // the composed transform in the metadata cannot be decomposed after the
+        // fact. Everything else the freeze decides (centers, input scale, radial
+        // chart, penalty topology) is ψ-invariant and is kept.
+        //
+        // The caller's own spec is NOT the source: by the time it reaches this
+        // realizer it has already been frozen at least once upstream, so its
+        // policy is itself a composed transform.
+        let mut spec = freeze_term_collection_from_design(&spec, &design)
             .map_err(|e| format!("failed to freeze incremental replay specification: {e}"))?;
+        for (term_idx, term) in design.smooth.terms.iter().enumerate() {
+            let Some(gauge) = term.collection_gauge.as_ref() else {
+                continue;
+            };
+            let Some(replay) = spec.smooth_terms.get_mut(term_idx) else {
+                continue;
+            };
+            restore_local_identifiability_chart(
+                &mut replay.basis,
+                gauge.local_identifiability_transform.as_ref(),
+            );
+        }
+        let spec = spec;
         let fixed_blocks = build_term_collection_fixed_blocks(data, &spec)
             .map_err(|e| format!("failed to cache fixed term-collection blocks: {e}"))?;
 
@@ -5763,18 +5894,29 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         Ok((global_range, p_total, locals))
     }
 
+    /// Realize a new ψ on every named term.
+    ///
+    /// Typed, not stringly (gam#2760): a trial ψ at which the collection's model
+    /// cannot be realized is a DOMAIN WALL the outer search retreats from, while
+    /// a rebuild that is not the basis the collection gauged is a defect that
+    /// must abort. `EstimationError` is the type that already carries that
+    /// distinction (`TrialPointRefused` vs the rest), and flattening it to a
+    /// `String` here is what erased it — every realization failure reached
+    /// `eval_cost` as `InvalidInput`, i.e. fatal.
     fn apply_log_kappa(
         &mut self,
         log_kappa: &SpatialLogKappaCoords,
         term_indices: &[usize],
-    ) -> Result<(), String> {
+    ) -> Result<(), EstimationError> {
         if term_indices.len() != log_kappa.dims_per_term().len() {
-            return Err(SmoothError::dimension_mismatch(format!(
-                "incremental realizer log-kappa term mismatch: term_indices={}, dims_per_term={}",
-                term_indices.len(),
-                log_kappa.dims_per_term().len()
-            ))
-            .into());
+            return Err(EstimationError::InvalidInput(
+                SmoothError::dimension_mismatch(format!(
+                    "incremental realizer log-kappa term mismatch: term_indices={}, dims_per_term={}",
+                    term_indices.len(),
+                    log_kappa.dims_per_term().len()
+                ))
+                .to_string(),
+            ));
         }
 
         let mut any_changed = false;
@@ -5783,23 +5925,32 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         }
 
         if any_changed {
-            self.refresh_full_design_operator()?;
+            self.refresh_full_design_operator()
+                .map_err(EstimationError::InvalidInput)?;
             rebuild_smooth_auxiliary_state(
                 &mut self.design.smooth,
                 &self.dropped_penaltyinfo_by_term,
-            )?;
-            rebuild_term_collection_auxiliary_state(&self.spec, &mut self.design)?;
+            )
+            .map_err(EstimationError::InvalidInput)?;
+            rebuild_term_collection_auxiliary_state(&self.spec, &mut self.design)
+                .map_err(EstimationError::InvalidInput)?;
             self.design_revision = self.design_revision.wrapping_add(1);
         }
         Ok(())
     }
 
-    fn apply_log_kappa_to_term(&mut self, term_idx: usize, psi: &[f64]) -> Result<bool, String> {
+    fn apply_log_kappa_to_term(
+        &mut self,
+        term_idx: usize,
+        psi: &[f64],
+    ) -> Result<bool, EstimationError> {
         if !spatial_term_supports_hyper_optimization(&self.spec, term_idx) {
-            return Err(SmoothError::invalid_config(format!(
-                "incremental realizer term {term_idx} does not expose spatial hyperparameters"
-            ))
-            .into());
+            return Err(EstimationError::InvalidInput(
+                SmoothError::invalid_config(format!(
+                    "incremental realizer term {term_idx} does not expose spatial hyperparameters"
+                ))
+                .to_string(),
+            ));
         }
         // Measure-jet ψ slots are dial coordinates, not log-κ (dial docs:
         // the MEASURE_JET_PSI_* bounds block); route through the dial setter
@@ -5813,13 +5964,13 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         let mut next_aniso: Option<Vec<f64>> = None;
         if measure_jet_term {
             if !set_measure_jet_psi_dials(&mut self.spec, term_idx, psi)
-                .map_err(|e| e.to_string())?
+                ?
             {
                 return Ok(false);
             }
         } else if constant_curvature_term {
             if !set_constant_curvature_kappa(&mut self.spec, term_idx, psi)
-                .map_err(|e| e.to_string())?
+                ?
             {
                 return Ok(false);
             }
@@ -5836,11 +5987,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             }
             if let Some(length_scale) = next_length_scale {
                 set_spatial_length_scale(&mut self.spec, term_idx, length_scale)
-                    .map_err(|e| e.to_string())?;
+                    ?;
             }
             if let Some(eta) = next_aniso.clone() {
                 set_spatial_aniso_log_scales(&mut self.spec, term_idx, eta)
-                    .map_err(|e| e.to_string())?;
+                    ?;
             }
         }
 
@@ -5857,14 +6008,15 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         let geometry_slot = self
             .spatial_realization_geometry
             .get(term_idx)
-            .ok_or_else(|| format!("incremental realizer geometry slot {term_idx} out of range"))?;
+            .ok_or_else(|| EstimationError::InvalidInput(format!("incremental realizer geometry slot {term_idx} out of range")))?;
+        let geometry_cached = geometry_slot.is_some();
         let mut build_spec = match geometry_slot {
             Some(cached) => cached.clone(),
             None => self
                 .spec
                 .smooth_terms
                 .get(term_idx)
-                .ok_or_else(|| format!("incremental realizer smooth term {term_idx} out of range"))?
+                .ok_or_else(|| EstimationError::InvalidInput(format!("incremental realizer smooth term {term_idx} out of range")))?
                 .clone(),
         };
         if measure_jet_term {
@@ -5872,22 +6024,22 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             // barycenter nodes, frozen quadrature + transform); only the
             // dials move per trial.
             set_single_term_measure_jet_psi_dials(&mut build_spec, psi)
-                .map_err(|e| e.to_string())?;
+                ?;
         } else if constant_curvature_term {
             // The cached build spec carries the κ-fixed geometry (UserProvided
             // centers, frozen ℓ and constraint transform); only κ moves per
             // trial, written through the raw-κ setter to match the collection
             // write-back above.
             set_single_term_constant_curvature_kappa(&mut build_spec, psi)
-                .map_err(|e| e.to_string())?;
+                ?;
         } else {
             if let Some(length_scale) = next_length_scale {
                 set_single_term_spatial_length_scale(&mut build_spec, length_scale)
-                    .map_err(|e| e.to_string())?;
+                    ?;
             }
             if let Some(eta) = next_aniso {
                 set_single_term_spatial_aniso_log_scales(&mut build_spec, eta)
-                    .map_err(|e| e.to_string())?;
+                    ?;
             }
         }
 
@@ -5898,9 +6050,9 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             &mut self.basisworkspace,
         )
         .map_err(|e| {
-            format!(
+            EstimationError::InvalidInput(format!(
                 "failed to rebuild smooth term '{termname}' during incremental κ realization: {e}"
-            )
+            ))
         })?;
 
         // Populate the geometry cache from the realized metadata on first use.
@@ -5941,8 +6093,18 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             self.spatial_realization_geometry[term_idx] = Some(frozen);
         }
 
-        let realization = wrap_local_build_as_realization(local, &build_spec)?;
-        self.replace_term_realization(term_idx, realization)?;
+        // What this trial was rebuilt FROM, so a shape refusal downstream names
+        // the trial rather than only its arithmetic (gam#2760).
+        let trial_report = format!(
+            "psi={psi:?}, length_scale={next_length_scale:?}, geometry_cached={geometry_cached}, \
+             frozen_radial_chart={:?}, realized_radial_chart={:?}, local_cols={}",
+            spatial_frozen_radial_chart_shape(&build_spec),
+            spatial_realized_radial_chart_shape(&local.metadata),
+            local.design.ncols(),
+        );
+        let realization = wrap_local_build_as_realization(local, &build_spec)
+            .map_err(EstimationError::InvalidInput)?;
+        self.replace_term_realization(term_idx, realization, &trial_report)?;
         Ok(true)
     }
 
@@ -5950,13 +6112,10 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         &mut self,
         term_idx: usize,
         realization: SingleSmoothTermRealization,
-    ) -> Result<(), String> {
+        trial_report: &str,
+    ) -> Result<(), EstimationError> {
         let t_replace = std::time::Instant::now();
-        let SingleSmoothTermRealization {
-            design_local,
-            term,
-            dropped_penaltyinfo,
-        } = realization;
+        let SingleSmoothTermRealization { design_local, term } = realization;
         let SmoothTerm {
             name,
             active_penalties,
@@ -5967,45 +6126,180 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             joint_null_rotation,
             ..
         } = term;
+        // THE GAUGE IS THE COLLECTION'S (#2747). This rebuild is TERM-LOCAL, so
+        // it cannot see the constraint block `[1 | owned linear axes | owner
+        // smooths]` the collection made this term orthogonal to — the same
+        // blindness the penalty-topology note below records for #2750, on the
+        // design instead of on the penalty set.
+        //
+        // Before this, the splice wrote a term-local design and chart into the
+        // slot while leaving the collection's `R` behind, and `R` is a function
+        // of the design, hence of the ψ this realizer exists to move. The fit
+        // then shipped `X(ψ̂)·Z − C·R(ψ₀)`: measured at `‖XᵀC‖/(‖X‖‖C‖) =
+        // 4.15e-1` on `y ~ x1 + matern(x1, x2)` against the `1e-8` bar the
+        // global step asserts whenever it applies a transform, with `2.39e-14`
+        // for the same spec and rows when the pair is derived rather than
+        // replayed. The κ search was therefore also minimizing a criterion for
+        // a model the fit did not ship.
+        //
+        // `C` and the arm are ψ-INDEPENDENT and travel on the term; `T` and `R`
+        // are re-derived here, through the entry point the collection build
+        // itself uses.
+        let collection_gauge = self
+            .design
+            .smooth
+            .terms
+            .get(term_idx)
+            .and_then(|target| target.collection_gauge.clone());
+        // Everything the width check below decides on, captured BEFORE the gauge
+        // consumes the local build (gam#2760). A refusal that reports only the
+        // two widths cannot say which of the two halves moved — the local basis
+        // dimension or the gauge's deletion — and those have different causes and
+        // different repairs.
+        let pre_gauge_cols = design_local.ncols();
+        let gauge_report = match collection_gauge.as_ref() {
+            Some(gauge) => format!(
+                "arm={:?}, constraint_block={}x{}, owner_terms={:?}, local_columns={}",
+                gauge.arm,
+                gauge.constraint_block.nrows(),
+                gauge.constraint_block.ncols(),
+                gauge.owner_terms,
+                gauge.local_columns,
+            ),
+            None => "none".to_string(),
+        };
+        let collection_gauge_local_columns = collection_gauge
+            .as_ref()
+            .map(|gauge| gauge.local_columns);
+        let (
+            design_local,
+            metadata,
+            active_penalties,
+            dropped_penalties,
+            linear_constraints_local,
+            joint_null_rotation,
+            regauged_residualization,
+        ) = match collection_gauge {
+            Some(gauge) => {
+                let placed = gam_terms::smooth::place_term_in_collection_gauge(
+                    &gauge,
+                    gam_terms::smooth::LocalTermRealization {
+                        design: design_local,
+                        metadata: &metadata,
+                        active_penalties: &active_penalties,
+                        dropped_penalties,
+                        linear_constraints_local: linear_constraints_local.as_ref(),
+                        joint_null_rotation: joint_null_rotation.as_ref(),
+                        termname: &name,
+                    },
+                )
+                .map_err(|e| {
+                    EstimationError::InvalidInput(format!(
+                        "term '{name}' could not be returned to its collection's identifiability \
+                         gauge after an incremental rebuild: {e}"
+                    ))
+                })?;
+                (
+                    placed.design,
+                    placed.metadata,
+                    placed.active_penalties,
+                    placed.dropped_penalties,
+                    placed.linear_constraints_local,
+                    // Folded into `metadata` above, exactly as a collection-built
+                    // term reports it.
+                    None,
+                    Some(placed.parametric_residualization),
+                )
+            }
+            None => (
+                design_local,
+                metadata,
+                active_penalties,
+                dropped_penalties,
+                linear_constraints_local,
+                joint_null_rotation,
+                None,
+            ),
+        };
+        // The gauge can add drops (a penalty that becomes vacuous under the
+        // congruence), so the per-term dropped-block report is restated from the
+        // post-gauge set rather than from the local build's.
+        let dropped_penaltyinfo: Vec<DroppedPenaltyBlockInfo> = dropped_penalties
+            .iter()
+            .map(|info| DroppedPenaltyBlockInfo {
+                termname: Some(name.clone()),
+                penalty: info.clone(),
+            })
+            .collect();
         let coeff_range = self
             .design
             .smooth
             .terms
             .get(term_idx)
-            .ok_or_else(|| format!("incremental realizer smooth term {term_idx} out of range"))?
+            .ok_or_else(|| EstimationError::InvalidInput(format!("incremental realizer smooth term {term_idx} out of range")))?
             .coeff_range
             .clone();
         if design_local.ncols() != coeff_range.len() {
-            return Err(SmoothError::dimension_mismatch(format!(
-                "incremental realizer width mismatch for term {}: rebuilt_cols={}, cached_cols={}",
-                term_idx,
+            // WHICH half moved decides whether this is a defect or a domain wall
+            // (gam#2760). The gauge records the term-local width it was derived
+            // on, so the two questions are separable:
+            //
+            //   * a LOCAL width that no longer matches means the rebuild is not
+            //     the same basis the collection gauged — a defect, and fatal;
+            //   * a matching local width that still comes out narrow after the
+            //     arm means the realized design lost rank in this gauge's chart
+            //     AT THIS ψ. The frozen chart is `G`-orthonormalizing at the ψ it
+            //     was derived at and nowhere else (measured: the local Gram's
+            //     eigenvalue ratio runs 1.0 at the fit's own ℓ to 2.3e-17 two
+            //     decades away), so a direction can become numerically
+            //     indistinguishable from zero there. That is a statement about
+            //     the trial point, and the outer search already knows how to
+            //     retreat from one — it must not abort the whole fit.
+            let local_width_moved = collection_gauge_local_columns
+                .is_some_and(|expected| pre_gauge_cols != expected);
+            let reason = format!(
+                "incremental realizer width mismatch for term {term_idx} ('{name}'): rebuilt_cols={}, \
+                 cached_cols={}; the local rebuild produced {pre_gauge_cols} column(s) before the \
+                 collection gauge ({gauge_report}) and {} after it. Trial: {trial_report}",
                 design_local.ncols(),
-                coeff_range.len()
-            ))
-            .into());
+                coeff_range.len(),
+                design_local.ncols(),
+            );
+            if local_width_moved {
+                return Err(EstimationError::InvalidInput(format!(
+                    "{reason}. The LOCAL width moved, so this rebuild is not the basis the \
+                     collection gauged (gam#2760)"
+                )));
+            }
+            return Err(EstimationError::TrialPointRefused {
+                reason: format!(
+                    "{reason}. The local width is unchanged, so the realized design loses rank in \
+                     the collection gauge's chart at this psi and the model the collection \
+                     specified does not exist here (gam#2760)"
+                ),
+            });
         }
         if design_local.nrows() != self.design.design.nrows() {
-            return Err(SmoothError::dimension_mismatch(format!(
+            return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
                 "incremental realizer row mismatch for term {}: rebuilt_rows={}, design_rows={}",
                 term_idx,
                 design_local.nrows(),
                 self.design.design.nrows()
-            ))
-            .into());
+            )).to_string()));
         }
 
         let smooth_penalty_range = self
             .smooth_penalty_ranges
             .get(term_idx)
             .ok_or_else(|| {
-                format!("incremental realizer missing smooth penalty range for term {term_idx}")
+                EstimationError::InvalidInput(format!("incremental realizer missing smooth penalty range for term {term_idx}"))
             })?
             .clone();
         let full_penalty_range = self
             .full_penalty_ranges
             .get(term_idx)
             .ok_or_else(|| {
-                format!("incremental realizer missing full penalty range for term {term_idx}")
+                EstimationError::InvalidInput(format!("incremental realizer missing full penalty range for term {term_idx}"))
             })?
             .clone();
         // TOPOLOGY IS FROZEN WITH THE CHART (#2750). A ψ trial may move penalty
@@ -6052,15 +6346,15 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                     })
                     .and_then(Option::take)
                 else {
-                    return Err(SmoothError::dimension_mismatch(format!(
-                        "incremental realizer lost cached penalty {original} for term '{name}':                          the rebuild produced {:?}",
+                    return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
+                        "incremental realizer lost cached penalty {original} for term \
+                         '{name}': the rebuild produced {:?}",
                         slots
                             .iter()
                             .flatten()
                             .map(|active| active.info.original_index)
                             .collect::<Vec<_>>()
-                    ))
-                    .into());
+                    )).to_string()));
                 };
                 kept.push(found);
             }
@@ -6078,13 +6372,12 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             (active_penalties, dropped_penalties)
         };
         if active_penalties.len() != smooth_penalty_range.len() {
-            return Err(SmoothError::dimension_mismatch(format!(
+            return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
                 "incremental realizer topology changed for term '{}': active_penalties={}, cached_penalties={}",
                 name,
                 active_penalties.len(),
                 smooth_penalty_range.len()
-            ))
-            .into());
+            )).to_string()));
         }
 
         self.design.smooth.term_designs[term_idx] = design_local;
@@ -6097,16 +6390,18 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             if penalty_local.nrows() != coeff_range.len()
                 || penalty_local.ncols() != coeff_range.len()
             {
-                return Err(SmoothError::dimension_mismatch(format!(
-                    "incremental realizer penalty shape mismatch for term '{}' penalty {}: \
-                     penalty is {}x{} but coeff_range has {} columns",
-                    name,
-                    offset,
-                    penalty_local.nrows(),
-                    penalty_local.ncols(),
-                    coeff_range.len()
-                ))
-                .into());
+                return Err(EstimationError::InvalidInput(
+                    SmoothError::dimension_mismatch(format!(
+                        "incremental realizer penalty shape mismatch for term '{}' penalty {}: \
+                         penalty is {}x{} but coeff_range has {} columns",
+                        name,
+                        offset,
+                        penalty_local.nrows(),
+                        penalty_local.ncols(),
+                        coeff_range.len()
+                    ))
+                    .to_string(),
+                ));
             }
 
             let smooth_penalty = self
@@ -6115,10 +6410,10 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 .penalties
                 .get_mut(smooth_penalty_idx)
                 .ok_or_else(|| {
-                    format!(
+                    EstimationError::InvalidInput(format!(
                         "incremental realizer smooth penalty {} out of range for term {}",
                         smooth_penalty_idx, term_idx
-                    )
+                    ))
                 })?;
             // With per-term block-local penalties, col_range already targets
             // this specific term, so .local is p_k × p_k.
@@ -6130,10 +6425,10 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 .penalties
                 .get_mut(full_penalty_idx)
                 .ok_or_else(|| {
-                    format!(
+                    EstimationError::InvalidInput(format!(
                         "incremental realizer full penalty {} out of range for term {}",
                         full_penalty_idx, term_idx
-                    )
+                    ))
                 })?;
             // With per-term block-local penalties, col_range already targets
             // this specific term, so .local is p_k × p_k.
@@ -6154,7 +6449,7 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         }
 
         let target_term = self.design.smooth.terms.get_mut(term_idx).ok_or_else(|| {
-            format!("incremental realizer smooth term {term_idx} disappeared during replacement")
+            EstimationError::InvalidInput(format!("incremental realizer smooth term {term_idx} disappeared during replacement"))
         })?;
         target_term.active_penalties = active_penalties;
         target_term.dropped_penalties = dropped_penalties;
@@ -6162,6 +6457,12 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         target_term.lower_bounds_local = lower_bounds_local;
         target_term.linear_constraints_local = linear_constraints_local;
         target_term.joint_null_rotation = joint_null_rotation;
+        // `R` moves with the design it was derived from, or the freeze ships a
+        // pair that describes two different models (#2747). `None` on the
+        // `Delete` arm is the right answer there, not a missing one.
+        if let Some(chart) = regauged_residualization {
+            target_term.parametric_residualization = chart;
+        }
         self.dropped_penaltyinfo_by_term[term_idx] = dropped_penaltyinfo;
         log::info!(
             "[STAGE] smooth basis rebuild (term {}, '{}', cols={}): {:.3}s",
@@ -6477,12 +6778,14 @@ impl<'d> ExactJointDesignCache<'d> {
             if block_idx < n - 1 {
                 let (block_lk, rest) = remaining.split_at(count);
                 self.realizers[block_idx]
-                    .apply_log_kappa(&block_lk, &self.block_term_indices[block_idx])?;
+                    .apply_log_kappa(&block_lk, &self.block_term_indices[block_idx])
+                    .map_err(|e| e.to_string())?;
                 remaining = rest;
             } else {
                 // Last block gets the remainder.
                 self.realizers[block_idx]
-                    .apply_log_kappa(&remaining, &self.block_term_indices[block_idx])?;
+                    .apply_log_kappa(&remaining, &self.block_term_indices[block_idx])
+                    .map_err(|e| e.to_string())?;
             }
         }
 
@@ -8729,14 +9032,52 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
             ));
         }
     };
+    let exact_joint = require_available_spatial_optimization_result(Ok(Some(exact_joint)))?;
     let exact_score = fit_score(&exact_joint.fit);
-    let exact_joint = require_successful_spatial_optimization_result(
-        initial_score,
-        Ok(Some((exact_joint, exact_score))),
-    )?;
 
-    log_spatial_aniso_scales(&exact_joint.resolvedspec);
-    Ok(exact_joint)
+    // Keep whichever of the two SCORED fits is better (#2748). κ optimization
+    // is a refinement of a fit that already exists, so "the refinement did not
+    // improve on the incumbent" is an argument for shipping the incumbent, not
+    // for destroying it — which is what this site did, on a bar of
+    // `max(1e-6, |score|·1e-8)`, until `geo_disease_eas_matern_k6` lost all
+    // four of its non-flexible benchmark lanes to a `1.267594e3 → 1.267595e3`
+    // regression. It is also exactly the conclusion the sibling
+    // `DeclinedKeepIncumbent` arm above reaches when the joint route grades its
+    // own candidate one level in; two graders of one comparison must not reach
+    // opposite responses.
+    //
+    // An `argmin` over two measured numbers needs no tolerance and admits no
+    // drift argument: it cannot ship something worse than what it was handed.
+    // A tie goes to the candidate, because the refinement is what was asked
+    // for and a tied score means the two fits are equally supported.
+    if exact_score.is_finite() && exact_score <= initial_score {
+        log_spatial_aniso_scales(&exact_joint.resolvedspec);
+        return Ok(exact_joint);
+    }
+    log::info!(
+        "[spatial-kappa] the optimized-κ fit scores {exact_score:.12e} against the incumbent's \
+         {initial_score:.12e} (regression {:.3e}); shipping the INCUMBENT, which is the better \
+         of the two fits this call has in hand. A refinement that does not improve on the fit \
+         it refines is not a reason to have no fit (#2748).",
+        exact_score - initial_score,
+    );
+    let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+        data,
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &resolvedspec,
+        best.fit.lambdas.as_slice(),
+        family,
+        options,
+    )?;
+    Ok(FittedTermCollectionWithSpec {
+        fit: fitted.fit,
+        design: fitted.design,
+        resolvedspec,
+        adaptive_diagnostics: fitted.adaptive_diagnostics,
+        kappa_timing: None,
+    })
 }
 
 /// The end-to-end curvature-as-an-estimand report for one `curv(...)` smooth:

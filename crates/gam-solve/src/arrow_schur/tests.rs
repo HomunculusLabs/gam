@@ -7585,3 +7585,195 @@ pub(crate) fn elimination_share_of_the_border_diagonal_is_fixture_dependent_2576
         );
     }
 }
+
+/// #2731 — [`CoupledCarrierPenaltyOp`] is EXACTLY the operator its eigen
+/// expansion is, on every surface the solver reads it through.
+///
+/// The barrier's Gauss–Newton β curvature is `Σ_{a,b} C[a,b]·v_a v_bᵀ`. It used
+/// to ship as `Σ_r λ_r w_r w_rᵀ` with `w_r = Σ_a e_r[a] v_a`, one
+/// `SparseRankOnePenaltyOp` per eigenvector — mathematically the same thing, and
+/// the reason it was replaced is cost, not correctness (`ne²·‖v‖₀` to build,
+/// `ne·‖∪ supp v‖₀` to store and apply). This test builds that expansion by hand
+/// from the SAME `C` and carriers and requires the factored operator to
+/// reproduce it through `matvec`, `gradient`, `diagonal`, `block` and
+/// `to_dense`, so the replacement is pinned as an identity rather than as an
+/// intention.
+///
+/// The fixture is built to be able to FAIL:
+///
+/// * three carriers over four blocks, with SHARED support — carriers 0 and 1
+///   both touch block 1, carriers 1 and 2 both touch block 2. A factored form
+///   that forgot the cross terms, or a `diagonal` that missed the overlap of two
+///   carriers on one block, agrees with the expansion only when the supports are
+///   disjoint. The non-vacuity assertion below pins that they are not.
+/// * `C` carries a NEGATIVE eigenvalue. The operator applies `C` as handed over
+///   and must not quietly clamp it: the barrier's own PSD majorization
+///   (`|M|`) happens upstream, and an operator that silently projected here
+///   would hide a caller that forgot to.
+/// * the carrier runs are misaligned across carriers (different starts and
+///   different lengths), so the run-overlap arithmetic is exercised rather than
+///   short-circuited by identical layouts.
+#[test]
+fn coupled_carrier_penalty_op_equals_its_rank_one_expansion_2731() {
+    use ndarray::Array1;
+
+    let k = 24_usize;
+    // (start, values) runs; deliberately different widths and starts.
+    let carriers: Vec<Vec<(usize, Vec<f64>)>> = vec![
+        vec![
+            (0, vec![0.5, -1.25, 0.75]),
+            (6, vec![2.0, 0.25, -0.5, 1.5]),
+        ],
+        vec![
+            (6, vec![-0.75, 1.0, 0.5, -2.25]),
+            (13, vec![0.25, -1.5, 3.0]),
+        ],
+        vec![(13, vec![1.75, 0.5, -0.25]), (18, vec![-1.0, 0.125])],
+    ];
+    let ne = carriers.len();
+    assert_eq!(
+        ne, 3,
+        "the expansion below builds one rank-1 per eigenvector, so the carrier \
+         count and the coupling's dimension must agree"
+    );
+    // Symmetric, deliberately indefinite: eigenvalues of this 3x3 are not all
+    // positive (the trace is 6.0 and the determinant is negative).
+    let coupling = array![[2.0, -1.5, 0.75], [-1.5, 1.0, 2.5], [0.75, 2.5, 3.0]];
+    assert_eq!(coupling.nrows(), ne);
+    let (eigenvalues, eigenvectors) = {
+        use gam_linalg::faer_ndarray::FaerEigh;
+        coupling
+            .eigh(faer::Side::Lower)
+            .expect("3x3 symmetric eigendecomposition")
+    };
+    assert!(
+        eigenvalues.iter().any(|&lam| lam < -1.0e-9),
+        "fixture must exercise an INDEFINITE coupling: {eigenvalues:?}"
+    );
+
+    // Dense carriers, then the historical expansion `Σ_r λ_r w_r w_rᵀ`.
+    let dense_carriers: Vec<Array1<f64>> = carriers
+        .iter()
+        .map(|runs| {
+            let mut v = Array1::<f64>::zeros(k);
+            for (start, values) in runs {
+                for (i, &value) in values.iter().enumerate() {
+                    v[start + i] += value;
+                }
+            }
+            v
+        })
+        .collect();
+    let shared: Vec<usize> = (0..k)
+        .filter(|&i| dense_carriers.iter().filter(|v| v[i] != 0.0).count() >= 2)
+        .collect();
+    assert!(
+        shared.len() >= 4,
+        "fixture must have carriers sharing support, else the cross terms are \
+         untested: shared indices {shared:?}"
+    );
+    let mut expansion = Array2::<f64>::zeros((k, k));
+    for (r, &lam) in eigenvalues.iter().enumerate() {
+        let mut w = Array1::<f64>::zeros(k);
+        for (a, v) in dense_carriers.iter().enumerate() {
+            w = w + eigenvectors[[a, r]] * v;
+        }
+        for i in 0..k {
+            for j in 0..k {
+                expansion[[i, j]] += lam * w[i] * w[j];
+            }
+        }
+    }
+
+    let op = CoupledCarrierPenaltyOp {
+        k,
+        coupling: coupling.clone(),
+        carriers,
+    };
+    let scale = expansion.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    assert!(scale > 1.0, "fixture operator must be non-trivial: {scale}");
+    let tolerance = 1.0e-12 * (1.0 + scale);
+
+    // to_dense
+    let dense = op.to_dense();
+    for i in 0..k {
+        for j in 0..k {
+            assert!(
+                (dense[[i, j]] - expansion[[i, j]]).abs() <= tolerance,
+                "to_dense mismatch at ({i},{j}): {} vs {}",
+                dense[[i, j]],
+                expansion[[i, j]]
+            );
+        }
+    }
+
+    // matvec and gradient (both are `P·vector`), against the expansion.
+    let x: Vec<f64> = (0..k).map(|i| ((i * 7) % 11) as f64 - 5.0).collect();
+    let mut y_op = vec![0.0_f64; k];
+    let mut y_grad = vec![0.0_f64; k];
+    op.matvec(&x, &mut y_op);
+    op.gradient(&x, &mut y_grad);
+    for i in 0..k {
+        let reference: f64 = (0..k).map(|j| expansion[[i, j]] * x[j]).sum();
+        assert!(
+            (y_op[i] - reference).abs() <= tolerance,
+            "matvec mismatch at {i}: {} vs {reference}",
+            y_op[i]
+        );
+        assert!(
+            (y_grad[i] - reference).abs() <= tolerance,
+            "gradient mismatch at {i}: {} vs {reference}",
+            y_grad[i]
+        );
+    }
+
+    // diagonal
+    let mut diag = vec![0.0_f64; k];
+    op.diagonal(&mut diag);
+    for i in 0..k {
+        assert!(
+            (diag[i] - expansion[[i, i]]).abs() <= tolerance,
+            "diagonal mismatch at {i}: {} vs {}",
+            diag[i],
+            expansion[[i, i]]
+        );
+    }
+
+    // block: ranges chosen so one straddles two carriers' shared run.
+    let offsets = [0..6, 6..13, 13..18, 18..k];
+    for (id, range) in offsets.iter().enumerate() {
+        let b = range.end - range.start;
+        let mut blk = Array2::<f64>::zeros((b, b));
+        op.block(BetaBlockId(id), &offsets, &mut blk);
+        for i in 0..b {
+            for j in 0..b {
+                let reference = expansion[[range.start + i, range.start + j]];
+                assert!(
+                    (blk[[i, j]] - reference).abs() <= tolerance,
+                    "block {id} mismatch at ({i},{j}): {} vs {reference}",
+                    blk[[i, j]]
+                );
+            }
+        }
+    }
+
+    // The `ne = 1` case is the historical rank-1 operator, so it must still be
+    // exactly `scale·v vᵀ` — the deleted `SparseRankOnePenaltyOp`'s contract.
+    let rank_one = CoupledCarrierPenaltyOp {
+        k: 4,
+        coupling: array![[2.5]],
+        carriers: vec![vec![(1, vec![3.0, -1.0])]],
+    };
+    let expected = array![
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 22.5, -7.5, 0.0],
+        [0.0, -7.5, 2.5, 0.0],
+        [0.0, 0.0, 0.0, 0.0]
+    ];
+    let rank_one_dense = rank_one.to_dense();
+    for i in 0..4 {
+        for j in 0..4 {
+            assert_abs_diff_eq!(rank_one_dense[[i, j]], expected[[i, j]], epsilon = 1.0e-12);
+        }
+    }
+}

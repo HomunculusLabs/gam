@@ -596,7 +596,7 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
-        penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
+        objective_state: crate::assembly::InnerObjectiveState::unaugmented(&[rho.clone()], None),
     };
     let per_block = vec![rho.clone()];
     let options = BlockwiseFitOptions {
@@ -775,7 +775,7 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
-        penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
+        objective_state: crate::assembly::InnerObjectiveState::unaugmented(&[rho.clone()], None),
     };
     let per_block = vec![rho.clone()];
     let options = BlockwiseFitOptions {
@@ -915,7 +915,7 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
             joint_workspace: None,
             kkt_residual: None,
             active_constraints: None,
-            penalty_state: crate::assembly::InnerPenaltyState::new(&[rho.clone()], None),
+            objective_state: crate::assembly::InnerObjectiveState::unaugmented(&[rho.clone()], None),
         };
         let per_block = vec![rho.clone()];
         let options = BlockwiseFitOptions {
@@ -1294,7 +1294,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
         joint_workspace: None,
         kkt_residual: None,
         active_constraints: None,
-        penalty_state: crate::assembly::InnerPenaltyState::new(&per_block, None),
+        objective_state: crate::assembly::InnerObjectiveState::unaugmented(&per_block, None),
     };
 
     let options = BlockwiseFitOptions {
@@ -6141,4 +6141,209 @@ fn the_drift_audits_pilot_beta_is_the_warm_start_not_zeros_2360() {
         "against a zeros pilot the same fit reports {zeros}, which is the epsilon \
          denominator rather than a movement"
     );
+}
+
+// ── `D_β H_Φ`: the Jeffreys curvature's own β-drift (#2765) ─────────────────
+//
+// The outer criterion folds `H_Φ` into `½ log|H + S_λ + H_Φ|`, so its analytic
+// gradient carries `½ tr[(·)⁻¹ D_β H_Φ[v_k]]` beside the likelihood drift
+// `D_β H[v_k]`. That term is built by
+// `custom_family_outer_jeffreys_hphi_drift_batched`, and nothing differenced it
+// against the object it claims to differentiate: the shipped coverage is
+// laziness/call-count and per-direction-vs-batched agreement, both of which a
+// consistently wrong drift passes. This gate closes that, in the same shape as
+// the survival lane's `D_β H` gates: difference the family's OWN `H_Φ` along the
+// direction.
+
+/// A one-block family whose Jeffreys information genuinely depends on `β`, with
+/// exact first and second directional derivatives written out.
+///
+/// ```text
+///   H(β) = [[a + c·β₀²,      e·β₀β₁     ],
+///           [   e·β₀β₁,   b + c·β₁²    ]]
+/// ```
+///
+/// `a` and `b` are small so the conditioning gate leaves the term ACTIVE (the
+/// same reason `OuterJeffreysModeCountingFamily` uses `0.5`); a well-conditioned
+/// information would be skipped and the gate would compare two zeros.
+#[derive(Clone)]
+struct BetaDependentJeffreysInformationFamily;
+
+impl BetaDependentJeffreysInformationFamily {
+    const A: f64 = 0.5;
+    const B: f64 = 0.4;
+    const C: f64 = 0.1;
+    const E: f64 = 0.02;
+
+    fn beta_of(block_states: &[ParameterBlockState]) -> (f64, f64) {
+        let beta = &block_states[0].beta;
+        (beta[0], beta[1])
+    }
+
+    fn information(b0: f64, b1: f64) -> Array2<f64> {
+        array![
+            [Self::A + Self::C * b0 * b0, Self::E * b0 * b1],
+            [Self::E * b0 * b1, Self::B + Self::C * b1 * b1],
+        ]
+    }
+
+    /// `∂H/∂β₀` and `∂H/∂β₁`.
+    fn information_axes(b0: f64, b1: f64) -> [Array2<f64>; 2] {
+        [
+            array![
+                [2.0 * Self::C * b0, Self::E * b1],
+                [Self::E * b1, 0.0]
+            ],
+            array![
+                [0.0, Self::E * b0],
+                [Self::E * b0, 2.0 * Self::C * b1]
+            ],
+        ]
+    }
+
+    /// `∂²H/∂β_a∂β` contracted with `u`, i.e. `D²H[u, e_a]`. Constant in `β`
+    /// because `H` is quadratic.
+    fn information_second_axes(u: &Array1<f64>) -> [Array2<f64>; 2] {
+        [
+            array![
+                [2.0 * Self::C * u[0], Self::E * u[1]],
+                [Self::E * u[1], 0.0]
+            ],
+            array![
+                [0.0, Self::E * u[0]],
+                [Self::E * u[0], 2.0 * Self::C * u[1]]
+            ],
+        ]
+    }
+}
+
+impl CustomFamily for BetaDependentJeffreysInformationFamily {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        let n = block_states[0].eta.len();
+        Ok(FamilyEvaluation {
+            log_likelihood: 0.0,
+            blockworking_sets: vec![BlockWorkingSet::Diagonal {
+                working_response: Array1::zeros(n),
+                working_weights: Array1::ones(n),
+            }],
+        })
+    }
+
+    fn joint_jeffreys_term_required(&self) -> bool {
+        true
+    }
+
+    fn joint_jeffreys_information_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys information");
+        let (b0, b1) = Self::beta_of(block_states);
+        Ok(Some(Self::information(b0, b1)))
+    }
+
+    fn joint_jeffreys_information_directional_derivative_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys drift");
+        let (b0, b1) = Self::beta_of(block_states);
+        let [axis0, axis1] = Self::information_axes(b0, b1);
+        Ok(Some(&axis0 * d_beta_flat[0] + &axis1 * d_beta_flat[1]))
+    }
+
+    fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_specs_consistent(specs, "beta-dependent Jeffreys all-axes drift");
+        let (b0, b1) = Self::beta_of(block_states);
+        Ok(Some(Self::information_axes(b0, b1).to_vec()))
+    }
+
+    fn joint_jeffreys_information_second_directional_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "beta-dependent Jeffreys second drift");
+        assert_specs_consistent(specs, "beta-dependent Jeffreys second drift");
+        // `H` is quadratic in beta, so its SECOND directional derivative is
+        // constant in beta -- which is a statement about this fixture, not a
+        // licence to ignore the state: the assertion above is what says the
+        // caller handed a well-formed one.
+        Ok(Some(Self::information_second_axes(d_beta_u_flat).to_vec()))
+    }
+}
+
+/// `D_β H_Φ[δ]` must match a Richardson-certified central difference of the
+/// `H_Φ` the same helper pair produces.
+#[test]
+fn outer_jeffreys_hphi_drift_matches_a_central_difference_of_hphi_2765() {
+    let family = BetaDependentJeffreysInformationFamily;
+    let specs = vec![jeffreys_seam_spec(2)];
+    let ranges = block_param_ranges(&specs);
+    let beta = array![0.7, -0.4];
+    let direction = array![0.35, 0.22];
+
+    let hphi_at = |t: f64| -> Array2<f64> {
+        let states = vec![jeffreys_seam_state(&beta + &(&direction * t))];
+        let (_, hphi, completion) =
+            custom_family_outer_jeffreys_hphi(&family, &states, &specs, &ranges)
+                .expect("Jeffreys term")
+                .expect("the small information keeps the conditioning gate active");
+        assert!(
+            completion.is_none(),
+            "this fixture declares no contracted-trace completion, so the drift it \
+             differences is the bare divided-difference H_Phi"
+        );
+        hphi
+    };
+
+    let states = vec![jeffreys_seam_state(beta.clone())];
+    let drift = custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
+        .expect("Jeffreys drift construction")
+        .expect("an active Jeffreys geometry exposes a drift");
+    let analytic = drift(std::slice::from_ref(&direction))
+        .expect("drift evaluation")
+        .pop()
+        .flatten()
+        .expect("the drift is defined along this direction");
+
+    let h = 1e-3;
+    let (coarse_plus, coarse_minus) = (hphi_at(h), hphi_at(-h));
+    let (fine_plus, fine_minus) = (hphi_at(0.5 * h), hphi_at(-0.5 * h));
+    let scale = analytic
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+        .max(1e-12);
+    for row in 0..2 {
+        for column in 0..2 {
+            let coarse =
+                (coarse_plus[[row, column]] - coarse_minus[[row, column]]) / (2.0 * h);
+            let fine = (fine_plus[[row, column]] - fine_minus[[row, column]]) / h;
+            // Central differences are `O(h²)`: the `h/2` estimate carries a
+            // quarter of the coarse remainder, so `(4·fine − coarse)/3` cancels
+            // it and `|fine − coarse|/3` bounds what is left.
+            let value = (4.0 * fine - coarse) / 3.0;
+            let uncertainty = (fine - coarse).abs() / 3.0;
+            assert!(
+                uncertainty <= 1e-3 * scale,
+                "D_beta H_Phi[{row},{column}]: the finite-difference oracle did not \
+                 resolve this entry (value={value:.6e} uncertainty={uncertainty:.3e})"
+            );
+            let gap = (analytic[[row, column]] - value).abs();
+            assert!(
+                gap <= 1e-6 * scale + 4.0 * uncertainty,
+                "D_beta H_Phi[{row},{column}]: analytic={:.9e} fd={value:.9e} \
+                 gap={gap:.3e} oracle_uncertainty={uncertainty:.3e}",
+                analytic[[row, column]],
+            );
+        }
+    }
 }

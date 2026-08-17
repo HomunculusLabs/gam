@@ -64,6 +64,84 @@ pub(crate) struct SelectedWiggleBasis {
 // evaluation point never moves across that boundary.
 pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 
+/// The highest derivative of a composed warp's basis that the inner objective's
+/// own VALUE reads (gam#2695).
+///
+/// A composed warp is not evaluated on fixed data. It sits on the model's index,
+/// `q = q₀ + Σ_j βw_j·I_j(q₀)` with `q₀ = −η_t·e^{−η_ls}`, so `q₀` moves with β
+/// while the knots stay where the seed put them, and the objective differentiates
+/// the basis rather than merely evaluating it.
+///
+/// # Read off the row program, not argued
+///
+/// `sls_row_nll_wiggle` composes the basis into the row jet at two places, and
+/// the second is the one that sets this order:
+///
+/// ```text
+///   q₁ʷ = q₁ + Σ βw_j·I_j(q₁)          stack [I, I′, I″, I‴, I⁗]
+///   m₁  = 1  + Σ βw_j·I′_j(q₁)         stack [I′, I″, I‴, I⁗, …]   <- SHIFTED BY ONE
+///   g   = η_t′ + m₁·q̇₀,  and  ℓ ∋ −d·log g
+/// ```
+///
+/// `H = ∂²(−ℓ)/∂β²` is the order-2 coefficient of that jet, and `m₁`'s order-2
+/// coefficient reads its stack's slot 2 — which, because `m₁` is built from `I′`,
+/// is **`I‴`**. `Φ = ½ Σ g(λ(Z_JᵀHZ_J))` is a TERM OF THE OBJECTIVE, not a
+/// diagnostic about it — the inner NLL is `−ℓ + ½βᵀSβ − Φ` — so the objective's
+/// own value reads `I‴`, and a step in `I‴` is a jump in the function the trust
+/// region compares two points on.
+///
+/// # The order is measured on the FIT, because a unit fixture under-reported it
+///
+/// This constant was first landed as `2`, from
+/// `probe_2695_joint_hessian_across_an_interior_knot`: on that fixture `H` steps
+/// at degree 2 (ratio `1.00` at both `βw = 1e-6` and `βw = 3e-2`) and closes at
+/// degree 3 (ratio `100`). That fixture does not excite the `βw`-weighted `I‴`
+/// channel above its own resolution, so it cannot see the difference between
+/// degree 3 and degree 4, and reading the order off it alone was wrong.
+///
+/// The shipped witness does excite it. `Φ`'s response to the accepted step,
+/// swept down the trust ladder (`|Δφ| / |δ|∞` constant ⇒ smooth; `Δφ` constant
+/// ⇒ a jump):
+///
+/// ```text
+///   built at 3:  |δ|∞ 1.573e-10 → 3.379e-13   Δφ  −2.571e-7 … −2.599e-7   JUMP
+///   built at 4:  |δ|∞ 2.037e-08 → 9.820e-12   ratio 13.76 … 12.22        smooth
+///   built at 5:  |δ|∞ 1.032e-01 → 7.545e-02   ratio 6.01e-2 … 5.88e-2    smooth
+///   built at 6:  |δ|∞ 4.608e-06 → 1.150e-06   ratio 8.77 … 8.86          smooth
+/// ```
+///
+/// Three decades of step size with `Δφ` pinned at `−2.6e-7` is a jump; four
+/// decades with `|Δφ|/|δ|∞` constant to three digits is a derivative. So the
+/// objective reads `I‴`, the order is **3**, and a composed warp is built at 4.
+///
+/// End to end, before any of this: at degree 2 the accept-test objective jumped
+/// by `2.976461e-1`, identically, at step norms from `1.436e-10` to `7.094e-13`,
+/// and the jump was Φ to twelve digits while `ℓ` and `½βᵀSβ` did not move at all.
+pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 3;
+
+/// The smallest public degree at which a composed warp's basis is continuous to
+/// [`COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER`], hence the smallest degree
+/// at which the inner objective is a function at all.
+///
+/// A degree-`d` I-spline is `C^{d−1}` at a knot of multiplicity one, so the
+/// requirement `d − 1 ≥ order` is what this returns. Nothing is chosen: the
+/// order comes from the objective and the `−1` from the spline.
+///
+/// # Why this RAISES the degree instead of refusing it
+///
+/// `5139b8977` derived the same floor and REFUSED below it. That was reverted in
+/// `3c530dbda` for a reason that still holds: a refusal breaks every working fit
+/// that asked for degree 2 and buys none of them a fit. The requirement is not a
+/// statement about what the user may ask for — it is a property of the objective
+/// the model then has to minimise, in the same class as "a B-spline basis needs
+/// at least `degree + 1` knots". So a composed warp is BUILT at this degree, the
+/// realised degree is what the block, the knots, the penalties and the saved
+/// metadata all carry, and the raise is logged rather than silent.
+#[inline]
+pub(crate) fn composed_warp_minimum_degree() -> usize {
+    COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER + 1
+}
+
 #[inline]
 pub(crate) fn monotone_wiggle_internal_degree(degree: usize) -> Result<usize, String> {
     // Public monotone-wiggle degree refers to the value basis. The low-level
@@ -551,27 +629,52 @@ pub(crate) fn select_wiggle_basis_from_seed_with_knots(
     let mut derivative_orders = Vec::with_capacity(1 + extra_orders.len());
     derivative_orders.push(primary_order);
     derivative_orders.extend(extra_orders);
+    // REALISED DEGREE (gam#2695). A simple-ended warp is one the inner objective
+    // COMPOSES rather than evaluates, so its basis has to be continuous to
+    // `COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER` for that objective to be a
+    // function of β at all. The floor is tied to `Simple` ends and not applied to
+    // `Clamped` ones deliberately: at a boundary knot of multiplicity `degree + 1`
+    // the ramp is `C^{-1}` at EVERY degree, so raising the degree there buys
+    // nothing — a clamped composed warp becomes admissible by moving its ends
+    // first, which is the work `WarpKnotEnds` already names and tracks.
+    let degree = match ends {
+        WarpKnotEnds::Simple => {
+            let minimum = composed_warp_minimum_degree();
+            if cfg.degree < minimum {
+                log::info!(
+                    "[warp-degree] composed monotone warp requested degree {} and is built at \
+                     {minimum}: the inner objective reads the basis's derivative of order {} \
+                     (H is the order-2 coefficient of the row jet and reaches the basis through \
+                     m1 = 1 + sum betaw_j B'_j, i.e. the tower SHIFTED BY ONE, so it consumes \
+                     the basis's THIRD derivative; and Phi = 1/2 sum g(lambda(Z_J^T H Z_J)) is a \
+                     term of the objective, not a diagnostic about it), while a degree-d \
+                     I-spline is only C^(d-1) at a simple knot — so degree {} leaves the \
+                     objective discontinuous across every knot the index crosses (gam#2695)",
+                    cfg.degree,
+                    COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER,
+                    cfg.degree,
+                );
+                minimum
+            } else {
+                cfg.degree
+            }
+        }
+        WarpKnotEnds::Clamped => cfg.degree,
+    };
     let knots = match ends {
         WarpKnotEnds::Simple => {
-            monotone_warp_knots_from_seed(seed, cfg.degree, cfg.num_internal_knots)?
+            monotone_warp_knots_from_seed(seed, degree, cfg.num_internal_knots)?
         }
-        WarpKnotEnds::Clamped => gam_terms::basis::initializewiggle_knots_from_seed(
-            seed,
-            cfg.degree,
-            cfg.num_internal_knots,
-        )?,
+        WarpKnotEnds::Clamped => {
+            gam_terms::basis::initializewiggle_knots_from_seed(seed, degree, cfg.num_internal_knots)?
+        }
     };
-    let canonical = canonical_wiggle_function_penalties(
-        &knots,
-        cfg.degree,
-        &derivative_orders,
-        cfg.double_penalty,
-    )?;
-    let block =
-        buildwiggle_block_input_from_canonical_penalties(seed, &knots, cfg.degree, &canonical)?;
+    let canonical =
+        canonical_wiggle_function_penalties(&knots, degree, &derivative_orders, cfg.double_penalty)?;
+    let block = buildwiggle_block_input_from_canonical_penalties(seed, &knots, degree, &canonical)?;
     Ok(SelectedWiggleBasis {
         knots,
-        degree: cfg.degree,
+        degree,
         block,
         penalty_metadata: canonical.metadata,
     })
@@ -1119,5 +1222,122 @@ mod warp_basis_smoothness_2695_tests {
                 );
             }
         }
+    }
+}
+
+/// gam#2695 — a COMPOSED warp is built at the degree its own objective requires.
+///
+/// The basis module above pins `C^{degree−1}`, a property of the basis. This
+/// module pins the other half: which degree a warp the objective COMPOSES is
+/// allowed to be built at, and that the answer is applied by construction rather
+/// than by refusal.
+#[cfg(test)]
+mod composed_warp_degree_2695_tests {
+    use super::*;
+    use ndarray::Array1;
+
+    fn seed() -> Array1<f64> {
+        Array1::from_shape_fn(24, |i| -1.5 + 3.0 * (i as f64) / 23.0)
+    }
+
+    fn cfg(degree: usize) -> WiggleBlockConfig {
+        WiggleBlockConfig {
+            degree,
+            num_internal_knots: 2,
+            penalty_order: 2,
+            double_penalty: false,
+        }
+    }
+
+    /// The floor is derived from two stated facts, so it must equal their
+    /// composition rather than a literal that happens to agree today.
+    #[test]
+    fn the_minimum_degree_is_the_objective_order_plus_the_spline_loss() {
+        assert_eq!(
+            composed_warp_minimum_degree(),
+            COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER + 1,
+            "a degree-d I-spline is C^(d-1) at a simple knot, so continuity to order k \
+             needs d >= k + 1"
+        );
+        // Non-vacuity: the floor has to bind on the shipped witness, which asks
+        // for `linkwiggle(degree=2, internal_knots=2)`.
+        assert!(
+            composed_warp_minimum_degree() > 2,
+            "the floor must exclude degree 2 or the witness this issue is named for is \
+             unaffected by it"
+        );
+    }
+
+    /// A simple-ended (composed) warp asked for a degree below the floor is
+    /// BUILT at the floor, and every object it returns carries the realised
+    /// degree — the knot vector's span count, the design's column count, and the
+    /// degree the block reports to the saved model.
+    #[test]
+    fn a_composed_warp_below_the_floor_is_built_at_the_floor() {
+        let minimum = composed_warp_minimum_degree();
+        let seed = seed();
+        for requested in 2..=minimum {
+            let selected = select_wiggle_basis_from_seed_with_knots(
+                seed.view(),
+                &cfg(requested),
+                &[2],
+                WarpKnotEnds::Simple,
+            )
+            .expect("composed warp basis");
+            assert_eq!(
+                selected.degree,
+                requested.max(minimum),
+                "requested degree {requested}"
+            );
+            // `monotone_warp_knots` emits `num_internal_knots + 1` spans across
+            // the range and continues the grid by `degree` spans at each end,
+            // all simple — `num_internal_knots + 2 + 2·degree` knots. So the
+            // knot count is a direct readout of the degree the basis was
+            // actually built at.
+            assert_eq!(
+                selected.knots.len(),
+                2 + 2 + 2 * selected.degree,
+                "knot count must follow the REALISED degree, not the requested one"
+            );
+            // Column count is `num_internal_knots + degree` for this generator.
+            assert_eq!(
+                selected.block.design.ncols(),
+                2 + selected.degree,
+                "the design must be the realised degree's basis"
+            );
+        }
+    }
+
+    /// Above the floor nothing moves: the realised degree is the requested one.
+    #[test]
+    fn a_composed_warp_at_or_above_the_floor_is_untouched() {
+        let seed = seed();
+        for requested in composed_warp_minimum_degree()..=composed_warp_minimum_degree() + 2 {
+            let selected = select_wiggle_basis_from_seed_with_knots(
+                seed.view(),
+                &cfg(requested),
+                &[2],
+                WarpKnotEnds::Simple,
+            )
+            .expect("composed warp basis");
+            assert_eq!(selected.degree, requested);
+        }
+    }
+
+    /// The floor is tied to SIMPLE ends and must not reach the clamped
+    /// subsystems: at a boundary knot of multiplicity `degree + 1` the ramp is
+    /// `C^{-1}` at every degree, so raising the degree there would change those
+    /// fits while fixing nothing. Their route to admissibility is moving their
+    /// ends, which `WarpKnotEnds` already names.
+    #[test]
+    fn a_clamped_warp_keeps_the_degree_it_asked_for() {
+        let seed = seed();
+        let selected =
+            select_wiggle_basis_from_seed_with_knots(seed.view(), &cfg(2), &[2], WarpKnotEnds::Clamped)
+                .expect("clamped wiggle basis");
+        assert_eq!(
+            selected.degree, 2,
+            "the composed-warp floor must not silently re-shape a clamped block"
+        );
     }
 }

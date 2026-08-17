@@ -5,6 +5,7 @@ use super::*;
 use super::outer_objective::ProbeRefusalKind;
 use crate::identifiability::{
     FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature,
+    TriangularRootAccumulator,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
@@ -340,6 +341,39 @@ pub(super) fn normalized_reconstruction_energy(
         ));
     }
     Ok(energy)
+}
+
+/// Evaluate a per-ATOM post-fit certificate over every atom, in atom order.
+///
+/// The three certificates this serves (coordinate fidelity, decoder
+/// embeddedness, topology persistence) are pure reads of one atom each: they
+/// take `&SaeManifoldTerm` and an atom index, write nothing, and perform no
+/// cross-atom reduction. So the only thing the serial `(0..k).map(..)` they
+/// replace was buying is a fixed evaluation ORDER, and an indexed collect keeps
+/// that: slot `k` holds exactly what the serial sweep's `k`-th step produced,
+/// computed by the identical arithmetic on one thread. The result is
+/// bit-identical, not merely equal in distribution.
+///
+/// Worth doing because these are not cheap reads. The topology audit alone runs
+/// a Vietoris–Rips filtration over `C(m, 3)` triangles at the
+/// [`PERSISTENCE_H1_MAX_POINTS`](super::persistence::PERSISTENCE_H1_MAX_POINTS)
+/// cover — measured at ~17 s for one full-support atom — so the serial sweep is
+/// `K ×` that, on one core, which is precisely the "unparallelised, ~1.0 of 16
+/// cores" #2757 records against this function.
+///
+/// The nesting guard is the crate's standing rule: a caller already inside a
+/// rayon worker stays serial so the outer region keeps its cores. A single-atom
+/// model never fans out, since one work item cannot be shared.
+fn atom_certificates_in_parallel<T, F>(k_atoms: usize, certificate: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync + Send,
+{
+    if k_atoms <= 1 || rayon::current_thread_index().is_some() {
+        return (0..k_atoms).map(certificate).collect();
+    }
+    use rayon::prelude::*;
+    (0..k_atoms).into_par_iter().map(certificate).collect()
 }
 
 /// Standard floating-point accumulation factor `γ_k = kε/(1-kε)`.
@@ -2281,12 +2315,30 @@ impl SaeManifoldTerm {
         // atom) and never gated by a flag.
         let atom_inference = crate::identifiability::atom_inference_reports(&certificate_model);
 
+        // The three remaining certificates are per-ATOM and mutually independent:
+        // each reads only `&self` and its own atom index, writes only its own
+        // slot, and performs no cross-atom reduction. They were three serial
+        // `map`s, which is the "~1.0 of 16 cores" #2757's body records against
+        // this function — and the topology audit alone measures ~17 s per atom
+        // at a full-support cover, so the serial sweep is `K` × that.
+        //
+        // `atom_certificates_in_parallel` runs them over atoms with an indexed
+        // collect, so the output vector is in atom order and every element is
+        // computed by the identical serial arithmetic — bit-identical to the
+        // sweep it replaces, not merely equal in distribution. The nesting guard
+        // keeps a caller already inside a rayon worker on the serial path so the
+        // outer region keeps its cores.
+        let k_atoms = self.k_atoms();
+
         // #2081 — per-atom coordinate-fidelity certificate (uniformity + arc-length
         // defect). Always populated (one entry per atom, `None` for non-`d = 1`
         // charts), never dispersion-gated: coordinate quality does not depend on the
         // reconstruction dispersion the incoherence report needs.
-        let coordinate_fidelity = (0..self.k_atoms())
-            .map(|atom_idx| atom_coordinate_fidelity(self, atom_idx))
+        let coordinate_fidelity =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_coordinate_fidelity(self, atom_idx)
+            })
+            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
         // #2518 item 2 — per-atom decoded-image embeddedness certificate. Every
@@ -2296,17 +2348,21 @@ impl SaeManifoldTerm {
         // that sees it. One entry per atom, `None` for atoms outside the `d = 1`
         // periodic family, and — like the fidelity report — a pure read that
         // feeds nothing back into the loss or criterion.
-        let decoder_embeddedness = (0..self.k_atoms())
-            .map(|atom_idx| atom_decoder_embeddedness(self, atom_idx))
+        let decoder_embeddedness =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_decoder_embeddedness(self, atom_idx)
+            })
+            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
         // Reviewer-F3 persistent-homology topology audit (one entry per atom,
         // `None` for caller-supplied or under-sampled atoms). A pure read of the
         // fitted decoder image and shared soft support measure; never gated by a flag and
         // feeds nothing back into the loss/criterion.
-        let topology_persistence = (0..self.k_atoms())
-            .map(|atom_idx| atom_topology_persistence(self, atom_idx))
-            .collect::<Vec<_>>();
+        let topology_persistence =
+            atom_certificates_in_parallel(k_atoms, |atom_idx| {
+                atom_topology_persistence(self, atom_idx)
+            });
 
         Ok(SaeManifoldFitDiagnostics {
             atom_two_lens,
@@ -2860,24 +2916,46 @@ impl SaeManifoldTerm {
         // `rank` root rows `v_r[(k,i,a)] = U_n[i,r] · g[i,(k,a)]`. Each is a
         // `param_dim`-vector built in `param_dim` flops — the whitening reaches
         // exactly one output coordinate per column.
-        let dense = root_rows > param_dim;
-        let mut root = if dense {
+        //
+        // The metric couples output coordinates here, so `H` genuinely has no
+        // block structure: the per-row Jacobian is output-coordinate diagonal,
+        // but `M_n` is not, and the product `J_nᵀ M_n J_n` is dense. What the
+        // certificate reads off `H` is nevertheless read off a ROOT in both
+        // regimes (#2757):
+        //
+        // * with no more rows than columns the root is the smaller object and is
+        //   kept whole;
+        // * with more, its rows are folded into the `param_dim`-square
+        //   upper-triangular factor `T` with `TᵀT = RᵀR` by Givens rotations.
+        //
+        // This branch used to assemble the dense `param_dim × param_dim` GRAM
+        // instead — the exact object this issue is named for, on the half of the
+        // fork the block-structured curvature never reached — and then take its
+        // symmetric eigendecomposition. The factor is strictly better on both
+        // axes the certificate cares about: `eigh` allocates a second
+        // `param_dim²` for eigenvectors the reduction discards where a
+        // values-only SVD allocates none, and the rank decision stays on `σ`
+        // rather than being squared into `λ = σ²` and then floored at the
+        // eigensolver's own resolution `ε·param_dim·λ_max`.
+        //
+        // What it does not do is make this branch affordable at production
+        // width: `min(rows, param_dim)²` is what an exact full spectrum costs
+        // from either side, and no representation of a coupling metric's
+        // curvature avoids it. See `TriangularRootAccumulator`.
+        let fold = root_rows > param_dim;
+        let mut root = if fold {
             Array2::<f64>::zeros((0, 0))
         } else {
             Array2::<f64>::zeros((root_rows, param_dim))
         };
         let pin_rows = dense_rows.nrows();
-        let mut gram = if dense {
-            Array2::<f64>::zeros((param_dim, param_dim))
-        } else {
-            Array2::<f64>::zeros((0, 0))
-        };
+        let mut folded = fold.then(|| TriangularRootAccumulator::new(param_dim));
         let mut root_row = vec![0.0_f64; param_dim];
         for row in 0..n {
             if !self.fill_row_frame_jacobian(row, &assignments, layout, &mut tangent, &mut g) {
                 // No assignment mass: every root row this observation would
                 // contribute is exactly zero, and a zero row changes neither the
-                // Gram nor the (already zero) stored root row.
+                // triangular factor nor the (already zero) stored root row.
                 continue;
             }
             for r in 0..rank {
@@ -2888,11 +2966,20 @@ impl SaeManifoldTerm {
                         root_row[layout.column(i, l)] = w * g[[i, l]];
                     }
                 }
-                if dense {
-                    Self::accumulate_residual_gauge_gram_row(&mut gram, &root_row);
-                } else {
-                    for (c, v) in root_row.iter().enumerate() {
-                        root[[out_index, c]] = *v;
+                match folded.as_mut() {
+                    // `push_root_row` consumes the buffer (it is left as the
+                    // annihilated residual), and the next iteration overwrites
+                    // every entry it wrote — but only the entries this row's
+                    // Jacobian touches, so the buffer is re-zeroed rather than
+                    // trusted.
+                    Some(accumulator) => {
+                        accumulator.push_root_row(&mut root_row)?;
+                        root_row.fill(0.0);
+                    }
+                    None => {
+                        for (c, v) in root_row.iter().enumerate() {
+                            root[[out_index, c]] = *v;
+                        }
                     }
                 }
             }
@@ -2902,20 +2989,19 @@ impl SaeManifoldTerm {
         // lost by appending them, and none was available to exploit.
         for j in 0..pin_rows {
             let pin_row = dense_rows.row(j);
-            if dense {
-                let owned: Vec<f64> = pin_row.iter().copied().collect();
-                Self::accumulate_residual_gauge_gram_row(&mut gram, &owned);
-            } else {
-                root.row_mut(n * rank + j).assign(&pin_row);
+            match folded.as_mut() {
+                Some(accumulator) => {
+                    for (c, v) in pin_row.iter().enumerate() {
+                        root_row[c] = *v;
+                    }
+                    accumulator.push_root_row(&mut root_row)?;
+                    root_row.fill(0.0);
+                }
+                None => root.row_mut(n * rank + j).assign(&pin_row),
             }
         }
-        if dense {
-            for a in 0..param_dim {
-                for b in 0..a {
-                    gram[[b, a]] = gram[[a, b]];
-                }
-            }
-            return Ok(ResidualGaugeCurvature::DenseGram { gram, root_rows });
+        if let Some(accumulator) = folded {
+            return Ok(accumulator.finish(root_rows));
         }
         Ok(ResidualGaugeCurvature::DualRoot { root, root_rows })
     }
@@ -2950,21 +3036,6 @@ impl SaeManifoldTerm {
             }
         }
         any
-    }
-
-    pub(crate) fn accumulate_residual_gauge_gram_row(gram: &mut Array2<f64>, row: &[f64]) {
-        for a in 0..row.len() {
-            let va = row[a];
-            if va == 0.0 {
-                continue;
-            }
-            for b in 0..=a {
-                let vb = row[b];
-                if vb != 0.0 {
-                    gram[[a, b]] += va * vb;
-                }
-            }
-        }
     }
 
     pub fn set_temperature_schedule(

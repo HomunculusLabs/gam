@@ -51,7 +51,7 @@ use csv::StringRecord;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand_distr::{Bernoulli, Distribution, Poisson};
+use rand_distr::{Bernoulli, Distribution, Normal, Poisson};
 
 /// Which null family/DGP a replicate is drawn from. In every case the smooth's
 /// covariate `z ~ U(0,1)` has NO effect on the mean — the smooth `s(z)` is
@@ -62,6 +62,19 @@ enum NullFamily {
     PoissonLog,
     /// `y ~ Bernoulli(logit⁻¹(−0.2 + 0.9 x))`, logit link.
     BernoulliLogit,
+    /// `y ~ N(0.3 + 0.8 x, 0.5²)`, identity link — the family whose
+    /// log-likelihood IS the quadratic every other lane here expands to.
+    ///
+    /// It exists as a DISCRIMINATOR, not for coverage. The reference and the
+    /// Lawley factor are both second-order expansions of the log-likelihood
+    /// about the penalized fit, so on Poisson and Bernoulli a size miss has two
+    /// readings that no amount of replication separates: the reference is wrong,
+    /// or the expansion is. On a Gaussian response the expansion is exact in `β`
+    /// — `ℓ` is a quadratic, `Δε` is zero to the order Lawley works at — and the
+    /// only inexactness left is the profiled `σ̂`. So a Gaussian cell that lands
+    /// on nominal says the reference is right and the residual elsewhere is the
+    /// expansion; a Gaussian cell that misses says it is not, and by how much.
+    GaussianIdentity,
 }
 
 impl NullFamily {
@@ -69,12 +82,14 @@ impl NullFamily {
         match self {
             NullFamily::PoissonLog => "poisson",
             NullFamily::BernoulliLogit => "binomial",
+            NullFamily::GaussianIdentity => "gaussian",
         }
     }
     fn label(self) -> &'static str {
         match self {
             NullFamily::PoissonLog => "poisson/log",
             NullFamily::BernoulliLogit => "bernoulli/logit",
+            NullFamily::GaussianIdentity => "gaussian/identity",
         }
     }
 }
@@ -99,6 +114,10 @@ fn null_replicate(family: NullFamily, n: usize, seed: u64) -> gam::data::Encoded
                 let mu = 1.0 / (1.0 + (-eta).exp());
                 let bit = Bernoulli::new(mu).expect("bernoulli p").sample(&mut rng);
                 if bit { 1.0 } else { 0.0 }
+            }
+            NullFamily::GaussianIdentity => {
+                let mean = 0.3 + 0.8 * x; // no z term — the smooth is null-true.
+                Normal::new(mean, 0.5).expect("normal").sample(&mut rng)
             }
         };
         rows.push(StringRecord::from(vec![
@@ -861,6 +880,215 @@ fn zz_measure_bernoulli_wide_basis_size_versus_n_2672() {
         "[zz2672-n] read: nominal 0.05 / 0.01; MC s.e. at {REPS} reps is {:.4} / {:.4}. \
          A size that falls toward nominal WITH the separation rate is the quadratic \
          expansion; one that does not is the reference.",
+        size_se(0.05, REPS),
+        size_se(0.01, REPS)
+    );
+}
+
+/// #2672: THE DISCRIMINATOR. On a family whose log-likelihood is exactly the
+/// quadratic every other lane expands to, the smooth-term LR test must be the
+/// right size — and if it is not, the reference is wrong and no amount of `n`
+/// will fix it.
+///
+/// The grid's residual after the selection replay's descent landed is confined
+/// to `bernoulli/logit, k = 12`, at `0.119` against a nominal `0.05` on `n ∈
+/// {30, 50}` while every other cell averages `0.046`. That has two readings with
+/// opposite consequences:
+///
+/// * the REFERENCE is still wrong for a wide basis on a binary response — a
+///   defect, and one that will not decay with `n`;
+/// * the QUADRATIC EXPANSION is wrong there — the reference and the Lawley
+///   factor are both second-order expansions of `ℓ` about the penalized fit, and
+///   30 Bernoulli trials against an 11-column smooth is the worst case for one.
+///
+/// `zz_measure_bernoulli_wide_basis_size_versus_n_2672` separates them with `n`,
+/// which takes the sweep out to `n = 400` before the MC error resolves anything.
+/// A Gaussian response separates them at `n = 30`: `ℓ` is a quadratic in `β`
+/// EXACTLY, so the expansion is not an approximation and the only inexactness
+/// left is the profiled `σ̂`. Same `n`, same `k`, same basis, same replicate
+/// count, same driver.
+///
+/// This is a CONTRACT and not a `zz_` diagnostic, because "the reference is
+/// right where nothing is being approximated" is a claim the reference has to
+/// keep. The band is the same one the rest of this file uses — `3·SE` plus half
+/// the cell's own first-order distortion — evaluated per cell and pooled.
+#[test]
+fn gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672() {
+    init_parallelism();
+
+    const REPS: usize = 120;
+    let ns = [30usize, 50];
+    let ks = [6usize, 12];
+
+    let mut cells = Vec::<CellResult>::new();
+    for &k in &ks {
+        for &n in &ns {
+            let mut counts = SizeCounts::default();
+            let mut refused = 0usize;
+            let mut first_refusal: Option<String> = None;
+            for rep in 0..REPS {
+                let seed = mix_seed(NullFamily::GaussianIdentity.label(), n, k, rep);
+                let data = null_replicate(NullFamily::GaussianIdentity, n, seed);
+                match run_one(NullFamily::GaussianIdentity, k, &data) {
+                    Ok(Some(r)) => counts.ingest(&r),
+                    Ok(None) => {}
+                    Err(message) => {
+                        refused += 1;
+                        first_refusal.get_or_insert(message);
+                    }
+                }
+            }
+            if let Some(message) = first_refusal.as_ref() {
+                eprintln!(
+                    "[#2672 gaussian] n={n} k={k}: {refused}/{REPS} replicate fits REFUSED \
+                     and contribute no calibration datum. First: {message}"
+                );
+            }
+            cells.push(CellResult {
+                n,
+                k,
+                label: NullFamily::GaussianIdentity.label(),
+                used: counts.used,
+                refused,
+                est_applied: counts.est_lambda_applied,
+                size_first_05: counts.size(counts.rej_first_05),
+                size_fixed_05: counts.size(counts.rej_fixed_05),
+                size_est_05: counts.size(counts.rej_est_05),
+                size_first_01: counts.size(counts.rej_first_01),
+                size_est_01: counts.size(counts.rej_est_01),
+            });
+        }
+    }
+
+    assert_grid_calibration(&cells, REPS, "gaussian");
+}
+
+/// DIAGNOSTIC (not a contract, #2672): the A/B on the estimated-scale channel.
+///
+/// This arm was written before the fix, to score a candidate correction from
+/// published fields without touching the driver. The driver has it now, so the
+/// same measurement is available as a strict A/B and is worth more that way:
+/// `SmoothLrReferenceDf::profiled_scale` is a public `Option`, so the SAME fit,
+/// the SAME statistic and the SAME spectrum can be scored with the channel on
+/// and with it off, and nothing but the reference differs.
+///
+/// The mechanism, restated because this is where it is measured. gam's profiled
+/// Gaussian log-likelihood is `ℓ = −½[n·ln 2π + n·ln(D/ν) − Σ ln w_i + ν]`, so
+///
+/// ```text
+/// W = 2(ℓ_f − ℓ_0) = n·ln(D_0/D_f) + n·ln(ν_f/ν_0) + (ν_0 − ν_f)
+///                  = n·ln(1 + Q/V) + B,
+/// ```
+///
+/// `Q = (D_0 − D_f)/σ²` the quantity the reference's spectrum is the spectrum
+/// OF, and `V = D_f/σ²` a random variable of the same data. The known-scale
+/// reference scores `Q`; both the mean shift `ν/(ν−2)` and the extra spread are
+/// `O(1/ν)`, which is why this is invisible at `n = 1000` and worth `0.03` in
+/// size at `n = 30`.
+///
+/// The arms, on ONE set of fits:
+///
+/// * `shipped` — what the driver publishes, i.e. the ratio reference;
+/// * `known` — the same reference with `profiled_scale` cleared, i.e. what
+///   shipped before the fix;
+/// * `F` — `P(F_{a,ν} > W/(g·a))` from the published two-moment `(a, g)`, the
+///   `F`-family approximation of the same correction, so the exact inversion
+///   has a same-family comparison and the difference between "inverted exactly"
+///   and "approximated in the two-moment family" is visible rather than
+///   asserted.
+///
+/// `ratio` reads `mean(W)` against the mean of the law the p-value is read
+/// from; under an unscored profiled scale it sits near `ν/(ν−2)` rather than at
+/// one, and that is the readout that says the mechanism is present at all.
+#[test]
+fn zz_measure_gaussian_reference_against_the_profiled_scale_2672() {
+    init_parallelism();
+
+    const REPS: usize = 200;
+    let ns = [30usize, 50, 100, 200];
+    let ks = [6usize, 12];
+    let family = NullFamily::GaussianIdentity;
+
+    eprintln!(
+        "[zz2672-scale] {:>5} {:>3} {:>5} | size@.05 shipped / known / F | size@.01 shipped / \
+         known | mean_nu  mean_kappa  ratio",
+        "n", "k", "used"
+    );
+    for &k in &ks {
+        for &n in &ns {
+            let mut counts = [0usize; 5];
+            let (mut used, mut sum_w, mut sum_nu, mut sum_kappa, mut sum_predicted) =
+                (0usize, 0.0, 0.0, 0.0, 0.0);
+            let mut predicted_used = 0usize;
+            for rep in 0..REPS {
+                let seed = mix_seed(family.label(), n, k, rep);
+                let data = null_replicate(family, n, seed);
+                let Ok(Some(r)) = run_one(family, k, &data) else {
+                    continue;
+                };
+                let provenance = &r.ref_df_provenance;
+                let (a, g) = (provenance.chi_square_df, provenance.scale);
+                if !(r.statistic_lr.is_finite() && a.is_finite() && a > 0.0 && g > 0.0) {
+                    continue;
+                }
+                let Some(scale) = provenance.profiled_scale.as_ref() else {
+                    continue;
+                };
+                // The residual degrees of freedom the profiled `σ̂` actually
+                // has, published by the reference itself rather than refitted.
+                let residual_df: f64 = scale.residual_weights.iter().sum::<f64>()
+                    + scale.residual_unit_dimension;
+                used += 1;
+                sum_w += r.statistic_lr;
+                sum_nu += residual_df;
+                sum_kappa += n as f64 / residual_df;
+                if let Some(replay) = provenance.selection.replay() {
+                    let mean = replay.selection_mean();
+                    if mean.is_finite() {
+                        sum_predicted += mean;
+                        predicted_used += 1;
+                    }
+                }
+                let statistic = r.statistic_corrected;
+                let mut known = provenance.clone();
+                known.profiled_scale = None;
+                let arms = [
+                    r.p_value_corrected,
+                    known.tail_probability(statistic),
+                    gam_math::probability::fisher_snedecor_sf(statistic / (g * a), a, residual_df),
+                ];
+                for (slot, p) in arms.iter().enumerate() {
+                    if *p <= 0.05 {
+                        counts[slot] += 1;
+                    }
+                }
+                if r.p_value_corrected <= 0.01 {
+                    counts[3] += 1;
+                }
+                if known.tail_probability(statistic) <= 0.01 {
+                    counts[4] += 1;
+                }
+            }
+            let denominator = used.max(1) as f64;
+            let size = |slot: usize| counts[slot] as f64 / denominator;
+            eprintln!(
+                "[zz2672-scale] {n:>5} {k:>3} {used:>5} |   {:.3} / {:.3} / {:.3}   |   \
+                 {:.3} / {:.3}   | {:>7.2}  {:>7.4}  {:>6.3}",
+                size(0),
+                size(1),
+                size(2),
+                size(3),
+                size(4),
+                sum_nu / denominator,
+                sum_kappa / denominator,
+                (sum_w / denominator) / (sum_predicted / predicted_used.max(1) as f64),
+            );
+        }
+    }
+    eprintln!(
+        "[zz2672-scale] read: nominal 0.05 / 0.01, MC s.e. {:.4} / {:.4} per cell at {REPS} reps. \
+         `ratio` is mean(W) against the mean of the law the p-value is read from — under an \
+         UNSCORED profiled scale it sits near ν/(ν−2), not at one.",
         size_se(0.05, REPS),
         size_se(0.01, REPS)
     );

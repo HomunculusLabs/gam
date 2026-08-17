@@ -20,20 +20,20 @@ const ARD_SPREAD_FLOOR: f64 = 1.0e-12;
 /// Why one bounded joint-fit chunk returned. Ordinary fits may use the two
 /// heuristic exits; evidence is certified only by [`Self::NoStrictDecrease`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JointFitTermination {
+pub(crate) enum JointFitTermination {
     Frozen,
     Heuristic,
     NoStrictDecrease,
     IterationGrantExhausted,
 }
 
-struct JointFitOutcome {
-    loss: SaeManifoldLoss,
-    termination: JointFitTermination,
-    state_moved: bool,
+pub(crate) struct JointFitOutcome {
+    pub(crate) loss: SaeManifoldLoss,
+    pub(crate) termination: JointFitTermination,
+    pub(crate) state_moved: bool,
     /// The FIRST site that moved state, for the evidence lane's refusal
     /// to name (see [`StateMoveSite`]).
-    moved_at: Option<StateMoveSite>,
+    pub(crate) moved_at: Option<StateMoveSite>,
 }
 
 pub(crate) struct EvidenceJointFitOutcome {
@@ -93,6 +93,37 @@ pub(crate) enum StateMoveSite {
     ExitBlockSweep,
     /// AFTER the loop: the exit objective warranty restored a banked state (#2228).
     ExitWarrantyRestore,
+    /// The gauge-orbit block descent committed a decrease, inside the loop
+    /// (#2762). Reached only after the Newton line search AND the proximal
+    /// correction both failed to find one, so it is the same "a real objective
+    /// improvement was still available" statement as `ProximalCorrectionStep`,
+    /// in the block where the Newton model is structurally unable to look.
+    GaugeOrbitDescent,
+}
+
+/// What one [`SaeManifoldTerm::descend_gauge_orbit`] call did (#2762). All
+/// fields are measurements, not requests: `rounds == 0` with a large
+/// `max_directional_derivative` is the honest report that the removed span
+/// carries live slope no FINITE motion along it can cash in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct GaugeOrbitDescent {
+    /// Rounds that committed a decrease clearing the material floor.
+    pub(crate) rounds: usize,
+    /// Total penalized-objective decrease committed across those rounds.
+    pub(crate) objective_decrease: f64,
+    /// Dimension of the removed span at the last round examined.
+    pub(crate) dimension: usize,
+    /// `maxᵢ |gᵀvᵢ|` over the removed span at the last round examined — the
+    /// precondition `quotient_residual_norm_sq`'s removal assumes.
+    pub(crate) max_directional_derivative: f64,
+    /// Objective evaluations spent. Each is one `penalized_objective_total`.
+    pub(crate) evaluations: usize,
+}
+
+impl GaugeOrbitDescent {
+    pub(crate) fn moved(&self) -> bool {
+        self.rounds > 0 && self.objective_decrease > 0.0
+    }
 }
 
 impl StateMoveSite {
@@ -129,6 +160,13 @@ impl StateMoveSite {
                 "the pass moved state at the exit-warranty RESTORE, AFTER the loop - a \
                  restore, so the state may be bit-identical to entry and the refusal may be \
                  rejecting an idempotent pass"
+            }
+            Self::GaugeOrbitDescent => {
+                "the pass moved state at the GAUGE-ORBIT block descent, inside the loop - it \
+                 committed a decrease clearing the evidence MATERIAL floor in the span the \
+                 convergence measure removes, so a real objective improvement was still \
+                 available at the state being certified, in the block the Newton model cannot \
+                 look in"
             }
         }
     }
@@ -2376,98 +2414,469 @@ impl SaeManifoldTerm {
     }
 
     /// Norm² of a full-length `(n·q + β)` residual vector after projecting out
-    /// BOTH the chart reparametrisation orbit AND the rank-deficient decoder
-    /// β-null (#1051/#1117). Shared by the convergence STEP gate
-    /// ([`Self::quotient_newton_step_norm_sq`]) and the convergence GRADIENT gate
-    /// ([`Self::quotient_gradient_norm_sq`]) so both measure progress on the SAME
-    /// identified quotient — otherwise a rank-deficient circle whose only
-    /// remaining motion is gauge/null crawl is recognised as converged by the
-    /// step measure but rejected forever by the raw-gradient measure, burning the
-    /// inner refine budget (the #1117 stall).
+    /// the rank-deficient decoder null space (#1051/#1117). Shared by the
+    /// convergence STEP gate ([`Self::quotient_newton_step_norm_sq`]) and the
+    /// convergence GRADIENT gate ([`Self::quotient_gradient_norm_sq`]) so both
+    /// measure progress on the SAME identified quotient — otherwise a
+    /// rank-deficient circle whose only remaining motion is null crawl is
+    /// recognised as converged by the step measure but rejected forever by the
+    /// raw-gradient measure, burning the inner refine budget (the #1117 stall).
     ///
-    /// ## WHAT IS FLAT ALONG THE ORBIT, AND WHAT IS NOT (gam#2715)
+    /// ## WHY THE CHART ORBIT IS NOT IN THIS SPAN (gam#2720)
     ///
-    /// This doc previously said "along either the penalised joint objective is
-    /// flat, so a component there is gauge freedom, not un-converged motion".
-    /// **The first clause is false and the second does not follow.** Measured:
+    /// It used to be, on the premise that "along either the penalised joint
+    /// objective is flat, so a component there is gauge freedom, not
+    /// un-converged motion". The premise is false, and the measurement that
+    /// settles it is a per-objective-term central difference of the VALUE
+    /// functions along every direction this span used to contain
+    /// (`tests_gauge_posterior_flatness_2720`, on the planted-circle fixture at
+    /// four atom kinds):
     ///
-    /// * The orbit IS an exact first-order symmetry of the **likelihood**.
-    ///   [`Self::dense_step_gauge_vector_from_field`] cancels the reconstruction
-    ///   motion with a least-squares decoder compensation, and the residual of
-    ///   that solve — which is precisely the first-order reconstruction change —
-    ///   measured `1.29e-16 … 1.11e-15` RELATIVE over 1333 constructions on two
-    ///   fixtures. So the data-fit term really is flat here.
-    /// * The orbit is NOT a symmetry of the **posterior**. The ARD prior on `t`
-    ///   and the smoothness prior on `β` depend on those coordinates directly,
-    ///   not only through the reconstruction, and a chart reparametrisation moves
-    ///   them. Measured at one stall state: the directional derivatives of the
-    ///   PENALISED objective along the two orbit directions are `4.592144e-3` and
-    ///   `5.823201e-3` against a `5.574613e-4` convergence tolerance — **8.2x and
-    ///   10.4x**, and they reconstruct the projected gradient component
-    ///   (`hypot = 7.4160270e-3` vs `‖Π∥gauge g‖ = 7.416027e-3`) to `5.6e-10`.
+    /// | family | directions | worst \|d f\| / tolerance |
+    /// |---|---|---|
+    /// | `dense_step_gauge_vectors` (chart orbit) | 7 | **76 170** |
+    /// | `joint_decoder_beta_null_directions` | 704 | 0.00003 |
+    /// | `decoder_channel_null_directions` | — | 0.00003 |
     ///
-    /// A component along the orbit is therefore **likelihood-gauge but live
-    /// posterior descent**, and removing it from a convergence measure is only
-    /// sound where the priors are inactive along it. Any consumer that reads a
-    /// small quotient as "stationary" is relying on the false clause, not on this
-    /// one: the inner acceptance gate ([`Self::quotient_gradient_norm_sq`] via
-    /// `quasi_laplace_kkt_stationary`), the terminal Newton polish's stationarity
-    /// return, and `SaeInstalledInnerKktAudit::certifies()`, whose
-    /// `extensive OR intensive` disjunction reaches users as
-    /// `parameter_space.certifies()`.
+    /// The two kinds of direction are not the same object:
     ///
-    /// Worse, the omission is self-concealing: the solver can only move in the
-    /// complement, so it drives the complement component down and leaves the
-    /// orbit component alone, and the retained fraction `‖Π⊥g‖/‖g‖` therefore
-    /// tends to zero at ANY fixed point whether or not it is stationary
-    /// (measured on one trajectory at constant projector rank: `0.978` far out,
-    /// `0.500` at the stall, `0.00108` after a polish step). An acceptance
-    /// denominated in it is an eventual-acceptance guarantee rather than a test.
+    /// * the decoder nulls are machine-null eigenvectors of the **penalized**
+    ///   Gram `DᵀD + λS`, so the data fit AND the smoothness prior are flat
+    ///   along them by construction — measured at `3e-9` absolute, i.e. the
+    ///   roundoff of the value function. They are genuine posterior nulls and
+    ///   they belong in a convergence quotient.
+    /// * the chart orbit is a symmetry of the **likelihood** only. The
+    ///   compensating decoder solve makes the reconstruction change vanish to
+    ///   `1e-16` relative — re-measured through the value function, at
+    ///   `n_active = 42` against `M ∈ {2,3,32}`, so it is not the rank-trivial
+    ///   regime where that solve is exact for any field whatever. But the ARD
+    ///   prior on `t` and the smoothness prior on `β` are written on the chart
+    ///   coordinates, and they move: the constant-shift field moves ARD alone,
+    ///   the dilation field `δt = t` moves the smoothness prior by `−7.82` on an
+    ///   objective of `165` because shrinking the chart while inflating the
+    ///   decoder buys smoothness at no cost in fit.
     ///
-    /// This comment documents the state of the code; it does not fix it. The
-    /// precondition the accept path assumes — `maxᵢ |gᵀvᵢ| ≤ tolerance` over the
-    /// removed directions — is available here as `coeff` and is not checked.
-    /// Making the orbit a genuine posterior symmetry is a modelling change and is
-    /// tracked separately.
+    /// ### The modelling question #2720 asked, and its answer
+    ///
+    /// "Make the orbit a genuine posterior symmetry" would mean deleting the
+    /// prior's dependence on the chart coordinates. It cannot be done, and
+    /// should not be: the ARD coordinate prior IS the chart's identifiability
+    /// device — the standard mean-zero random-effect convention, with the
+    /// decoder's constant column absorbing the location — and the smoothness
+    /// prior is what fixes the chart's scale. A prior made invariant under
+    /// translation and dilation of `t` is improper along exactly those
+    /// directions and cannot shrink an unused axis, which is the entire purpose
+    /// of ARD. **There is no posterior gauge here and there should not be one.**
+    ///
+    /// ### Why removing it can only help, stated exactly
+    ///
+    /// The gradient quotient removes `Σᵢ (gᵀvᵢ)²` from `‖g‖²`, so the
+    /// precondition `maxᵢ |gᵀvᵢ| ≤ τ` bounds what it can ever remove at
+    /// `√m · τ` over `m` directions — the gate is then at worst `√m`-loose, and
+    /// on the measured span that bound is `√704 · 3e-9 = 8e-8` against
+    /// `τ = 7.5e-5`, i.e. nothing. Where the precondition FAILS the removal is
+    /// unbounded, and it failed here by four orders of magnitude. So the chart
+    /// orbit's presence in this span bought the gate nothing it did not already
+    /// have and cost it everything at exactly the states where the gate was
+    /// right.
+    ///
+    /// For the STEP gate the quotient is not bounded that way — a step along a
+    /// genuinely flat direction is genuinely not progress, and removing it is
+    /// the point — but that argument needs the direction to BE flat, which is
+    /// what the table above refutes for the chart orbit and confirms for the
+    /// decoder nulls.
+    ///
+    /// ### What the orbit gets instead
+    ///
+    /// A mover, not a blindfold: [`Self::descend_gauge_orbit`] minimizes the
+    /// penalized objective over [`Self::likelihood_flat_block_basis`], which
+    /// still contains the chart orbit. That is block-coordinate descent on the
+    /// real objective, so the orbit component of the residual is reduced rather
+    /// than hidden, and the raw gate can then see a genuinely stationary point.
     pub(crate) fn quotient_residual_norm_sq(
         &self,
         mut residual: Array1<f64>,
         penalized_gram_scale: &[f64],
     ) -> Result<f64, String> {
+        for basis in self.posterior_null_quotient_basis(penalized_gram_scale)? {
+            if basis.len() != residual.len() {
+                continue;
+            }
+            let coeff = residual.dot(&basis);
+            for i in 0..residual.len() {
+                residual[i] -= coeff * basis[i];
+            }
+        }
+        Ok(residual.iter().map(|v| v * v).sum::<f64>())
+    }
+
+    /// The ORTHONORMAL basis of the span every convergence quotient removes,
+    /// and the SINGLE source of truth for it (#2762/#2720).
+    ///
+    /// Membership is decided by one question — **is the PENALIZED objective flat
+    /// along this direction?** — and both families here answer it structurally
+    /// rather than by measurement at a state: they are machine-null directions
+    /// of the penalized Gram `DᵀD + λS` (basis-column deficiency) and of the
+    /// decoder's realised column span (ambient-channel deficiency). The data fit
+    /// and the smoothness prior are both flat along them by construction, and
+    /// `tests_gauge_posterior_flatness_2720` measures the whole penalized
+    /// objective flat along every one of them to `3e-9`.
+    ///
+    /// The chart reparametrisation orbit is deliberately NOT here; see
+    /// [`Self::quotient_residual_norm_sq`] for the measurement and the modelling
+    /// argument. It lives in [`Self::likelihood_flat_block_basis`], which is
+    /// what the descent block minimizes over.
+    ///
+    /// Order is load-bearing (Gram--Schmidt is order-dependent) and is the
+    /// historical one within these two families: the penalized joint decoder
+    /// β-null, then the decoder column-span channel null (#1051/#1273).
+    pub(crate) fn posterior_null_quotient_basis(
+        &self,
+        penalized_gram_scale: &[f64],
+    ) -> Result<Vec<Array1<f64>>, String> {
+        Ok(Self::orthonormalized(
+            self.joint_decoder_beta_null_directions(penalized_gram_scale)?
+                .into_iter()
+                .chain(self.decoder_channel_null_directions()?),
+        ))
+    }
+
+    /// The ORTHONORMAL basis of the span the penalized objective is flat along
+    /// **as a function of the reconstruction** — the chart reparametrisation
+    /// orbit followed by the posterior nulls (#2720).
+    ///
+    /// This is the block [`Self::descend_gauge_orbit`] minimizes over, and it is
+    /// deliberately WIDER than [`Self::posterior_null_quotient_basis`]. The two
+    /// spans answer two different questions and conflating them is what #2720
+    /// was opened on:
+    ///
+    /// * *what may be REMOVED from a convergence measure* — only directions the
+    ///   posterior cannot see, or the measure certifies non-stationary points;
+    /// * *what should be DESCENDED as its own block* — every direction the
+    ///   LIKELIHOOD cannot see, because those carry no data-fit curvature, so
+    ///   the only curvature on them is the priors' (tiny next to the transverse
+    ///   block) and every globalization in this solver is a step-SHORTENING
+    ///   device. Descending a direction is never unsound: it only ever lowers
+    ///   the same scalar every other mover lowers.
+    ///
+    /// Chart gauges come first so the Gram--Schmidt keeps the historical
+    /// ordering of the decoder-null families relative to each other.
+    pub(crate) fn likelihood_flat_block_basis(
+        &self,
+        penalized_gram_scale: &[f64],
+    ) -> Result<Vec<Array1<f64>>, String> {
+        Ok(Self::orthonormalized(
+            self.dense_step_gauge_vectors()?
+                .into_iter()
+                .chain(self.joint_decoder_beta_null_directions(penalized_gram_scale)?)
+                .chain(self.decoder_channel_null_directions()?),
+        ))
+    }
+
+    /// Modified Gram--Schmidt over a candidate stream, dropping anything that
+    /// collapses into the span already accumulated. Shared by the two span
+    /// constructors above so that "the descent block contains the quotient
+    /// span" is a property of one algorithm run on two inputs, not of two
+    /// implementations that agree today.
+    fn orthonormalized(candidates: impl Iterator<Item = Array1<f64>>) -> Vec<Array1<f64>> {
         let mut orthonormal: Vec<Array1<f64>> = Vec::new();
-        let gauges = self
-            .dense_step_gauge_vectors()?
-            .into_iter()
-            .chain(self.joint_decoder_beta_null_directions(penalized_gram_scale)?)
-            // #1051/#1273: project out the decoder column-span null too, so the
-            // inner convergence measure and the outer-gradient deflation
-            // quotient the SAME identified subspace — otherwise a rank-deficient
-            // decoder whose only remaining motion is an unidentified ambient
-            // channel reads as converged by the step gate yet non-stationary by
-            // the gradient gate, burning the inner refine budget.
-            .chain(self.decoder_channel_null_directions()?);
-        for mut gauge in gauges {
+        for mut candidate in candidates {
             for basis in &orthonormal {
-                let coeff = gauge.dot(basis);
-                for i in 0..gauge.len() {
-                    gauge[i] -= coeff * basis[i];
+                let coeff = candidate.dot(basis);
+                for i in 0..candidate.len() {
+                    candidate[i] -= coeff * basis[i];
                 }
             }
-            let norm_sq = gauge.iter().map(|v| v * v).sum::<f64>();
+            let norm_sq = candidate.iter().map(|v| v * v).sum::<f64>();
             if norm_sq <= 1.0e-24 || !norm_sq.is_finite() {
                 continue;
             }
             let inv_norm = norm_sq.sqrt().recip();
-            for v in gauge.iter_mut() {
+            for v in candidate.iter_mut() {
                 *v *= inv_norm;
             }
-            let coeff = residual.dot(&gauge);
-            for i in 0..residual.len() {
-                residual[i] -= coeff * gauge[i];
-            }
-            orthonormal.push(gauge);
+            orthonormal.push(candidate);
         }
-        Ok(residual.iter().map(|v| v * v).sum::<f64>())
+        orthonormal
+    }
+
+    /// #2762 — MINIMIZE the penalized objective over the span the LIKELIHOOD is
+    /// flat along ([`Self::likelihood_flat_block_basis`]), instead of removing
+    /// it from a convergence measure and hoping it was flat for the posterior
+    /// too.
+    ///
+    /// # Why this block exists at all
+    ///
+    /// The chart-gauge orbit is an exact first-order symmetry of the
+    /// RECONSTRUCTION (measured reconstruction-invariant to `~1e-16` relative
+    /// over 1333 constructions) and NOT of the penalized objective: the ARD
+    /// prior on `t` and the smoothness prior on `β` are written on the chart
+    /// coordinates, so a reparametrisation moves them. That asymmetry is what
+    /// makes this subspace pathological for every mover in the inner solve, and
+    /// it is a curvature statement, not a bookkeeping one:
+    ///
+    /// * the data-fit Hessian contributes NOTHING along the orbit, so the only
+    ///   curvature there is the priors' — tiny next to the transverse block;
+    /// * a direction with tiny curvature and a live gradient needs a LONG step;
+    /// * and every globalization in this solver is a step-SHORTENING device.
+    ///   Armijo backtracks, the LM gain ratio grows the ridge, the terminal
+    ///   polish's damping ladder suppresses exactly the near-null modes. None of
+    ///   them can take a long step, so the orbit component of the residual is
+    ///   the one part of `g` no mover reduces.
+    ///
+    /// Measured at the `zz2015_tiny_inner_crawl_terminates` refusal (#2762),
+    /// `‖g‖ = 2.075e-1` of which `‖Π∥gauge g‖ = 2.016e-1` — 94% of the residual
+    /// ENERGY inside a 4-dimensional span:
+    ///
+    /// | direction | best objective drop | at α |
+    /// |---|---|---|
+    /// | steepest descent `−g/‖g‖` | `1.879e-4` | `1e-3` |
+    /// | the removed span | `1.090e-1` | `1.0` |
+    ///
+    /// against a material floor of `1.949e-4`. Steepest descent lands BELOW the
+    /// floor — the stall detector was right — while the orbit buys 580x more at
+    /// a 1000x longer step, because the 6% transverse component of `−g` is stiff
+    /// enough to cap the ambient line search three decades early. The solve then
+    /// refuses at `intensive_over_bound = 5.8e3` having declared an objective
+    /// stall while holding 559 stall-resolutions of realizable decrease.
+    ///
+    /// # What this does, and why it changes no estimand
+    ///
+    /// It is plain block-coordinate descent on the objective's own parameter
+    /// space: minimize `f` over the likelihood-flat block, let the Newton/MM
+    /// movers have the transverse block where they are well-conditioned. Both
+    /// blocks decrease the SAME scalar (`penalized_objective_total`, the exact
+    /// function the inner Armijo line search descends and the KKT gradient
+    /// differentiates), so the composition is monotone and a joint fixed point
+    /// is stationary in both — which is full stationarity. Nothing about the
+    /// model, the priors, or the likelihood changes; the gauge coordinate stops
+    /// being arbitrary and starts being CHOSEN by the objective.
+    ///
+    /// The consequence for the gate is the point of the exercise, and #2720
+    /// sharpened what that consequence is. This block is the ONLY thing that
+    /// reduces the orbit component of `g`, because the orbit is no longer
+    /// removed from any convergence measure: at a state this has converged on,
+    /// `Π∥gauge g ≈ 0` is a MEASURED property of the iterate rather than an
+    /// assumption a projection made on its behalf, and the raw gate reads it
+    /// directly.
+    ///
+    /// # The line search, and why every bound in it is derived
+    ///
+    /// Along `d̂ = −Π_V g/‖Π_V g‖` the objective is swept geometrically between
+    /// two ENDPOINTS THE STATE ITSELF SUPPLIES, not between chosen constants:
+    ///
+    /// * the far end is [`Self::inner_iterate_scale`] — one step may not move
+    ///   the iterate further than the iterate's own magnitude, the same
+    ///   scale-free trust radius the Newton step already clips against and the
+    ///   same one the KKT tolerance is measured in;
+    /// * the near end is `material_floor / ‖Π_V g‖`, below which the FIRST-ORDER
+    ///   model itself predicts less than the objective's own resolution — so no
+    ///   shorter step could be committed even if it were exact. That is a proof
+    ///   that the sweep is complete, not a cap on it.
+    ///
+    /// The best bracket is then refined once by the parabola through
+    /// `(α/2, α, 2α)`, which is exact for a quadratic and is accepted only if it
+    /// measures better. A round commits only a decrease clearing the material
+    /// floor `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL · (1 + |f|)` — the same
+    /// floor the evidence lane's Armijo and proximal gates use — so a committed
+    /// move is never the ε-harvest that makes an inner map non-idempotent, and
+    /// rounds are strictly decreasing in `f` and therefore finite.
+    ///
+    /// Every rejected trial restores the snapshot bit-for-bit; a round that
+    /// commits nothing leaves the state exactly as it found it.
+    pub(crate) fn descend_gauge_orbit(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        penalized_gram_scale: &[f64],
+        max_rounds: usize,
+    ) -> Result<GaugeOrbitDescent, String> {
+        let mut outcome = GaugeOrbitDescent::default();
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let dense_len = n.saturating_mul(q);
+        let border_dim = self.factored_border_dim();
+        if dense_len + border_dim == 0 {
+            return Ok(outcome);
+        }
+        for _ in 0..max_rounds {
+            let system = match self.assemble_arrow_schur(target, rho, registry) {
+                Ok(system) => system,
+                Err(_) => return Ok(outcome),
+            };
+            if system.rows.len() != n
+                || system.row_offsets.len() != n + 1
+                || system.gb.len() != border_dim
+            {
+                return Ok(outcome);
+            }
+            let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+            for (row_index, row) in system.rows.iter().enumerate() {
+                let base = system.row_offsets[row_index];
+                let dim = system.row_dims[row_index];
+                if base + dim > dense_len || row.gt.len() < dim {
+                    return Ok(outcome);
+                }
+                for axis in 0..dim {
+                    gradient[base + axis] = row.gt[axis];
+                }
+            }
+            for (index, &value) in system.gb.iter().enumerate() {
+                gradient[dense_len + index] = value;
+            }
+            drop(system);
+            if !gradient.iter().all(|value| value.is_finite()) {
+                return Ok(outcome);
+            }
+
+            let basis = self.likelihood_flat_block_basis(penalized_gram_scale)?;
+            outcome.dimension = basis.len();
+            let mut direction = Array1::<f64>::zeros(gradient.len());
+            let mut max_directional = 0.0_f64;
+            for vector in &basis {
+                if vector.len() != gradient.len() {
+                    continue;
+                }
+                let coeff = gradient.dot(vector);
+                max_directional = max_directional.max(coeff.abs());
+                for index in 0..direction.len() {
+                    direction[index] -= coeff * vector[index];
+                }
+            }
+            outcome.max_directional_derivative = max_directional;
+            let slope = direction.dot(&direction).sqrt();
+            if !(slope.is_finite() && slope > 0.0) {
+                return Ok(outcome);
+            }
+            for value in direction.iter_mut() {
+                *value /= slope;
+            }
+
+            let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
+            if !base_objective.is_finite() {
+                return Ok(outcome);
+            }
+            let material_floor =
+                SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + base_objective.abs());
+            // Both ends of the sweep come from the state: the far end is the
+            // iterate's own magnitude, the near end is where the first-order
+            // model stops predicting a committable decrease.
+            let far_alpha = self.inner_iterate_scale();
+            let near_alpha = material_floor / slope;
+            if !(far_alpha.is_finite() && far_alpha > 0.0 && near_alpha.is_finite()) {
+                return Ok(outcome);
+            }
+            let snapshot = self.snapshot_mutable_state();
+            let evaluate = |term: &mut Self, alpha: f64| -> f64 {
+                if !(alpha.is_finite() && alpha > 0.0) {
+                    return f64::INFINITY;
+                }
+                let value = term
+                    .apply_newton_step(
+                        direction.slice(s![..dense_len]),
+                        direction.slice(s![dense_len..]),
+                        alpha,
+                    )
+                    .and_then(|()| term.penalized_objective_total(target, rho, registry, 1.0))
+                    .unwrap_or(f64::INFINITY);
+                if term.restore_mutable_state(&snapshot).is_err() {
+                    return f64::INFINITY;
+                }
+                if value.is_finite() { value } else { f64::INFINITY }
+            };
+
+            let mut best_alpha = 0.0_f64;
+            let mut best_value = base_objective;
+            let mut alpha = far_alpha;
+            while alpha >= near_alpha {
+                outcome.evaluations += 1;
+                let value = evaluate(self, alpha);
+                if value < best_value {
+                    best_value = value;
+                    best_alpha = alpha;
+                }
+                alpha *= 0.5;
+            }
+            if best_alpha > 0.0 {
+                // GOLDEN-SECTION REFINEMENT of the bracket the halving grid
+                // located, run to the limit of what f64 function VALUES can
+                // resolve.
+                //
+                // A grid minimum plus one parabolic step is not enough here, and
+                // the trail says so: with that refinement the block committed a
+                // decrease on 603 consecutive calls and `maxᵢ|gᵀvᵢ|` never fell
+                // below `1.33e-1` — the round kept leaving slope behind because
+                // it stopped at a grid point, so the next round re-descended the
+                // same trough. A block step that does not leave its block
+                // stationary is not a block step.
+                //
+                // The bracket is `[α/2, 2α]` around the grid minimum and shrinks
+                // by the golden ratio, which is the optimal derivative-free
+                // contraction. It stops at `√ε` RELATIVE width: a smooth
+                // function's minimum cannot be located more precisely than that
+                // from values alone (near the minimum `f` varies quadratically,
+                // so a displacement of `√ε·α` changes `f` by `ε`-level noise) —
+                // an information bound of the f64 evaluation, not a chosen
+                // iteration count.
+                const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_894_9;
+                let mut low = best_alpha * 0.5;
+                let mut high = best_alpha * 2.0;
+                let resolution = f64::EPSILON.sqrt() * best_alpha;
+                let mut inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
+                let mut inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
+                let mut value_low = evaluate(self, inner_low);
+                let mut value_high = evaluate(self, inner_high);
+                outcome.evaluations += 2;
+                while high - low > resolution {
+                    if value_low <= value_high {
+                        high = inner_high;
+                        inner_high = inner_low;
+                        value_high = value_low;
+                        inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
+                        value_low = evaluate(self, inner_low);
+                    } else {
+                        low = inner_low;
+                        inner_low = inner_high;
+                        value_low = value_high;
+                        inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
+                        value_high = evaluate(self, inner_high);
+                    }
+                    outcome.evaluations += 1;
+                }
+                if value_low < best_value {
+                    best_value = value_low;
+                    best_alpha = inner_low;
+                }
+                if value_high < best_value {
+                    best_value = value_high;
+                    best_alpha = inner_high;
+                }
+            }
+
+            let decrease = base_objective - best_value;
+            if !(best_alpha > 0.0 && decrease > material_floor) {
+                self.restore_mutable_state(&snapshot)
+                    .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+                return Ok(outcome);
+            }
+            self.apply_newton_step(
+                direction.slice(s![..dense_len]),
+                direction.slice(s![dense_len..]),
+                best_alpha,
+            )
+            .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+            outcome.rounds += 1;
+            outcome.objective_decrease += decrease;
+            log::debug!(
+                "SAE gauge-orbit descent: round {} committed {decrease:.6e} at α={best_alpha:.6e} \
+                 (objective {base_objective:.9e} → {best_value:.9e}, span dim {}, \
+                 maxᵢ|gᵀvᵢ|={max_directional:.6e}, floor {material_floor:.6e})",
+                outcome.rounds,
+                outcome.dimension,
+            );
+        }
+        Ok(outcome)
     }
 
     /// Quotient KKT-gradient norm² for the inner convergence gate (#1117): the
@@ -3721,7 +4130,7 @@ impl SaeManifoldTerm {
     /// flat at ~40, coordinates modest, no reseed), a spurious non-stationarity the
     /// inner solve then has to grind back down over many iterations (the real
     /// 600-row `qwen_real_activation_behavior_fit` stall). The coordinate-gauge
-    /// quotient `‖Π⊥gauge g‖` does NOT capture this DECODER-amplitude gauge (a
+    /// quotient `‖Π⊥null g‖` does NOT capture this DECODER-amplitude gauge (a
     /// different flat direction), which is why raw ≈ quotient at the stall.
     ///
     /// This re-gauges any atom whose decoder norm has run past the dictionary's
@@ -6200,7 +6609,7 @@ impl SaeManifoldTerm {
         })
     }
 
-    fn run_joint_fit_arrow_schur_with_termination_policy(
+    pub(crate) fn run_joint_fit_arrow_schur_with_termination_policy(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &mut SaeManifoldRho,
@@ -6552,6 +6961,14 @@ impl SaeManifoldTerm {
         let mut lm_ridge_t = ridge_ext_coord;
         let mut lm_ridge_b = ridge_beta;
         let mut termination = JointFitTermination::IterationGrantExhausted;
+        // #2762 — whether the gauge-orbit block descent is armed for the NEXT
+        // objective-stall plateau in the ORDINARY lane. Same arm/disarm doctrine
+        // as `terminal_newton_polish_armed` in the evidence refine loop:
+        // consulting the block disarms it, and only a materially-descending
+        // Newton or proximal step re-arms, so a long fit that alternates real
+        // descent with plateaus gets one block consultation per plateau rather
+        // than an unbounded alternation.
+        let mut gauge_block_armed = true;
         let mut state_moved = false;
         // FIRST site to move state — `termination` is set only inside the Newton
         // loop, so without this the out-of-loop sites are unattributable.
@@ -6982,10 +7399,71 @@ impl SaeManifoldTerm {
                     consecutive_objective_stalls += 1;
                     if consecutive_objective_stalls >= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS
                     {
+                        // #2762 — THE SAME BLOCK, AT THE OTHER FIXED-POINT CLAIM.
+                        //
+                        // This comment used to say the shortcut fires "on the
+                        // gauge-orbit crawl ... immediately (constant EV ⇒
+                        // vanishing objective decrease)" — naming the exact
+                        // mechanism and then treating it as a reason to STOP.
+                        // The objective stops moving here because the movers can
+                        // only shorten a step and the remaining decrease lives in
+                        // a near-null block that needs a long one; measured on the
+                        // seeded two-circle fixture, this exit left `7.66e-2` of
+                        // penalized objective — relative `2.3e-3`, five orders
+                        // above the `1e-8` resolution this very branch calls "no
+                        // meaningful change" — recoverable in the removed span.
+                        //
+                        // A stall is only a fixed point if it is a fixed point of
+                        // BOTH blocks, so ask the other one before concluding.
+                        //
+                        // ARMED ONCE PER PLATEAU, on the same doctrine this file
+                        // already uses for the terminal Newton polish: consulting
+                        // the block disarms it, and only a materially-descending
+                        // NEWTON or proximal step re-arms. Without that, the
+                        // block's own decrease breaks the stall streak that
+                        // summoned it, the streak re-forms, and the ordinary
+                        // lane's cheap approximation becomes a budget-limited
+                        // grind — measured on the seeded two-circle fixture as
+                        // `IterationGrantExhausted` at 256 iterations where the
+                        // shipped exit is a bounded heuristic. One consultation
+                        // per plateau is what makes the exit state gauge-
+                        // minimized without changing what the exit MEANS.
+                        let orbit = if gauge_block_armed {
+                            gauge_block_armed = false;
+                            self.descend_gauge_orbit(
+                                target,
+                                rho,
+                                analytic_penalties,
+                                &rho.lambda_smooth_vec()?,
+                                max_iter.saturating_sub(outer_iteration).max(1),
+                            )?
+                        } else {
+                            GaugeOrbitDescent::default()
+                        };
+                        if orbit.moved() {
+                            state_moved = true;
+                            moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
+                            consecutive_objective_stalls = 0;
+                            previous_full_iterate_objective = f64::NAN;
+                            log::debug!(
+                                "run_joint_fit_arrow_schur: gauge-orbit descent recovered \
+                                 {:.6e} over {} round(s) at the objective-stall shortcut, \
+                                 iteration {outer_iteration} (span dim {}, \
+                                 maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations)",
+                                orbit.objective_decrease,
+                                orbit.rounds,
+                                orbit.dimension,
+                                orbit.max_directional_derivative,
+                                orbit.evaluations,
+                            );
+                            self.reclaim_arrow_assembly_workspace(&mut sys);
+                            continue;
+                        }
                         // The ordinary bounded fit has reached its documented
-                        // objective-stall approximation. The pre-step state is
-                        // unperturbed (the snapshot was taken from it), so no
-                        // restore is needed.
+                        // objective-stall approximation, now in both blocks. The
+                        // pre-step state is unperturbed (the snapshot was taken
+                        // from it, and a descent that commits nothing restores
+                        // it), so no restore is needed.
                         termination = JointFitTermination::Heuristic;
                         self.reclaim_arrow_assembly_workspace(&mut sys);
                         break;
@@ -7102,6 +7580,9 @@ impl SaeManifoldTerm {
             if let Some(step) = accepted_step {
                 state_moved = true;
                 moved_at.get_or_insert(StateMoveSite::AcceptedNewtonStep);
+                // Genuine transverse progress: the next plateau is a new one, so
+                // the gauge block is worth asking again (#2762).
+                gauge_block_armed = true;
                 // #2267 — A NEWTON STEP'S NATURAL LENGTH IS ONE.
                 //
                 // `backtracking_line_search` only ever CONTRACTS from its initial
@@ -7262,11 +7743,67 @@ impl SaeManifoldTerm {
                     );
                     self.restore_mutable_state(&snapshot)?;
                     self.reclaim_arrow_assembly_workspace(&mut sys);
+                    // #2762 — THE BLOCK THE NEWTON MODEL CANNOT LOOK IN.
+                    //
+                    // Both movers have now failed to find a decrease along a
+                    // Newton direction. That is a statement about the Newton
+                    // model, not about the objective: the chart-gauge orbit
+                    // carries no data-fit curvature at all (it is an exact
+                    // symmetry of the reconstruction), so the residual there
+                    // needs a LONG step, and both movers above — Armijo
+                    // backtracking and the proximal ridge escalation — can only
+                    // SHORTEN one. The measurement that forced this is on
+                    // `descend_gauge_orbit`: at the `zz2015` refusal the best
+                    // ambient step bought `1.879e-4` against a `1.949e-4` floor
+                    // (correctly a stall) while the removed span bought
+                    // `1.090e-1` at a 1000x longer step.
+                    //
+                    // So before this loop concludes there is no strict decrease
+                    // left, minimize the objective over exactly the span the
+                    // convergence measure removes. It commits only a decrease
+                    // clearing the same material floor as the two gates above,
+                    // and a state it converges on satisfies the precondition the
+                    // quotient measure's removal assumes.
+                    let orbit = self.descend_gauge_orbit(
+                        target,
+                        rho,
+                        analytic_penalties,
+                        &rho.lambda_smooth_vec()?,
+                        // RUN THE BLOCK TO ITS OWN STATIONARITY, not one step of
+                        // it. `descend_gauge_orbit` returns at the first round
+                        // that cannot commit a material decrease, so this is a
+                        // bound, not a schedule — and the bound is the outer
+                        // loop's OWN remaining budget, so no second budget and
+                        // no constant enter. Measured on `zz2015` with a
+                        // one-round schedule: each round cost a full Newton
+                        // solve + line search + proximal correction to
+                        // rediscover that the transverse block had nothing,
+                        // which is the expensive half of an iteration spent to
+                        // learn something the previous round already proved.
+                        max_iter.saturating_sub(outer_iteration).max(1),
+                    )?;
+                    if orbit.moved() {
+                        state_moved = true;
+                        moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
+                        log::debug!(
+                            "run_joint_fit_arrow_schur: gauge-orbit descent recovered \
+                             {:.6e} over {} round(s) at iteration {outer_iteration} \
+                             (span dim {}, maxᵢ|gᵀvᵢ|={:.6e}, {} objective evaluations) \
+                             where both Newton movers found none",
+                            orbit.objective_decrease,
+                            orbit.rounds,
+                            orbit.dimension,
+                            orbit.max_directional_derivative,
+                            orbit.evaluations,
+                        );
+                        continue;
+                    }
                     termination = JointFitTermination::NoStrictDecrease;
                     break;
                 }
                 state_moved = true;
                 moved_at.get_or_insert(StateMoveSite::ProximalCorrectionStep);
+                gauge_block_armed = true;
             }
             // Affine gauge canonicalization is a representation change, but the
             // decoder smoothness term is part of the optimized objective — a

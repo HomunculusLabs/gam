@@ -227,14 +227,27 @@ const SMOOTH_LR_SELECTION_DRAWS: usize = 4096;
 /// could not have.
 const SMOOTH_LR_SELECTION_LOG_STEP: f64 = 0.05;
 
-/// Total grid points the multi-scale replay may spend, whatever `m` is.
+/// Total points the multi-scale BRACKET may spend, whatever `m` is.
 ///
-/// The one-dimensional replay grids `ln t` at a fixed step because its per-point
-/// cost is `O(q)`. The multi-scale one costs `O(q³)` to build a point and
-/// `O(q²)` per draw at it, so the budget is on the TOTAL and each axis gets
-/// `budget^(1/m)` points — the cost is then independent of `m` and the
-/// resolution degrades with it, which is the trade the
-/// [`SMOOTH_LR_SELECTION_MAX_SCALES`] cut-off exists to bound.
+/// This grid does not have to RESOLVE the selection — the per-draw descent in
+/// [`SmoothLrSelectionReplay::generate_multiscale`] does that — it has to find
+/// the basin each draw's minimum lives in. That is what makes a budget on the
+/// total sane: each axis gets `budget^(1/m)` points, the cost stays independent
+/// of `m`, and what degrades with `m` is the bracket's reach rather than the
+/// answer's accuracy.
+///
+/// It used to be the whole selection, and it could not carry that: at `m = 2`
+/// this is 21 points per axis over a window the box opens to 60 wide, a spacing
+/// of `3.0` in `ln λ` against the `0.05` the one-dimensional lane commits to.
+/// Measured on a whitened bending+ridge pair at the separations a null-true
+/// smooth reaches, the law that grid generates is short of the converged one by
+/// `15%` in the mean and `23%` at `q95` — see the descent's own documentation
+/// for the table.
+///
+/// `121` reproduces the same answer once the descent runs (measured, same
+/// fixture, to `0.3%`); `441` is kept because the bracket's only remaining job
+/// is not to miss a basin, and at `0.07 s` per term it is not what the replay
+/// costs.
 const SMOOTH_LR_SELECTION_GRID_BUDGET: usize = 441;
 
 /// Draws for the multi-scale replay.
@@ -248,11 +261,70 @@ const SMOOTH_LR_SELECTION_GRID_BUDGET: usize = 441;
 /// finer one nobody can afford to run.
 const SMOOTH_LR_MULTISCALE_DRAWS: usize = 2048;
 
+/// The finest `ln t` the multi-scale refinement resolves.
+///
+/// It is [`SMOOTH_LR_SELECTION_LOG_STEP`] — the same resolution the
+/// one-dimensional lane commits to, and for the same reason: `0.05` in `ln t`
+/// moves a weight `w_k = 1 − (tν_k/(1 + tν_k))²` by at most `0.025`. The
+/// multi-scale lane reaches it by descending rather than by gridding, because a
+/// grid at that step over the box the solver leaves a railed `λ̂` is `10²⁴`
+/// points per axis.
+const SMOOTH_LR_SELECTION_REFINE_FLOOR: f64 = SMOOTH_LR_SELECTION_LOG_STEP;
+
+/// Criterion evaluations one draw's refinement may spend.
+///
+/// A compass search that halves its step whenever a sweep fails needs
+/// `log2(coarse_step / floor)` failed sweeps — about `7` at the widest window
+/// the box allows — plus the accepted moves in between, at `2m` evaluations per
+/// sweep. `96` covers that with room for a descent that keeps moving, and
+/// bounds the refinement at roughly a fifth of what the coarse grid already
+/// costs per draw. A draw that hits the cap keeps the best point it reached:
+/// the refinement only ever LOWERS a draw's criterion, so the budget trades
+/// resolution for time and never correctness.
+const SMOOTH_LR_SELECTION_REFINE_MAX_EVALUATIONS: usize = 96;
+
+/// What the multi-scale replay may spend, and how finely it resolves the
+/// selection it is replaying.
+///
+/// It is a value rather than three constants read at the use site because the
+/// two halves trade against each other — a coarse bracket that is refined
+/// resolves better than a fine bracket that is not, at a fraction of the cost —
+/// and that trade is only arguable if it is measurable.
+/// [`MultiscaleBudget::SHIPPED`] is what production uses;
+/// `zz_probe_multiscale_grid_budget_moves_the_selected_law_2672` sweeps both
+/// halves against it.
+#[derive(Clone, Copy)]
+struct MultiscaleBudget {
+    /// Total points the bracketing grid may spend, whatever `m` is.
+    grid: usize,
+    /// Finest `ln t` the per-draw refinement resolves.
+    ///
+    /// `f64::INFINITY` turns the refinement off entirely, which is the arm the
+    /// probe measures the bracket alone at.
+    refine_floor: f64,
+    /// Criterion evaluations one draw's refinement may spend.
+    refine_evaluations: usize,
+}
+
+impl MultiscaleBudget {
+    const SHIPPED: Self = Self {
+        grid: SMOOTH_LR_SELECTION_GRID_BUDGET,
+        refine_floor: SMOOTH_LR_SELECTION_REFINE_FLOOR,
+        refine_evaluations: SMOOTH_LR_SELECTION_REFINE_MAX_EVALUATIONS,
+    };
+}
+
 /// Scales past which the budget above would leave fewer than five points per
-/// axis — a spacing of about `15` in `ln λ` over the solver's box, which is not
-/// a selection, it is a coin toss. A term with more scales than this falls back
-/// to the common-scale slice, and says so in its provenance rather than
-/// pretending to a replay it did not do.
+/// axis — a spacing of about `15` in `ln λ` over the solver's box.
+///
+/// What that number bounds is the BRACKET, not the resolution: the per-draw
+/// descent resolves `ln t` to `0.05` on however many axes it is given, so this
+/// cut-off is the point at which the grid can no longer be trusted to put a
+/// draw in the right BASIN — five nodes over a 60-wide window is a coin toss
+/// about which minimum the descent then walks into, and a descent started in
+/// the wrong basin is worse than an honest slice. A term with more scales than
+/// this falls back to the common-scale slice, and says so in its provenance
+/// rather than pretending to a replay it did not do.
 const SMOOTH_LR_SELECTION_MAX_SCALES: usize = 4;
 
 /// The term's penalty geometry in the basis the replay's criterion lives in:
@@ -333,6 +405,78 @@ struct SelectionGeometry {
     /// right factor is a full orthonormal basis of the block (the padding rows
     /// are zero and change nothing else).
     stacked_rows: usize,
+    /// `U`, `q × rank`: an orthonormal basis of `range(Σ_i Wᵀ S_i W)`, the
+    /// `t`-free subspace `log|T|₊` runs over.
+    ///
+    /// Taken from the same UNIT stacked-roots decomposition the rank is, so the
+    /// two cannot disagree about which directions are structural.
+    range_basis: Array2<f64>,
+    /// `R_i U`, `rank_i × rank`: each component's root already expressed in the
+    /// range basis, so a scaled stack of them is `M(t)` with
+    /// `M(t)ᵀM(t) = Uᵀ T(t) U` — full rank by construction, which is what makes
+    /// its triangular factor a pseudo-determinant rather than an approximation
+    /// to one.
+    range_roots: Vec<Array2<f64>>,
+}
+
+/// The criterion and the statistic at one `t`, WITHOUT an eigenbasis.
+///
+/// # Why a second evaluator exists beside [`SelectionGeometry::at`]
+///
+/// `at` returns the full eigensystem, which is the right object when every draw
+/// is asked about the same grid point: one `O(q³)` decomposition is amortized
+/// over thousands of `O(q²)` projections. The per-draw REFINEMENT inverts that
+/// ratio — one draw per point — and an eigendecomposition per draw per step is
+/// twenty times the arithmetic the answer needs, in allocations as much as in
+/// flops.
+///
+/// Everything the replay reads at a point is available from two triangular
+/// factorizations of `r × r` objects, `r = rank(T)`:
+///
+/// ```text
+/// C(t) = Uᵀ T(t) U = RᵀR,     R = qr(M(t)),   M(t) = [√(t_iλ̂_i)·R_iU ; …]
+/// D    = (I + C)⁻¹ C,         v = Uᵀu
+/// criterion = vᵀDv + log|I + C| − log|C|
+/// statistic = ‖u‖² − ‖Dv‖²
+/// ```
+///
+/// The identities are exact, not approximations of the eigen route: `D`'s
+/// eigenvalues are the shares `f_j = e_j/(1 + e_j)`, so `vᵀDv` is
+/// `Σ_j c_j² f_j`; `‖u‖² − ‖Dv‖²` is `Σ_j c_j²(1 − f_j²) = Σ_j w_j c_j²`
+/// because `w_j = 2f̄_j − f̄_j² = 1 − f_j²`; and a direction outside `range(T)`
+/// has `f = 0`, so it drops out of the first and carries its full `c²` in the
+/// second, exactly as the eigen route's `log(1 + 0) = 0` and `w = 1` do.
+///
+/// # Where the conditioning goes
+///
+/// The two log-determinants are NOT symmetric in how much they can be trusted,
+/// and this splits them accordingly (#2644):
+///
+/// * `log|C|` is taken from the TRIANGULAR FACTOR of the scaled roots, never
+///   from an assembled sum. `κ(C)` reaches `e^{60}` on a null-true
+///   double-penalty smooth, where an assembled Cholesky has no small pivots
+///   left to speak of.
+/// * `log|I + C|` and `D` are taken from an assembled `I + C`, which is benign:
+///   a mode `e` enters as `log(1 + e)` and as `e/(1 + e)`, both of which are
+///   insensitive to an ABSOLUTE error of `ε‖C‖` in a mode near zero. That is
+///   the same split `SelectionGeometry`'s own doc draws between the bracket's
+///   two summands.
+struct SelectionFactor {
+    /// `r`, the structural rank.
+    rank: usize,
+    /// `M(t)`, overwritten in place by the Householder reduction that reads its
+    /// triangular factor.
+    stacked: Array2<f64>,
+    /// `R`'s diagonal, which the reduction overwrites in `stacked`.
+    diagonal: Vec<f64>,
+    /// The lower Cholesky factor of `I + C`.
+    factor: Array2<f64>,
+    /// `log|I + T| − log|T|₊`, the criterion's `t`-dependent Occam term.
+    offset: f64,
+    /// `C v` and then `D v`.
+    mapped: Vec<f64>,
+    /// `R v`, the intermediate of `C v = Rᵀ(R v)`.
+    projected: Vec<f64>,
 }
 
 /// One grid point of the replay: the criterion's data operator, the statistic's
@@ -397,8 +541,8 @@ impl SelectionGeometry {
         // components' own conditioning — the λ ratio that makes the assembled
         // sum unreadable is not present here at all.
         let unit = stack_roots(&roots, &vec![0.0; roots.len()], stacked_rows.max(dimension));
-        let (_, unit_singular, _) =
-            gam_linalg::faer_ndarray::FaerSvd::svd(&unit, false, false).ok()?;
+        let (_, unit_singular, unit_right) =
+            gam_linalg::faer_ndarray::FaerSvd::svd(&unit, false, true).ok()?;
         let unit_largest = unit_singular.iter().copied().fold(0.0_f64, f64::max);
         let rank = unit_singular
             .iter()
@@ -407,12 +551,30 @@ impl SelectionGeometry {
         if rank == 0 {
             return None;
         }
+        // The same decomposition that decided the rank also names the subspace:
+        // the leading `rank` right singular vectors of the UNIT stack span
+        // `range(Σ_i S̃_i)`. Deciding the two from one object is what stops them
+        // disagreeing about which directions are structural.
+        let unit_right = unit_right?;
+        if unit_right.nrows() < rank || unit_right.ncols() != dimension {
+            return None;
+        }
+        let mut range_basis = Array2::<f64>::zeros((dimension, rank));
+        for column in 0..rank {
+            for row in 0..dimension {
+                range_basis[[row, column]] = unit_right[[column, row]];
+            }
+        }
+        let range_roots: Vec<Array2<f64>> =
+            roots.iter().map(|root| root.dot(&range_basis)).collect();
         Some(Self {
             roots,
             log_lambda: log_lambda.to_vec(),
             dimension,
             rank,
             stacked_rows: stacked_rows.max(dimension),
+            range_basis,
+            range_roots,
         })
     }
 
@@ -490,6 +652,191 @@ impl SelectionGeometry {
             basis,
         })
     }
+}
+
+impl SelectionFactor {
+    /// Buffers sized for one geometry. Allocated once per replay, never inside
+    /// the loop the refinement spends its time in.
+    fn new(geometry: &SelectionGeometry) -> Self {
+        let rank = geometry.rank;
+        let rows = geometry
+            .range_roots
+            .iter()
+            .map(|root| root.nrows())
+            .sum::<usize>()
+            .max(rank);
+        Self {
+            rank,
+            stacked: Array2::zeros((rows, rank)),
+            diagonal: vec![0.0; rank],
+            factor: Array2::zeros((rank, rank)),
+            offset: 0.0,
+            mapped: vec![0.0; rank],
+            projected: vec![0.0; rank],
+        }
+    }
+
+    /// Factor the geometry at `ln t`. `false` means the point is unusable and
+    /// the caller must not read the scores.
+    fn refactor(&mut self, geometry: &SelectionGeometry, log_t: &[f64]) -> bool {
+        if log_t.len() != geometry.range_roots.len() {
+            return false;
+        }
+        self.stacked.fill(0.0);
+        let mut offset_row = 0usize;
+        for ((root, &rho), &shift) in geometry
+            .range_roots
+            .iter()
+            .zip(geometry.log_lambda.iter())
+            .zip(log_t.iter())
+        {
+            // `exp(s/2)` rather than `sqrt(exp(s))`, so a `λ̂` at the box wall
+            // never round-trips through an intermediate that overflows.
+            let scale = (0.5 * (rho + shift)).exp();
+            if !scale.is_finite() {
+                return false;
+            }
+            for row in 0..root.nrows() {
+                for column in 0..self.rank {
+                    self.stacked[[offset_row + row, column]] = scale * root[[row, column]];
+                }
+            }
+            offset_row += root.nrows();
+        }
+        let Some(log_determinant) =
+            householder_triangularize(&mut self.stacked, &mut self.diagonal)
+        else {
+            return false;
+        };
+        // `I + C` with `C = RᵀR`, assembled — the benign half (see the type's
+        // doc): an absolute `ε‖C‖` in a mode near zero moves `log(1 + e)` and
+        // `e/(1 + e)` by the same absolute amount and nothing more.
+        for row in 0..self.rank {
+            for column in 0..self.rank {
+                let mut sum = 0.0_f64;
+                for k in 0..=row.min(column) {
+                    let left = if k == row {
+                        self.diagonal[k]
+                    } else {
+                        self.stacked[[k, row]]
+                    };
+                    let right = if k == column {
+                        self.diagonal[k]
+                    } else {
+                        self.stacked[[k, column]]
+                    };
+                    sum += left * right;
+                }
+                self.factor[[row, column]] = sum + f64::from(row == column);
+            }
+        }
+        let Some(cholesky) = gam_linalg::triangular::cholesky_factor_in_place(
+            self.factor.view(),
+            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+        ) else {
+            return false;
+        };
+        let mut log_hessian = 0.0_f64;
+        for index in 0..self.rank {
+            log_hessian += cholesky[[index, index]].ln();
+        }
+        self.factor = cholesky;
+        self.offset = 2.0 * (log_hessian - log_determinant);
+        self.offset.is_finite()
+    }
+
+    /// `(criterion, statistic)` for one draw, from its coordinates in the range
+    /// basis and the squared norm of the WHOLE draw.
+    ///
+    /// The norm carries the directions the penalty never reaches: they are
+    /// absent from `projected` (which lives in `range(T)`) and they contribute
+    /// nothing to the criterion and their full square to the statistic.
+    fn score(&mut self, projected: &[f64], norm_squared: f64) -> (f64, f64) {
+        // `R v`, then `Rᵀ(R v)` — `C v` without ever forming `C`.
+        for row in 0..self.rank {
+            let mut sum = self.diagonal[row] * projected[row];
+            for column in (row + 1)..self.rank {
+                sum += self.stacked[[row, column]] * projected[column];
+            }
+            self.projected[row] = sum;
+        }
+        for row in 0..self.rank {
+            let mut sum = self.diagonal[row] * self.projected[row];
+            for k in 0..row {
+                sum += self.stacked[[k, row]] * self.projected[k];
+            }
+            self.mapped[row] = sum;
+        }
+        // `D v = (I + C)⁻¹ (C v)`.
+        let solved =
+            gam_linalg::triangular::cholesky_solve_vector(&self.factor, self.mapped.as_slice());
+        let mut data = 0.0_f64;
+        let mut mapped_norm = 0.0_f64;
+        for row in 0..self.rank {
+            data += projected[row] * solved[row];
+            mapped_norm += solved[row] * solved[row];
+        }
+        (self.offset + data, norm_squared - mapped_norm)
+    }
+}
+
+/// Overwrite `matrix` (`n × r`, `n ≥ r`) with the Householder reduction whose
+/// triangular factor `R` satisfies `RᵀR = matrixᵀmatrix`, writing `R`'s diagonal
+/// to `diagonal` and returning `Σ_j ln|R_jj| = ½ log det(MᵀM)`.
+///
+/// The strictly-upper triangle of the leading `r × r` block holds `R`'s
+/// off-diagonal entries on return; the diagonal cells are left holding the
+/// reflector vectors and must be read from `diagonal`.
+///
+/// `None` when a column collapses — for a matrix of full column rank by
+/// construction that is a statement about the input, not a tolerance, so the
+/// caller refuses the point rather than continuing with a determinant it cannot
+/// price.
+fn householder_triangularize(matrix: &mut Array2<f64>, diagonal: &mut [f64]) -> Option<f64> {
+    let rows = matrix.nrows();
+    let columns = matrix.ncols();
+    if rows < columns || diagonal.len() != columns {
+        return None;
+    }
+    let mut log_determinant = 0.0_f64;
+    for pivot in 0..columns {
+        let mut norm_squared = 0.0_f64;
+        for row in pivot..rows {
+            norm_squared += matrix[[row, pivot]] * matrix[[row, pivot]];
+        }
+        let norm = norm_squared.sqrt();
+        if !(norm > 0.0) || !norm.is_finite() {
+            return None;
+        }
+        log_determinant += norm.ln();
+        // Reflect onto `−sign(x_pivot)·‖x‖ e₁`, the sign that avoids
+        // cancellation in `x_pivot − α`.
+        let alpha = if matrix[[pivot, pivot]] > 0.0 {
+            -norm
+        } else {
+            norm
+        };
+        diagonal[pivot] = alpha;
+        matrix[[pivot, pivot]] -= alpha;
+        let mut reflector_squared = 0.0_f64;
+        for row in pivot..rows {
+            reflector_squared += matrix[[row, pivot]] * matrix[[row, pivot]];
+        }
+        if reflector_squared <= 0.0 {
+            continue;
+        }
+        for column in (pivot + 1)..columns {
+            let mut inner = 0.0_f64;
+            for row in pivot..rows {
+                inner += matrix[[row, pivot]] * matrix[[row, column]];
+            }
+            let scale = 2.0 * inner / reflector_squared;
+            for row in pivot..rows {
+                matrix[[row, column]] -= scale * matrix[[row, pivot]];
+            }
+        }
+    }
+    log_determinant.is_finite().then_some(log_determinant)
 }
 
 /// `[√(e^{s_0}) R_0; √(e^{s_1}) R_1; …]`, zero-padded to `rows`.
@@ -700,7 +1047,12 @@ impl SmoothLrSelectionReplay {
         }
         let scales = geometry.roots.len();
         if (2..=SMOOTH_LR_SELECTION_MAX_SCALES).contains(&scales) {
-            return match Self::generate_multiscale(geometry, log_scale_windows, multiscale_draws) {
+            return match Self::generate_multiscale(
+                geometry,
+                log_scale_windows,
+                multiscale_draws,
+                MultiscaleBudget::SHIPPED,
+            ) {
                 Ok(replay) => SmoothLrSelection::Replayed(replay),
                 // A closed multi-scale window is not the end of the story: the
                 // common-scale slice intersects the same windows and declines
@@ -874,14 +1226,45 @@ impl SmoothLrSelectionReplay {
     /// one `λ̂` rails, which for a null-true double-penalty smooth is the normal
     /// state and not a corner case.
     ///
-    /// The grid is `SMOOTH_LR_SELECTION_GRID_BUDGET^(1/m)` points per axis, so
-    /// the cost is bounded independently of `m`, and past
-    /// [`SMOOTH_LR_SELECTION_MAX_SCALES`] scales the axes would be too coarse to
-    /// be a selection at all and the common-scale slice is used instead.
+    /// # The grid is a BRACKET, and the selection is a DESCENT
+    ///
+    /// `SMOOTH_LR_SELECTION_GRID_BUDGET^(1/m)` points per axis is a bounded cost
+    /// and an unbounded error. At `m = 2` it is 21 points over a window the box
+    /// opens to 60 wide — `3.0` in `ln λ` — while the fit whose selection this
+    /// replays had a continuum, and the one-dimensional lane next door commits
+    /// to `0.05`. A grid that cannot find the criterion's minimum returns a law
+    /// that is selected LESS than the statistic it is the reference for, and
+    /// that error has one sign: it under-disperses, so the tail it is read at is
+    /// too thin and the test over-rejects. Measured on a whitened bending+ridge
+    /// pair at the `ρ̂` separations a null-true `s(z)` reaches, 2048 draws:
+    ///
+    /// ```text
+    /// arm             grid  per_axis  spacing   E[W(t̂)]      sd      q95    wall
+    /// grid only        441     21      3.000     2.1334   2.9094   7.1898   0.10s
+    /// grid only       1681     41      1.500     2.4212   3.3266   9.4427   0.38s
+    /// grid only       6561     81      0.750     2.4928   3.3656   9.2994   1.48s
+    /// grid only      25921    161      0.375     2.5192   3.3783   9.3892   5.80s
+    /// grid + descent   441     21      3.000     2.5258   3.3779   9.3278   0.50s
+    /// grid + descent   121     11      6.000     2.5258   3.3779   9.3278   0.52s
+    /// ```
+    ///
+    /// The shipped budget was `15%` short in the mean and `23%` short at `q95`,
+    /// which is where `α = 0.05` is read. Sixty times the grid does not fix it —
+    /// `25921` points is still `0.375` — because the grid is the wrong
+    /// instrument. Each draw now DESCENDS the criterion from its own bracket
+    /// node, by a compass search that halves its step whenever a sweep fails,
+    /// down to the same `0.05` floor the diagonal lane uses. That reproduces the
+    /// `161²` law to `0.3%` from a bracket of 121 points, i.e. by making the
+    /// grid smaller rather than larger.
+    ///
+    /// Past [`SMOOTH_LR_SELECTION_MAX_SCALES`] scales the bracket would be four
+    /// points per axis, which is not a bracket, and the common-scale slice is
+    /// used instead.
     fn generate_multiscale(
         geometry: &SelectionGeometry,
         log_scale_windows: &[(f64, f64)],
         draws: usize,
+        budget: MultiscaleBudget,
     ) -> Result<Self, SmoothLrSelectionDecline> {
         let scales = geometry.roots.len();
         if scales < 2 || scales > SMOOTH_LR_SELECTION_MAX_SCALES {
@@ -894,10 +1277,7 @@ impl SmoothLrSelectionReplay {
         // with `m`. A scale whose own window is empty — its `λ̂` railed against
         // both walls at once — contributes a single node at the fitted point
         // rather than sinking the whole replay.
-        let per_axis = ((SMOOTH_LR_SELECTION_GRID_BUDGET as f64)
-            .powf(1.0 / scales as f64)
-            .floor() as usize)
-            .max(2);
+        let per_axis = ((budget.grid as f64).powf(1.0 / scales as f64).floor() as usize).max(2);
         let mut axes = Vec::<Vec<f64>>::with_capacity(scales);
         let mut movable = 0usize;
         for &(low, high) in log_scale_windows {
@@ -957,6 +1337,9 @@ impl SmoothLrSelectionReplay {
         let mut best_criterion = vec![f64::INFINITY; draws];
         let mut selection_sample = vec![0.0_f64; draws];
         let mut conditional_sample = vec![0.0_f64; draws];
+        // Where each draw's own selection landed on the coarse grid — the
+        // bracket the refinement below descends from. One `m`-vector per draw.
+        let mut best_log_t = vec![0.0_f64; draws * scales];
         let mut generalized = Vec::new();
         let mut log_t = vec![0.0_f64; scales];
         for point in 0..points {
@@ -989,12 +1372,106 @@ impl SmoothLrSelectionReplay {
                 if criterion < best_criterion[draw] {
                     best_criterion[draw] = criterion;
                     selection_sample[draw] = statistic;
+                    best_log_t[draw * scales..(draw + 1) * scales].copy_from_slice(&log_t);
                 }
                 if point == fitted_index {
                     conditional_sample[draw] = statistic;
                 }
             }
         }
+
+        // THE GRID IS A BRACKET, NOT THE SELECTION. Every draw now descends the
+        // criterion from its own coarse node, which is what makes the replayed
+        // `λ̂` the same KIND of object as the fitted one.
+        let coarse_step: Vec<f64> = axes
+            .iter()
+            .zip(log_scale_windows.iter())
+            .map(|(axis, &(low, high))| {
+                if axis.len() < 2 {
+                    0.0
+                } else {
+                    // HALF the grid spacing, because a full step lands on the
+                    // neighbouring node — a point the grid has already scored
+                    // and this draw has already rejected. The first sweep would
+                    // be four guaranteed misses.
+                    0.5 * (high - low) / (axis.len() - 1) as f64
+                }
+            })
+            .collect();
+        if coarse_step.iter().any(|&size| size > budget.refine_floor) {
+            // The draw's coordinates in the range basis, and the squared norm
+            // of the whole draw — both `t`-free, so both are formed once.
+            let range_coordinates = normals.dot(&geometry.range_basis);
+            let mut factor = SelectionFactor::new(geometry);
+            let mut trial = vec![0.0_f64; scales];
+            let mut coordinates = vec![0.0_f64; geometry.rank];
+            for draw in 0..draws {
+                let norm_squared = normals
+                    .row(draw)
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>();
+                for column in 0..geometry.rank {
+                    coordinates[column] = range_coordinates[[draw, column]];
+                }
+                let current = &mut best_log_t[draw * scales..(draw + 1) * scales];
+                // The baseline is re-read THROUGH THE REFINEMENT'S OWN
+                // arithmetic. The grid priced this same point with the eigen
+                // route; the two agree to roundoff, and comparing a trial
+                // against the other route's rounding would accept or reject
+                // moves on `1e-16`.
+                if !factor.refactor(geometry, current) {
+                    continue;
+                }
+                let (mut value, mut statistic) = factor.score(&coordinates, norm_squared);
+                let mut step = coarse_step.clone();
+                let mut evaluations = 0usize;
+                while evaluations < budget.refine_evaluations
+                    && step.iter().any(|&size| size > budget.refine_floor)
+                {
+                    let mut improved = false;
+                    for scale in 0..scales {
+                        if !(step[scale] > budget.refine_floor) {
+                            continue;
+                        }
+                        let (low, high) = log_scale_windows[scale];
+                        for direction in [-1.0_f64, 1.0] {
+                            let moved = (current[scale] + direction * step[scale]).clamp(low, high);
+                            if moved == current[scale] {
+                                continue;
+                            }
+                            trial.copy_from_slice(current);
+                            trial[scale] = moved;
+                            if !factor.refactor(geometry, &trial) {
+                                continue;
+                            }
+                            evaluations += 1;
+                            let (criterion, moved_statistic) =
+                                factor.score(&coordinates, norm_squared);
+                            if criterion < value {
+                                value = criterion;
+                                statistic = moved_statistic;
+                                current[scale] = moved;
+                                improved = true;
+                            }
+                            if evaluations >= budget.refine_evaluations {
+                                break;
+                            }
+                        }
+                        if evaluations >= budget.refine_evaluations {
+                            break;
+                        }
+                    }
+                    if !improved {
+                        for size in step.iter_mut() {
+                            *size *= 0.5;
+                        }
+                    }
+                }
+                selection_sample[draw] = statistic;
+            }
+        }
+
         Ok(Self {
             generalized,
             selection_sample,
@@ -1267,6 +1744,18 @@ fn split_mix64(state: u64) -> u64 {
 ///   reference cannot degenerate that way: as REML shrinks a term the weights and
 ///   the statistic collapse *together*, `W/g` stays `O(1)`, and `ν → q`. The floor
 ///   was a patch on the wrong shape, not on a missing quantity.
+///
+/// # And what all of it is the reference FOR
+///
+/// Everything above describes the law of `Q`, the statistic a KNOWN-scale
+/// likelihood ratio is. A profiled Gaussian's `W` is not `Q` — it is
+/// `n·ln(1 + Q/V) + B`, with `V` the residual sum of squares the same fit
+/// estimated its `σ̂` from. Scoring `W` against `Q`'s law is anti-conservative
+/// at `O(1/ν)`: measured `size@.05 = 0.0792` pooled over 480 replicates at
+/// `n ∈ {30, 50}` against a nominal `0.05`, with the Lawley factor inert
+/// throughout, so the whole miss belonged here. [`Self::profiled_scale`] is
+/// that channel and [`SmoothLrProfiledScale`] is the derivation; it is `None`
+/// on every family whose dispersion is already inside the IRLS weight.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SmoothLrReferenceDf {
     /// The null spectrum itself, `w_j ∈ [0, 1]`, sorted descending — the whole
@@ -1333,6 +1822,109 @@ pub struct SmoothLrReferenceDf {
     /// [`Self::tail_probability_with_bound`] for what this is used for and why
     /// it is not a numerical-accuracy knob.
     pub statistic_resolution: f64,
+    /// The ESTIMATED-SCALE channel, present exactly when the fit profiled its
+    /// own Gaussian dispersion out of a residual sum of squares (#2672).
+    ///
+    /// `None` is a statement about the family, not a missing measurement: every
+    /// other likelihood on this path carries its dispersion in the IRLS weight
+    /// and its `W` is not a function of a second, independently-estimated
+    /// scalar. See [`SmoothLrProfiledScale`].
+    pub profiled_scale: Option<SmoothLrProfiledScale>,
+}
+
+/// What the reference needs in order to score a statistic whose SCALE was
+/// estimated from the same residuals (#2672).
+///
+/// # The statistic is a ratio, exactly
+///
+/// gam's profiled Gaussian log-likelihood is `ℓ = −½[n·ln 2π + n·ln(D/ν) −
+/// Σ ln w_i + ν]` with `D` the weighted residual sum of squares and `ν` the
+/// residual degrees of freedom it divides by — so the whole-term LR statistic
+/// is, with no expansion anywhere,
+///
+/// ```text
+///   W = 2(ℓ_full − ℓ_null) = n·ln(D_0/D_f) + n·ln(ν_f/ν_0) + (ν_0 − ν_f)
+///     = n·ln(1 + Q/V) + B,
+///   Q = (D_0 − D_f)/σ²,   V = D_f/σ²,   B = n·ln(ν_f/ν_0) + (ν_0 − ν_f).
+/// ```
+///
+/// `Q` is what [`SmoothLrReferenceDf::weights`] is the null spectrum OF, and
+/// the known-scale reference scores it directly. The shipped reference
+/// therefore answers the question "how extreme is `Q`" when the question asked
+/// was "how extreme is `n·ln(1 + Q/V) + B`" — and `V` is a random variable of
+/// the same data, with mean `ν` and spread `√(2ν)`. Both the mean shift
+/// `ν/(ν−2)` and the extra spread push the test anti-conservative, and both are
+/// `O(1/ν)`: invisible at `n = 1000`, worth `0.03` in size at `n = 30`. It is
+/// the same reason mgcv's smooth-term p-values take an `F` reference when the
+/// scale is estimated and a `χ²` when it is known.
+///
+/// # Inverting it costs nothing, because the map is monotone
+///
+/// `W > w ⟺ Q/V > exp((w − B)/n) − 1`, so
+///
+/// ```text
+///   P(W > w) = P( Q − c(w)·V > 0 ),   c(w) = expm1((w − B)/n),
+/// ```
+///
+/// a linear combination of independent chi-squares with a NEGATIVE weight,
+/// evaluated at zero — which is exactly
+/// [`gam_math::probability::signed_weighted_chi_square_sf_to_tolerance`]. There
+/// is no expansion, no `κ`-convention to pick, and no separate `F`-family
+/// approximation: `n` and `ν` appear where the log-likelihood actually put
+/// them.
+///
+/// # Where the residual law comes from
+///
+/// The same spectral object the numerator uses, taken over the whole model
+/// instead of over the tested block. The profiled Gaussian's hat matrix
+/// `A = X H⁻¹X'W` is symmetric in the whitened coordinates the weighted RSS is
+/// a sum of squares in (`X̃ = W^{1/2}X`, where `ε̃ = W^{1/2}ε` has covariance
+/// `σ²I` because `Var(y_i) = σ²/w_i`), with eigenvalues `f_i = 1 − p_i` — the
+/// `p_i` being the penalty shares [`lr_tested_block`] returns, which are
+/// unchanged by the whitening since `H⁻¹S` is — and `n − p` further zeros. The
+/// true mean is annihilated because it lies in the penalty's null space. So
+///
+/// ```text
+///   V = ε̃'(I − Ã)²ε̃ ~ Σ_i p_i²·χ²_1  +  χ²_{n−p},
+/// ```
+///
+/// exact at fixed `λ`, with `n` the POSITIVE-WEIGHT row count in both places.
+/// The `n − p` unit directions are folded into ONE term with `n − p` degrees of
+/// freedom, which is what keeps an `n`-sized reference the same cost as a
+/// `p`-sized one.
+///
+/// # What is approximated, stated plainly
+///
+/// Three things, all inherited rather than introduced, and none of them the
+/// `O(1/ν)` term this channel exists to remove.
+///
+/// * `Q`'s spectrum is the reference's own claim, unchanged.
+/// * `Q` and `V` are taken INDEPENDENT — exact for the unpenalized linear model
+///   by Cochran, approximate under penalization, and the same independence
+///   every `F` reference for a penalized smooth rests on.
+/// * `V` is taken CENTRAL. It is exactly central when the mean lies in the
+///   penalty's null space, which is what the tested term being null gives on
+///   its own block; a DIFFERENT term in the model carrying real signal that the
+///   penalty shrinks adds a non-centrality. That inflates `V`, which inflates
+///   the p-value — so the residual runs conservative, in the direction a test
+///   is allowed to be wrong.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmoothLrProfiledScale {
+    /// `n` — the multiplier the profiled `ln σ̂²` carries in the log-likelihood.
+    pub observations: f64,
+    /// `B = n·ln(ν_f/ν_0) + (ν_0 − ν_f)`, the part of `W` that is a function of
+    /// the two fits' residual degrees of freedom and of nothing random.
+    ///
+    /// It is NOT negligible and it is not the same sign as the rest: on the
+    /// `n = 30` Gaussian cells it runs `−0.13` to `−0.61`.
+    pub deterministic_offset: f64,
+    /// `p_i²` over the whole model's penalty shares — the non-trivial half of
+    /// the residual quadratic form's spectrum.
+    pub residual_weights: Vec<f64>,
+    /// `n − p`, the residual directions no design column reaches. Each carries
+    /// weight exactly one, so they are one term with this many degrees of
+    /// freedom rather than this many terms.
+    pub residual_unit_dimension: f64,
 }
 
 /// Accumulated-roundoff floor on the requested tail accuracy.
@@ -1411,7 +2003,7 @@ impl SmoothLrReferenceDf {
         if !conditional.is_finite() {
             return (conditional, bound);
         }
-        let (shift, standard_error) = replay.tail_shift(statistic);
+        let (shift, standard_error) = replay.tail_shift(self.selection_threshold(statistic));
         (
             (conditional + shift).clamp(0.0, 1.0),
             bound + 2.0 * standard_error,
@@ -1424,9 +2016,59 @@ impl SmoothLrReferenceDf {
     /// This is a `O(draws)` pass over two samples, four orders cheaper than the
     /// quadrature it is used to budget.
     fn selection_standard_error(&self, statistic: f64) -> f64 {
-        self.selection
-            .replay()
-            .map_or(0.0, |replay| replay.tail_shift(statistic).1)
+        self.selection.replay().map_or(0.0, |replay| {
+            replay.tail_shift(self.selection_threshold(statistic)).1
+        })
+    }
+
+    /// The threshold the λ̂-selection replay has to be asked about, which is not
+    /// the statistic itself once the scale is profiled.
+    ///
+    /// The replay samples the statistic's KNOWN-SCALE law `Q` under two ways of
+    /// choosing `λ`, and its shift is the difference of the two tails at a
+    /// `Q`-threshold. With an estimated scale the event `W > w` is
+    /// `Q > c(w)·V`, so the `Q`-threshold is random; the selection correction is
+    /// `E_V[Δ(c(w)·V)]`, and evaluating `Δ` at `E[V]` is the first-order term of
+    /// that expectation. `E[V] = Σ_i v_i + (n − p)` is the residual law's own
+    /// mean, already carried.
+    ///
+    /// As `ν → ∞` this returns the statistic: `B → 0`, `E[V]/n → 1`, and
+    /// `expm1(w/n)·n → w`. So the correction composes with the known-scale
+    /// behaviour rather than replacing it.
+    fn selection_threshold(&self, statistic: f64) -> f64 {
+        let Some(scale) = self.profiled_scale.as_ref() else {
+            return statistic;
+        };
+        let residual_mean: f64 = scale.residual_weights.iter().sum::<f64>()
+            + scale.residual_unit_dimension;
+        let ratio = ((statistic - scale.deterministic_offset) / scale.observations).exp_m1();
+        ratio.max(0.0) * residual_mean
+    }
+
+    /// The statistic's OWN null law, as a list of `λ_j·χ²_{h_j}` terms: the
+    /// exact spectrum where the fit supplied one, and the two-moment summary
+    /// `(g, ν)` where it did not.
+    ///
+    /// The two lanes are one object here rather than two branches because the
+    /// summary is not an approximation of a different shape — it is the same
+    /// linear combination with one term. Reading it this way is what lets the
+    /// profiled-scale route below apply on every lane instead of only on the
+    /// lane that reached the spectrum.
+    fn null_law_terms(&self) -> Vec<gam_math::probability::WeightedChiSquareTerm> {
+        use gam_math::probability::WeightedChiSquareTerm;
+        if self.weights.is_empty() {
+            return vec![WeightedChiSquareTerm {
+                weight: self.scale,
+                degrees_of_freedom: self.chi_square_df,
+            }];
+        }
+        self.weights
+            .iter()
+            .map(|&weight| WeightedChiSquareTerm {
+                weight,
+                degrees_of_freedom: 1.0,
+            })
+            .collect()
     }
 
     fn conditional_tail_with_bound(&self, statistic: f64) -> (f64, f64) {
@@ -1435,7 +2077,7 @@ impl SmoothLrReferenceDf {
         }
         let summary =
             |w: f64| gam_math::probability::chi_square_sf(w / self.scale, self.chi_square_df);
-        if self.weights.is_empty() {
+        if self.weights.is_empty() && self.profiled_scale.is_none() {
             // The summary IS the reference on the two degraded lanes, and it is
             // a closed form: no truncation, so no bound to report.
             return (summary(statistic), 0.0);
@@ -1469,11 +2111,37 @@ impl SmoothLrReferenceDf {
         let tolerance = derived
             .max(self.selection_standard_error(statistic))
             .clamp(SMOOTH_LR_TAIL_ROUNDOFF_FLOOR, SMOOTH_LR_TAIL_COARSEST);
-        gam_math::probability::weighted_chi_square_sf_to_tolerance(
-            &self.weights,
-            statistic,
-            tolerance,
-        )
+        let mut terms = self.null_law_terms();
+        let Some(scale) = self.profiled_scale.as_ref() else {
+            return gam_math::probability::signed_weighted_chi_square_sf_to_tolerance(
+                &terms, statistic, tolerance,
+            );
+        };
+        // `W > w  ⟺  Q/V > expm1((w − B)/n)`, so the tail is the SIGNED
+        // combination `Q − c·V` at zero. See [`SmoothLrProfiledScale`].
+        let ratio = ((statistic - scale.deterministic_offset) / scale.observations).exp_m1();
+        if !ratio.is_finite() {
+            return (f64::NAN, f64::NAN);
+        }
+        if ratio <= 0.0 {
+            // `W` is at or under the value the two fits' degrees of freedom
+            // alone produce. `Q ≥ 0` and `V > 0`, so `Q − cV ≥ 0` with
+            // certainty and the statistic is not evidence of anything.
+            return (1.0, 0.0);
+        }
+        terms.extend(scale.residual_weights.iter().map(|&weight| {
+            gam_math::probability::WeightedChiSquareTerm {
+                weight: -ratio * weight,
+                degrees_of_freedom: 1.0,
+            }
+        }));
+        if scale.residual_unit_dimension > 0.0 {
+            terms.push(gam_math::probability::WeightedChiSquareTerm {
+                weight: -ratio,
+                degrees_of_freedom: scale.residual_unit_dimension,
+            });
+        }
+        gam_math::probability::signed_weighted_chi_square_sf_to_tolerance(&terms, 0.0, tolerance)
     }
 }
 
@@ -1732,6 +2400,40 @@ pub fn smooth_term_lr_inference_forspec(
     let smooth_start = p_total.saturating_sub(full.design.smooth.total_smooth_cols());
     let fitted_likelihood = resolved_likelihood_for_fit(&full.fit)?;
     let family_disp = lawley_dispersion_for_family(&fitted_likelihood, &full.fit)?;
+    // The estimated-scale channel (#2672), assembled once because every part of
+    // it except the deterministic offset is a property of the FULL fit and not
+    // of which term is being tested.
+    //
+    // The observation count is the POSITIVE-WEIGHT row count, not the raw one.
+    // That is the count the optimizer's own `φ̂ = weighted_rss/(n − edf)` uses
+    // (#584: a zero-weight row is exactly an absent row, and counting it in the
+    // denominator while the numerator excludes it biases `φ̂` low), and it is
+    // also the count that multiplies `ln σ̂²` in the log-likelihood, since a
+    // zero-weight row's `−½(… − ln w_i …)` term is not summable at all. The two
+    // have to be the same number or `W = n·ln(D_0/D_f) + B` is not an identity.
+    let profiled_observations = weights.iter().filter(|weight| **weight > 0.0).count();
+    let profiled_residual_shares = profiled_scale_residual_shares(
+        &fitted_likelihood,
+        hessian_inverse.as_ref(),
+        &s_lambda,
+        p_total,
+    )?;
+    let full_residual_df = profiled_residual_shares
+        .as_ref()
+        .and(profiled_residual_degrees_of_freedom(
+            &full.fit,
+            profiled_observations,
+        ));
+    // `(v, h)`: the non-trivial residual weights and the degrees of freedom of
+    // the weight-one block. On the exact rung that block is the `n − p`
+    // directions no column reaches; on the summary rung the whole residual law
+    // is folded into it at the fit's own `ν`.
+    let profiled_residual = profiled_residual_shares.zip(full_residual_df).map(
+        |(shares, residual_df)| match shares {
+            Some(spectrum) => (spectrum, profiled_observations.saturating_sub(p_total) as f64),
+            None => (Vec::new(), residual_df),
+        },
+    );
 
     let mut out = Vec::<SmoothTermLrInference>::new();
     for (term_idx, design_term) in full.design.smooth.terms.iter().enumerate() {
@@ -1856,6 +2558,7 @@ pub fn smooth_term_lr_inference_forspec(
             &term_penalties,
             &term_log_lambda,
         );
+        let mut reference = reference;
         let ref_df = reference.mean;
         if !(ref_df.is_finite()
             && ref_df > 0.0
@@ -1866,7 +2569,6 @@ pub fn smooth_term_lr_inference_forspec(
         {
             continue;
         }
-        let ref_df_provenance = reference.clone();
 
         // Null model: drop this smooth term from the spec and refit. The term's
         // name pins which spec entry to remove (design and spec share names).
@@ -1888,7 +2590,7 @@ pub fn smooth_term_lr_inference_forspec(
             family.clone(),
             options,
         );
-        let (statistic_lr, eta_null) = match null_fit {
+        let (statistic_lr, eta_null, null_residual_df) = match null_fit {
             Ok(null) if null.fit.log_likelihood.is_finite() => {
                 let w = (2.0 * (ll_full - null.fit.log_likelihood)).max(0.0);
                 // η at the null fit: X_null β_null + affine_offset + offset
@@ -1902,10 +2604,33 @@ pub fn smooth_term_lr_inference_forspec(
                     .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
                 let mut eta = null.design.design.dot(&null.fit.beta);
                 eta += &null_offset;
-                (w, Some(eta))
+                let residual_df =
+                    profiled_residual_degrees_of_freedom(&null.fit, profiled_observations);
+                (w, Some(eta), residual_df)
             }
-            _ => (f64::NAN, None),
+            _ => (f64::NAN, None, None),
         };
+
+        // The estimated-scale channel needs BOTH fits' residual degrees of
+        // freedom, so it is completed here rather than where the rest of the
+        // reference was built: `B = n·ln(ν_f/ν_0) + (ν_0 − ν_f)` is the only
+        // part of `W` that is a function of the null refit and of nothing
+        // random (#2672).
+        if let Some((residual_weights, residual_unit_dimension)) = profiled_residual.as_ref()
+            && let (Some(full_df), Some(null_df)) = (full_residual_df, null_residual_df)
+            && full_df > 0.0
+            && null_df > 0.0
+        {
+            let observations = profiled_observations as f64;
+            reference.profiled_scale = Some(SmoothLrProfiledScale {
+                observations,
+                deterministic_offset: observations * (full_df / null_df).ln()
+                    + (null_df - full_df),
+                residual_weights: residual_weights.clone(),
+                residual_unit_dimension: *residual_unit_dimension,
+            });
+        }
+        let ref_df_provenance = reference.clone();
 
         let (p_uncorrected, mut p_bound) = reference.tail_probability_with_bound(statistic_lr);
         let mut p_conditional = reference.conditional_tail_probability(statistic_lr);
@@ -2029,6 +2754,80 @@ pub fn smooth_term_lr_inference_forspec(
     Ok(out)
 }
 
+/// The residual degrees of freedom the fit's profiled `σ̂` ACTUALLY divided by,
+/// read back as `D/σ̂²` from two published fields.
+///
+/// Not recomputed as `n − edf_total`. That is what the optimizer uses on one of
+/// its two branches — the other, taken when inference is off, divides by `n` —
+/// and a reference that assumed the branch would be silently wrong on the other
+/// one. `D` is the weighted residual sum of squares (the Gaussian deviance) and
+/// `σ̂² = D/ν` by construction, so `ν = D/σ̂²` inverts the fit's own convention
+/// whatever it was.
+///
+/// The inversion is exact rather than approximate, and the reason is a
+/// type-level one: `ProfiledGaussian` implies the IDENTITY link, because
+/// `gam_spec`'s `legal_cell_kind` admits no other Gaussian cell — a
+/// `(Gaussian, log)` model is not constructible rather than merely unusual. The
+/// optimizer's weighted-RSS channel is wired for the identity link, so on every
+/// fit that reaches this function `D` IS `Σ w_i(y_i − μ_i)²` and `σ̂² = D/ν`
+/// holds by construction.
+///
+/// `None` when the two fields cannot produce a residual degrees of freedom that
+/// is finite, positive, and no larger than the sample size — a statement that
+/// this fit's `σ̂` is not the profiled residual one the identity above assumes,
+/// which is exactly when the estimated-scale channel must stay switched off.
+fn profiled_residual_degrees_of_freedom(fit: &UnifiedFitResult, n: usize) -> Option<f64> {
+    let variance = fit.standard_deviation * fit.standard_deviation;
+    if !(variance.is_finite() && variance > 0.0 && fit.deviance.is_finite() && fit.deviance > 0.0) {
+        return None;
+    }
+    let residual_df = fit.deviance / variance;
+    // The `n` ceiling carries a tolerance because `ν = D/σ̂²` is a ratio of two
+    // separately-rounded published numbers, and the branch that divides by `n`
+    // exactly lands on the ceiling.
+    let ceiling = n as f64 * (1.0 + 8.0 * f64::EPSILON);
+    (residual_df.is_finite() && residual_df > 0.0 && residual_df <= ceiling).then_some(residual_df)
+}
+
+/// The residual quadratic form's spectrum, `v_i = p_i²` over the WHOLE model's
+/// penalty shares — or `None` when the family does not profile a Gaussian scale
+/// out of a residual sum of squares.
+///
+/// This is [`lr_tested_block`] over the full coefficient range rather than over
+/// a term's: the same self-adjoint decomposition and the same `[0, 1]` shares,
+/// deliberately not a second route to the same object. See
+/// [`SmoothLrProfiledScale`] for why `V ~ Σ_i p_i²·χ²_1 + χ²_{n−p}`.
+///
+/// `Some(None)` — the family profiles a scale but the shares are unreachable —
+/// is a rung, not a refusal, on the same ladder the numerator's reference
+/// already has: the fit that cannot publish `H⁻¹` is the fit whose numerator is
+/// also a two-moment summary. What the caller does with it is fold the whole
+/// residual law into `V ~ χ²_{ν}` at the fit's own `ν`, which is mgcv's `F`
+/// reference exactly. Two things are then inexact rather than exact, both
+/// bounded by `Σ_i f_i(1 − f_i)` — the count of PARTIALLY shrunk directions,
+/// zero at both ends of the shrinkage range: `E[V] = tr((I−A)²) = ν −
+/// Σ f(1−f)` rather than `ν`, and `Var(V)/2 = Σv² ≤ Σv` so `χ²_ν`
+/// over-disperses. That is strictly better than the known-scale reference,
+/// which is what the alternative — dropping the channel — would silently
+/// restore.
+fn profiled_scale_residual_shares(
+    likelihood: &gam_spec::GlmLikelihoodSpec,
+    hessian_inverse: Option<&Array2<f64>>,
+    penalty: &Array2<f64>,
+    p_total: usize,
+) -> Result<Option<Option<Vec<f64>>>, EstimationError> {
+    let resolved = likelihood
+        .resolved_scale()
+        .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
+    if !matches!(resolved, gam_spec::ResolvedLikelihoodScale::ProfiledGaussian) {
+        return Ok(None);
+    }
+    Ok(Some(
+        lr_tested_block(hessian_inverse, Some(penalty), &(0..p_total))
+            .map(|block| block.shares.iter().map(|share| share * share).collect()),
+    ))
+}
+
 fn resolved_likelihood_for_fit(
     fit: &UnifiedFitResult,
 ) -> Result<gam_spec::GlmLikelihoodSpec, EstimationError> {
@@ -2122,6 +2921,9 @@ fn lr_null_reference(
         // geometry the replay is built from either.
         selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
         statistic_resolution,
+        // Completed by the caller once the null refit has produced the second
+        // residual degrees of freedom `B` needs (#2672).
+        profiled_scale: None,
     };
     let unit_weight = || {
         let df = edf.max(null_dim as f64).max(1.0);
@@ -2171,6 +2973,7 @@ fn lr_null_reference(
                     log_scale_windows,
                 ),
                 statistic_resolution,
+                profiled_scale: None,
             };
         }
     }
@@ -2783,10 +3586,289 @@ mod lr_null_reference_tests {
     }
 }
 
+/// The ESTIMATED-SCALE channel (#2672): the reference a profiled Gaussian's
+/// `W = n·ln(1 + Q/V) + B` actually has.
+#[cfg(test)]
+mod profiled_scale_reference_tests {
+    use super::{
+        SmoothLrProfiledScale, SmoothLrReferenceDf, SmoothLrReferenceSource, SmoothLrSelection,
+        SmoothLrSelectionDecline,
+    };
+
+    /// A reference carrying an explicit spectrum, no selection replay, and the
+    /// strictest tail accuracy the clamp allows.
+    fn reference(weights: Vec<f64>, profiled_scale: Option<SmoothLrProfiledScale>) -> SmoothLrReferenceDf {
+        let mean: f64 = weights.iter().sum();
+        let second_moment: f64 = weights.iter().map(|w| w * w).sum();
+        SmoothLrReferenceDf {
+            weights,
+            mean,
+            second_moment,
+            chi_square_df: mean * mean / second_moment,
+            scale: second_moment / mean,
+            moment_residual: None,
+            edf: mean,
+            null_dim: 0,
+            source: SmoothLrReferenceSource::NullSpectrum,
+            selection: SmoothLrSelection::Declined(SmoothLrSelectionDecline::GeometryRefused),
+            statistic_resolution: 0.0,
+            profiled_scale,
+        }
+    }
+
+    /// When the tested block's spectrum is FLAT the ratio law is a Fisher-
+    /// Snedecor tail in closed form, so the whole channel — the `expm1`
+    /// inversion, the residual spectrum, the multiplicity fold — is checkable
+    /// against `fisher_snedecor_sf` with nothing shared but the arithmetic.
+    ///
+    /// `Q = g·χ²_q` and `V = χ²_ν`, so
+    /// `P(W > w) = P(g·χ²_q > c·χ²_ν) = P(F_{q,ν} > c·ν/(g·q))`.
+    #[test]
+    fn a_flat_spectrum_makes_the_profiled_reference_an_f_tail() {
+        for &(q, scale) in &[(1usize, 1.0_f64), (4, 1.0), (4, 0.37), (9, 2.5)] {
+            for &nu in &[8.0_f64, 26.0, 191.0] {
+                let observations = nu + q as f64;
+                let subject = reference(
+                    vec![scale; q],
+                    Some(SmoothLrProfiledScale {
+                        observations,
+                        deterministic_offset: 0.0,
+                        // `V ~ χ²_ν` exactly: no partially-shrunk direction, so
+                        // the whole residual law is the unit-multiplicity term.
+                        residual_weights: Vec::new(),
+                        residual_unit_dimension: nu,
+                    }),
+                );
+                for &statistic in &[0.05_f64, 0.8, 3.0, 12.0, 30.0] {
+                    let (got, bound) = subject.tail_probability_with_bound(statistic);
+                    let ratio = (statistic / observations).exp_m1();
+                    let want = gam_math::probability::fisher_snedecor_sf(
+                        ratio * nu / (scale * q as f64),
+                        q as f64,
+                        nu,
+                    );
+                    assert!(
+                        (got - want).abs() <= bound + 1e-9,
+                        "q={q} g={scale} ν={nu} W={statistic}: {got} vs F-tail {want} \
+                         (certified {bound:.3e})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The correction only ever costs power, never buys it: dividing by an
+    /// independent mean-one variate adds spread, so the profiled tail is above
+    /// the known-scale one everywhere in the upper tail. This is the SIGN of the
+    /// whole change, asserted as a property.
+    #[test]
+    fn the_profiled_reference_is_more_conservative_than_the_known_scale_one() {
+        let weights = vec![0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        let known = reference(weights.clone(), None);
+        for &nu in &[10.0_f64, 26.0, 100.0] {
+            let profiled = reference(
+                weights.clone(),
+                Some(SmoothLrProfiledScale {
+                    observations: nu + 5.0,
+                    deterministic_offset: 0.0,
+                    residual_weights: vec![0.81, 0.49],
+                    residual_unit_dimension: nu,
+                }),
+            );
+            for &statistic in &[3.0_f64, 6.0, 11.0, 20.0] {
+                let bare = known.tail_probability(statistic);
+                let scaled = profiled.tail_probability(statistic);
+                if bare > 0.4 {
+                    continue;
+                }
+                assert!(
+                    scaled > bare,
+                    "ν={nu} W={statistic}: profiled tail {scaled} must exceed the \
+                     known-scale {bare}"
+                );
+            }
+        }
+    }
+
+    /// And it converges back onto the known-scale reference as the residual
+    /// degrees of freedom grow, which is what makes this a refinement of the
+    /// large-`n` behaviour rather than a change to it.
+    #[test]
+    fn the_profiled_reference_converges_to_the_known_scale_one() {
+        let weights = vec![0.95_f64, 0.62, 0.31, 0.14, 0.05];
+        let known = reference(weights.clone(), None);
+        for &statistic in &[2.0_f64, 5.0, 10.0] {
+            let target = known.tail_probability(statistic);
+            let mut previous = f64::INFINITY;
+            for &nu in &[100.0_f64, 1_000.0, 10_000.0, 100_000.0] {
+                let profiled = reference(
+                    weights.clone(),
+                    Some(SmoothLrProfiledScale {
+                        observations: nu + 5.0,
+                        deterministic_offset: 0.0,
+                        residual_weights: Vec::new(),
+                        residual_unit_dimension: nu,
+                    }),
+                );
+                let gap = (profiled.tail_probability(statistic) - target).abs();
+                assert!(gap < previous, "W={statistic} ν={nu}: {gap:.3e} vs {previous:.3e}");
+                previous = gap;
+            }
+            assert!(
+                previous < 1e-3,
+                "W={statistic}: still {previous:.3e} from the known-scale tail at ν = 100000"
+            );
+        }
+    }
+
+    /// The deterministic offset is part of the statistic, not a nuisance: a `W`
+    /// at or below it corresponds to `Q/V ≤ 0`, which cannot happen, so the
+    /// p-value is exactly one rather than something the quadrature invents.
+    #[test]
+    fn a_statistic_under_the_deterministic_offset_is_not_evidence() {
+        let subject = reference(
+            vec![1.0_f64, 0.5],
+            Some(SmoothLrProfiledScale {
+                observations: 30.0,
+                deterministic_offset: -0.61,
+                residual_weights: vec![0.25],
+                residual_unit_dimension: 24.0,
+            }),
+        );
+        for &statistic in &[-5.0_f64, -0.61, -0.7] {
+            let (got, bound) = subject.tail_probability_with_bound(statistic);
+            assert_eq!(got, 1.0, "W={statistic}");
+            assert_eq!(bound, 0.0);
+        }
+        // And it is a strict boundary: just above the offset the tail is still
+        // essentially one, but it is no longer the exact branch.
+        let (just_above, _) = subject.tail_probability_with_bound(-0.6099);
+        assert!(just_above < 1.0 && just_above > 0.999, "{just_above}");
+    }
+
+    /// The offset SHIFTS the reference, in the direction its sign says. A
+    /// negative `B` — which is what a null model with fewer effective degrees of
+    /// freedom produces — makes the same `W` more extreme.
+    #[test]
+    fn the_deterministic_offset_moves_the_reference_the_way_its_sign_says() {
+        let weights = vec![0.9_f64, 0.4, 0.1];
+        let build = |offset: f64| {
+            reference(
+                weights.clone(),
+                Some(SmoothLrProfiledScale {
+                    observations: 50.0,
+                    deterministic_offset: offset,
+                    residual_weights: vec![0.36, 0.04],
+                    residual_unit_dimension: 44.0,
+                }),
+            )
+        };
+        for &statistic in &[2.0_f64, 5.0, 9.0] {
+            let neutral = build(0.0).tail_probability(statistic);
+            let negative = build(-0.5).tail_probability(statistic);
+            let positive = build(0.5).tail_probability(statistic);
+            assert!(
+                negative < neutral && neutral < positive,
+                "W={statistic}: {negative} / {neutral} / {positive} are not ordered by the offset"
+            );
+        }
+    }
+
+    /// WHAT THE CORRECTION CANNOT COST: discriminating power.
+    ///
+    /// `c(w) = expm1((w − B)/n)` is strictly increasing in `w`, and
+    /// `P(Q − c·V > 0)` is strictly decreasing in `c`, so the profiled tail is
+    /// strictly decreasing in the statistic — exactly like the known-scale one.
+    /// Two strictly decreasing functions of the same `W` order the same data the
+    /// same way, so at a MATCHED size the two references are the same test:
+    /// everything the correction changes is calibration, and the power it gives
+    /// up is precisely the over-rejection it removes and nothing else.
+    ///
+    /// Measured offline at `n = 40, k = 6` on a planted alternative: raw power
+    /// `0.6675 → 0.6150` against a null size that moved `0.0642 → 0.0542`. This
+    /// test is that argument's premise, asserted rather than assumed, across the
+    /// whole statistic range including the exact branch at the bottom.
+    #[test]
+    fn the_profiled_reference_is_strictly_decreasing_in_the_statistic() {
+        let subject = reference(
+            vec![0.95_f64, 0.62, 0.31, 0.14, 0.05],
+            Some(SmoothLrProfiledScale {
+                observations: 40.0,
+                deterministic_offset: -0.17,
+                residual_weights: vec![0.9, 0.5, 0.2, 0.01],
+                residual_unit_dimension: 33.0,
+            }),
+        );
+        let mut previous = f64::INFINITY;
+        let mut statistic = -2.0_f64;
+        let (mut highest, mut lowest) = (f64::NEG_INFINITY, f64::INFINITY);
+        while statistic < 60.0 {
+            let tail = subject.tail_probability(statistic);
+            assert!(
+                (0.0..=1.0).contains(&tail),
+                "W={statistic}: {tail} is not a probability"
+            );
+            assert!(
+                tail <= previous + 1e-9,
+                "W={statistic}: the tail rose from {previous} to {tail}"
+            );
+            previous = tail;
+            highest = highest.max(tail);
+            lowest = lowest.min(tail);
+            statistic += 0.25;
+        }
+        // ANTI-VACUITY, stated as the property rather than as a step count. A
+        // tail that is flat is monotone and orders nothing, and "it moved
+        // strictly N times" needs an N nobody can derive — the first draft used
+        // `> 100` against a sweep that delivers 98, which is a tuned constant
+        // failing rather than a claim failing. What the argument actually needs
+        // is that the reference SPANS the range a p-value is read in, so that
+        // is what is asserted.
+        assert!(
+            highest > 0.99 && lowest < 0.01,
+            "the reference spans only [{lowest}, {highest}] over the sweep — a tail that never \
+             reaches either end cannot order the data across the range a p-value is read in"
+        );
+    }
+
+    /// The channel is available on the DEGRADED lanes too, because the two-moment
+    /// summary is a one-term linear combination rather than a different shape.
+    /// Without it, a fit that could not reach its own spectrum would silently
+    /// fall back to the known-scale reference — the exact defect being removed.
+    #[test]
+    fn the_two_moment_lane_also_carries_the_estimated_scale() {
+        let mut subject = reference(Vec::new(), None);
+        subject.mean = 3.0;
+        subject.second_moment = 2.4;
+        subject.chi_square_df = 3.75;
+        subject.scale = 0.8;
+        let bare = subject.tail_probability(6.0);
+        subject.profiled_scale = Some(SmoothLrProfiledScale {
+            observations: 40.0,
+            deterministic_offset: 0.0,
+            residual_weights: Vec::new(),
+            residual_unit_dimension: 34.0,
+        });
+        let scaled = subject.tail_probability(6.0);
+        let want = gam_math::probability::fisher_snedecor_sf(
+            (6.0_f64 / 40.0).exp_m1() * 34.0 / (0.8 * 3.75),
+            3.75,
+            34.0,
+        );
+        assert!(
+            (scaled - want).abs() < 1e-9,
+            "the two-moment lane's ratio tail {scaled} is not the F tail {want}"
+        );
+        assert!(scaled > bare, "{scaled} must be above the known-scale {bare}");
+    }
+}
+
 #[cfg(test)]
 mod selection_replay_tests {
     use super::{
-        SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_MAX_SCALES, SelectionGeometry,
+        MultiscaleBudget, SMOOTH_LR_SELECTION_DRAWS, SMOOTH_LR_SELECTION_GRID_BUDGET,
+        SMOOTH_LR_SELECTION_MAX_SCALES, SMOOTH_LR_SELECTION_REFINE_FLOOR,
+        SMOOTH_LR_SELECTION_REFINE_MAX_EVALUATIONS, SelectionFactor, SelectionGeometry,
         SmoothLrSelection, SmoothLrSelectionDecline, SmoothLrSelectionReplay,
     };
     use ndarray::Array2;
@@ -2977,6 +4059,7 @@ mod selection_replay_tests {
             &split_geometry,
             &[(-6.0, 6.0), (-6.0, 6.0)],
             2048,
+            MultiscaleBudget::SHIPPED,
         )
         .expect("multiscale replay");
         // With `information = I` the generalized eigenvalues ARE the penalty's
@@ -2997,6 +4080,10 @@ mod selection_replay_tests {
         );
         let split_selected = mean(&split.selection_sample);
         let single_selected = mean(&single.selection_sample);
+        eprintln!(
+            "[2672 seam] conditional {split_mean:.6} vs {single_mean:.6}; \
+             selected {split_selected:.6} vs {single_selected:.6}"
+        );
         assert!(
             (split_selected - single_selected).abs() <= 0.25 * single_selected.abs().max(1.0),
             "the two paths disagree on the SELECTED law by more than the coarser \
@@ -3032,7 +4119,13 @@ mod selection_replay_tests {
         )
         .expect("single geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&single, &[(-6.0, 6.0)], 256).is_err()
+            SmoothLrSelectionReplay::generate_multiscale(
+                &single,
+                &[(-6.0, 6.0)],
+                256,
+                MultiscaleBudget::SHIPPED,
+            )
+            .is_err()
         );
         // More scales than the grid budget can resolve: declines rather than
         // gridding five axes at four points each — and the dispatcher then hands
@@ -3045,7 +4138,15 @@ mod selection_replay_tests {
             &vec![0.0; SMOOTH_LR_SELECTION_MAX_SCALES + 1],
         )
         .expect("crowded geometry");
-        assert!(SmoothLrSelectionReplay::generate_multiscale(&crowded, &windows, 256).is_err());
+        assert!(
+            SmoothLrSelectionReplay::generate_multiscale(
+                &crowded,
+                &windows,
+                256,
+                MultiscaleBudget::SHIPPED,
+            )
+            .is_err()
+        );
         assert!(
             SmoothLrSelectionReplay::from_geometry(&crowded, &windows, 256, 256)
                 .replay()
@@ -3060,14 +4161,23 @@ mod selection_replay_tests {
         )
         .expect("pair geometry");
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (2.0, 2.0)], 256)
-                == Err(SmoothLrSelectionDecline::WindowClosed)
+            SmoothLrSelectionReplay::generate_multiscale(
+                &pair,
+                &[(1.0, 1.0), (2.0, 2.0)],
+                256,
+                MultiscaleBudget::SHIPPED,
+            ) == Err(SmoothLrSelectionDecline::WindowClosed)
         );
         // But ONE open axis is still a selection, and used to be discarded with
         // the closed one — the intersection of the two windows is empty.
         assert!(
-            SmoothLrSelectionReplay::generate_multiscale(&pair, &[(1.0, 1.0), (-6.0, 6.0)], 256)
-                .is_ok(),
+            SmoothLrSelectionReplay::generate_multiscale(
+                &pair,
+                &[(1.0, 1.0), (-6.0, 6.0)],
+                256,
+                MultiscaleBudget::SHIPPED,
+            )
+            .is_ok(),
             "a scale whose own window is open must still be replayed when a \
              SIBLING scale's window is closed"
         );
@@ -3100,6 +4210,319 @@ mod selection_replay_tests {
                 "a closed window must decline with a NAMED reason"
             );
         }
+    }
+
+    /// The MULTI-SCALE replay is a p-value input too, and its per-draw descent
+    /// is the part of it that could most easily stop being a pure function of
+    /// the geometry (#1017).
+    ///
+    /// `the_replay_is_bit_identical_across_generations` pins the diagonal lane,
+    /// where the whole computation is a fixed grid. This pins the lane that
+    /// searches: two generations must agree bit for bit on both samples and on
+    /// every tail shift read off them.
+    #[test]
+    fn the_multiscale_replay_is_bit_identical_across_generations() {
+        let q = 5;
+        let mut bending = Array2::<f64>::zeros((q, q));
+        let mut ridge = Array2::<f64>::zeros((q, q));
+        for index in 0..q {
+            if index < 3 {
+                bending[[index, index]] = 1.0 + index as f64;
+            } else {
+                ridge[[index, index]] = 0.5 + index as f64;
+            }
+        }
+        let generate = || {
+            let geometry = SelectionGeometry::whiten(
+                &Array2::eye(q),
+                &[bending.clone(), ridge.clone()],
+                &[6.0, -9.0],
+            )
+            .expect("geometry");
+            SmoothLrSelectionReplay::generate_multiscale(
+                &geometry,
+                &[(-36.0, 24.0), (-21.0, 39.0)],
+                512,
+                MultiscaleBudget::SHIPPED,
+            )
+            .expect("multiscale replay")
+        };
+        let first = generate();
+        let second = generate();
+        assert_eq!(first, second);
+        for statistic in [0.05_f64, 0.5, 1.5, 4.0] {
+            assert_eq!(first.tail_shift(statistic), second.tail_shift(statistic));
+        }
+    }
+
+    /// #2672: the refinement's evaluator and the grid's are the SAME function.
+    ///
+    /// The bracket prices a point through the eigensystem of `T(t)` and the
+    /// refinement prices it through two triangular factorizations, because one
+    /// amortizes over draws and the other cannot. They are two routes to one
+    /// number, and the refinement compares its trials against a baseline the
+    /// bracket produced — so a discrepancy between them is not a rounding
+    /// difference, it is a search descending one function while reporting
+    /// another's value.
+    ///
+    /// Checked on a DENSE information with two dense components at separations
+    /// up to the box's own width, which is where the two routes' conditioning
+    /// differs most, and at `t` off the fitted point in both directions.
+    #[test]
+    fn the_two_evaluators_price_a_point_identically_2672() {
+        let q = 7;
+        let mixing = Array2::from_shape_fn((q, q), |(row, column)| {
+            let a = row as f64 + 1.0;
+            let b = column as f64 + 1.0;
+            ((a * 0.7 + b * 1.3).sin() + 0.25 * (a * b).cos()) / (1.0 + 0.1 * a * b)
+        });
+        let information = mixing.dot(&mixing.t()) + Array2::<f64>::eye(q) * 0.5;
+        let mut bending = Array2::<f64>::zeros((q, q));
+        for index in 0..q - 2 {
+            bending[[index, index]] = 1.0;
+            bending[[index, index + 1]] = -0.5;
+            bending[[index + 1, index]] = -0.5;
+        }
+        let bending = mixing.dot(&bending.dot(&mixing.t()));
+        let bending = bending.dot(&bending.t());
+        let ridge = mixing.dot(&mixing.t());
+        let draw: Vec<f64> = (0..q)
+            .map(|index| ((index as f64 + 1.0) * 0.9).sin() + 0.3)
+            .collect();
+        let norm_squared: f64 = draw.iter().map(|value| value * value).sum();
+        for separation in [0.0_f64, 18.0, 40.0] {
+            let geometry = SelectionGeometry::whiten(
+                &information,
+                &[bending.clone(), ridge.clone()],
+                &[0.5 * separation, -0.5 * separation],
+            )
+            .expect("geometry");
+            let mut factor = SelectionFactor::new(&geometry);
+            let mut coordinates = vec![0.0_f64; geometry.rank];
+            for log_t in [[0.0_f64, 0.0], [-2.5, 1.75], [3.0, -4.0], [-8.0, -8.0]] {
+                let evaluated = geometry.at(&log_t).expect("eigen route");
+                let mut criterion = evaluated.offset;
+                let mut statistic = 0.0_f64;
+                for column in 0..geometry.dimension {
+                    let mut coordinate = 0.0_f64;
+                    for row in 0..geometry.dimension {
+                        coordinate += draw[row] * evaluated.basis[[row, column]];
+                    }
+                    let square = coordinate * coordinate;
+                    criterion += square * evaluated.shares[column];
+                    statistic += square * evaluated.weights[column];
+                }
+                assert!(
+                    factor.refactor(&geometry, &log_t),
+                    "separation {separation}, ln t = {log_t:?}: the factor route refused a \
+                     point the eigen route priced"
+                );
+                for column in 0..geometry.rank {
+                    coordinates[column] = (0..geometry.dimension)
+                        .map(|row| draw[row] * geometry.range_basis[[row, column]])
+                        .sum();
+                }
+                let (fast_criterion, fast_statistic) =
+                    factor.score(&coordinates, norm_squared);
+                assert!(
+                    (fast_criterion - criterion).abs() <= 1e-8 * criterion.abs().max(1.0),
+                    "separation {separation}, ln t = {log_t:?}: criterion {fast_criterion} \
+                     (factor) vs {criterion} (eigen)"
+                );
+                assert!(
+                    (fast_statistic - statistic).abs() <= 1e-8 * statistic.abs().max(1.0),
+                    "separation {separation}, ln t = {log_t:?}: statistic {fast_statistic} \
+                     (factor) vs {statistic} (eigen)"
+                );
+            }
+        }
+    }
+
+    /// #2672: the shipped multi-scale replay reaches the law a grid it cannot
+    /// afford reaches — and the bracket alone does not.
+    ///
+    /// This is the contract the descent exists for, and it is stated as a
+    /// CONTRAST so it cannot pass by both arms drifting together: the reference
+    /// is a `161 × 161` grid (spacing `0.375`, `5.8 s` per term — sixty times
+    /// the shipped budget's cost and still coarser than the descent's floor),
+    /// and the two arms scored against it are the shipped one and the bracket
+    /// with the descent switched off, which is what shipped before.
+    ///
+    /// Both halves have to hold. Without the second, a descent that did nothing
+    /// would pass as soon as the reference grid stopped moving; without the
+    /// first, the test would only be saying that a fine grid differs from a
+    /// coarse one, which nobody disputes.
+    #[test]
+    fn the_descent_reaches_a_grid_it_cannot_afford_2672() {
+        let q = 6;
+        let mut bending = Array2::<f64>::zeros((q, q));
+        let mut ridge = Array2::<f64>::zeros((q, q));
+        for index in 0..q {
+            if index < 4 {
+                bending[[index, index]] = 1.0 + index as f64;
+            } else {
+                ridge[[index, index]] = 1.0;
+            }
+        }
+        let geometry = SelectionGeometry::whiten(
+            &Array2::eye(q),
+            &[bending, ridge],
+            &[12.0, -12.0],
+        )
+        .expect("geometry");
+        let windows = [(-42.0, 18.0), (-18.0, 42.0)];
+        let law = |budget: MultiscaleBudget| {
+            let replay =
+                SmoothLrSelectionReplay::generate_multiscale(&geometry, &windows, 2048, budget)
+                    .expect("multiscale replay");
+            let draws = replay.selection_sample.len() as f64;
+            let mean = replay.selection_sample.iter().sum::<f64>() / draws;
+            let mut sorted = replay.selection_sample.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            let upper = sorted[((0.95 * draws) as usize).min(sorted.len() - 1)];
+            (mean, upper)
+        };
+        // The reference: a grid nobody can afford per term, with no descent.
+        let (reference_mean, reference_upper) = law(MultiscaleBudget {
+            grid: 25_921,
+            refine_floor: f64::INFINITY,
+            refine_evaluations: 0,
+        });
+        let (shipped_mean, shipped_upper) = law(MultiscaleBudget::SHIPPED);
+        let (bracket_mean, bracket_upper) = law(MultiscaleBudget {
+            grid: SMOOTH_LR_SELECTION_GRID_BUDGET,
+            refine_floor: f64::INFINITY,
+            refine_evaluations: 0,
+        });
+        eprintln!(
+            "[2672 descent] reference (161²) mean={reference_mean:.4} q95={reference_upper:.4}  \
+             shipped mean={shipped_mean:.4} q95={shipped_upper:.4}  \
+             bracket-only mean={bracket_mean:.4} q95={bracket_upper:.4}"
+        );
+        assert!(
+            (shipped_mean - reference_mean).abs() <= 0.03 * reference_mean.abs(),
+            "the shipped replay's selected law has mean {shipped_mean} against the \
+             unaffordable grid's {reference_mean}"
+        );
+        assert!(
+            (shipped_upper - reference_upper).abs() <= 0.03 * reference_upper.abs(),
+            "the shipped replay's selected law has q95 {shipped_upper} against the \
+             unaffordable grid's {reference_upper} — and q95 is where α = 0.05 is read"
+        );
+        // And the arm the descent replaced misses, in the direction that
+        // over-rejects: a less-selected law is a thinner upper tail.
+        assert!(
+            bracket_upper < 0.9 * reference_upper,
+            "the bracket alone reached q95 {bracket_upper} against {reference_upper}; if \
+             the grid on its own is now accurate, this test is no longer measuring the \
+             defect it was written for and the descent's cost needs re-arguing"
+        );
+        assert!(
+            bracket_mean < reference_mean,
+            "a coarser selection cannot select MORE: bracket-only mean {bracket_mean} \
+             against {reference_mean}"
+        );
+    }
+
+    /// PROBE (#2672, not a contract): what the multi-scale grid's BUDGET costs
+    /// the law it generates.
+    ///
+    /// The one-dimensional lane grids `ln t` at a fixed `0.05`; the
+    /// multi-scale one spends a fixed TOTAL of `441` points, which at `m = 2`
+    /// over the box the solver leaves a railed `λ̂` is a spacing of about `3` in
+    /// `ln λ` — sixty times coarser. The replay's whole job is to reproduce a
+    /// selection the fit made with a continuum available, so a grid that cannot
+    /// resolve the criterion's minimum generates a law that is selected LESS
+    /// than the statistic it is the reference for. This prints the selected
+    /// law's mean, spread and upper tail against budget so the size of that
+    /// gap is a measurement rather than an assumption.
+    #[test]
+    fn zz_probe_multiscale_grid_budget_moves_the_selected_law_2672() {
+        let q = 6;
+        // The default `s(z)` shape: a bending penalty over the wiggly
+        // directions and a null-space ridge over the rest, fitted at the
+        // separation a null-true smooth actually reaches (`λ₁` up, `λ₂` down).
+        let mut bending = Array2::<f64>::zeros((q, q));
+        let mut ridge = Array2::<f64>::zeros((q, q));
+        for index in 0..q {
+            if index < 4 {
+                bending[[index, index]] = 1.0 + index as f64;
+            } else {
+                ridge[[index, index]] = 1.0;
+            }
+        }
+        for separation in [0.0_f64, 24.0, 42.0] {
+            let (rho_one, rho_two) = (0.5 * separation, -0.5 * separation);
+            let geometry = SelectionGeometry::whiten(
+                &Array2::eye(q),
+                &[bending.clone(), ridge.clone()],
+                &[rho_one, rho_two],
+            )
+            .expect("geometry");
+            let windows = [
+                (-30.0 - rho_one, 30.0 - rho_one),
+                (-30.0 - rho_two, 30.0 - rho_two),
+            ];
+            eprintln!(
+                "[zz2672-grid] separation={separation}  window0={:?} window1={:?}",
+                windows[0], windows[1]
+            );
+            // Two axes, and they trade against each other: `grid` is the
+            // BRACKET the draws start from and `refine_floor` is how far each
+            // draw then descends. `INFINITY` is the shipped-before arm — the
+            // bracket alone, with no descent.
+            let arms: [(usize, f64, &str); 6] = [
+                (441, f64::INFINITY, "grid only"),
+                (1681, f64::INFINITY, "grid only"),
+                (6561, f64::INFINITY, "grid only"),
+                (25921, f64::INFINITY, "grid only"),
+                (441, SMOOTH_LR_SELECTION_REFINE_FLOOR, "grid + refine"),
+                (121, SMOOTH_LR_SELECTION_REFINE_FLOOR, "grid + refine"),
+            ];
+            for (grid, refine_floor, label) in arms {
+                let budget = MultiscaleBudget {
+                    grid,
+                    refine_floor,
+                    refine_evaluations: SMOOTH_LR_SELECTION_REFINE_MAX_EVALUATIONS,
+                };
+                let started = std::time::Instant::now();
+                let replay = SmoothLrSelectionReplay::generate_multiscale(
+                    &geometry, &windows, 2048, budget,
+                )
+                .expect("multiscale replay");
+                let elapsed = started.elapsed().as_secs_f64();
+                let per_axis = (grid as f64).powf(0.5).floor() as usize;
+                let draws = replay.selection_sample.len() as f64;
+                let mean = replay.selection_sample.iter().sum::<f64>() / draws;
+                let variance = replay
+                    .selection_sample
+                    .iter()
+                    .map(|value| (value - mean) * (value - mean))
+                    .sum::<f64>()
+                    / draws;
+                let conditional_mean = replay.conditional_sample.iter().sum::<f64>() / draws;
+                let upper = |quantile: f64| {
+                    let mut sorted = replay.selection_sample.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+                    sorted[((quantile * draws) as usize).min(sorted.len() - 1)]
+                };
+                eprintln!(
+                    "[zz2672-grid]   {label:<13} grid={grid:>6} per_axis={per_axis:>3} \
+                     spacing={:>6.3}  E[W(t-hat)]={mean:.4} sd={:.4} \
+                     q95={:.4} q99={:.4}  (E[W|t-hat]={conditional_mean:.4})  {elapsed:.2}s",
+                    (windows[0].1 - windows[0].0) / (per_axis as f64 - 1.0),
+                    variance.sqrt(),
+                    upper(0.95),
+                    upper(0.99),
+                );
+            }
+        }
+        eprintln!(
+            "[zz2672-grid] read: the selected law is generated by MINIMISING the \
+             criterion over the grid, so a finer grid can only lower each draw's \
+             criterion. A mean/tail that keeps moving as the budget rises is the \
+             shipped budget failing to reproduce the selection the fit made."
+        );
     }
 
     /// #2672: the criterion's log-determinant is priced from the stacked scaled

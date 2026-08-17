@@ -112,7 +112,7 @@ pub(crate) use gam_solve::arrow_schur::{
     ArrowSchurSystem, ArrowSolveOptions, ArrowSolverMode, BetaPenaltyOp, CompositePenaltyOp,
     DensePenaltyOp, DeviceSaePcgData, DeviceSaeSmoothBlock, FactoredFrameGBlock,
     FactoredFrameKroneckerOp, IdentityRightKroneckerPenaltyOp, SparseBlockKroneckerPenaltyOp,
-    SparseGBlock, SparseRankOnePenaltyOp, StreamingArrowSchur, matrix_free_arrow_inverse_apply,
+    CoupledCarrierPenaltyOp, SparseGBlock, StreamingArrowSchur, matrix_free_arrow_inverse_apply,
     matrix_free_arrow_operator_apply, prepare_sae_resident_frame, row_sub_floor_null_directions,
     solve_arrow_newton_step_with_proximal_correction, solve_streaming_reduced_beta,
     solve_with_lm_escalation_inner,
@@ -364,6 +364,17 @@ mod tests_rank_charge_2101;
 #[cfg(test)]
 mod tests_frame_curvature_2757;
 
+/// #2757 — the rewritten Vietoris–Rips filtration engine against the one it
+/// replaces, bar for bar. Carries the pre-rewrite engine as its control.
+#[cfg(test)]
+mod tests_persistence_engine_2757;
+
+/// #2757 — the phase-by-phase stopwatch on the post-fit certification. It runs
+/// at a committed small shape and prints its table; the sweep is a `const` a
+/// working tree raises to reach the production cell.
+#[cfg(test)]
+mod probe_report_cost_2757_tests;
+
 #[cfg(test)]
 mod tests_sure_dispersion_2133;
 
@@ -454,6 +465,9 @@ mod tests_outer_quasi_laplace_probe_budget_2080;
 mod lambda_smooth_1556_tests;
 
 #[cfg(test)]
+mod tests_gauge_orbit_descent_2762;
+
+#[cfg(test)]
 mod tests_behavior_column_equilibration_2015;
 #[cfg(test)]
 mod tests_behavior_isometry_2015;
@@ -473,7 +487,17 @@ mod tests_crosscoder_olmo;
 mod tests_stall_diagnostic_2234;
 
 #[cfg(test)]
+mod tests_barrier_curvature_2731;
+
+#[cfg(test)]
 mod tests_gauge_frame_roundtrip_2720;
+
+/// #2720 — per-objective-term attribution of the chart-orbit directional
+/// derivative, by finite difference of the value functions the line search
+/// descends. Answers WHICH penalty breaks the orbit symmetry, which the single
+/// `|gᵀvᵢ|` scalar every prior measurement reports cannot.
+#[cfg(test)]
+mod tests_gauge_posterior_flatness_2720;
 
 #[cfg(test)]
 mod tests_gauge_geometry_2720;

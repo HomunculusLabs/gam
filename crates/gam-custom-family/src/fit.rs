@@ -1344,30 +1344,68 @@ fn effective_df_floor_bound(
 ///
 /// The mathematical object is the limit of the exact continuation path, so the
 /// discretization is refined — 1, 2, 4, … uniform steps — until the endpoint
-/// stops moving. The stopping yardstick is the inner solver's own convergence
-/// tolerance: refinement halts once two successive discretizations agree to
-/// within what the corrector itself can resolve, which is the point past which
-/// a finer path cannot carry information. This is a self-consistency criterion,
-/// not a budget, so it introduces no tunable constant.
+/// stops moving. What "stops moving" means, and what it is measured against, is
+/// derived in [`certify_refined_continuation`]: the endpoint sequence is
+/// MODE-VALUED, not smoothly convergent, and both the yardstick and the stopping
+/// rule follow from that.
 ///
 /// # Typed termination
 ///
-/// A corrector that does not converge, an endpoint discrepancy that violates
-/// the continuation's contraction premise, or a path that reaches floating-point
+/// A corrector that does not converge, a ladder that exhausts its refinement
+/// budget without the endpoint settling, or a path that reaches floating-point
 /// resolution means the continuation does not name a mode. Those outcomes are
 /// typed [`AnchoredContinuationRefusal`]s rather than an undifferentiated
 /// `None`. Success carries an [`AnchoredContinuationCertificate`] that records
-/// the refinement and discrepancy which proved the endpoint invariant. The
+/// the refinement and the agreement which proved the endpoint invariant. The
 /// production caller logs a refusal and keeps its existing seed, so declining a
 /// continuation still never turns a fit that works today into a failure.
-const MAX_CONTINUATION_DISCREPANCY_RATIO: f64 = 0.5;
+
+/// How many CONSECUTIVE refinements must name the same mode before the ladder
+/// calls it the limit.
+///
+/// One agreement is provably not enough, and the counterexample is measured
+/// rather than imagined. On the #2612 penguins stride-4 armed refit the ladder's
+/// endpoint-criterion trail is
+///
+/// ```text
+///   steps  2 -> 4    agree to 9.0e-7   <- and BOTH are on a mode the next
+///   steps  4 -> 8    differ by 6.4e-2     refinement leaves
+///   steps  8 -> 16   agree to 5.0e-7
+/// ```
+///
+/// so a ladder that certified on the first agreement would have stopped at 4
+/// steps and returned a mode the exact path does not reach. A dyadic sweep at
+/// `2k` steps visits every waypoint of the `k`-step sweep and inserts one
+/// midpoint between each pair, so an agreement says "inserting midpoints once
+/// did not change the branch" and two consecutive agreements say it at two
+/// levels.
+///
+/// There is no finite certificate that a mode-valued sequence has reached its
+/// limit — this is an evidence standard, not a theorem, and it is set one level
+/// above the measured failure. The count reached is recorded in the certificate
+/// so that a future fixture which defeats it changes one number with its
+/// evidence attached rather than a rule with none.
+const REQUIRED_CONSECUTIVE_AGREEMENTS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AnchoredContinuationCertificate {
     pub(crate) steps: usize,
+    /// The state-space discrepancy (linear predictors, log-likelihood, penalty)
+    /// at the certifying refinement. Reported as evidence; it is NOT the
+    /// certifying quantity — see [`certify_refined_continuation`].
     pub(crate) endpoint_discrepancy: f64,
     pub(crate) inner_tolerance: f64,
     pub(crate) observed_contraction_factor: Option<f64>,
+    /// Relative agreement of the criterion the seed exists to make well defined,
+    /// between this refinement's endpoint and the previous one's. This is what
+    /// the certificate is taken on.
+    pub(crate) criterion_agreement: f64,
+    /// The resolution `criterion_agreement` was required to clear: the outer
+    /// solver's own relative-cost tolerance, in the criterion's own units.
+    pub(crate) criterion_resolution: f64,
+    /// How many consecutive refinements agreed, at least
+    /// [`REQUIRED_CONSECUTIVE_AGREEMENTS`].
+    pub(crate) consecutive_agreements: usize,
 }
 
 pub(crate) struct CertifiedAnchoredContinuationSeed {
@@ -1421,12 +1459,19 @@ pub(crate) enum AnchoredContinuationRefusal {
         role: &'static str,
         discrepancy: f64,
     },
-    ContractionPremiseViolated {
+    /// The ladder spent its whole refinement budget without the endpoint
+    /// settling on one mode. Carries the full trail, because the two shapes a
+    /// non-settling ladder can have need different repairs and are opposites:
+    /// a trail that alternates between `O(1)` and the corrector's floor is a
+    /// path oscillating between branches, while one that sits just above the
+    /// resolution throughout is a path whose criterion never resolves.
+    RefinementBudgetExhausted {
         steps: usize,
-        previous_discrepancy: f64,
-        discrepancy: f64,
-        observed_factor: f64,
-        required_max_factor: f64,
+        refinements: usize,
+        max_refinements: usize,
+        criterion_resolution: f64,
+        /// `(steps, endpoint discrepancy, criterion agreement)` per refinement.
+        trail: Vec<(usize, f64, f64)>,
     },
     StepCountOverflow {
         steps: usize,
@@ -1520,17 +1565,26 @@ impl std::fmt::Display for AnchoredContinuationRefusal {
                 f,
                 "{steps}-step {role} endpoint discrepancy is invalid ({discrepancy})"
             ),
-            Self::ContractionPremiseViolated {
+            Self::RefinementBudgetExhausted {
                 steps,
-                previous_discrepancy,
-                discrepancy,
-                observed_factor,
-                required_max_factor,
+                refinements,
+                max_refinements,
+                criterion_resolution,
+                trail,
             } => write!(
                 f,
-                "{steps}-step endpoint discrepancy violates the dyadic contraction premise: \
-                 {discrepancy:.6e} / {previous_discrepancy:.6e} = {observed_factor:.6e}, \
-                 required <= {required_max_factor:.6e}"
+                "the continuation endpoint had not settled on one mode after {refinements} of \
+                 {max_refinements} refinement(s), the last at {steps} steps: no \
+                 {REQUIRED_CONSECUTIVE_AGREEMENTS} consecutive refinements agreed on the \
+                 criterion to within its resolution {criterion_resolution:.6e}. Trail \
+                 (steps, endpoint discrepancy, criterion agreement): {}",
+                trail
+                    .iter()
+                    .map(|(steps, discrepancy, agreement)| format!(
+                        "({steps}, {discrepancy:.6e}, {agreement:.6e})"
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" "),
             ),
             Self::StepCountOverflow { steps } => {
                 write!(
@@ -1575,15 +1629,44 @@ pub(crate) enum ContinuationRefinement {
     Refine,
 }
 
+/// Everything one refinement of the ladder knows about itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ContinuationRefinementReading {
+    pub(crate) steps: usize,
+    /// State-space distance between this endpoint and the coarser one.
+    pub(crate) discrepancy: f64,
+    /// The same for the previous refinement, if there was one.
+    pub(crate) previous_discrepancy: Option<f64>,
+    /// Relative distance between the two endpoints' criterion values.
+    pub(crate) criterion_agreement: f64,
+    /// How many consecutive refinements — INCLUDING this one — agreed.
+    pub(crate) consecutive_agreements: usize,
+}
+
+/// The verdict on one refinement, given the resolutions it is judged against.
+///
+/// The certifying quantity is `criterion_agreement`, not `discrepancy`. Both are
+/// carried, because the certificate reports both.
 pub(crate) fn continuation_refinement_decision(
-    steps: usize,
-    previous_discrepancy: Option<f64>,
-    discrepancy: f64,
+    reading: ContinuationRefinementReading,
     inner_tolerance: f64,
+    criterion_resolution: f64,
 ) -> Result<ContinuationRefinement, AnchoredContinuationRefusal> {
+    let ContinuationRefinementReading {
+        steps,
+        discrepancy,
+        previous_discrepancy,
+        criterion_agreement,
+        consecutive_agreements,
+    } = reading;
     if !inner_tolerance.is_finite() || inner_tolerance < 0.0 {
         return Err(AnchoredContinuationRefusal::InvalidInnerTolerance {
             tolerance: inner_tolerance,
+        });
+    }
+    if !criterion_resolution.is_finite() || criterion_resolution < 0.0 {
+        return Err(AnchoredContinuationRefusal::InvalidInnerTolerance {
+            tolerance: criterion_resolution,
         });
     }
     if !discrepancy.is_finite() || discrepancy < 0.0 {
@@ -1593,43 +1676,44 @@ pub(crate) fn continuation_refinement_decision(
             discrepancy,
         });
     }
-    let observed_contraction_factor = if let Some(previous) = previous_discrepancy {
-        if !previous.is_finite() || previous < 0.0 {
-            return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
-                steps,
-                role: "previous",
-                discrepancy: previous,
-            });
-        }
-        let observed_factor = if previous == 0.0 {
-            if discrepancy == 0.0 {
-                0.0
-            } else {
-                f64::INFINITY
+    if !criterion_agreement.is_finite() || criterion_agreement < 0.0 {
+        return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
+            steps,
+            role: "criterion",
+            discrepancy: criterion_agreement,
+        });
+    }
+    let observed_contraction_factor = match previous_discrepancy {
+        Some(previous) => {
+            if !previous.is_finite() || previous < 0.0 {
+                return Err(AnchoredContinuationRefusal::InvalidEndpointDiscrepancy {
+                    steps,
+                    role: "previous",
+                    discrepancy: previous,
+                });
             }
-        } else {
-            discrepancy / previous
-        };
-        if !continuation_discrepancy_satisfies_contraction_premise(previous, discrepancy) {
-            return Err(AnchoredContinuationRefusal::ContractionPremiseViolated {
-                steps,
-                previous_discrepancy: previous,
-                discrepancy,
-                observed_factor,
-                required_max_factor: MAX_CONTINUATION_DISCREPANCY_RATIO,
-            });
+            Some(if previous == 0.0 {
+                if discrepancy == 0.0 {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
+            } else {
+                discrepancy / previous
+            })
         }
-        Some(observed_factor)
-    } else {
-        None
+        None => None,
     };
-    if discrepancy <= inner_tolerance {
+    if consecutive_agreements >= REQUIRED_CONSECUTIVE_AGREEMENTS {
         return Ok(ContinuationRefinement::Certified(
             AnchoredContinuationCertificate {
                 steps,
                 endpoint_discrepancy: discrepancy,
                 inner_tolerance,
                 observed_contraction_factor,
+                criterion_agreement,
+                criterion_resolution,
+                consecutive_agreements,
             },
         ));
     }
@@ -1660,11 +1744,22 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
         rho_anchor,
         rho_target,
     };
-    certify_refined_continuation(&path, options.inner_tol, false)
+    certify_refined_continuation(&path, options, false)
 }
 
-trait RefinedContinuationPath {
-    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal>;
+/// One sweep's endpoint, together with the value of the criterion the seed
+/// exists to make well defined, evaluated at it.
+///
+/// The pair travels together because the ladder judges endpoints by the
+/// criterion and reports them by their state; separating them is how one of them
+/// gets compared at the wrong ρ.
+pub(crate) struct SweptEndpoint {
+    pub(crate) warm_start: ConstrainedWarmStart,
+    pub(crate) criterion_value: f64,
+}
+
+pub(crate) trait RefinedContinuationPath {
+    fn sweep(&self, steps: usize) -> Result<SweptEndpoint, AnchoredContinuationRefusal>;
     fn resolves_steps(&self, refined_steps: usize) -> bool;
     fn endpoint_discrepancy(
         &self,
@@ -1672,15 +1767,120 @@ trait RefinedContinuationPath {
         coarser: &ConstrainedWarmStart,
         finer: &ConstrainedWarmStart,
     ) -> Result<f64, AnchoredContinuationRefusal>;
+    /// What this path is a continuation IN, for the refinement trail below.
+    fn label(&self) -> &'static str;
 }
 
-fn certify_refined_continuation<P: RefinedContinuationPath>(
+/// Relative distance between two criterion values, on the same scale-free form
+/// the state discrepancy uses so the two are read in the same units.
+fn criterion_agreement(coarser: f64, finer: f64) -> f64 {
+    if !coarser.is_finite() || !finer.is_finite() {
+        return f64::INFINITY;
+    }
+    (coarser - finer).abs() / (1.0 + coarser.abs().max(finer.abs()))
+}
+
+/// How many dyadic refinements the ladder may spend.
+///
+/// #2661 established the requirement this answers: accepting arbitrarily slow
+/// progress makes the loop operationally unbounded, and each refinement DOUBLES
+/// the number of full corrector solves. That is a statement about a resource, so
+/// it is bounded as one rather than smuggled into a convergence ratio (which is
+/// what it was, and which #2612 measured cannot read this ladder — see
+/// [`certify_refined_continuation`]).
+///
+/// The bound is derived, not chosen: **the seed may not cost more correctors
+/// than the outer search it seeds is budgeted for.** A ladder through `D`
+/// refinements runs `1 + 2 + 4 + … + 2^D = 2^{D+1} − 1` correctors, and the outer
+/// search is allowed `outer_max_iter` iterations each of which pays at least one,
+/// so `2^{D+1} ≤ outer_max_iter`, i.e. `D = ⌊log₂(outer_max_iter)⌋ − 1`.
+///
+/// Floored at `REQUIRED_CONSECUTIVE_AGREEMENTS + 1`, which is the fewest
+/// refinements that can produce a verdict at all: a budget below it refuses
+/// every path regardless of what the path does, which is a disablement rather
+/// than a budget.
+pub(crate) fn continuation_refinement_budget(outer_max_iter: usize) -> usize {
+    let from_outer_budget = usize::BITS
+        .saturating_sub(outer_max_iter.leading_zeros())
+        .saturating_sub(2) as usize;
+    from_outer_budget.max(REQUIRED_CONSECUTIVE_AGREEMENTS + 1)
+}
+
+/// Refine the continuation's discretization until its endpoint settles on one
+/// mode, and certify that it did.
+///
+/// # The endpoint sequence is MODE-VALUED, and everything here follows from it
+///
+/// Every sweep's LAST waypoint corrects at the target family and the target ρ,
+/// to the inner solver's own KKT tolerance. So each endpoint is an *exact* mode
+/// of the *same* function — not a discretization-perturbed approximation of one.
+/// Refining the path does not shrink an error; it changes WHICH mode the path
+/// arrives at. The measured trail on the #2612 penguins stride-4 armed refit
+/// says exactly that:
+///
+/// ```text
+///   steps  1 -> 2    endpoint discrepancy 1.521120e0
+///   steps  2 -> 4                         3.328619e-5
+///   steps  4 -> 8                         1.695145e0
+///   steps  8 -> 16                        5.413481e-5
+/// ```
+///
+/// Two values, four orders apart, alternating: `O(1)` when the two sweeps land
+/// on different modes, `O(5e-5)` — the corrector's own reproducibility — when
+/// they land on the same one. There is no `O(hᑫ)` decay to observe.
+///
+/// ## Consequence 1: the contraction premise cannot read this ladder
+///
+/// `d_k ≤ ½ d_{k−1}` is the signature of a smoothly convergent discretization.
+/// On the trail above it fires at `steps = 8` — the FIRST refinement that
+/// actually tracks the branch — using as its baseline the `3.328619e-5`
+/// agreement of two coarse sweeps that had both jumped to the same wrong mode.
+/// The premise is retained only as reported evidence
+/// ([`AnchoredContinuationCertificate::observed_contraction_factor`]).
+///
+/// ## Consequence 2: one agreement is not evidence of a limit
+///
+/// The `2 → 4` agreement above is a full agreement on a mode the next refinement
+/// leaves. [`REQUIRED_CONSECUTIVE_AGREEMENTS`] carries that reasoning.
+///
+/// ## Consequence 3: the yardstick has to be the criterion, not the coefficients
+///
+/// The old bar compared a relative sup-norm over linear predictors against
+/// `options.inner_tol` — a KKT-RESIDUAL tolerance. Those are different
+/// quantities, and on this fixture the mismatch is fatal rather than cosmetic:
+/// two sweeps reaching the SAME mode differ by `3.3e-5` and `5.4e-5` in that
+/// norm against a `1e-5` bar, so "the same mode, reached twice" could not be
+/// certified at any refinement depth. The reason is physical: the armed mode is
+/// nearly flat in one direction (`λ_min ≈ 4.7e-7` on this fixture), so `β̂` is
+/// poorly determined by a KKT residual while the criterion built from it is
+/// well determined — the same two endpoints agree to `5.0e-7` in the criterion.
+///
+/// And the criterion is what the seed exists for. `V(ρ) = ℓ_p(θ̂(ρ), ρ)` is a
+/// function of ρ only once a selection rule fixes `θ̂`; the rule is this
+/// continuation; so two endpoints that the criterion cannot tell apart are the
+/// same seed for every purpose the caller has. The bar is therefore the outer
+/// solver's own relative-cost resolution, in the criterion's own units.
+///
+/// The state discrepancy is still computed and still reported — it is what makes
+/// a branch change visible in the trail — it simply is not the verdict.
+pub(crate) fn certify_refined_continuation<P: RefinedContinuationPath>(
     path: &P,
-    inner_tolerance: f64,
+    options: &BlockwiseFitOptions,
     refine_uncertified_waypoints: bool,
 ) -> Result<CertifiedAnchoredContinuationSeed, AnchoredContinuationRefusal> {
-    let mut coarser: Option<ConstrainedWarmStart> = None;
+    let inner_tolerance = options.inner_tol;
+    // The outer solver's own relative-cost resolution: two criterion values
+    // closer than this are values the search that consumes them cannot separate.
+    // `outer_rel_cost_tol` is the relative one where a family sets it;
+    // `outer_tol` is the fallback, and it is the same quantity the outer
+    // convergence test is denominated in.
+    let criterion_resolution = options.outer_rel_cost_tol.unwrap_or(options.outer_tol);
+    let max_refinements = continuation_refinement_budget(options.outer_max_iter);
+    let mut coarser: Option<SweptEndpoint> = None;
     let mut previous_discrepancy: Option<f64> = None;
+    let mut consecutive_agreements = 0usize;
+    let mut refinements = 0usize;
+    let mut trail: Vec<(usize, f64, f64)> = Vec::new();
     let mut steps = 1usize;
     loop {
         let endpoint = match path.sweep(steps) {
@@ -1696,9 +1896,23 @@ fn certify_refined_continuation<P: RefinedContinuationPath>(
                 if !path.resolves_steps(refined) {
                     return Err(refusal);
                 }
+                // Charged against the same budget as a comparison refinement:
+                // it doubles the same corrector count, so exempting it would
+                // reopen the unbounded loop by another door.
+                if refinements >= max_refinements {
+                    return Err(AnchoredContinuationRefusal::RefinementBudgetExhausted {
+                        steps,
+                        refinements,
+                        max_refinements,
+                        criterion_resolution,
+                        trail,
+                    });
+                }
+                refinements += 1;
                 log::info!(
-                    "[OUTER] coefficient-objective continuation refining {steps}→{refined} \
-                     steps after waypoint {waypoint_index} did not certify"
+                    "[OUTER] {} continuation refining {steps}→{refined} steps after waypoint \
+                     {waypoint_index} did not certify",
+                    path.label(),
                 );
                 steps = refined;
                 continue;
@@ -1706,16 +1920,47 @@ fn certify_refined_continuation<P: RefinedContinuationPath>(
             Err(refusal) => return Err(refusal),
         };
         if let Some(previous) = coarser.as_ref() {
-            let discrepancy = path.endpoint_discrepancy(steps, previous, &endpoint)?;
+            let discrepancy =
+                path.endpoint_discrepancy(steps, &previous.warm_start, &endpoint.warm_start)?;
+            let agreement =
+                criterion_agreement(previous.criterion_value, endpoint.criterion_value);
+            if agreement <= criterion_resolution {
+                consecutive_agreements += 1;
+            } else {
+                consecutive_agreements = 0;
+            }
+            trail.push((steps, discrepancy, agreement));
+            // The refinement TRAIL, not just the pair the verdict is taken on.
+            // A mode-valued ladder's discrepancy sequence alternates between two
+            // scales; printing one ratio out of it reads as a convergence rate
+            // and is not one.
+            log::info!(
+                "[OUTER] {} continuation refinement: steps={steps} discrepancy={discrepancy:.6e} \
+                 previous={} criterion={:.9e} -> {:.9e} (agreement={agreement:.6e} vs resolution \
+                 {criterion_resolution:.6e}, consecutive={consecutive_agreements}/{}) \
+                 inner_tolerance={inner_tolerance:.6e}",
+                path.label(),
+                previous_discrepancy
+                    .map(|value| format!("{value:.6e}"))
+                    .unwrap_or_else(|| "none".to_string()),
+                previous.criterion_value,
+                endpoint.criterion_value,
+                REQUIRED_CONSECUTIVE_AGREEMENTS,
+            );
             match continuation_refinement_decision(
-                steps,
-                previous_discrepancy,
-                discrepancy,
+                ContinuationRefinementReading {
+                    steps,
+                    discrepancy,
+                    previous_discrepancy,
+                    criterion_agreement: agreement,
+                    consecutive_agreements,
+                },
                 inner_tolerance,
+                criterion_resolution,
             )? {
                 ContinuationRefinement::Certified(certificate) => {
                     return Ok(CertifiedAnchoredContinuationSeed {
-                        warm_start: endpoint,
+                        warm_start: endpoint.warm_start,
                         certificate,
                     });
                 }
@@ -1732,18 +1977,21 @@ fn certify_refined_continuation<P: RefinedContinuationPath>(
                 refined_steps: refined,
             });
         }
+        // `refinements` counts refinements PERFORMED, so the check comes before
+        // the increment and the refusal reports what was actually spent.
+        if refinements >= max_refinements {
+            return Err(AnchoredContinuationRefusal::RefinementBudgetExhausted {
+                steps,
+                refinements,
+                max_refinements,
+                criterion_resolution,
+                trail,
+            });
+        }
+        refinements += 1;
         coarser = Some(endpoint);
         steps = refined;
     }
-}
-
-/// Whether one dyadic refinement satisfies the continuation method's stated
-/// first-order contraction premise.
-pub(crate) fn continuation_discrepancy_satisfies_contraction_premise(
-    previous: f64,
-    current: f64,
-) -> bool {
-    current <= MAX_CONTINUATION_DISCREPANCY_RATIO * previous
 }
 
 /// The segment in ρ that the continuation follows, together with everything
@@ -1780,8 +2028,8 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     /// reconstructed `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the
     /// requested ρ* bitwise, because everything downstream binds the mode and
     /// its ρ as one identity.
-    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal> {
-        let mut carried: Option<ConstrainedWarmStart> = None;
+    fn sweep(&self, steps: usize) -> Result<SweptEndpoint, AnchoredContinuationRefusal> {
+        let mut carried: Option<SweptEndpoint> = None;
         for step in 0..=steps {
             let waypoint = if step == steps {
                 self.rho_target.clone()
@@ -1799,7 +2047,7 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                 self.options,
                 self.layout,
                 &waypoint,
-                carried.as_ref(),
+                carried.as_ref().map(|endpoint| &endpoint.warm_start),
                 self.rho_prior,
                 EvalMode::ValueOnly,
             )
@@ -1818,7 +2066,10 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     objective: eval.objective,
                 });
             }
-            carried = Some(eval.warm_start);
+            carried = Some(SweptEndpoint {
+                warm_start: eval.warm_start,
+                criterion_value: eval.objective,
+            });
         }
         carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
     }
@@ -1834,6 +2085,10 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
         finer: &ConstrainedWarmStart,
     ) -> Result<f64, AnchoredContinuationRefusal> {
         continuation_endpoint_discrepancy(steps, coarser, finer)
+    }
+
+    fn label(&self) -> &'static str {
+        "#2661 anchored"
     }
 }
 
@@ -1876,7 +2131,7 @@ pub(crate) fn coefficient_objective_homotopy_seed<
         rho_prior,
         rho,
     };
-    certify_refined_continuation(&path, options.inner_tol, true).map(Some)
+    certify_refined_continuation(&path, options, true).map(Some)
 }
 
 struct CoefficientObjectiveHomotopyPath<'a, F> {
@@ -1891,8 +2146,8 @@ struct CoefficientObjectiveHomotopyPath<'a, F> {
 impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     for CoefficientObjectiveHomotopyPath<'_, F>
 {
-    fn sweep(&self, steps: usize) -> Result<ConstrainedWarmStart, AnchoredContinuationRefusal> {
-        let mut carried: Option<ConstrainedWarmStart> = None;
+    fn sweep(&self, steps: usize) -> Result<SweptEndpoint, AnchoredContinuationRefusal> {
+        let mut carried: Option<SweptEndpoint> = None;
         for step in 0..=steps {
             let progress = step as f64 / steps as f64;
             let member = if step == steps {
@@ -1920,7 +2175,7 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                 self.options,
                 self.layout,
                 self.rho,
-                carried.as_ref(),
+                carried.as_ref().map(|endpoint| &endpoint.warm_start),
                 self.rho_prior,
                 EvalMode::ValueOnly,
             )
@@ -1939,7 +2194,42 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     objective: eval.objective,
                 });
             }
-            carried = Some(eval.warm_start);
+            // The per-waypoint trail. The endpoint discrepancy compares two
+            // sweeps at their LAST waypoint only, so a path that changed branch
+            // partway is indistinguishable from one that landed differently by
+            // accumulation. `|eta|inf` is the coordinate the discrepancy is
+            // taken in, so the two readings are the same instrument.
+            log::info!(
+                "[OUTER] coefficient-objective homotopy: steps={steps} waypoint={step} \
+                 progress={progress:.6} objective={:.9e} |eta|inf={:.6e} \
+                 inner(loglik={} penalty={} cycles={} converged={})",
+                eval.objective,
+                waypoint_eta_sup_norm(self.specs, &eval.warm_start),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| format!("{:.9e}", inner.log_likelihood))
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| format!("{:.9e}", inner.penalty_value))
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| inner.cycles.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                eval.warm_start
+                    .cached_inner
+                    .as_ref()
+                    .map(|inner| inner.converged.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+            );
+            carried = Some(SweptEndpoint {
+                warm_start: eval.warm_start,
+                criterion_value: eval.objective,
+            });
         }
         carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
     }
@@ -1956,6 +2246,10 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     ) -> Result<f64, AnchoredContinuationRefusal> {
         coefficient_objective_endpoint_discrepancy(steps, self.specs, coarser, finer)
     }
+
+    fn label(&self) -> &'static str {
+        "coefficient-objective"
+    }
 }
 
 /// Compare two coefficient modes in the coordinates the model objective can
@@ -1970,6 +2264,24 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
 /// authoritative map from coefficients to family state, while the cached
 /// likelihood/penalty pair catches any objective-relevant penalty motion not
 /// visible in eta.
+/// `‖η‖∞` over every block of a waypoint, in the same linear-predictor
+/// coordinates [`coefficient_objective_endpoint_discrepancy`] compares. Purely
+/// diagnostic; a block whose design cannot be applied contributes nothing rather
+/// than turning a log line into a failure.
+fn waypoint_eta_sup_norm(specs: &[ParameterBlockSpec], warm: &ConstrainedWarmStart) -> f64 {
+    let mut worst = 0.0_f64;
+    for (beta, spec) in warm.block_beta.iter().zip(specs.iter()) {
+        if beta.len() != spec.solver_design().ncols() {
+            continue;
+        }
+        let eta = spec.solver_design().matrixvectormultiply(beta) + spec.solver_offset();
+        for value in eta.iter() {
+            worst = worst.max(value.abs());
+        }
+    }
+    worst
+}
+
 fn coefficient_objective_endpoint_discrepancy(
     steps: usize,
     specs: &[ParameterBlockSpec],
@@ -2636,18 +2948,42 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // 0→1 from the already-certified unbiased mode; walking rho from maximal
     // smoothing solves a different selection problem and can discard that
     // authoritative mode before the Firth objective is even reached.
-    let objective_homotopy_seed = coefficient_objective_homotopy_seed(
+    // A continuation that cannot certify its mode selection DECLINES; it does
+    // not kill the fit (#2612).
+    //
+    // Its sibling `anchored_continuation_seed` has carried that contract since
+    // #2366 — "the production caller logs a refusal and keeps its existing seed,
+    // so declining a continuation still never turns a fit that works today into
+    // a failure" — and this call site was the one place that read the same kind
+    // of refusal as fatal. The asymmetry does not survive stating: refusing the
+    // whole fit does not make `V(ρ)` well defined, it only denies the caller the
+    // answer that the pre-#2366 seed would have produced. Measured on the
+    // penguins stride-4 armed refit, that asymmetry was the entire user-visible
+    // failure — a `FIT FAILED after 8.9s` where the seed the caller had already
+    // certified was sitting in `persistent_warm_start`.
+    //
+    // What a decline costs is real and is logged rather than hidden: the mode is
+    // then selected by the caller's coefficients, so `θ̂` is a functional of the
+    // seed for this fit and the #2366 guarantee does not hold for it.
+    let objective_homotopy_seed = match coefficient_objective_homotopy_seed(
         family,
         specs,
         &outer_options,
         &label_layout,
         &rho_prior,
         &rho0,
-    )
-    .map_err(|refusal| CustomFamilyError::Optimization {
-        context: "fit_custom_family coefficient-objective continuation",
-        reason: refusal.to_string(),
-    })?;
+    ) {
+        Ok(seed) => seed,
+        Err(refusal) => {
+            log::warn!(
+                "[OUTER] coefficient-objective continuation declined with typed refusal: \
+                 {refusal}. The armed coefficient mode is therefore selected by the caller's \
+                 seed rather than by the continuation, so it is not the #2366 canonical mode \
+                 for this fit"
+            );
+            None
+        }
+    };
     let initial_warm_cache = if let Some(certified) = objective_homotopy_seed {
         log::info!(
             "[OUTER] coefficient-objective continuation certified at {} steps: endpoint \

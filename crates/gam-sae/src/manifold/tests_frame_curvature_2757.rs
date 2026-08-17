@@ -52,6 +52,23 @@ fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeMani
     planted_term_with_gate(n, p, k_atoms, dense_tail, 3.0)
 }
 
+/// The same fixture, shared with the #2757 cost probe
+/// ([`crate::manifold::probe_report_cost_2757_tests`]) so the stopwatch and the gates
+/// measure the identical object.
+pub(crate) fn planted_term_for_probe(
+    n: usize,
+    p: usize,
+    k_atoms: usize,
+    dense_tail: bool,
+) -> SaeManifoldTerm {
+    planted_term(n, p, k_atoms, dense_tail)
+}
+
+/// The unit smoothing state the gates fit at, shared with the cost probe.
+pub(crate) fn unit_rho_for_probe(k_atoms: usize) -> SaeManifoldRho {
+    unit_rho(k_atoms)
+}
+
 /// As [`planted_term`], with an explicit gate logit so a caller can plant a term
 /// that claims no rows at all.
 fn planted_term_with_gate(
@@ -411,10 +428,23 @@ fn rank_deficient_blocks_agree_with_the_dense_spectrum() {
 }
 
 /// The gauge-driving arm: an output-Fisher metric couples output coordinates,
-/// so the curvature is NOT block diagonal and the builder must say so — and the
-/// root it returns must still reproduce the dense Gram exactly.
+/// so the curvature is NOT block diagonal and the builder must say so — and
+/// what it returns must still reproduce the dense Gram exactly.
+///
+/// This test used to assert `structure_tag() == "dense_gram"` here, i.e. it
+/// CODIFIED the surviving half of #2757's own defect: with more root rows than
+/// columns the builder assembled the `param_dim × param_dim` Gram and the
+/// certificate read its spectrum through a symmetric eigendecomposition. The
+/// rows are now folded into the `param_dim`-square upper-triangular factor `T`
+/// with `TᵀT = RᵀR` instead, so the tag is `dual_root` on both sides of the
+/// fork and the production builder emits no `DenseGram` at all.
+///
+/// The Gram-equality assertion below is unchanged and is what makes that a cost
+/// and resolution change rather than a different answer: `to_dense_gram()` on
+/// the folded factor is `TᵀT`, which must still match the naive
+/// `Σ_n J_nᵀ M_n J_n` reference entry by entry.
 #[test]
-fn gauge_driving_metric_falls_back_to_a_root_that_reproduces_the_dense_gram() {
+fn gauge_driving_metric_folds_into_a_root_that_reproduces_the_dense_gram() {
     let (n, p, k_atoms, rank) = (12usize, 10usize, 2usize, 3usize);
     let mut term = planted_term(n, p, k_atoms, true);
     let mut s = 0x2757_FEED_0000_0001u64;
@@ -434,8 +464,14 @@ fn gauge_driving_metric_falls_back_to_a_root_that_reproduces_the_dense_gram() {
         )
         .expect("streamed curvature");
     // n·rank = 36 root rows against param_dim = 20 columns, so the root is the
-    // larger object and the dense Gram is the right store.
-    assert_eq!(curvature.structure_tag(), "dense_gram");
+    // larger object and its rows are folded into the triangular factor.
+    assert_eq!(curvature.structure_tag(), "dual_root");
+    assert_eq!(
+        curvature.stored_scalars(),
+        layout.param_dim() * layout.param_dim(),
+        "the folded factor is param_dim-square, which is the point: it is the \
+         SMALLER of the two exact sides once the root outgrows its columns"
+    );
 
     let reference = reference_dense_gram(&term, &metric, &layout);
     let built = curvature.to_dense_gram();
@@ -463,6 +499,136 @@ fn gauge_driving_metric_falls_back_to_a_root_that_reproduces_the_dense_gram() {
     assert!(
         off_block > 0.0,
         "an output-Fisher metric must couple output coordinates, else this arm is vacuous"
+    );
+}
+
+/// The folded factor certifies the SAME model as the dense Gram it replaces.
+///
+/// This is the equivalence the previous test's tag change rests on. Both
+/// representations are handed to the identical certificate entry point and
+/// every per-generator verdict must agree — the pinned/unpinned flag exactly,
+/// the relative curvature fraction to the last digits either instrument can
+/// claim. A cost change that moved a verdict would be a different certificate
+/// wearing the same name.
+///
+/// The pinning RANK is deliberately not asserted equal, and that is the second
+/// half of why the fold is the right object rather than merely a cheaper one.
+/// `gram_spectral_rank` has to take the decision on `λ = σ²` and is therefore
+/// floored at the eigensolver's own resolution `ε·param_dim·λ_max`; the root
+/// decision is `σ > τ` with `τ = α·ε·N·σ_max`, which resolves `τ² ≈ 1e-16·λ_max`
+/// — five orders finer at this shape and more at production width. So the Gram
+/// can only ever count a SUBSET of what the root counts, which is what is
+/// asserted, alongside the bound neither may exceed.
+#[test]
+fn the_folded_root_and_the_dense_gram_certify_the_same_model() {
+    use crate::identifiability::residual_gauge_exact_from_curvature;
+
+    let (n, p, k_atoms, rank) = (24usize, 12usize, 3usize, 3usize);
+    let mut term = planted_term(n, p, k_atoms, true);
+    let mut s = 0x2757_F01D_0000_0001u64;
+    let factors = Array2::<f64>::from_shape_fn((n, p * rank), |_| lcg(&mut s) - 0.5);
+    let metric = gam_problem::RowMetric::output_fisher(Arc::new(factors), p, rank)
+        .expect("output-Fisher metric");
+    term.set_row_metric(metric.clone())
+        .expect("metric is conformable");
+
+    let (model, streamed) = term
+        .to_residual_gauge_model(metric, None, false)
+        .expect("certificate model");
+    let folded = streamed.expect("the unpinned path streams its curvature");
+    // n·rank = 72 root rows against param_dim = 36 columns: the fold arm.
+    assert_eq!(folded.structure_tag(), "dual_root");
+    assert_eq!(folded.root_rows(), n * rank);
+
+    let dense = ResidualGaugeCurvature::DenseGram {
+        gram: folded.to_dense_gram(),
+        root_rows: folded.root_rows(),
+    };
+    let views = term.atom_parameter_views();
+    let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
+        (0..k_atoms).map(|_| None).collect();
+    let from_fold = residual_gauge_exact_from_curvature(&model, &views, &ops, folded)
+        .expect("folded certificate");
+    let from_gram = residual_gauge_exact_from_curvature(&model, &views, &ops, dense)
+        .expect("dense-Gram certificate");
+
+    assert_eq!(from_fold.generators.len(), from_gram.generators.len());
+    assert!(
+        !from_fold.generators.is_empty(),
+        "a certificate with no generators cannot separate the two reductions"
+    );
+    for (a, b) in from_fold.generators.iter().zip(from_gram.generators.iter()) {
+        assert_eq!(a.description, b.description);
+        assert_eq!(
+            a.unpinned, b.unpinned,
+            "generator `{}` is {} from the folded root and {} from the dense Gram",
+            a.description,
+            if a.unpinned { "unpinned" } else { "pinned" },
+            if b.unpinned { "unpinned" } else { "pinned" }
+        );
+        let gap = (a.pinned_energy_fraction - b.pinned_energy_fraction).abs();
+        assert!(
+            gap <= 1.0e-9,
+            "generator `{}` scores {:.17e} from the folded root against {:.17e} from \
+             the dense Gram",
+            a.description,
+            a.pinned_energy_fraction,
+            b.pinned_energy_fraction
+        );
+    }
+
+    let bound = (n * rank).min(model.param_dim());
+    assert!(
+        from_fold.pinning_rank <= bound && from_gram.pinning_rank <= bound,
+        "no reduction may report a rank above min(root rows, param_dim) = {bound}; \
+         folded {} gram {}",
+        from_fold.pinning_rank,
+        from_gram.pinning_rank
+    );
+    assert!(
+        from_gram.pinning_rank <= from_fold.pinning_rank,
+        "the Gram decision is floored at the eigensolver's resolution, so it can \
+         only count a subset of what the root counts; gram {} > folded {}",
+        from_gram.pinning_rank,
+        from_fold.pinning_rank
+    );
+}
+
+/// A curvature that is exactly zero must certify at rank zero on the FOLD arm
+/// too, not merely on the block arm.
+///
+/// The fold is the one representation whose stored object (a `param_dim`-square
+/// factor) is the same shape whether the curvature is full rank or identically
+/// zero, so "the factor is big" must not be read as "the rank is big".
+#[test]
+fn a_zero_curvature_folds_to_rank_zero_under_a_gauge_driving_metric() {
+    let (n, p, k_atoms, rank) = (20usize, 8usize, 2usize, 3usize);
+    let mut term = planted_constant_decoder_term(n, p, k_atoms);
+    let mut s = 0x2757_F01D_0000_0002u64;
+    let factors = Array2::<f64>::from_shape_fn((n, p * rank), |_| lcg(&mut s) - 0.5);
+    let metric = gam_problem::RowMetric::output_fisher(Arc::new(factors), p, rank)
+        .expect("output-Fisher metric");
+    term.set_row_metric(metric.clone())
+        .expect("metric is conformable");
+
+    let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
+    let curvature = term
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
+        .expect("streamed curvature");
+    // n·rank = 60 root rows against param_dim = 16: the fold arm.
+    assert_eq!(curvature.structure_tag(), "dual_root");
+    let worst = curvature
+        .to_dense_gram()
+        .iter()
+        .fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert!(
+        worst == 0.0,
+        "a constant decoder has an identically zero curvature; the folded factor \
+         reconstructs {worst:.3e}"
     );
 }
 

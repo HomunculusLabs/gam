@@ -808,6 +808,83 @@ pub(crate) fn measured_penalty_nullspace(s: &Array2<f64>) -> Result<Array2<f64>,
     )
 }
 
+/// The directions a symmetric PSD curvature `A` fails to bound: an orthonormal
+/// basis of the span of `A`'s eigenvectors whose eigenvalue is below ONE
+/// observation-equivalent of curvature (gam#2612).
+///
+/// The threshold is `CONDITIONING_GATE_ABSOLUTE`, not a fresh constant. That
+/// value is already the codebase's answer to "how much curvature does one
+/// observation contribute to a unit-scale direction" — a binomial Fisher weight
+/// `p(1−p) ≤ ¼`, a Gaussian unit weight `1` — and it is already what decides
+/// whether the Jeffreys term FIRES. Using it to decide the term's SUPPORT as
+/// well is the same statement asked once instead of twice: a direction holding
+/// less than a single observation's worth of curvature is not determined by the
+/// model, whether the missing curvature is the likelihood's or the penalty's.
+///
+/// `A` is expected in the reduced (identifiable) coordinates, so the returned
+/// columns are too; the caller lifts them through the same identifiable span it
+/// reduced with.
+pub(crate) fn under_identified_subspace(
+    a: &Array2<f64>,
+    metric: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    gam_solve::estimate::reml::jeffreys_subspace::under_identified_subspace_in_metric(
+        a.view(),
+        metric.view(),
+    )
+}
+
+/// The reference-symmetric metric on the raw joint coefficient space,
+/// `M ⊗ I_P` in the class-major layout `θ[a·P + i] = β[i, a]` (gam#2612).
+///
+/// This is the CLR whitening factor of the softmax gauge — the same `M` the
+/// reference-symmetric penalty `M ⊗ S_t` is built from (gam#1587) — and it is
+/// what makes a curvature THRESHOLD a statement about the model rather than
+/// about which class happens to be the arbitrary baseline. Relabelling classes
+/// acts on `θ` by a non-orthogonal contrast change `R`, so `H + S_λ` transforms
+/// by congruence and its eigenvalues move; `M ⊗ I_P` transforms the same way, so
+/// generalized eigenvalues against it do not. See
+/// `under_identified_subspace_in_metric`.
+pub(crate) fn centered_class_coefficient_metric(m: usize, k: usize, p: usize) -> Array2<f64> {
+    // Scaled by `1/K`, and the scale is DERIVED rather than chosen.
+    //
+    // Any positive multiple of `M` is equally gauge-covariant, and the multiple
+    // moves every generalized eigenvalue — so it decides what the threshold
+    // MEANS, and picking it by what makes a fixture pass would be choosing an
+    // estimand on a curve. `CONDITIONING_GATE_ABSOLUTE`'s own derivation names
+    // the multiple: "one observation contributes at most `O(1)` curvature to a
+    // unit-scale direction (a binomial Fisher weight `p(1−p) ≤ ¼`, a Gaussian
+    // unit weight `1`)". The softmax's version of that quantity is exact. One
+    // observation's Fisher block in the ALR active frame is
+    // `W_ab = p_a(δ_ab − p_b)`, which at the most-informative point `p_c = 1/K`
+    // is
+    //
+    // ```text
+    //     W_ab = (1/K)(δ_ab − 1/K) = (1/K) · M_ab
+    // ```
+    //
+    // so `M/K` IS one maximally-informative observation's curvature per unit of
+    // design, and a generalized eigenvalue against it is literally "how many
+    // such observations does this direction hold". That is the constant's own
+    // sentence, transported into this family's geometry instead of borrowed from
+    // a binomial's.
+    let class_metric = centered_class_metric(m, k).mapv(|value| value / k as f64);
+    let dim = m * p;
+    let mut metric = Array2::<f64>::zeros((dim, dim));
+    for a in 0..m {
+        for b in 0..m {
+            let value = class_metric[[a, b]];
+            if value == 0.0 {
+                continue;
+            }
+            for i in 0..p {
+                metric[[a * p + i, b * p + i]] = value;
+            }
+        }
+    }
+    metric
+}
+
 /// The reference-symmetric class-space metric `M = I_m − J_m/K` (`m = K−1`
 /// active classes, `J` = all-ones), the closed-form CLR whitening factor of
 /// the softmax gauge (gam#1587). Symmetric positive-definite with eigenvalues
@@ -979,6 +1056,21 @@ pub struct MultinomialFamily {
     /// a single shared seed cannot express — and how fixed-ρ diagnostics pin
     /// the joint λs when probing the criterion surface (#2349).
     joint_initial_log_lambdas: Option<Vec<f64>>,
+    /// The MEASURED directions the model fails to bound at the smoothing it
+    /// selected, as an orthonormal `(K−1)P × m` basis in the raw joint
+    /// coefficient order — the span the Jeffreys/Firth term acts on (gam#2612).
+    ///
+    /// `None` (the default) falls back to `jeffreys_span_aggregate_penalty`,
+    /// i.e. `ker(S_λ)`. The formula REML driver sets this from the separation
+    /// certificate, which measures it ONCE at the unbiased probe's certified
+    /// mode and at the λ that probe selected, so it is constant for the lifetime
+    /// of the armed refit — the constancy every `Φ` derivative formula needs.
+    /// See `CustomFamily::jeffreys_span_basis` for why a penalty kernel is the
+    /// wrong object to derive this from.
+    ///
+    /// `Arc` because the family is cloned per homotopy waypoint and per outer
+    /// evaluation, and this basis never changes within a fit.
+    joint_jeffreys_span: Option<Arc<Array2<f64>>>,
 }
 
 /// One frozen-`β` snapshot of every canonical-axis joint-Hessian directional
@@ -1113,7 +1205,18 @@ impl MultinomialFamily {
             joint_jeffreys_term_strength: 1.0,
             initial_log_lambda: 0.0,
             joint_initial_log_lambdas: None,
+            joint_jeffreys_span: None,
         })
+    }
+
+    /// Install the MEASURED Jeffreys/Firth span (gam#2612).
+    ///
+    /// The caller is promising the basis is orthonormal, is expressed in the raw
+    /// joint coefficient order, and does not change for the lifetime of the fit.
+    /// See [`Self::joint_jeffreys_span`] and `CustomFamily::jeffreys_span_basis`.
+    pub fn with_joint_jeffreys_span(mut self, span: Option<Arc<Array2<f64>>>) -> Self {
+        self.joint_jeffreys_span = span;
+        self
     }
 
     /// Select whether this multinomial adapter instance contributes the
@@ -1226,14 +1329,13 @@ impl MultinomialFamily {
                     stacked_design: None,
                     stacked_offset: None,
                 };
-                spec.jacobian_callback =
-                    Some(Arc::new(MultinomialClassChannelJacobian::new(
-                        AdditiveBlockJacobian {
-                            design: (*self.design).clone(),
-                            own_output: a,
-                            n_family_outputs: m,
-                        },
-                    )));
+                spec.jacobian_callback = Some(Arc::new(MultinomialClassChannelJacobian::new(
+                    AdditiveBlockJacobian {
+                        design: (*self.design).clone(),
+                        own_output: a,
+                        n_family_outputs: m,
+                    },
+                )));
                 spec
             })
             .collect()
@@ -1452,6 +1554,41 @@ impl MultinomialFamily {
         Ok(specs)
     }
 
+    /// Whether the solver's block specs describe the SAME geometry this family
+    /// will assemble its joint workspace from.
+    ///
+    /// This predicate gates the three `*_available` capability answers below,
+    /// and through them the solver's routing: `inner_blockwise_fit` reaches its
+    /// coupled joint-Newton path when the family has an HVP workspace OR when
+    /// there are at least two blocks.
+    ///
+    /// # What "workspace shape" is, and what it is not (gam#2612)
+    ///
+    /// The workspace assembles `X_aᵀ diag(w_ab) X_b` from the design, the row
+    /// weights and the block count this family captured. Those are the only
+    /// things it can disagree with a spec about, so those are the only things
+    /// checked: row count, column count, offset length, block count, and the
+    /// absence of a stacked design the workspace does not know how to index.
+    ///
+    /// It used to ALSO require `spec.penalties.len() == self.penalties.len()`
+    /// and the same of `initial_log_lambdas`. Penalties are not part of the
+    /// workspace's geometry — no penalty ever enters `X_aᵀ diag(w_ab) X_b`; the
+    /// solver adds `s_lambdas` and the joint bundle itself, from the specs, on
+    /// the other side of this call. The clause was a leftover from before
+    /// gam#1587 moved this family's entire smoothing onto the JOINT penalty and
+    /// made `build_block_specs` attach `penalties: Vec::new()` deliberately (see
+    /// its comment: "The per-class blocks attach NO smooth penalty").
+    ///
+    /// So from #1587 onward the predicate was FALSE for every penalized
+    /// multinomial — the family was declaring "I cannot serve a joint workspace"
+    /// about the workspace it does in fact serve. For `K ≥ 3` that is invisible
+    /// in the verdict (`specs.len() >= 2` reaches the joint path anyway) and
+    /// costs only the workspace gradient/log-likelihood fast paths. For `K = 2`
+    /// there is ONE block, so the stale clause was the whole routing decision:
+    /// a two-class smooth multinomial fell onto the block-coordinate path,
+    /// whose line search rejected every step, and the zero iterate was published
+    /// as a converged mode — `edf_per_class = 4.09` with `β ≡ 0`, so every
+    /// predicted probability was the uniform simplex.
     fn specs_match_workspace_shape(&self, specs: &[ParameterBlockSpec]) -> bool {
         let n = self.weights.len();
         let p = self.design.ncols();
@@ -1462,8 +1599,6 @@ impl MultinomialFamily {
                     && spec.offset.len() == n
                     && spec.stacked_design.is_none()
                     && spec.stacked_offset.is_none()
-                    && spec.initial_log_lambdas.len() == self.penalties.len()
-                    && spec.penalties.len() == self.penalties.len()
             })
     }
 
@@ -2528,6 +2663,20 @@ impl CustomFamily for MultinomialFamily {
 
     fn joint_jeffreys_term_strength(&self) -> f64 {
         self.joint_jeffreys_term_strength
+    }
+
+    fn jeffreys_span_basis(&self) -> Result<Option<Array2<f64>>, String> {
+        let Some(span) = self.joint_jeffreys_span.as_ref() else {
+            return Ok(None);
+        };
+        let expected = self.beta_flat_dim();
+        if span.nrows() != expected {
+            return Err(format!(
+                "multinomial measured Jeffreys span is {:?}, expected ({expected}, m)",
+                span.dim()
+            ));
+        }
+        Ok(Some(span.as_ref().clone()))
     }
 
     fn coefficient_mode_homotopy_member(&self, progress: f64) -> Result<Option<Self>, String> {
@@ -4027,7 +4176,6 @@ mod tests {
                 .map(|(index, value)| value * (1 + index % 17) as f64)
                 .sum()
         }
-
 
         /// Binding #932 release gate for multinomial higher-order production.
         ///

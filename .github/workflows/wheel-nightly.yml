@@ -48,7 +48,7 @@ on:
   # rolling behaviour for rapid pushes and still guarantees an artifact exists
   # on a bounded delay.
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '19 4 * * *'
   workflow_dispatch:
     inputs:
       build_sha:

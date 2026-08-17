@@ -1,4 +1,5 @@
 use crate::inference::predict_io::PredictResult;
+use crate::transformation_normal::CtnTransformTable;
 use gam_custom_family::{CustomFamily, ParameterBlockState};
 use gam_problem::types::{
     LikelihoodScaleMetadata, LikelihoodSpec, ResponseFamily, is_valid_tweedie_power,
@@ -177,48 +178,21 @@ pub enum NoiseModel {
     /// samples from the genuine conditional law `F(·|x)`.
     ///
     /// Both this sampler and the response-scale conditional mean `E[Y|x]` used by
-    /// `predict` (#1612) invert the SAME per-row monotone curve, materialized on
-    /// a shared response grid, so the two paths cannot disagree on the underlying
-    /// transform.
+    /// `predict` (#1612) invert the SAME object — a [`CtnTransformTable`], which
+    /// carries the tabulated transform together with the slopes of the two
+    /// affine tails it has outside the tabulated range — so the two paths cannot
+    /// disagree on the underlying transform, and neither of them can truncate
+    /// the predictive law at the training range.
+    ///
+    /// That truncation is what this variant used to do: a latent draw past
+    /// `h(y_hi|x)` — which happens with the model's own probability
+    /// `1 − Φ(h(y_hi|x))`, around `1/(n+1)` for a calibrated fit — returned the
+    /// support endpoint, so `y_lo` and `y_hi` were atoms of the sampled law
+    /// (gam#2600).
     TransformationNormalQuantile {
-        /// Shared, strictly increasing response grid (length `g ≥ 2`).
-        grid_y: Array1<f64>,
-        /// `h_grid[[i, k]] = h(grid_y[k] | x_i)`, strictly increasing in `k` for
-        /// every row `i` (one row per observation).
-        h_grid: Array2<f64>,
+        /// The fitted transform and its tails, one row per observation.
+        table: CtnTransformTable,
     },
-}
-
-/// Invert a monotone increasing tabulated function `z = h_row(grid_y)` at the
-/// latent value `target`: find the bracketing grid interval and linearly
-/// interpolate `y`. Values below/above the tabulated range map to the support
-/// endpoints (the finite-support tails carry no mass between the clamp and the
-/// endpoint). This is the same bracketing inversion the CTM `predict` mean
-/// (#1612) uses on its quadrature nodes, applied here to a random latent draw.
-fn invert_monotone_grid(
-    grid_y: &Array1<f64>,
-    h_row: ndarray::ArrayView1<'_, f64>,
-    target: f64,
-) -> f64 {
-    let g = grid_y.len();
-    if target <= h_row[0] {
-        return grid_y[0];
-    }
-    if target >= h_row[g - 1] {
-        return grid_y[g - 1];
-    }
-    let mut lo = 0usize;
-    let mut hi = g - 1;
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        if h_row[mid] <= target {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let t = (target - h_row[lo]) / (h_row[hi] - h_row[lo]);
-    grid_y[lo] + t * (grid_y[hi] - grid_y[lo])
 }
 
 /// First-class generative specification: mean process + observation noise.
@@ -860,24 +834,19 @@ pub fn sampleobservations<R: rand::Rng + ?Sized>(
             }
             Ok(y)
         }
-        NoiseModel::TransformationNormalQuantile { grid_y, h_grid } => {
+        NoiseModel::TransformationNormalQuantile { table } => {
             let n = spec.mean.len();
-            if h_grid.nrows() != n {
+            if table.nrows() != n {
                 crate::bail_invalid_estim!(
-                    "transformation-normal h_grid has {} rows but mean length is {n}",
-                    h_grid.nrows()
-                );
-            }
-            let g = grid_y.len();
-            if g < 2 || h_grid.ncols() != g {
-                crate::bail_invalid_estim!(
-                    "transformation-normal grid is degenerate: grid_y len {g}, h_grid cols {}",
-                    h_grid.ncols()
+                    "transformation-normal transform table has {} rows but mean length is {n}",
+                    table.nrows()
                 );
             }
             // `h(Y|x) ~ N(0,1)` ⇒ a response-scale draw is `Y = h⁻¹(Z | x)`,
             // `Z ~ N(0,1)`. One independent latent draw per observation, inverted
-            // through that row's monotone transform.
+            // through that row's monotone transform — including through its
+            // affine tails, so the sampled law has no atoms at the fitted
+            // support endpoints.
             let dist = rand_distr::Normal::new(0.0, 1.0).map_err(|e| {
                 EstimationError::InvalidInput(format!(
                     "invalid standard-normal latent sampler: {e}"
@@ -886,7 +855,7 @@ pub fn sampleobservations<R: rand::Rng + ?Sized>(
             let mut y = Array1::<f64>::zeros(n);
             for i in 0..n {
                 let z: f64 = rand_distr::Distribution::sample(&dist, rng);
-                y[i] = invert_monotone_grid(grid_y, h_grid.row(i), z);
+                y[i] = table.invert(i, z);
             }
             Ok(y)
         }
@@ -1153,12 +1122,13 @@ mod tests {
                 h_grid[[i, k]] = slopes[i] * (grid_y[k] - centers[i]);
             }
         }
+        // Both rows are exactly affine, so every node slope is the row slope.
+        let slope_grid = Array2::from_shape_fn((2, g), |(i, _)| slopes[i]);
+        let table = CtnTransformTable::new(grid_y.clone(), h_grid, slope_grid)
+            .expect("affine transform table");
         let spec = GenerativeSpec {
             mean: Array1::from_vec(vec![centers[0], centers[1]]),
-            noise: NoiseModel::TransformationNormalQuantile {
-                grid_y: grid_y.clone(),
-                h_grid,
-            },
+            noise: NoiseModel::TransformationNormalQuantile { table },
         };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(20240613);

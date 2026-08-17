@@ -106,16 +106,22 @@ pub(crate) const SCOP_HESSIAN_HVP_DENSE_CACHE_MAX_BYTES: usize = 64 * 1024 * 102
 /// rank-deficient KKT tail that genuinely needs hundreds of cycles. CTN is a
 /// different regime: its coefficient block is a *bounded-dimension* Khatri–Rao
 /// tensor (capped by `BASE/LARGE_SAMPLE_TRANSFORMATION_TENSOR_WIDTH`), and the
-/// objective is strictly convex by construction — the `double_penalty` ridge
-/// plus the order-2/order-1 roughness penalties make the penalized Hessian
-/// positive definite even where the likelihood is flat on weakly-identified
-/// shape×covariate directions. An exact-Newton iteration on a strictly convex,
-/// bounded-dimension block converges in a handful of cycles; the only way the
-/// fit reaches 1200 inner cycles is by polishing weakly-identified directions
-/// that contribute nothing to the likelihood (the #720 timeout). Scaling the
-/// cap with the realized coefficient dimension keeps a generous margin for a
-/// genuinely nonlinear, high-dimensional transformation while refusing to grind
-/// the production large-scale cap on an easy near-Gaussian shift.
+/// objective is convex by construction. The convexity is the LIKELIHOOD's, not
+/// the penalty's: the negative log-likelihood is `Σ w (½h² − log h')` with `h`
+/// and `h'` both linear in β, so its exact Hessian is
+/// `Σ w (∇h ∇hᵀ + ∇h' ∇h'ᵀ / h'²)` — two Gram matrices, positive definite
+/// wherever no nonzero β annihilates `h` on every row. (Before gam#2600 this
+/// paragraph credited the `double_penalty` ridge and the roughness penalties,
+/// and it was false in both halves: the endpoint renormalizer made the
+/// likelihood non-convex, and gam#2600's predecessor `faf3f3fde` had already
+/// put the affine transformation in every penalty's null space.) An
+/// exact-Newton iteration on a convex, bounded-dimension block converges in a
+/// handful of cycles; the only way the fit reaches 1200 inner cycles is by
+/// polishing weakly-identified directions that contribute nothing to the
+/// likelihood (the #720 timeout). Scaling the cap with the realized coefficient
+/// dimension keeps a generous margin for a genuinely nonlinear, high-dimensional
+/// transformation while refusing to grind the production large-scale cap on an
+/// easy near-Gaussian shift.
 pub(crate) const CTN_INNER_MAX_CYCLES_BASE: usize = 64;
 
 pub(crate) const CTN_INNER_MAX_CYCLES_PER_DIM: usize = 2;

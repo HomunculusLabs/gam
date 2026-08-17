@@ -7674,31 +7674,38 @@ mod spatial_trial_recovery_tests {
     }
 }
 
-fn require_successful_spatial_optimization_result<T>(
-    initial_score: f64,
-    result: Result<Option<(T, f64)>, EstimationError>,
+/// Surface the two ways the exact spatial-κ route can fail to produce a
+/// candidate at all: it was unavailable, or it errored.
+///
+/// # ⚠ It deliberately does NOT grade the candidate's score (#2748)
+///
+/// It used to. A candidate whose realized score was worse than the incumbent's
+/// by more than `max(1e-6, |score|·1e-8)` was turned into a
+/// `RemlOptimizationFailed` and **killed the whole fit** — measured on
+/// `geo_disease_eas_matern_k6`, where a `1.267594e3 → 1.267595e3` regression
+/// (`8e-7` relative, some eighty times that bar) took down all four of its
+/// non-flexible benchmark lanes, `rust_gam` included.
+///
+/// Two things were wrong with that, and neither is the size of the bar.
+///
+/// 1. **The incumbent exists.** κ optimization is a refinement of a fit that
+///    has already been produced and scored. "The refinement did not improve on
+///    the incumbent" is an argument for shipping the incumbent, not for
+///    destroying it — which is exactly what the sibling
+///    `JointSpatialKappaOutcome::DeclinedKeepIncumbent` arm concluded when the
+///    joint route graded its own candidate one level in. Two graders of the
+///    same comparison reaching opposite responses is the defect, and the
+///    response that keeps a valid fit is the right one.
+/// 2. **A comparison between two measured numbers needs no tolerance.** The
+///    caller now keeps whichever of the incumbent and the candidate has the
+///    smaller score. `argmin` over two values is monotone by construction: it
+///    cannot ship something worse than what it was handed, at any drift, so
+///    there is nothing left for a bar to calibrate.
+fn require_available_spatial_optimization_result<T>(
+    result: Result<Option<T>, EstimationError>,
 ) -> Result<T, EstimationError> {
     match result {
-        Ok(Some((value, exact_score))) => {
-            // Allow rounding-level worsening: REML scores accumulate
-            // log-determinant terms whose finite-precision re-evaluation
-            // can drift well past 1e-10 absolute near a converged optimum
-            // (we have seen ~1e-6 between two evaluations whose printed
-            // values round to identical 6-digit scientific). Reject genuine
-            // worsenings (>1 unit) but admit anything within ~1e-6
-            // absolute / 1e-8 relative — meaningful REML gains are
-            // orders of magnitude larger.
-            const SCORE_DRIFT_ABS_TOL: f64 = 1e-6;
-            const SCORE_DRIFT_REL_TOL: f64 = 1e-8;
-            let tol = SCORE_DRIFT_ABS_TOL.max(initial_score.abs() * SCORE_DRIFT_REL_TOL);
-            if exact_score <= initial_score + tol {
-                Ok(value)
-            } else {
-                Err(EstimationError::RemlOptimizationFailed(format!(
-                    "spatial kappa optimization made REML score worse ({initial_score:.6e} -> {exact_score:.6e})"
-                )))
-            }
-        }
+        Ok(Some(value)) => Ok(value),
         Ok(None) => Err(EstimationError::RemlOptimizationFailed(
             "spatial kappa optimization is unavailable for one or more eligible spatial terms"
                 .to_string(),

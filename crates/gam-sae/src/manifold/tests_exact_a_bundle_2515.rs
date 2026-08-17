@@ -23,7 +23,7 @@
 
 use super::tests::{TestPeriodicEvaluator, periodic_basis};
 use approx::assert_abs_diff_eq;
-use super::construction::ThetaAdjointDhChannel;
+use super::construction::{ArrowMetric, ThetaAdjointDhChannel, sae_exact_a_direction_floor};
 use super::outer_objective::sae_surrogate_lane_config;
 use super::*;
 use ndarray::array;
@@ -446,15 +446,28 @@ fn zz_measure_exact_a_geometry_bundle_channels_2515() {
     let (eigs, vecs) =
         gam_linalg::faer_ndarray::FaerEigh::eigh(&a_dense, faer::Side::Lower).unwrap();
     let max_eig = eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    // #2673 — the retained band is per direction, in the `B` metric.
+    let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+    let joint_metric = ArrowMetric::Joint(&b_cache);
+    let floors: Vec<f64> = (0..eigs.len())
+        .map(|idx| {
+            let vbv = joint_metric
+                .quadratic_form(vecs.column(idx))
+                .expect("B quadratic form");
+            sae_exact_a_direction_floor(eigs.len(), spectral_norm, vbv)
+        })
+        .collect();
     let weights = Array1::from_iter(
         eigs.iter()
-            .map(|&l| if l > floor { 1.0 / l } else { 0.0 }),
+            .enumerate()
+            .map(|(idx, &l)| if l > floors[idx] { 1.0 / l } else { 0.0 }),
     );
     let a_pinv = vecs.dot(&Array2::from_diag(&weights)).dot(&vecs.t());
     let min_eig = eigs.iter().cloned().fold(f64::INFINITY, f64::min);
     println!(
-        "[#2515 A-GEOMETRY] joint A spectrum: min={min_eig:.6e} max={max_eig:.6e} floor={floor:.6e}"
+        "[#2515 A-GEOMETRY] joint A spectrum: min={min_eig:.6e} max={max_eig:.6e} \
+         widest floor={:.6e}",
+        floors.iter().copied().fold(0.0_f64, f64::max)
     );
     let without = term
         .logdet_theta_adjoint_dense(

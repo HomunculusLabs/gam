@@ -1449,6 +1449,14 @@ pub trait CustomFamily {
     ///
     /// # The contract
     ///
+    /// SUPERSEDED, for a family that can measure its span, by
+    /// [`Self::jeffreys_span_basis`] — which answers the question this route only
+    /// approximates. Read that method's doc before adding a caller here: a
+    /// kernel says which directions no `λ` could EVER reach, and the term needs
+    /// the directions the model does not bound at the `λ` it actually selected.
+    /// This route remains correct and remains the default for a family that has
+    /// no certified mode to measure at.
+    ///
     /// Return the `Σ_t M_t` of the family's own joint penalty specs (any
     /// POSITIVE combination has the same kernel, so the returned matrix is
     /// λ-free and therefore constant in both `β` and `ρ` — which is what keeps
@@ -1460,6 +1468,57 @@ pub trait CustomFamily {
     /// direction, which is why the span was widened in the first place, is left
     /// on the full span).
     fn jeffreys_span_aggregate_penalty(&self) -> Result<Option<Array2<f64>>, String> {
+        Ok(None)
+    }
+
+    /// The directions the Jeffreys/Firth term is allowed to act on, stated
+    /// DIRECTLY as an orthonormal `total_p × m` basis, when the family has
+    /// measured them rather than derived them from a penalty's kernel (gam#2612).
+    ///
+    /// Takes precedence over [`Self::jeffreys_span_aggregate_penalty`]. Default
+    /// `None` leaves that route, and therefore every existing family, unchanged.
+    ///
+    /// # Why a kernel is the wrong object to derive it from
+    ///
+    /// `ker(S_λ)` answers *"which directions could no smoothing parameter ever
+    /// reach"*, and the full identifiable span answers *"all of them"*. The
+    /// question the term needs answered is neither: it is **which directions does
+    /// the model, at the smoothing it actually selected, fail to bound**. Those
+    /// three sets differ, and this lane has now measured both of the derived ones
+    /// being wrong on the same fixture:
+    ///
+    /// * the FULL span over-arms — on the penguins witness `H + S_λ` reaches
+    ///   `2298` on directions the penalty bounds perfectly well, and arming them
+    ///   published mean argmax probability `0.828` against accuracy `0.965`;
+    /// * `ker(S_λ)` under-arms — on the same witness the whole identifiable span
+    ///   has `λ_min(H + S_λ) = 5.1e-5`, five orders below one observation-
+    ///   equivalent, on a direction that is NOT in `ker(S_λ)`. It is a `range(S)`
+    ///   direction whose selected `λ` railed at the floor, so the claim that
+    ///   backs the kernel — "on `range(S)` the model already carries a proper
+    ///   prior" — is true in name and false in magnitude: `8e-4`
+    ///   pseudo-observations is not a prior. The coefficient then runs to
+    ///   `|η|∞ ≈ 45`, and the posterior-mean predictive refuses to publish
+    ///   because the posterior at that width is not describable.
+    ///
+    /// The measured set is `{v : vᵀ(H + S_λ)v < 1 observation-equivalent}`, the
+    /// same criterion `CONDITIONING_GATE_ABSOLUTE` already uses to decide the
+    /// term's WEIGHT, now also deciding its SUPPORT. It contains the separating
+    /// members of `ker(S_λ)` and excludes its well-determined members (an
+    /// unpenalized intercept the data pins does not need a prior), so it is
+    /// strictly better on both sides.
+    ///
+    /// # The constancy contract, and how it is met
+    ///
+    /// Every `Φ` derivative formula differentiates through `H` with `Z_J` held
+    /// FIXED, so the returned basis must not move during a fit. `H + S_λ` moves
+    /// with both `β` and `ρ`, which is exactly why reading its deficient subspace
+    /// live was rejected. This route does not read it live: the basis is measured
+    /// ONCE, at the certified mode of the unbiased probe and at the `λ` that
+    /// probe selected, and handed to the armed refit as a constant — the same
+    /// construction, at the same point, that the arming DECISION already uses.
+    /// A family that returns `Some` here is promising the basis is fixed for the
+    /// lifetime of the fit; one that cannot promise that must return `None`.
+    fn jeffreys_span_basis(&self) -> Result<Option<Array2<f64>>, String> {
         Ok(None)
     }
 

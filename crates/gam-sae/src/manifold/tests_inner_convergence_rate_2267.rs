@@ -109,7 +109,7 @@ fn zz_measure_inner_contraction_and_curvature_fidelity_2267() {
         base.n_obs() * base.assignment.row_block_dim(),
     );
     eprintln!(
-        "[2267-RATE] budget | ‖g‖ | ‖Π⊥gauge g‖ | pen_obj | contraction/iter | vᵀBv/vᵀAv | wall_s"
+        "[2267-RATE] budget | ‖g‖ | ‖Π⊥null g‖ | pen_obj | contraction/iter | vᵀBv/vᵀAv | wall_s"
     );
 
     let budgets = [8usize, 16, 32, 64, 128, 256, 512];

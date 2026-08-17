@@ -1874,11 +1874,15 @@ impl SaeManifoldTerm {
         // restoring the collapse-prevention curvature the operator would otherwise
         // drop there.
         let mut sep_atom_curv = vec![0.0_f64; self.atoms.len()];
-        // #1038 — full-`B` self-concordant rank-1 carriers `(d2, ∂o/∂B)` the barrier
-        // hands back on the matrix-free / framed path (empty on the dense path, which
-        // scatters the rank-1 straight into `hbb`). Installed as `SparseRankOnePenaltyOp`
-        // on the structured penalty op below, projected to factored coords when framed.
-        let mut sep_rank1: Vec<(f64, Vec<(usize, f64)>)> = Vec::new();
+        // #1038/#2731 — the barrier's exact Gauss–Newton β curvature, one entry
+        // per co-firing component, in the factored `(coupling, per-edge carriers)`
+        // form it is derived in (empty on the dense path, which expands it
+        // straight into `hbb`). Installed as a `CoupledCarrierPenaltyOp` on the
+        // structured penalty op below, with each carrier projected to factored
+        // coords when framed. NOT expanded into per-eigenvector rank-1 carriers:
+        // that expansion is `ne²·2Mp` to build and `ne·sMp` to store and apply,
+        // and it was 86% of the curved tier at `p=2048, charts=32` (#2731).
+        let mut sep_curvature: Vec<SeparationBarrierCurvature> = Vec::new();
         // #2343 — amplitude barrier FIRST: its radial ridge lands in the SAME
         // shared `sep_atom_curv` the separation barrier's `lev` uses, folded once
         // below regardless of which barrier(s) engaged.
@@ -1893,7 +1897,7 @@ impl SaeManifoldTerm {
             penalty_scale,
             dense_beta_curvature,
             &mut sep_atom_curv,
-            &mut sep_rank1,
+            &mut sep_curvature,
         );
         if amplitude_wrote || separation_wrote {
             if dense_beta_curvature {
@@ -2071,42 +2075,53 @@ impl SaeManifoldTerm {
                 block_ranges.push(start..start + basis_sizes[k] * ranks[k]);
             }
             sys.set_block_offsets(Arc::from(block_ranges.into_boxed_slice()));
-            // #1038 — install the barrier's exact self-concordant rank-1 curvature
-            // in FACTORED coords. A full-`B` rank-1 `v vᵀ` projects to `(Φᵀv)(Φᵀv)ᵀ`
-            // (still rank-1 since `Φ` is linear), so project each carrier `v` through
-            // `project_border_vec` (= `Φᵀ`) and add a `SparseRankOnePenaltyOp`. This
-            // is the curvature the scalar `smooth_scaled_s` ridge cannot represent.
-            for (scale, carrier) in &sep_rank1 {
-                let mut full = ndarray::Array1::<f64>::zeros(frame_projection.beta_dim());
-                for &(idx, v) in carrier {
-                    full[idx] += v;
-                }
-                let vc = frame_projection.project_border_vec(full.view());
-                let sparse: Vec<(usize, f64)> = (0..vc.len())
-                    .filter(|&i| vc[i] != 0.0)
-                    .map(|i| (i, vc[i]))
+            // #1038/#2731 — install the barrier's exact Gauss–Newton curvature in
+            // FACTORED coords. `Φᵀ(Σ_{a,b} C[a,b] v_a v_bᵀ)Φ =
+            // Σ_{a,b} C[a,b] (Φᵀv_a)(Φᵀv_b)ᵀ` because `Φ` is linear, so ONLY the
+            // carriers move and the coupling is carried across untouched. Each
+            // carrier run is one atom's `M·p` block, which `Φ` maps to that same
+            // atom's `M·r` border block — a run in, a run out — so the projection
+            // never widens the support and never allocates a full-`β` vector.
+            // This is the curvature the scalar `smooth_scaled_s` ridge cannot
+            // represent.
+            for curvature in &sep_curvature {
+                let carriers: Vec<Vec<(usize, Vec<f64>)>> = curvature
+                    .carriers
+                    .iter()
+                    .map(|runs| {
+                        runs.iter()
+                            .filter(|(atom, _)| basis_sizes[*atom] * ranks[*atom] > 0)
+                            .map(|(atom, values)| {
+                                (
+                                    off_c[*atom],
+                                    frame_projection.project_atom_block(*atom, values),
+                                )
+                            })
+                            .collect()
+                    })
                     .collect();
-                if !sparse.is_empty() {
-                    ops.push(Arc::new(SparseRankOnePenaltyOp {
-                        k: border_dim,
-                        scale: *scale,
-                        carrier: sparse,
-                    }));
+                if carriers.iter().all(|runs| runs.is_empty()) {
+                    continue;
                 }
+                ops.push(Arc::new(CoupledCarrierPenaltyOp {
+                    k: border_dim,
+                    coupling: curvature.coupling.clone(),
+                    carriers,
+                }));
             }
             sys.set_penalty_op(Arc::new(CompositePenaltyOp { k: border_dim, ops }));
             // #1017/#1026 — install the frames-engaged device SAE PCG data. Skipped
             // (CPU fallback) when a dense analytic Beta-tier penalty fired (the
             // device kernel does not model that extra dense term). Builder:
             // `crate::frames::build_framed_device_sae_data`.
-            // #1038 — also skip (CPU fallback) when the barrier installed a rank-1
+            // #1038 — also skip (CPU fallback) when the barrier installed a
             // curvature carrier: the device kernel folds only the per-atom scalar
-            // smooth blocks, so it would silently drop the cross-atom rank-1 and
-            // diverge from the CPU operator. The rank-1 fires only on a genuinely
+            // smooth blocks, so it would silently drop the cross-atom coupling and
+            // diverge from the CPU operator. The carrier fires only on a genuinely
             // co-collapsing dictionary (gated), so healthy fits keep the device path.
             let has_dense_beta_penalty = beta_penalty_assembly.dense_written
                 || beta_penalty_assembly.deferred_factored
-                || !sep_rank1.is_empty();
+                || !sep_curvature.is_empty();
             // #974: `device_frame_blocks` is `None` on the whitening path (the
             // device kernel assumes the isotropic frame Gram), forcing the CPU
             // reduced-Schur matvec which routes `H_ββ` through the metric-aware
@@ -2155,15 +2170,12 @@ impl SaeManifoldTerm {
             if beta_penalty_assembly.dense_written {
                 ops.push(Arc::new(DensePenaltyOp(sys.hbb.clone())));
             }
-            // #1038 — the barrier's exact self-concordant rank-1, full-`B` layout
-            // (no frame projection on the non-frames path). Already CPU (no device
-            // data installed on the whitening path), so no extra fallback guard.
-            for (scale, carrier) in &sep_rank1 {
-                ops.push(Arc::new(SparseRankOnePenaltyOp {
-                    k: beta_dim,
-                    scale: *scale,
-                    carrier: carrier.clone(),
-                }));
+            // #1038/#2731 — the barrier's exact Gauss–Newton curvature, full-`B`
+            // layout (no frame projection on the non-frames path). Already CPU (no
+            // device data installed on the whitening path), so no extra fallback
+            // guard.
+            for curvature in &sep_curvature {
+                ops.push(Arc::new(curvature.as_full_beta_op(beta_dim, &beta_offsets)));
             }
             sys.set_penalty_op(Arc::new(CompositePenaltyOp { k: beta_dim, ops }));
             self.reclaim_border_hbb_workspace(&mut sys);
@@ -2218,11 +2230,11 @@ impl SaeManifoldTerm {
                 .collect();
             // #1038 — the device SAE PCG kernel folds only the per-atom scalar smooth
             // blocks and the `G ⊗ I_p` data Gram; it cannot represent the barrier's
-            // cross-atom rank-1 curvature. When that rank-1 fires (a co-collapsing
+            // cross-atom curvature. When that curvature fires (a co-collapsing
             // dictionary), skip the device install so the solve falls back to the CPU
             // reduced-Schur matvec, which routes `H_ββ` through the composite op below
-            // (rank-1 included). Healthy fits install no rank-1 and keep the device PCG.
-            if sep_rank1.is_empty() {
+            // (the carrier included). Healthy fits install none and keep the device PCG.
+            if sep_curvature.is_empty() {
                 self.install_device_sae_pcg_data(
                     &mut sys,
                     DeviceSaePcgData {
@@ -2246,13 +2258,10 @@ impl SaeManifoldTerm {
             if beta_penalty_assembly.dense_written {
                 ops.push(Arc::new(DensePenaltyOp(sys.hbb.clone())));
             }
-            // #1038 — barrier's exact self-concordant rank-1 (full-`B`, no projection).
-            for (scale, carrier) in &sep_rank1 {
-                ops.push(Arc::new(SparseRankOnePenaltyOp {
-                    k: beta_dim,
-                    scale: *scale,
-                    carrier: carrier.clone(),
-                }));
+            // #1038/#2731 — barrier's exact Gauss–Newton curvature (full-`B`, no
+            // projection).
+            for curvature in &sep_curvature {
+                ops.push(Arc::new(curvature.as_full_beta_op(beta_dim, &beta_offsets)));
             }
             sys.set_penalty_op(Arc::new(CompositePenaltyOp { k: beta_dim, ops }));
             self.reclaim_border_hbb_workspace(&mut sys);

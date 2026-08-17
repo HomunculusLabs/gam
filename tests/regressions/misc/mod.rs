@@ -10,6 +10,7 @@ mod cli_ffi_fit_parity_1196;
 mod conformal_held_out_calibration_fold_size_mismatch;
 mod constrained_linear_active_bound_panics;
 mod corrected_covariance_response_scale_not_equivariant;
+mod ctn_recovers_the_true_transform_2600;
 mod cubic_cell_kernel_bug_hunt;
 mod debug_assert_ban_gate_marginal_slope;
 mod decoder_incoherence_hvp_is_gauss_newton_not_exact;

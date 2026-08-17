@@ -84,15 +84,13 @@ fn latent_input_location_jet(
             let dim_ambient = centers.ncols();
             let (resolved_nullspace, resolved_power) =
                 resolve_duchon_orders(dim_ambient, duchon_nullspace_order_from_m(m), 0, None);
-            let effective_nullspace =
-                duchon_effective_nullspace_order(centers, resolved_nullspace);
+            let effective_nullspace = duchon_effective_nullspace_order(centers, resolved_nullspace);
             // The canonical construction (shared with the forward design via
             // `build_duchon_basis`) mean-centers the centers before the RRQR
             // (#1375), so the jet's `Z` is bit-identical to the design's `Z`
             // instead of a pivot-drifted basis of the same null space.
-            let radial_transform =
-                duchon_kernel_constraint_nullspace(centers, effective_nullspace)
-                    .map_err(|err| err.to_string())?;
+            let radial_transform = duchon_kernel_constraint_nullspace(centers, effective_nullspace)
+                .map_err(|err| err.to_string())?;
             // The radial derivative differentiates the exact forward Green's
             // function: same scale-free pure Duchon spectrum (`length_scale =
             // None`, the resolved spectral power `s`), not a hard-coded
@@ -1165,10 +1163,14 @@ fn predict_multinomial_intervals_pyfunc<'py>(
     out.set_item("prob_se", intervals.standard_error.into_pyarray(py))?;
     out.set_item("mean_lower", intervals.mean_lower.into_pyarray(py))?;
     out.set_item("mean_upper", intervals.mean_upper.into_pyarray(py))?;
-    // #2296: multinomial fits persist only the conditional joint-Laplace
-    // covariance; label the band with the definition actually integrated so
-    // the uncertainty is never presented as smoothing-corrected.
-    out.set_item("covariance_source", "conditional")?;
+    // #2296: label the band with the definition actually integrated, so the
+    // uncertainty is never presented as something it is not. This used to be
+    // the literal `"conditional"` because a multinomial fit persisted only the
+    // conditional joint-Laplace covariance; it now persists the first-order
+    // ρ-uncertainty correction too (gam#2612), so the answer is the payload's
+    // own measured provenance rather than a constant that was true when it was
+    // written.
+    out.set_item("covariance_source", intervals.covariance_source.as_str())?;
     Ok(out.unbind())
 }
 
@@ -1998,7 +2000,7 @@ fn sae_manifold_fit_inner<'py>(
     // single typed orchestration entry (#2236).
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let request = gam::terms::sae::manifold::SaeFitRequest {
-            reconstruction_optimism_folds: None,
+        reconstruction_optimism_folds: None,
         base_term,
         target: z_view.to_owned(),
         registry,
