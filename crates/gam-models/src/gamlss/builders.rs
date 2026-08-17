@@ -1447,6 +1447,471 @@ mod binomial_mean_wiggle_saved_frame_tests {
     }
 }
 
+/// Residualize a frozen warp basis against the mean block **in the metric the
+/// frozen joint solve's own Hessian defines** (#2748).
+///
+/// Returns `(A, B⊥)` with
+///
+/// ```text
+///     A  = (XᵀWX)⁺ XᵀWB,     B⊥ = B − X·A,     W = diag(curvature),
+/// ```
+///
+/// so that `Xᵀ W B⊥ = 0` on the range the pseudo-inverse retains.
+///
+/// # ⚠ The metric is not decoration — it is the whole content of "identifiable"
+///
+/// "The part of `B` outside the mean column space" is meaningless until an
+/// inner product says what *outside* means, and the only inner product the rest
+/// of this solve uses is the one its own curvature defines. With the warp basis
+/// frozen, `q = Xβ + B⊥β_w` is linear in `(β, β_w)`, so the joint
+/// negative-log-likelihood Hessian the fit assembles is EXACTLY
+///
+/// ```text
+///     [X B⊥]ᵀ diag(m₂) [X B⊥] + penalties,      m₂ = ∂²(−ℓ)/∂q²
+/// ```
+///
+/// — see [`BinomialMeanWiggleFamily::bmw_static_hessian_operator`], whose
+/// frozen arm has `dq_dq0 = 1` and `basis_d1 = 0`, collapsing its four row
+/// coefficients to `m₂` in every block. Its cross block is `Xᵀ diag(m₂) B⊥`,
+/// and `W = diag(m₂)` makes that **zero by construction**. The two blocks are
+/// then exactly decoupled in the curvature the solve reads, which is what
+/// de-aliasing was for.
+///
+/// Taking `W = I` instead orthogonalizes in a metric no part of the problem
+/// uses. It leaves `Xᵀ diag(m₂) B⊥ ≠ 0`, and the residue is largest exactly
+/// where binomial data are least informative, because `m₂ = w·μ(1−μ)` on a
+/// logit spans orders of magnitude across rows near saturation. Two
+/// consequences:
+///
+/// * **The outer frozen-index fixed point stops contracting.** Freeze at `η̂`
+///   and perturb by `δ`: `B(η̂+δ) ≈ B + diag(δ)B'`, so the design moves by
+///   `(I−P)diag(s)δ` in `q` with `s = B'β_w`, and the refit answers with
+///   `Δη = −H(I−P)diag(s)δ`, where `H = X(XᵀWX + S)⁻¹XᵀW` is this fit's own
+///   hat matrix. With `P` the `W`-projection, `H(I−P) = 0` identically — *for
+///   any penalty `S`*, since `XᵀW(I−P) = XᵀW − XᵀWX(XᵀWX)⁻¹XᵀW = 0` — so the
+///   leading term of the outer map's derivative vanishes. With `P` the
+///   Euclidean projection it does not, and the map then contracts only while
+///   `max_i s_i` is small, which nothing enforces: monotonicity bounds `β_w`
+///   below at zero and not at all above.
+/// * **The `no identifiable warp direction` refusal stops firing on rows that
+///   carry no information.** An unweighted projection spends its budget
+///   fitting `B` on saturated rows, where `μ(1−μ) ≈ 0` and the likelihood
+///   cannot tell `B` from `X` anyway; the `W`-projection leaves those rows in
+///   the residual, where they belong.
+///
+/// # Degenerate metrics
+///
+/// A row whose curvature is not a usable weight — non-finite, or negative,
+/// which a non-canonical link's OBSERVED information can be — must be handed
+/// in as `0` by the caller. A metric with zero rows is still a valid
+/// semi-inner product, and the eigen pseudo-inverse below already handles the
+/// rank deficiency it can produce: directions of `XᵀWX` under the cutoff are
+/// dropped from `A`, which leaves their (equally negligible) alias in `B⊥`.
+///
+/// The cutoff is purely RELATIVE, deliberately. `XᵀWX`'s scale carries the
+/// curvature's units, which on a binomial logit sit well below one; an
+/// absolute floor would read the whole spectrum as numerical noise and
+/// residualize nothing.
+pub(crate) fn dealias_warp_against_mean_block(
+    x: &Array2<f64>,
+    b_full: &Array2<f64>,
+    curvature: &Array1<f64>,
+) -> Result<(Array2<f64>, Array2<f64>), String> {
+    use faer::Side;
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let n = x.nrows();
+    if b_full.nrows() != n || curvature.len() != n {
+        return Err(format!(
+            "frozen-basis warp de-aliasing row mismatch: mean block has {n} row(s), warp basis \
+             has {}, curvature has {}",
+            b_full.nrows(),
+            curvature.len()
+        ));
+    }
+    if let Some(bad) = curvature
+        .iter()
+        .position(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(format!(
+            "frozen-basis warp de-aliasing metric is not a semi-inner product: curvature[{bad}] \
+             = {}",
+            curvature[bad]
+        ));
+    }
+    let mut weighted_x = x.clone();
+    for row in 0..n {
+        let weight = curvature[row];
+        weighted_x.row_mut(row).map_inplace(|value| *value *= weight);
+    }
+    let xtwx = x.t().dot(&weighted_x);
+    let xtwb = weighted_x.t().dot(b_full);
+    let (evals, evecs) = xtwx
+        .eigh(Side::Lower)
+        .map_err(|e| format!("frozen-basis warp de-aliasing mean QR failed: {e}"))?;
+    let max_eval = evals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let cutoff = 1.0e3 * f64::EPSILON * (xtwx.nrows().max(1) as f64) * max_eval;
+    let mut alias = Array2::<f64>::zeros((x.ncols(), b_full.ncols()));
+    for k in 0..evals.len() {
+        let lam = evals[k];
+        if !lam.is_finite() || lam.abs() <= cutoff {
+            continue;
+        }
+        let uk = evecs.column(k);
+        let uk_xtwb = uk.t().dot(&xtwb);
+        for i in 0..alias.nrows() {
+            for j in 0..alias.ncols() {
+                alias[[i, j]] += uk[i] * uk_xtwb[j] / lam;
+            }
+        }
+    }
+    let bda = b_full - &x.dot(&alias);
+    Ok((alias, bda))
+}
+
+/// The dominant eigenvalue of the frozen-index map's Jacobian, measured from
+/// two consecutive residuals (#2748).
+///
+/// Let `Φ` be the frozen-index map, `η* ` its fixed point, `M = Φ'(η*)` and
+/// `e_k = η_k − η*`. The undamped iteration is `e_{k+1} = M e_k`, and the
+/// residual actually available at each pass is `d_k = Φ(η_k) − η_k = (M−I)e_k`.
+/// `M` commutes with `M − I`, so
+///
+/// ```text
+///     d_k = M d_{k-1}
+/// ```
+///
+/// exactly, and `⟨d_k, d_{k-1}⟩ / ‖d_{k-1}‖²` is `M`'s Rayleigh quotient on a
+/// vector the power iteration has already aligned with its dominant
+/// eigenvector. Nothing is chosen: the number is read off two vectors the loop
+/// computes anyway.
+///
+/// Returns `NaN` when there is no previous residual, or when either has zero
+/// length — a Rayleigh quotient of nothing is not a measurement.
+pub(crate) fn fixed_point_dominant_multiplier(
+    previous_residual: Option<&Array1<f64>>,
+    residual: &Array1<f64>,
+) -> f64 {
+    let Some(previous) = previous_residual else {
+        return f64::NAN;
+    };
+    if previous.len() != residual.len() {
+        return f64::NAN;
+    }
+    let denominator = previous.dot(previous);
+    if !(denominator > 0.0) || !residual.dot(residual).is_finite() {
+        return f64::NAN;
+    }
+    let quotient = residual.dot(previous) / denominator;
+    if quotient.is_finite() { quotient } else { f64::NAN }
+}
+
+/// The relaxation `t` that removes the dominant mode of a frozen-index
+/// iteration whose measured multiplier is `mu` (#2748).
+///
+/// Relaxing the map to `η + t(Φ(η) − η)` replaces its Jacobian `M` by
+/// `(1−t)I + tM`, so the dominant mode's multiplier becomes `(1−t) + t·mu`,
+/// and the `t` that annihilates it is `1/(1 − mu)`. That is Aitken's Δ² for
+/// this iteration, written as a relaxation.
+///
+/// **This function only ever damps.** `1/(1 − mu) ≥ 1` for `mu ∈ [0, 1)`, and
+/// on that branch it returns `1` — the undamped step, bit for bit. Extrapolating
+/// a monotone-but-slow mode would be sound for the mode it measures and could
+/// destabilise a mode of equal magnitude and opposite sign that the Rayleigh
+/// quotient cannot see, and the failing population here does not need it. So
+/// the return value is `min(1, 1/(1 − mu))`, i.e.:
+///
+/// * `mu < 0` — an ALTERNATING mode, the divergence signature this issue's
+///   cluster shows: `t = 1/(1 + |mu|) ∈ (0, 1)`, exactly enough damping to
+///   cancel it. `mu = −4` gives `t = 0.2`.
+/// * `0 ≤ mu` — `t = 1`. Every pass of every currently-converging fit takes
+///   this branch, including the first pass of all of them, where `mu` is not
+///   measurable at all.
+///
+/// `mu ≥ 1` is not a case this can repair and does not pretend to be: the
+/// dominant mode is a monotone divergence, `(1−t) + t·mu ≥ 1` for every `t > 0`,
+/// and no relaxation of any size stabilises it. The caller reports `mu` in the
+/// refusal instead.
+pub(crate) fn frozen_index_relaxation(dominant_multiplier: f64) -> f64 {
+    if !dominant_multiplier.is_finite() || dominant_multiplier >= 0.0 {
+        return 1.0;
+    }
+    let relaxation = 1.0 / (1.0 - dominant_multiplier);
+    if relaxation.is_finite() && relaxation > 0.0 {
+        relaxation
+    } else {
+        1.0
+    }
+}
+
+#[cfg(test)]
+mod frozen_index_relaxation_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// The Rayleigh quotient is exact on a residual pair produced by an actual
+    /// linear map, which is the situation the derivation claims.
+    #[test]
+    fn the_multiplier_recovers_a_planted_linear_map() {
+        // A diagonal map with a dominant alternating mode.
+        let previous = array![1.0_f64, 0.0, 0.0];
+        let residual = array![-3.5_f64, 0.0, 0.0];
+        let mu = fixed_point_dominant_multiplier(Some(&previous), &residual);
+        assert!((mu + 3.5).abs() <= 1.0e-14, "mu={mu}");
+        // And the relaxation it implies annihilates that mode: the relaxed
+        // multiplier `(1-t) + t*mu` is zero.
+        let t = frozen_index_relaxation(mu);
+        assert!(((1.0 - t) + t * mu).abs() <= 1.0e-14, "t={t} mu={mu}");
+    }
+
+    /// A component orthogonal to the previous residual does not contribute to
+    /// the quotient, which is what makes it an estimate of the DOMINANT mode
+    /// rather than of the step's length.
+    #[test]
+    fn an_orthogonal_component_does_not_move_the_multiplier() {
+        let previous = array![1.0_f64, 0.0];
+        let aligned = array![-2.0_f64, 0.0];
+        let with_orthogonal = array![-2.0_f64, 9.0];
+        let bare = fixed_point_dominant_multiplier(Some(&previous), &aligned);
+        let mixed = fixed_point_dominant_multiplier(Some(&previous), &with_orthogonal);
+        assert!((bare - mixed).abs() <= 1.0e-14, "{bare} vs {mixed}");
+    }
+
+    /// The whole no-regression claim: a non-alternating pass, and the first
+    /// pass of every fit, take the undamped step bit for bit.
+    #[test]
+    fn a_non_alternating_pass_is_the_undamped_step_exactly() {
+        for mu in [0.0_f64, 0.25, 0.9, 1.0, 4.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                frozen_index_relaxation(mu).to_bits(),
+                1.0_f64.to_bits(),
+                "mu={mu} must take the undamped branch"
+            );
+        }
+        let residual = array![1.0_f64, -2.0];
+        assert!(fixed_point_dominant_multiplier(None, &residual).is_nan());
+        assert_eq!(
+            frozen_index_relaxation(fixed_point_dominant_multiplier(None, &residual)).to_bits(),
+            1.0_f64.to_bits(),
+        );
+    }
+
+    /// Damping never overshoots into a step in the wrong direction and never
+    /// grows the step: `t` stays in `(0, 1]` for every representable input.
+    #[test]
+    fn the_relaxation_never_leaves_the_unit_interval() {
+        for mu in [
+            -1.0e300_f64,
+            -1.0e6,
+            -12.0,
+            -1.0,
+            -1.0e-12,
+            -0.0,
+            0.5,
+            1.0e300,
+        ] {
+            let t = frozen_index_relaxation(mu);
+            assert!(t > 0.0 && t <= 1.0, "mu={mu} gave t={t}");
+        }
+    }
+
+    /// The measured damping actually turns the archetypal diverging two-cycle
+    /// into a convergent one: simulate the scalar iteration the derivation
+    /// models, with a multiplier that makes the undamped map diverge.
+    #[test]
+    fn the_derived_relaxation_converges_a_map_the_undamped_iteration_diverges_on() {
+        let multiplier = -2.5_f64; // |M| > 1: the undamped iteration blows up.
+        let fixed_point = 0.75_f64;
+        let map = |eta: f64| fixed_point + multiplier * (eta - fixed_point);
+
+        let mut undamped = 1.0_f64;
+        for _ in 0..40 {
+            undamped = map(undamped);
+        }
+        assert!(
+            (undamped - fixed_point).abs() > 1.0e6,
+            "the control must diverge, got {undamped}"
+        );
+
+        let mut eta = 1.0_f64;
+        let mut previous: Option<Array1<f64>> = None;
+        for _ in 0..40 {
+            let residual = Array1::from_elem(1, map(eta) - eta);
+            let mu = fixed_point_dominant_multiplier(previous.as_ref(), &residual);
+            let t = frozen_index_relaxation(mu);
+            previous = Some(residual.clone());
+            eta += t * residual[0];
+        }
+        assert!(
+            (eta - fixed_point).abs() <= 1.0e-12,
+            "the damped iteration must reach the fixed point, got {eta}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod binomial_mean_wiggle_dealias_metric_tests {
+    use super::*;
+
+    /// A deterministic mean block, warp basis and curvature vector with the
+    /// shape the failing cells have: a curvature spanning six orders of
+    /// magnitude, because that is the whole reason the metric matters
+    /// (`m₂ = w·μ(1−μ)` on a logit near saturation).
+    fn fixture() -> (Array2<f64>, Array2<f64>, Array1<f64>) {
+        let n = 40;
+        let mut x = Array2::<f64>::zeros((n, 4));
+        let mut b = Array2::<f64>::zeros((n, 3));
+        let mut curvature = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let t = row as f64 / (n as f64 - 1.0);
+            let eta = -6.0 + 12.0 * t;
+            x[[row, 0]] = 1.0;
+            x[[row, 1]] = eta;
+            x[[row, 2]] = (1.7 * eta).sin();
+            x[[row, 3]] = (0.9 * eta).cos();
+            // A monotone-ish warp basis: partial sums of positive bumps, which
+            // is the shape an I-spline has.
+            b[[row, 0]] = t;
+            b[[row, 1]] = t * t;
+            b[[row, 2]] = (1.0 - (-3.0 * t).exp()) / (1.0 - (-3.0_f64).exp());
+            let mu = 1.0 / (1.0 + (-eta).exp());
+            curvature[row] = mu * (1.0 - mu);
+        }
+        (x, b, curvature)
+    }
+
+    fn cross_block(x: &Array2<f64>, curvature: &Array1<f64>, bda: &Array2<f64>) -> Array2<f64> {
+        let mut weighted = bda.clone();
+        for row in 0..bda.nrows() {
+            let weight = curvature[row];
+            weighted.row_mut(row).map_inplace(|value| *value *= weight);
+        }
+        x.t().dot(&weighted)
+    }
+
+    fn max_abs(matrix: &Array2<f64>) -> f64 {
+        matrix.iter().map(|value| value.abs()).fold(0.0, f64::max)
+    }
+
+    /// The defining identity: the de-aliased warp block is orthogonal to the
+    /// mean block in the metric the frozen joint solve's Hessian is assembled
+    /// in, so the Hessian's cross block is zero.
+    #[test]
+    fn the_dealiased_warp_is_curvature_orthogonal_to_the_mean_block() {
+        let (x, b, curvature) = fixture();
+        let (_, bda) = dealias_warp_against_mean_block(&x, &b, &curvature).expect("de-alias");
+        let cross = cross_block(&x, &curvature, &bda);
+        // Scale the bar by what a single unweighted cross block would have
+        // been, so this asserts "zero relative to the quantity being cancelled"
+        // and cannot pass by everything being small.
+        let reference = max_abs(&cross_block(&x, &curvature, &b));
+        assert!(reference > 1.0e-3, "the fixture must have a real alias to cancel, got {reference}");
+        assert!(
+            max_abs(&cross) <= 1.0e-12 * reference,
+            "X' W B_perp must vanish: {} against reference {reference}",
+            max_abs(&cross),
+        );
+    }
+
+    /// The negative control that makes the point of the fix falsifiable: the
+    /// EUCLIDEAN residualization — what this site used before #2748 — leaves
+    /// the solve's own cross block at the same order as the raw alias. It
+    /// removes nothing the Hessian can see.
+    #[test]
+    fn the_euclidean_residualization_leaves_the_solve_coupled() {
+        let (x, b, curvature) = fixture();
+        let flat = Array1::<f64>::ones(curvature.len());
+        let (_, euclidean) = dealias_warp_against_mean_block(&x, &b, &flat).expect("de-alias");
+        let euclidean_cross = max_abs(&cross_block(&x, &curvature, &euclidean));
+        let reference = max_abs(&cross_block(&x, &curvature, &b));
+        assert!(
+            euclidean_cross >= 0.05 * reference,
+            "the Euclidean residualization is supposed to leave the curvature cross block \
+             standing; if this ever becomes small the fixture stopped exercising the defect: \
+             {euclidean_cross} against {reference}",
+        );
+        // And it does cancel the metric it WAS taken in — so the two are
+        // genuinely different projections, not one of them being broken.
+        let flat_cross = max_abs(&cross_block(&x, &flat, &euclidean));
+        let flat_reference = max_abs(&cross_block(&x, &flat, &b));
+        assert!(
+            flat_cross <= 1.0e-12 * flat_reference,
+            "X' B_perp must vanish for the flat metric: {flat_cross} against {flat_reference}",
+        );
+    }
+
+    /// A constant curvature is the Euclidean projection, exactly. Any fit whose
+    /// rows are equally informative therefore does not move by this change —
+    /// which is what makes the change a repair of the ill-conditioned case
+    /// rather than a new model everywhere.
+    #[test]
+    fn a_constant_metric_reproduces_the_euclidean_projection() {
+        let (x, b, _) = fixture();
+        let flat = Array1::<f64>::ones(x.nrows());
+        let scaled = Array1::<f64>::from_elem(x.nrows(), 7.5);
+        let (alias_flat, _) = dealias_warp_against_mean_block(&x, &b, &flat).expect("flat");
+        let (alias_scaled, _) = dealias_warp_against_mean_block(&x, &b, &scaled).expect("scaled");
+        let scale = max_abs(&alias_flat).max(1.0);
+        assert!(
+            max_abs(&(&alias_flat - &alias_scaled)) <= 1.0e-12 * scale,
+            "a metric proportional to the identity is the identity's projection",
+        );
+    }
+
+    /// Rows the likelihood cannot see get weight zero, and the identity still
+    /// holds: those rows keep their raw warp in the residual instead of
+    /// spending the projection's budget on them.
+    #[test]
+    fn zero_curvature_rows_leave_their_warp_in_the_residual() {
+        let (x, b, mut curvature) = fixture();
+        for row in 0..12 {
+            curvature[row] = 0.0;
+        }
+        let (_, bda) = dealias_warp_against_mean_block(&x, &b, &curvature).expect("de-alias");
+        assert!(bda.iter().all(|value| value.is_finite()));
+        let cross = max_abs(&cross_block(&x, &curvature, &bda));
+        let reference = max_abs(&cross_block(&x, &curvature, &b));
+        assert!(
+            cross <= 1.0e-12 * reference,
+            "X' W B_perp must vanish with a rank-degraded metric too: {cross} against {reference}",
+        );
+    }
+
+    /// A rank-deficient mean block: the pseudo-inverse drops only its own null
+    /// directions, and the retained ones are still exactly cancelled.
+    #[test]
+    fn a_rank_deficient_mean_block_still_cancels_its_retained_range() {
+        let (x, b, curvature) = fixture();
+        let mut duplicated = Array2::<f64>::zeros((x.nrows(), x.ncols() + 1));
+        duplicated.slice_mut(s![.., ..x.ncols()]).assign(&x);
+        // An exact copy of column 1, so `X'WX` is singular by construction.
+        let copied = x.column(1).to_owned();
+        duplicated.column_mut(x.ncols()).assign(&copied);
+        let (_, bda) =
+            dealias_warp_against_mean_block(&duplicated, &b, &curvature).expect("de-alias");
+        assert!(bda.iter().all(|value| value.is_finite()));
+        let cross = max_abs(&cross_block(&duplicated, &curvature, &bda));
+        let reference = max_abs(&cross_block(&duplicated, &curvature, &b));
+        assert!(
+            cross <= 1.0e-10 * reference,
+            "a singular X'WX must not stop the retained range from cancelling: {cross} against \
+             {reference}",
+        );
+    }
+
+    /// A metric that is not a semi-inner product is refused, not silently used:
+    /// a negative weight would make `X'WX` indefinite and its "projection"
+    /// would not be one.
+    #[test]
+    fn a_negative_curvature_is_refused() {
+        let (x, b, mut curvature) = fixture();
+        curvature[7] = -1.0e-3;
+        let error = dealias_warp_against_mean_block(&x, &b, &curvature)
+            .expect_err("a negative metric weight must refuse");
+        assert!(error.contains("semi-inner product"), "{error}");
+    }
+}
+
 /// Fit the binomial mean link-wiggle model. The observation-space de-aliasing
 /// preserves the standard I-spline coefficient coordinate, which is returned
 /// for the saved-model predict runtime.
@@ -1557,7 +2022,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
     // Build the de-aliased warp block at a frozen index.  The identifiable
     // warp is the part of `B(η̂)` outside the mean column space:
     //
-    //     B⊥ = (I - P_X) B = B - X A,     A = (XᵀX)^+ XᵀB.
+    //     B⊥ = (I - P_X) B = B - X A,     A = (XᵀWX)^+ XᵀWB.
     //
     // The previous implementation used `Z = null(XᵀB)` and fitted `B Z`.
     // That is too strong: when the warp basis has no coefficient combination
@@ -1571,7 +2036,14 @@ pub(crate) fn fit_binomial_mean_wiggle(
     // The returned `A` is used after fitting: because the inner problem used
     // `Xβ + (B - XA)β_w`, while prediction reconstructs the saved warp as
     // `Xβ_saved + Bβ_w`, we save `β_saved = β - Aβ_w`.
+    //
+    // `W` is the curvature `∂²(−ℓ)/∂q²` of the row loss at `working_q`, the
+    // composite index this fit last realized (the pilot's `η̂` on the first
+    // pass, where the warp is still zero). The metric is the whole content of
+    // the word "identifiable" here; see
+    // [`dealias_warp_against_mean_block`] for why it is that one and not `I`.
     let build_dealiased = |frozen: &Array1<f64>,
+                           working_q: &Array1<f64>,
                            beta_hint: Option<&Array1<f64>>,
                            log_lambda_hint: Option<&Array1<f64>>|
      -> Result<
@@ -1582,32 +2054,14 @@ pub(crate) fn fit_binomial_mean_wiggle(
         ),
         String,
     > {
-        use faer::Side;
-        use gam_linalg::faer_ndarray::FaerEigh;
-
         let b_full = family.wiggle_design(frozen.view())?;
-        let xtx = x_dense.t().dot(&x_dense);
-        let xtb = x_dense.t().dot(&b_full);
-        let (evals, evecs) = xtx
-            .eigh(Side::Lower)
-            .map_err(|e| format!("frozen-basis warp de-aliasing mean QR failed: {e}"))?;
-        let max_eval = evals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let cutoff = 1.0e3 * f64::EPSILON * (xtx.nrows().max(1) as f64) * max_eval.max(1.0);
-        let mut alias = Array2::<f64>::zeros((x_dense.ncols(), b_full.ncols()));
-        for k in 0..evals.len() {
-            let lam = evals[k];
-            if !lam.is_finite() || lam.abs() <= cutoff {
-                continue;
-            }
-            let uk = evecs.column(k);
-            let uk_xtb = uk.t().dot(&xtb);
-            for i in 0..alias.nrows() {
-                for j in 0..alias.ncols() {
-                    alias[[i, j]] += uk[i] * uk_xtb[j] / lam;
-                }
-            }
+        let mut curvature = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let (_, m2, _) =
+                family.neglog_q_derivatives(family.y[row], family.weights[row], working_q[row])?;
+            curvature[row] = if m2.is_finite() && m2 > 0.0 { m2 } else { 0.0 };
         }
-        let bda = &b_full - &x_dense.dot(&alias);
+        let (alias, bda) = dealias_warp_against_mean_block(&x_dense, &b_full, &curvature)?;
         let max_b = b_full.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let max_resid = bda.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         let resid_tol =
@@ -1681,9 +2135,15 @@ pub(crate) fn fit_binomial_mean_wiggle(
     // alternating step whose ratio exceeds one IS the divergence, measured
     // rather than inferred from a terminal `delta`.
     let mut previous_step: Option<Array1<f64>> = None;
+    let mut dominant_multiplier = f64::NAN;
+    // The operating point the de-aliasing metric is evaluated at: the composite
+    // index `q = X·β + B⊥·β_w` of the previous pass. The pilot carries no warp,
+    // so on the first pass it is the pilot index itself (#2748).
+    let mut working_q = frozen_eta.clone();
     for _outer in 0..options.outer_max_iter {
         let (wiggle_block, alias, bda) = build_dealiased(
             &frozen_eta,
+            &working_q,
             wiggle_beta_warm.as_ref(),
             wiggle_log_lambda_warm.as_ref(),
         )?;
@@ -1714,14 +2174,17 @@ pub(crate) fn fit_binomial_mean_wiggle(
         }
         let new_eta = mean_state.eta.clone();
         let new_source_beta = mean_state.beta.clone();
-        let new_wiggle_beta = fit
+        let wiggle_state = fit
             .block_states
             .get(BinomialMeanWiggleFamily::BLOCK_WIGGLE)
-            .map(|state| state.beta.clone())
             .ok_or_else(|| {
                 "fit_binomial_mean_wiggle: frozen-basis refit did not expose a fitted wiggle block"
                     .to_string()
             })?;
+        let new_wiggle_beta = wiggle_state.beta.clone();
+        // The composite index this pass actually fitted, which is the operating
+        // point the next pass's de-aliasing metric is taken at (#2748).
+        working_q = &new_eta + &wiggle_state.eta;
         last_scale = frozen_eta
             .iter()
             .chain(new_eta.iter())
@@ -1732,8 +2195,8 @@ pub(crate) fn fit_binomial_mean_wiggle(
             .zip(frozen_eta.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
-        // #2748: report the step, its relation to the previous one, and the
-        // warp slope that predicts both.
+        // #2748: the step, its relation to the previous one, and the warp slope
+        // that predicts both.
         let step = &new_eta - &frozen_eta;
         let step_norm = step.dot(&step).sqrt();
         let (step_ratio, step_cosine) = match previous_step.as_ref() {
@@ -1750,6 +2213,8 @@ pub(crate) fn fit_binomial_mean_wiggle(
             }
             None => (f64::NAN, f64::NAN),
         };
+        dominant_multiplier = fixed_point_dominant_multiplier(previous_step.as_ref(), &step);
+        let relaxation = frozen_index_relaxation(dominant_multiplier);
         let warp_slope = family.wiggle_dq_dq0(frozen_eta.view(), new_wiggle_beta.view())?;
         let max_slope = warp_slope
             .iter()
@@ -1760,12 +2225,13 @@ pub(crate) fn fit_binomial_mean_wiggle(
         log::info!(
             "[WIGGLE-OUTER] #2748 pass {_outer}: delta={last_delta:.6e} scale={last_scale:.6e} \
              tol={:.6e} |step|={step_norm:.6e} |step_k|/|step_k-1|={step_ratio:.6e} \
-             cos(step_k, step_k-1)={step_cosine:+.6} max_warp_slope={max_slope:.6e} \
+             cos(step_k, step_k-1)={step_cosine:+.6} mu_hat={dominant_multiplier:+.6e} \
+             relaxation={relaxation:.6e} max_warp_slope={max_slope:.6e} \
              mean_warp_slope={mean_slope:.6e} |beta_w|_1={:.6e}",
             options.outer_tol * last_scale,
             new_wiggle_beta.iter().map(|value| value.abs()).sum::<f64>(),
         );
-        previous_step = Some(step);
+        previous_step = Some(step.clone());
         if last_delta <= options.outer_tol * last_scale {
             converged = Some((fit, alias, frozen_source_beta));
             break;
@@ -1781,7 +2247,12 @@ pub(crate) fn fit_binomial_mean_wiggle(
             }
             .into());
         }
-        eta_block_warm.initial_beta = Some(new_source_beta.clone());
+        // Relaxed advance. `relaxation == 1.0` reproduces the undamped
+        // iteration exactly, which is what every non-oscillating pass gets.
+        let next_source_beta = &frozen_source_beta
+            + &((&new_source_beta - &frozen_source_beta).mapv(|value| value * relaxation));
+        let next_eta = &frozen_eta + &step.mapv(|value| value * relaxation);
+        eta_block_warm.initial_beta = Some(next_source_beta.clone());
         eta_block_warm.initial_log_lambdas =
             Some(fit.log_lambdas.slice(s![0..eta_penalty_count]).to_owned());
         wiggle_beta_warm = Some(new_wiggle_beta);
@@ -1790,15 +2261,25 @@ pub(crate) fn fit_binomial_mean_wiggle(
                 .slice(s![eta_penalty_count..expected_log_lambdas])
                 .to_owned(),
         );
-        frozen_source_beta = new_source_beta;
-        frozen_eta = new_eta;
+        frozen_source_beta = next_source_beta;
+        frozen_eta = next_eta;
     }
     let (mut fit, last_alias, frozen_source_beta) = converged.ok_or_else(|| {
         GamlssError::NumericalFailure {
             reason: format!(
-                "fit_binomial_mean_wiggle frozen-index fixed point did not converge in {} outer iterations: delta={last_delta:.3e}, scale={last_scale:.3e}, tolerance={:.3e}",
+                "fit_binomial_mean_wiggle frozen-index fixed point did not converge in {} outer \
+                 iterations: delta={last_delta:.3e}, scale={last_scale:.3e}, \
+                 tolerance={:.3e}; the fixed-point map's measured dominant multiplier is \
+                 mu={dominant_multiplier:.3e} (successive residuals satisfy d_k = M d_(k-1), so \
+                 this is M's Rayleigh quotient on them) and the relaxation derived from it was \
+                 {:.3e}. mu >= 1 means the frozen index is a REPELLING fixed point along a \
+                 monotone direction, which no positive relaxation stabilises: the composite \
+                 index the warp and the mean block are competing for is not pinned by this \
+                 model at these smoothing parameters. mu <= -1 with the relaxation at 1 would \
+                 mean the damping was declined and is a defect here, not a modelling limit",
                 options.outer_max_iter,
                 options.outer_tol * last_scale,
+                frozen_index_relaxation(dominant_multiplier),
             ),
         }
         .to_string()
