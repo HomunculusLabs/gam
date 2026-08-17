@@ -501,6 +501,7 @@ mod tests_gauge_posterior_flatness_2720;
 
 #[cfg(test)]
 mod tests_gauge_geometry_2720;
+mod tests_linear_escalation_2720;
 
 #[cfg(test)]
 mod tests_rho_structural_layout_2253;

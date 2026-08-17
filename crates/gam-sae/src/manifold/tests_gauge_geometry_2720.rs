@@ -15,42 +15,53 @@
 //! Periodic-specific the fix can live in the periodic gauge construction; if it
 //! is geometry-general it must live at the gauge/penalty interface.
 //!
-//! ## Measured (at `9b9973f`, ARD-saddle rho, 40-outer-iteration budget)
+//! ## Measured (post-fix, at merged main `5603dec` + this branch, ARD-saddle
+//! rho, 40-outer-iteration budget; pre-fix numbers at `9b9973f` in parentheses)
 //!
 //! | cell | max \|gᵀv\|/tol | worst-dir near-null share (e⁻²⁰) | verdict |
-//! |---|---|---|---|
-//! | `periodic`/unframed | 2.33× | 3.4e-9 | above |
-//! | `periodic`/framed | 2.33× | 3.4e-9 | above (verdict unchanged) |
-//! | `duchon`/unframed | 3.63× | 4.0e-7 | **above — flat patches violate too** |
-//! | `duchon`/framed | 3.63× | 4.0e-7 | above (verdict unchanged) |
-//! | `poincare`/unframed | — | — | refused at budget 40, still refused at 400 |
-//! | `poincare`/framed | — | — | refused at budget 40 (not retried at 400) |
-//! | `linear`/unframed | 0.13× | 2.0e-9 | below this tolerance |
-//! | `linear`/framed | 0.13× | 2.0e-9 | below this tolerance |
+//!|---|---|---|---|
+//!| `periodic`/unframed | 0.19× (was 2.33×) | 3.4e-9 | **below — the fix met the criterion** |
+//!| `periodic`/framed | 0.19× (was 2.33×) | 3.4e-9 | below (verdict unchanged by frame) |
+//!| `duchon`/unframed | 0.01× (was 3.63×) | 5.0e-7 | **below — the fix met the criterion** |
+//!| `duchon`/framed | 0.01× (was 3.63×) | 5.0e-7 | below (verdict unchanged by frame) |
+//!| `poincare`/unframed | 0.00× (was REFUSED 40 & 400) | 9.6e-4 | **below — first-ever measurement** |
+//!| `poincare`/framed | 0.00× (was REFUSED 40) | 9.6e-4 | below (first-ever framed measurement) |
+//!| `linear`/unframed | 4.21× (was 0.13×) | 3.4e-9 | **above — the exemption INVERTED** |
+//!| `linear`/framed | 4.21× (was 0.13×) | 3.4e-9 | above (verdict unchanged by frame) |
 //!
-//! Conclusions the modelling fix can rely on (scoped to this instrument):
+//! What changed between the two tables is the landed #2720/#2762 resolution:
+//! `descend_gauge_orbit` (062277d/69ae5a1, 2026-08-15) gives the inner solve a
+//! block-coordinate mover for the chart orbit, and ec18eac/61d5f00/44cf16a
+//! (2026-08-17) split the single quotient span into
+//! `posterior_null_quotient_basis` (decoder nulls only) and `likelihood_flat_block_basis`
+//! (what the mover descends). The poincaré REFUSAL — 94.6% of the KKT gradient
+//! in-orbit, robust to a 10× budget at `9b9973f` — is GONE: the mover unblocked
+//! it (verified by bisection: the refusal dies at `69ae5a1`, before the
+//! two-span split, with a bit-identical criterion 8.623218e1).
 //!
-//! * On the shared circle-cloud fixture, the instrument detects a
-//!   gauge-direction posterior gradient above solver tolerance for `periodic`
-//!   and `duchon`, below tolerance for `linear`, and obtains no `poincare`
-//!   measurement because the solve refused (robustly — re-attempted at a
-//!   10× budget, same refusal). The detection is **not confined to the
-//!   periodic kind** — a flat patch exhibits it too — so a fix inside the
-//!   periodic gauge construction cannot be sufficient.
-//! * The near-null-penalty control shows the violating projection is carried
-//!   by the penalty block, not the data term: at the same state, with
-//!   penalties collapsed to `exp(-20)`, the worst direction's projection
-//!   drops to `3.4e-9` (periodic) / `4.0e-7` (duchon) of its full-penalty
-//!   value, and EVERY direction's near-null projection sits below
-//!   `1.2e-5× tol` (asserted). The deep floor `exp(-26)` discriminates the
-//!   two readings: periodic's share scales with the floor (→ residual
-//!   penalty), duchon/linear's are floor-independent roundoff (→ noise, not
-//!   likelihood). This is the likelihood-vs-posterior split #2720 claims,
-//!   verified independently on each measured geometry.
-//! * A decoder frame has no detectable effect on the verdicts on this fixture
-//!   (identical max ratios; projections agree to ~3e-4 relative on duchon,
-//!   machine-exact on periodic/linear), consistent with Fixture B's exact
-//!   reconstruction-side round trip (`b8f0c4d97`).
+//! Conclusions the modelling thread can rely on (scoped to this instrument):
+//!
+//! * **#2720's acceptance criterion is now MET at the exit state for every
+//!   curved kind on this fixture** — periodic 0.19×, duchon 0.01×, poincaré
+//!   0.00×, all below the solver's own tolerance. The fix lane's fixed-point
+//!   test (`at_an_inner_fixed_point_...`, periodic-only, all-zeros rho) is
+//!   corroborated at the ARD-saddle penalty state and across geometries.
+//! * **The linear exemption INVERTED**: the one kind that was below tolerance
+//!   pre-fix (0.13×) is now the only one above it (4.21×). Pre-fix, linear's
+//!   exit state genuinely carried little orbit slope; post-fix, the changed
+//!   trajectory (orbit-mover consults, once-per-plateau arming) exits at a
+//!   state whose dilation direction still carries live slope — recall the
+//!   2f766a7 probe: on linear the DILATION field moves the smoothness term by
+//!   −7.82 at the seed, the largest orbit slope of any kind. Whether this is
+//!   the block descent's once-per-plateau budget running out on the kind with
+//!   the steepest orbit, or an exit class that claims a fixed point it does
+//!   not have, is the open question this pin now guards: the reading is
+//!   "linear exits above orbit tolerance at ARD-saddle rho", not "linear is
+//!   broken".
+//! * The near-null-penalty control still shows every violation is carried by
+//!   the penalty block, not the data term (worst near-null projection
+//!   3.4e-5× tol across all cells — asserted), and a decoder frame still
+//!   changes no verdict (framed == unframed max ratios, all eight cells).
 //!
 //! ## Scope and caveats
 //!
@@ -60,12 +71,13 @@
 //!   "a non-periodic kind can violate on this fixture family", not a
 //!   magnitude ranking across geometries — a target native to each geometry
 //!   would be needed for that.
-//! * `poincare`'s refusal is **budget-conditioned, not a geometry
-//!   measurement**: the solver reports `gauge_share = 0.9456` at the refusing
-//!   iterate (94.6% of the KKT gradient inside the chart-gauge span), which
-//!   is refusal telemetry from a nonstationary state, not an orbit
-//!   derivative. An escalated-budget arm re-attempts it; if it still
-//!   refuses, that is reported, not interpreted.
+//! * `poincare`'s pre-fix refusal is GONE post-fix, killed by #2762's
+//!   `descend_gauge_orbit` (bisection: the refusal dies at `69ae5a1`, before
+//!   the two-span split; the post-fix criterion is bit-identical 8.623218e1
+//!   across `69ae5a1` and `5603dec`). The poincaré cells now carry the
+//!   first-ever orbit-derivative measurement for the hyperbolic chart. The
+//!   escalated-budget retry arm remains as a canary: if the refusal ever
+//!   returns at either budget, the pin above fails with this history.
 //! * The measurement is a derivative **conditional on fixed ρ** (the
 //!   ARD-saddle penalty state), not a statement about the joint posterior
 //!   over smoothing parameters: ρ is overridden before the solve, and both
@@ -84,8 +96,9 @@
 //! a refusal is a measurement about the geometry, a broken instrument is a
 //! bug in this file.
 //!
-//! Enforced (deterministic fixtures): the sweep's findings are asserted —
-//! periodic and duchon violate, linear is exempt, poincare refuses robustly.
+//! Enforced (deterministic fixtures): the post-fix findings are asserted —
+//! every curved kind (periodic, duchon, poincare) now sits BELOW tolerance,
+//! and linear — the pre-fix exempt kind — now sits ABOVE it in its own band.
 //! The `#[ignore]`d manual-diagnostic convention is banned by the repo's
 //! build-time scanner; this test now runs in the normal suite.
 //!
@@ -580,14 +593,17 @@ fn chart_gauge_orbit_violation_across_geometries_2720() {
         }
     }
 
-    // ENFORCED findings (deterministic fixtures; measured at `9b9973f` and
-    // stable across runs): the sweep's three geometry conclusions, as bands
-    // robust to solver-path jitter but tight enough that a regression in
-    // any of them fails the suite:
-    //   1. periodic violates (2.33×) and duchon violates (3.63×) — the
-    //      violation is geometry-general, so BOTH must sit above tolerance;
-    //   2. linear is below tolerance (0.13×) — the exemption is real;
-    //   3. poincare refuses at BOTH budgets (robust refusal);
+    // ENFORCED findings (deterministic fixtures; re-measured post-fix at
+    // merged main `5603dec`; pre-fix values at `9b9973f` in the module docs):
+    //   1. the fix met the criterion for every curved kind — periodic (was
+    //      2.33×) and duchon (was 3.63×) must now sit BELOW tolerance;
+    //   2. poincare no longer refuses — the #2762 orbit mover unblocked the
+    //      stall (bisection: refusal dies at `69ae5a1`), so the cell must now
+    //      MEASURE, and its measurement must sit below tolerance;
+    //   3. linear is now the ONE kind above tolerance (was 0.13× below): the
+    //      exemption inverted. Pinned in its own band so the finding cannot
+    //      silently drift; the reading is "linear exits above orbit tolerance
+    //      at ARD-saddle rho", not "linear is broken";
     //   4. framing changes no verdict (framed == unframed max-ratio bands).
     let measured = |label: &str| {
         summary
@@ -595,48 +611,43 @@ fn chart_gauge_orbit_violation_across_geometries_2720() {
             .find(|(l, _)| l == label)
             .unwrap_or_else(|| panic!("[2720-geom] cell {label} missing from summary"))
     };
-    for kind in ["periodic", "duchon"] {
+    for kind in ["periodic", "duchon", "poincare"] {
         for frame in ["unframed", "framed"] {
             let (label, cell) = measured(&format!("{kind}/{frame}"));
             let m = match cell {
                 CellOutcome::Measured(m) => *m,
                 CellOutcome::Refused { .. } => panic!(
-                    "[2720-geom] {label} refused — non-poincare kinds measured at both \
-                     frames when this sweep landed; a refusal now is an instrument change"
+                    "[2720-geom] {label} refused — the three curved kinds measured at both \
+                     frames post-fix (the pre-fix poincare refusal was killed by #2762's \
+                     descend_gauge_orbit); a refusal now is an instrument or solver change"
                 ),
             };
             assert!(
-                m.max_ratio > 1.0 && m.max_ratio < 10.0,
-                "[2720-geom] {label}: max|gᵀv|/tol = {:.2}× left the violation band \
-                 (periodic measured 2.33×, duchon 3.63×) — the geometry-generality \
-                 finding changed; re-measure before updating",
+                m.max_ratio < 1.0,
+                "[2720-geom] {label}: max|gᵀv|/tol = {:.2}× is above tolerance — the \
+                 post-fix finding is that the landed #2720/#2762 resolution meets the \
+                 issue's acceptance criterion on every curved kind (measured 0.19× / \
+                 0.01× / 0.00×); if this rose, the orbit mover lost the curved kinds",
                 m.max_ratio
             );
         }
     }
     for frame in ["unframed", "framed"] {
-        let (_, cell) = measured(&format!("linear/{frame}"));
+        let (label, cell) = measured(&format!("linear/{frame}"));
         let m = match cell {
             CellOutcome::Measured(m) => *m,
             CellOutcome::Refused { .. } => panic!(
-                "[2720-geom] linear/{frame} refused — linear measured below tolerance \
-                 (0.13×) when this sweep landed"
+                "[2720-geom] {label} refused — linear measured at both frames when this \
+                 pin was re-taken; a refusal now is an instrument or solver change"
             ),
         };
         assert!(
-            m.max_ratio < 1.0,
-            "[2720-geom] linear/{frame}: max|gᵀv|/tol = {:.2}× rose above tolerance \
-             (measured 0.13×) — the linear exemption finding changed; re-measure",
+            m.max_ratio > 1.0 && m.max_ratio < 20.0,
+            "[2720-geom] {label}: max|gᵀv|/tol = {:.2}× left the post-fix band (1, 20) \
+             — the linear exemption INVERTED in the post-fix world (pre-fix 0.13× below, \
+             post-fix 4.21× above); if this band fails the linear exit story changed; \
+             re-measure before updating",
             m.max_ratio
-        );
-    }
-    for frame in ["unframed", "framed"] {
-        let (_, cell) = measured(&format!("poincare/{frame}"));
-        assert!(
-            matches!(cell, CellOutcome::Refused { .. }),
-            "[2720-geom] poincare/{frame}: no longer refuses — the robust-refusal \
-             finding changed (it refused at budgets 40 AND 400 when this sweep \
-             landed); if the solver improved, re-measure and update this pin"
         );
     }
 }
