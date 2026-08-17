@@ -2746,9 +2746,7 @@ impl SaeManifoldTerm {
             else {
                 log::debug!(
                     "terminal Newton bail: every direction of A is inside its own null band at \
-                     ‖g‖={grad_norm:.6e} (floor {:.6e}) — no step of this operator can move the \
-                     residual",
-                    geometry.rank_floor,
+                     ‖g‖={grad_norm:.6e} — no step of this operator can move the residual",
                 );
                 break;
             };
