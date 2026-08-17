@@ -4123,7 +4123,7 @@ impl SaeManifoldTerm {
     /// flat at ~40, coordinates modest, no reseed), a spurious non-stationarity the
     /// inner solve then has to grind back down over many iterations (the real
     /// 600-row `qwen_real_activation_behavior_fit` stall). The coordinate-gauge
-    /// quotient `‖Π⊥gauge g‖` does NOT capture this DECODER-amplitude gauge (a
+    /// quotient `‖Π⊥null g‖` does NOT capture this DECODER-amplitude gauge (a
     /// different flat direction), which is why raw ≈ quotient at the stall.
     ///
     /// This re-gauges any atom whose decoder norm has run past the dictionary's

@@ -1821,7 +1821,7 @@ fn zz_measure_k2_wide_p_inner_trajectory_2080() {
         base.n_obs() * base.assignment.row_block_dim(),
     );
     eprintln!(
-        "[2080-K2] budget | ‖g‖ | ‖Π⊥gauge g‖ | tol | pen_obj | contraction/iter | wall_s"
+        "[2080-K2] budget | ‖g‖ | ‖Π⊥null g‖ | tol | pen_obj | contraction/iter | wall_s"
     );
 
     let budgets = [8usize, 16, 32, 64, 128, 256, 512];

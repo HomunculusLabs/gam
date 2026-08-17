@@ -244,6 +244,38 @@ is not normalized LAML, REML, or model evidence. Each piece plays a distinct rol
   knob would be `coord_sparsity`. `l1` emits no coordinate penalty and keeps the
   historical assignment-prior sparsity path.
 
+### The chart is a parameter, not a gauge
+
+A chart reparametrisation — shifting the phase of a circle atom, translating or
+dilating a patch atom's coordinate — can be exactly cancelled in the decoder, so
+the **reconstruction** does not move. It is therefore a symmetry of the
+likelihood, and only of the likelihood. It is not a symmetry of the fit, and the
+two paragraphs above are why:
+
+- the ARD prior is written on the latent coordinates, so it fixes the chart's
+  ORIGIN. It is the ordinary mean-zero random-effect convention, with the
+  decoder's constant column absorbing the location, and it is what lets an
+  unused axis be pruned at all;
+- the smoothness prior is a seminorm in a *declared reference geometry* whose
+  Gram does not move with the fitted decoder, so it fixes the chart's SCALE.
+  Shrinking the coordinate while inflating the decoder would otherwise buy
+  smoothness at no cost in fit.
+
+So the fitted chart is identified, the reported coordinates are meaningful, and
+the model has no gauge freedom to quotient away. Concretely: on a one-atom
+planted circle, dilating the chart moves the smoothness prior by `-7.82` on a
+penalized objective of `165` while leaving the data fit flat to `3e-9`.
+
+The consequence for convergence is a rule the solver now follows without
+exception: **a direction may be removed from a convergence measure only if the
+PENALIZED objective is flat along it.** The decoder null directions qualify (they
+are machine-null for the data fit and the smoothness prior at once) and are
+quotiented. The chart orbit does not qualify and is never quotiented — instead it
+is minimized over as its own block, because it carries no data-fit curvature and
+so is served badly by every step-shortening globalization. A fit is therefore
+never certified stationary on the strength of a direction it is still sliding
+down.
+
 Two more knobs: `decoder_feature_sparsity_groups=` group-lassoes the decoder
 over a partition of the `p` output features (encouraging each basis function
 to load on a single feature cluster), and

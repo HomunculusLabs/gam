@@ -124,6 +124,31 @@ pub(crate) fn seeded_term_of_kind(
     seed.base_term
 }
 
+/// The atom kinds this module sweeps, with the latent dimension each one
+/// requires. #2720's own "Not established" section records that its central
+/// measurement was taken on `Periodic` atoms alone; this list is that gap
+/// closed. Every kind that emits a chart-gauge orbit at all is here:
+///
+/// * `Sphere` / `ProjectivePlane` ride the ambient cover and require `d = 3`;
+/// * `KleinBottle` and `Cylinder` require `d = 2`;
+/// * `Linear`, `EuclideanPatch`, `Poincare` and `Duchon` emit translation and
+///   dilation fields per axis; `Periodic` / `Torus` emit the phase shift only.
+///
+/// `Mobius`, `FiniteSet` and `Precomputed` emit no orbit by construction (their
+/// arms in `dense_step_gauge_vectors` say why), so they cannot contribute a
+/// direction to either span and are not swept.
+pub(crate) const GAUGE_SWEEP_KINDS: &[(&str, usize)] = &[
+    ("periodic", 1),
+    ("torus", 2),
+    ("duchon", 1),
+    ("linear", 1),
+    ("euclidean", 1),
+    ("poincare", 1),
+    ("sphere", 3),
+    ("cylinder", 2),
+    ("klein_bottle", 2),
+];
+
 /// The penalized objective, split into the pieces `penalized_objective_total`
 /// sums. Every field is a VALUE, not a gradient — this struct is differenced,
 /// never differentiated.
@@ -257,17 +282,11 @@ fn unit_norm(mut v: Array1<f64>) -> Option<Array1<f64>> {
 fn chart_orbit_directional_derivative_splits_by_objective_term_2720() {
     let z = planted_circle_cloud();
     let registry = AnalyticPenaltyRegistry::new();
-    let kinds: [(&str, usize); 4] = [
-        ("periodic", 1),
-        ("duchon", 1),
-        ("linear", 1),
-        ("euclidean", 1),
-    ];
     let mut any_penalty_dominates = false;
     let mut worst_data_fit_slope = 0.0_f64;
-    for (kind, latent_dim) in kinds {
+    for &(kind, latent_dim) in GAUGE_SWEEP_KINDS {
         let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
-        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(latent_dim)]);
+        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())]);
         let base = objective_terms(&term, z.view(), &rho, &registry).expect("base objective");
         let gauges = term.dense_step_gauge_vectors().expect("gauge vectors");
         let (active, basis_size) = active_rows_and_basis_size(&term, 0).expect("active rows");
@@ -361,17 +380,11 @@ pub(crate) fn quotient_family_sizes(
 fn quotient_span_is_flat_for_the_penalized_objective_2720() {
     let z = planted_circle_cloud();
     let registry = AnalyticPenaltyRegistry::new();
-    let kinds: [(&str, usize); 4] = [
-        ("periodic", 1),
-        ("duchon", 1),
-        ("linear", 1),
-        ("euclidean", 1),
-    ];
     let mut violations: Vec<String> = Vec::new();
     let mut measured = 0usize;
-    for (kind, latent_dim) in kinds {
+    for &(kind, latent_dim) in GAUGE_SWEEP_KINDS {
         let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
-        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(latent_dim)]);
+        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())]);
         let lambda_smooth = rho
             .lambda_smooth_vec()
             .expect("the fixture rho carries one smoothing block per atom");
@@ -670,5 +683,89 @@ fn chart_orbit_stays_out_of_the_convergence_quotient_and_is_worth_excluding_2720
         "the chart orbit no longer carries live posterior descent on this fixture (worst \
          |d f| = {worst:.6e} against tolerance {tolerance:.6e}), so the evidence that put it \
          outside the convergence quotient no longer reproduces and the decision needs re-taking"
+    );
+}
+
+/// #2720's "Not established", second bullet: the framed decoder layout.
+///
+/// The chart-gauge construction writes its compensation through a Grassmann
+/// frame round trip (`δβ · U`, read back through `Uᵀ`) whenever a decoder frame
+/// is active, and `tests_gauge_frame_roundtrip_2720` establishes that the round
+/// trip preserves the RECONSTRUCTION exactly. That is the likelihood side. This
+/// is the posterior side of the same layout: with frames active, the span the
+/// convergence gates remove must still be flat for the penalized objective.
+///
+/// The framed path also changes the border coordinate the decoder-null families
+/// are written in (`decoder_channel_null_directions` declines to emit for a
+/// framed atom at all, and `joint_decoder_beta_null_directions` diagonalizes the
+/// factored operator instead of the full-`B` one), so this is not a repeat of
+/// the unframed arm with extra steps — it exercises a different construction.
+#[test]
+fn quotient_span_is_flat_with_decoder_frames_active_2720() {
+    let z = planted_circle_cloud();
+    let registry = AnalyticPenaltyRegistry::new();
+    let mut activated_total = 0usize;
+    let mut measured = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+    for &(kind, latent_dim) in GAUGE_SWEEP_KINDS {
+        let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.0,
+            vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())],
+        );
+        let lambda_smooth = rho.lambda_smooth_vec().expect("one block per atom");
+        let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+        let output_dim = term.output_dim();
+        let mut activated: Vec<(usize, usize)> = Vec::new();
+        for (atom_idx, atom) in term.atoms.iter_mut().enumerate() {
+            if let Some(rank) = atom
+                .maybe_activate_decoder_frame()
+                .expect("frame activation must not error")
+            {
+                activated.push((atom_idx, rank));
+            }
+        }
+        activated_total += activated.len();
+        let basis = term
+            .posterior_null_quotient_basis(&lambda_smooth)
+            .expect("quotient span on the framed layout");
+        println!(
+            "[2720-framed] kind={kind} frames={activated:?} p={output_dim} span={} tol={tolerance:.6e}",
+            basis.len(),
+        );
+        for (index, direction) in basis.into_iter().enumerate() {
+            let slope =
+                directional_derivative_terms(&mut term, z.view(), &rho, &registry, &direction, 1.0e-5)
+                    .expect("directional derivative")
+                    .total()
+                    .abs();
+            measured += 1;
+            if slope > tolerance {
+                violations.push(format!(
+                    "{kind} framed direction {index}: |d f| = {slope:.6e} = {:.3}x tolerance \
+                     {tolerance:.6e}",
+                    slope / tolerance,
+                ));
+            }
+        }
+    }
+    // Non-vacuity, both halves: a frame that never activated would make this a
+    // duplicate of the unframed gate, and a span that is empty everywhere would
+    // certify nothing at all.
+    assert!(
+        activated_total > 0,
+        "no decoder frame activated on any swept kind, so the framed border layout was never \
+         exercised and this test is a duplicate of its own unframed sibling"
+    );
+    assert!(
+        measured > 0,
+        "the framed arm measured no quotient direction on any kind, so it certified nothing"
+    );
+    assert!(
+        violations.is_empty(),
+        "with decoder frames ACTIVE the convergence quotient carries live descent of the \
+         penalized objective:\n  {}",
+        violations.join("\n  "),
     );
 }

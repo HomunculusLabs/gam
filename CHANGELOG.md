@@ -1,5 +1,90 @@
 ## Unreleased
 
+- **The SAE inner convergence gates removed a direction the fit was still
+  sliding down, and could certify a state sitting on a slope of 7.2 as
+  stationary (#2720).** `quotient_residual_norm_sq` projected a "chart-gauge
+  orbit" out of both inner convergence measures — the KKT gradient gate and the
+  Newton step gate — on the premise that the penalized objective is flat along
+  it. It is not. The premise came from a real property, stated one step too
+  strongly: a chart reparametrisation (a circle atom's phase, a patch atom's
+  translation or dilation) can be exactly cancelled in the decoder, so the
+  RECONSTRUCTION does not move, and the compensating least-squares solve leaves
+  a residual of `1e-16` relative. That makes it a symmetry of the likelihood and
+  of nothing else.
+
+  Measured by central difference of the objective's own value functions — the
+  surface the line search descends, not an analytic gradient scored against
+  itself — split per objective term, on a planted circle at four atom kinds:
+
+  ```text
+  kind       family      dirs   worst |d f| / tolerance
+  periodic   chart          1          3.5
+  duchon     chart          2         19.9
+  linear     chart          2     76,170.0
+  euclidean  chart          2     76,155.1
+  duchon     decoder-null 704          0.00003     (3e-9 absolute = roundoff)
+  ```
+
+  The separation is total, and it is the fix. The constant-shift field moves the
+  ARD prior alone; the dilation field `δt = t` moves the SMOOTHNESS prior by
+  `-7.82` on an objective of `165`, because shrinking the chart while inflating
+  the decoder buys smoothness at no cost in fit. Meanwhile every one of the 704
+  decoder-null directions is flat to roundoff, which is what their construction
+  claims: they are machine-null eigenvectors of the PENALIZED Gram `DᵀD + λS`,
+  so the data fit and the smoothness prior are flat along them at once.
+
+  **The modelling question, answered rather than deferred.** #2720 offered three
+  repairs: penalize the equivalence class so the posterior becomes flat along
+  the orbit; extend the decoder compensation to the priors as well; or accept
+  that there is no posterior gauge and stop quotienting. It is the third. The
+  ARD prior on the chart coordinates IS the chart's identifiability device — the
+  ordinary mean-zero random-effect convention, with the decoder's constant
+  column absorbing the location — and the smoothness prior, a seminorm in a
+  declared reference geometry whose Gram does not move with the fitted decoder,
+  is what fixes the chart's scale. A prior made invariant under translation and
+  dilation of `t` is improper along exactly those directions and can no longer
+  prune an unused axis, which is the entire purpose of ARD. The non-invariance
+  is the prior working.
+
+  The second repair is refuted constructively rather than argued away. Once a
+  coordinate field is chosen, `δβ` is the unique least-squares solution of an
+  over-determined system, so the prior derivative along a likelihood-null
+  direction is a FIXED linear functional of the field. On a patch atom the field
+  family is two-dimensional and the two slopes have opposite signs, so a
+  zero-derivative combination exists at any single state — and that is all it
+  is. Moved half a step along the shift field, with the reconstruction
+  unchanged, the same combination carries `|d f| = 1.96e-1`, 2076x the
+  convergence tolerance, because the shift/dilation slope ratio moves 74%. No
+  fixed combination of two slopes that move independently stays at zero.
+
+  **The repair.** One span becomes two, each answering its own question, and
+  both produced by one Gram--Schmidt run on two inputs so their containment is a
+  property of one algorithm rather than of two constructions that agree today:
+
+  * `posterior_null_quotient_basis` — what may be REMOVED from a convergence
+    measure. The two decoder-null families only.
+  * `likelihood_flat_block_basis` — what should be DESCENDED as its own block.
+    The chart orbit plus those nulls, i.e. everything the LIKELIHOOD cannot see,
+    which is exactly the set carrying no data-fit curvature and therefore the
+    set every step-SHORTENING globalization serves badly. `descend_gauge_orbit`
+    takes this one, so the orbit keeps its mover and loses only its blindfold.
+
+  For the gradient gate the old removal was structurally pure defect:
+  subtracting `(gᵀv)v` changes `‖g‖` only insofar as `gᵀv ≠ 0`, which is the
+  precondition's own violation, so the orbit's presence could never do anything
+  except weaken the gate exactly where the gate was right. For the step gate the
+  removal is not a no-op, but it requires the direction to BE flat — granted for
+  the decoder nulls, refused for the orbit.
+
+  Refusal messages that named `‖Π⊥gauge g‖` and `gauge_share` now name
+  `‖Π⊥null g‖` and `null_share`, because the span they measure no longer
+  contains a gauge. `outer_gradient_arrow_solver` still deflates the orbit and
+  still should, for a different and weaker reason now written down at the site:
+  that block runs only after the conditioning gate has flagged a near-singular
+  joint Hessian, and the orbit carries no data-fit curvature, so it is a genuine
+  near-null direction OF THE OPERATOR BEING INVERTED — a pseudo-inverse choice
+  on an ill-conditioned solve, not a claim that the criterion is flat.
+
 - **Two floors classified directions of one operator in two metrics, and which
   one the value path used depended on how much RAM the machine had free
   (#2673).** The exact observed information `A = B + ΔC` was classified by the
