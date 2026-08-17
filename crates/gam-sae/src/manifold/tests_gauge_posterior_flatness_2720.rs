@@ -326,3 +326,108 @@ fn chart_orbit_directional_derivative_splits_by_objective_term_2720() {
     );
     println!("[2720-split] worst |d data_fit| over all directions = {worst_data_fit_slope:.6e}");
 }
+
+/// The three families [`SaeManifoldTerm::gauge_quotient_basis`] concatenates,
+/// counted, so a per-direction verdict can be attributed to the family that
+/// produced it without re-deriving the concatenation order.
+pub(crate) fn quotient_family_sizes(
+    term: &SaeManifoldTerm,
+    lambda_smooth: &[f64],
+) -> Result<(usize, usize, usize), String> {
+    Ok((
+        term.dense_step_gauge_vectors()?.len(),
+        term.joint_decoder_beta_null_directions(lambda_smooth)?.len(),
+        term.decoder_channel_null_directions()?.len(),
+    ))
+}
+
+/// #2720's ACCEPTANCE CRITERION, as an executable gate.
+///
+/// > the directional derivative of the **penalized** objective along every
+/// > constructed orbit direction is at or below the convergence tolerance
+///
+/// denominated in the tolerance the accept path itself uses
+/// (`SAE_MANIFOLD_INNER_GRAD_REL_TOL · inner_iterate_scale()`, the single source
+/// of truth at `construction_quasi_laplace.rs:937`), and measured by central
+/// difference of the value function rather than by the analytic gradient, so it
+/// cannot pass by the gradient and the objective agreeing with each other while
+/// both are wrong (#2714).
+///
+/// This is a property of the SPAN THE GATES REMOVE, not of the chart-gauge
+/// construction: it reads `gauge_quotient_basis`, the single source of truth
+/// for that span, so it fails whichever family contributes a live direction.
+#[test]
+fn quotient_span_is_flat_for_the_penalized_objective_2720() {
+    let z = planted_circle_cloud();
+    let registry = AnalyticPenaltyRegistry::new();
+    let kinds: [(&str, usize); 4] = [
+        ("periodic", 1),
+        ("duchon", 1),
+        ("linear", 1),
+        ("euclidean", 1),
+    ];
+    let mut violations: Vec<String> = Vec::new();
+    let mut measured = 0usize;
+    for (kind, latent_dim) in kinds {
+        let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
+        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(latent_dim)]);
+        let lambda_smooth = rho
+            .lambda_smooth_vec()
+            .expect("the fixture rho carries one smoothing block per atom");
+        let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+        let (chart, beta_null, channel_null) =
+            quotient_family_sizes(&term, &lambda_smooth).expect("family sizes");
+        let basis = term
+            .gauge_quotient_basis(&lambda_smooth)
+            .expect("the seeded fixture has a well-defined quotient span");
+        println!(
+            "\n[2720-gate] kind={kind} tol={tolerance:.6e} span={} \
+             (chart={chart}, beta_null={beta_null}, channel_null={channel_null})",
+            basis.len(),
+        );
+        for (index, direction) in basis.into_iter().enumerate() {
+            let slope = directional_derivative_terms(
+                &mut term,
+                z.view(),
+                &rho,
+                &registry,
+                &direction,
+                1.0e-5,
+            )
+            .expect("directional derivative");
+            measured += 1;
+            let total = slope.total().abs();
+            println!(
+                "[2720-gate]   dir {index:>3}  |d f| = {total:.6e}  ({:.3}x tol)  \
+                 data_fit={:.3e} smooth={:.3e} ard={:.3e}",
+                total / tolerance,
+                slope.data_fit,
+                slope.smoothness,
+                slope.ard,
+            );
+            if total > tolerance {
+                violations.push(format!(
+                    "{kind} direction {index}: |d f| = {total:.6e} = {:.3}x the convergence \
+                     tolerance {tolerance:.6e} (data_fit {:.3e}, smoothness {:.3e}, ard {:.3e})",
+                    total / tolerance,
+                    slope.data_fit,
+                    slope.smoothness,
+                    slope.ard,
+                ));
+            }
+        }
+    }
+    assert!(
+        measured > 0,
+        "no quotient direction was measured on any fixture, so this gate certified nothing"
+    );
+    assert!(
+        violations.is_empty(),
+        "the span both inner convergence gates project out of the KKT residual carries LIVE \
+         descent of the penalized objective. Every consumer that reads a small quotient as \
+         `stationary` — the inner accept gate, the terminal polish's stationarity return, and \
+         `SaeInstalledInnerKktAudit::certifies()` via `parameter_space.certifies()` — is reading \
+         a point that is not stationary.\n  {}",
+        violations.join("\n  "),
+    );
+}
