@@ -1,5 +1,101 @@
 ## Unreleased
 
+- **Two floors classified directions of one operator in two metrics, and which
+  one the value path used depended on how much RAM the machine had free
+  (#2673).** The exact observed information `A = B + ΔC` was classified by the
+  VALUE path at `|λ| ≤ 1e-9·max(λ_max(A), 1)` — one absolute number for every
+  direction — and by the GRADIENT path at `|μ| = |vᵀAv/vᵀBv| < √ε`. Both ran on
+  the same `A` inside one evaluation on the streaming route (the value path's
+  terminal Newton polish reaches `solve_exact_stationarity`, which is not
+  route-gated, while the gradient adjoint takes the matrix-free sibling), and
+  which one the value path used was decided by `direct_logdet_admitted`, i.e. by
+  the working-set comparison in `streaming_plan.rs` against ambient free memory.
+  The same data on the same build could be classified two ways on two
+  differently-loaded machines.
+
+  Every previous pass counted directions that change class between the two,
+  found zero, and could not tell "the rules agree" from "the fixture never asked
+  them" — both counters need a near-null of `A` and no shipped fixture has one.
+  **The witness was never the question.** Written as thresholds on the same
+  `|λ|`, one rule is constant across directions and the other varies by the
+  spread of the `B`-Rayleigh quotient. Measured on the #2515 route-invariance
+  state:
+
+  ```text
+  dim=30  λ_max=3.089328e2
+  value rule    : |λ| ≤ 3.089328e-7                        (one number, all 30)
+  gradient rule : |λ| < √ε·vᵀBv ∈ [1.907374e-7, 4.602951e-6]
+  ratio gradient/value ∈ [6.174076e-1, 1.489952e1]         spread = 24.13x
+  ```
+
+  No choice of the two constants makes a constant threshold equal a varying one,
+  and the ratio **straddles 1** — so neither rule was even a conservative version
+  of the other.
+
+  **Which site moved was forced, not chosen.** Only `μ` is a curvature: it is
+  invariant under a reparametrization `θ → Lθ`, because `A` and `B` transform
+  congruently, while `λ/λ_max(A)` is not — and `θ = (t, β)` mixes chart
+  coordinates with border coefficients whose scale is set by the data's units, so
+  `λ_max(A)` was a maximum over incommensurable coordinates. `1e-9` was tuned
+  where `√ε` is derived (SPEC rule 21). And consistency decides the direction:
+  the value must pin exactly what the gradient cannot differentiate, or the
+  criterion carries a `ρ`-dependence through a direction whose `A⁻¹` response the
+  adjoint has projected out — the #931/#2253 value↔gradient desync in a new
+  place.
+
+  `ExactHessianSpectralBlock` now carries `metric_scale[i] = vᵢᵀBvᵢ` instead of a
+  scalar `rank_floor`, and
+
+  ```text
+  rank_floor(i) = max( dim·ε·‖A‖₂ ,  √ε·vᵢᵀBvᵢ )
+  ```
+
+  The second term is the shared predicate — the same one
+  `solve_exact_stationarity_preconditioned` applies to its own solution
+  direction, reached through one function so the two cannot drift. The first is
+  not a second classification: it is the standard backward-error bound for a
+  symmetric eigendecomposition, so an eigenvalue under it carries no significant
+  digits and `ln λ` is not a quantity. It is a floor UNDER the identifiability
+  term, never a ceiling, so it can only pin directions and never resurrect one
+  the gradient deflated — and the ONE crossing it cannot remove (`|λ|` inside the
+  backward error while `μ` is resolved, which needs `vᵀBv ≲ dim·√ε·‖A‖₂`) now
+  emits a `warn` naming itself in production instead of passing silently.
+
+  `ArrowMetric` decides which restriction of `B` a block is classified in — the
+  whole arrow operator for the joint block, `B`'s block-diagonal `H_tt` for the
+  coordinate block — so a block and a metric cannot be paired wrongly. Both are
+  applies through the cached factors: `dim` applies at `O(dim²)` against the
+  `O(dim³)` decomposition above them, and **no second dense block**, because
+  #2724 and #2757 price that residency.
+
+  **The crossing this issue was filed about, produced.**
+  `the_classification_is_invariant_under_a_reparametrization_2673` takes the same
+  #2515 state and rescales the β border by `1e-4` and nothing else — what a
+  change in the target's units does:
+
+  ```text
+  min|μ| plain  = 2.756149405310e-1
+  min|μ| scaled = 2.756149405310e-1     relative move = 1.611e-15
+  retired rule pins 0 of 30 directions before the rescaling and 5 after
+    direction 12: RETIRED VALUE RULE=gauge (|λ|=1.280000e-7 ≤ 3.084041e-7)
+                  but GRADIENT=resolved (|μ|=9.999989e-1 ≥ 1.490116e-8)
+  ```
+
+  Five directions with pencil curvature between 0.36 and 1.0 — as identified as a
+  direction gets — became "gauge" to the retired value rule under a change of
+  units alone. The shipped rule reaches the same verdict on every direction in
+  both frames, asserted per direction. The arithmetic term is deliberately made
+  to BIND in that frame (6 of 30, where `vᵀBv` fell by `1e-8`) and moves no
+  verdict: there `|λ|` still stands `6.18e4x` clear of it.
+
+  **One constant was also doing a third job.** `cluster_stable_eigh_operator`
+  borrowed the PD floor as its degenerate-cluster GAP threshold. An eigenvector's
+  perturbation under a backward error `~ε‖A‖₂` is `~‖E‖/gap`, so the cluster
+  boundary is `√ε·‖A‖₂` — where the direction is determined to no better than
+  `√ε` and must be re-resolved against `E` rather than trusted. Both factors
+  derived, and `‖A‖₂ = maxᵢ|λᵢ|` rather than the old `max(λ_max, 1)`, which was
+  not a norm at all when `A` was negative definite.
+
 - **The `matern` benchmark cluster's failure moved subsystems, and what it moved
   to is a projection taken in the wrong inner product (#2748).** The signature
   this issue was chased on since 08-08 — `invert_identified_rho_hessian`
