@@ -7049,23 +7049,26 @@ impl Zz2155Problem {
     let mut frozen_eta = eta0.clone();
     let mut beta_eta = beta_eta0.clone();
     let mut beta_w: Option<Array1<f64>> = beta_w0.cloned();
+    // The operating point the de-aliasing metric is read at, exactly as
+    // `fit_binomial_mean_wiggle` maintains it (#2748). This harness mirrors the
+    // production loop, so it calls the production de-aliasing rather than
+    // carrying a second definition of it: a closed-form Euclidean 2x2 Gram
+    // stopped being what production does, and a mirror that de-aliases in a
+    // different metric measures a different map.
+    let mut working_q = eta0.clone();
     for cycle in 0..60 {
         let b_full = base_family
             .wiggle_design(frozen_eta.view())
             .map_err(|e| format!("wiggle design: {e}"))?;
-        // Observation-space de-aliasing B⊥ = B - X (XᵀX)⁻¹ XᵀB (closed-form
-        // 2×2 mean Gram — the pilot design is intercept + slope).
-        let a00: f64 = x_dense.column(0).dot(&x_dense.column(0));
-        let a01: f64 = x_dense.column(0).dot(&x_dense.column(1));
-        let a11: f64 = x_dense.column(1).dot(&x_dense.column(1));
-        let det = a00 * a11 - a01 * a01;
-        let xtb = x_dense.t().dot(&b_full);
-        let mut alias = Array2::<f64>::zeros((2, b_full.ncols()));
-        for j in 0..b_full.ncols() {
-            alias[[0, j]] = (a11 * xtb[[0, j]] - a01 * xtb[[1, j]]) / det;
-            alias[[1, j]] = (a00 * xtb[[1, j]] - a01 * xtb[[0, j]]) / det;
+        let mut curvature = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let (_, m2, _) = base_family
+                .neglog_q_derivatives(base_family.y[row], base_family.weights[row], working_q[row])
+                .map_err(|e| format!("row curvature: {e}"))?;
+            curvature[row] = if m2.is_finite() && m2 > 0.0 { m2 } else { 0.0 };
         }
-        let bda = &b_full - &x_dense.dot(&alias);
+        let (_, bda) = dealias_warp_against_mean_block(&x_dense, &b_full, &curvature)
+            .map_err(|e| format!("warp de-aliasing: {e}"))?;
 
         let eta_input = ParameterBlockInput {
             design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
@@ -7104,6 +7107,8 @@ impl Zz2155Problem {
             .beta
             .clone();
         let eta_hat = x_dense.dot(&new_beta_eta);
+        working_q = &fit.block_states[BinomialMeanWiggleFamily::BLOCK_ETA].eta
+            + &fit.block_states[BinomialMeanWiggleFamily::BLOCK_WIGGLE].eta;
         let delta = eta_hat
             .iter()
             .zip(frozen_eta.iter())

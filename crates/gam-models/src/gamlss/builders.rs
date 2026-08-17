@@ -1899,6 +1899,115 @@ mod binomial_mean_wiggle_dealias_metric_tests {
         );
     }
 
+    /// The mechanism gate, stated on the quantity the outer loop actually
+    /// rides on rather than on the cross block that implies it (#2748).
+    ///
+    /// Freezing the warp basis at `η̂` and perturbing by `δ` moves the design by
+    /// `(I−P)·diag(s)·δ` in `q`, and the refit answers with
+    /// `Δη = −H·(I−P)·diag(s)·δ` for this fit's own penalized hat matrix
+    /// `H = X(XᵀWX + S)⁻¹XᵀW`. That product IS the leading term of the
+    /// frozen-index map's derivative. With `P` the `W`-projection it is zero
+    /// for ANY penalty `S`; with `P` Euclidean it is not, and the assertion
+    /// below is what turns "the metric is the right one" into a measurement.
+    #[test]
+    fn the_curvature_metric_annihilates_the_outer_maps_leading_term() {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerEigh;
+
+        let (x, b, curvature) = fixture();
+        let n = x.nrows();
+        let p = x.ncols();
+        // A warp slope large enough that the undamped map would diverge if the
+        // term below survived: `max_i s_i` well above one.
+        let slope = Array1::from_shape_fn(n, |row| 0.4 + 3.0 * (row as f64 / n as f64));
+        // An arbitrary but deterministic freezing-point perturbation.
+        let delta = Array1::from_shape_fn(n, |row| ((row as f64) * 0.37).sin());
+        let forcing = Array1::from_shape_fn(n, |row| slope[row] * delta[row]);
+
+        let mut weighted_x = x.clone();
+        for row in 0..n {
+            let weight = curvature[row];
+            weighted_x.row_mut(row).map_inplace(|value| *value *= weight);
+        }
+        // A non-trivial ridge penalty, to exercise the "for any S" half of the
+        // claim: the cancellation must not depend on the smoothing.
+        let mut normal = x.t().dot(&weighted_x);
+        for index in 0..p {
+            normal[[index, index]] += 0.37 * (index as f64 + 1.0);
+        }
+        let (normal_values, normal_vectors) = normal.eigh(Side::Lower).expect("penalized normal");
+        let mut normal_inverse = Array2::<f64>::zeros((p, p));
+        for k in 0..p {
+            let scale = 1.0 / normal_values[k];
+            let uk = normal_vectors.column(k);
+            for i in 0..p {
+                for j in 0..p {
+                    normal_inverse[[i, j]] += scale * uk[i] * uk[j];
+                }
+            }
+        }
+
+        // `H·r` for a residual `r`, through the same normal equations the fit
+        // solves.
+        let hat_apply = |residual: &Array1<f64>| -> Array1<f64> {
+            x.dot(&normal_inverse.dot(&weighted_x.t().dot(residual)))
+        };
+
+        let forcing_as_basis = forcing
+            .clone()
+            .into_shape_with_order((n, 1))
+            .expect("column");
+        let (_, metric_residual) =
+            dealias_warp_against_mean_block(&x, &forcing_as_basis, &curvature).expect("metric");
+        let flat = Array1::<f64>::ones(n);
+        let (_, euclidean_residual) =
+            dealias_warp_against_mean_block(&x, &forcing_as_basis, &flat).expect("euclidean");
+
+        let metric_response = hat_apply(&metric_residual.column(0).to_owned());
+        let euclidean_response = hat_apply(&euclidean_residual.column(0).to_owned());
+        let reference = hat_apply(&forcing);
+        let norm = |v: &Array1<f64>| v.dot(v).sqrt();
+
+        assert!(
+            norm(&reference) > 1.0e-2,
+            "the fixture must have a leading term to cancel, got {}",
+            norm(&reference)
+        );
+        assert!(
+            norm(&metric_response) <= 1.0e-12 * norm(&reference),
+            "H(I-P_W) must annihilate the forcing for any penalty: {} against {}",
+            norm(&metric_response),
+            norm(&reference),
+        );
+        assert!(
+            norm(&euclidean_response) >= 0.05 * norm(&reference),
+            "the Euclidean projector is supposed to leave the outer map's leading term \
+             standing; if this ever becomes small the fixture stopped exercising the defect: \
+             {} against {}",
+            norm(&euclidean_response),
+            norm(&reference),
+        );
+        // And with the leading term gone, the whole B block inherits it: the
+        // same statement for the real warp basis rather than for one column.
+        let (_, bda) = dealias_warp_against_mean_block(&x, &b, &curvature).expect("de-alias");
+        for column in 0..bda.ncols() {
+            let response = norm(&hat_apply(&bda.column(column).to_owned()));
+            // Against what the mean block DID absorb from that column before
+            // residualization — the quantity being cancelled. Grading against
+            // the residual column's own norm would be grading against a
+            // different, and smaller, thing.
+            let absorbed = norm(&hat_apply(&b.column(column).to_owned()));
+            assert!(
+                absorbed > 1.0e-3,
+                "column {column} must have something to cancel, got {absorbed}"
+            );
+            assert!(
+                response <= 1.0e-12 * absorbed,
+                "column {column}: H B_perp must vanish, got {response} against {absorbed}",
+            );
+        }
+    }
+
     /// A metric that is not a semi-inner product is refused, not silently used:
     /// a negative weight would make `X'WX` indefinite and its "projection"
     /// would not be one.
