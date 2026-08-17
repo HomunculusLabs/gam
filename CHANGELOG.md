@@ -1,5 +1,112 @@
 ## Unreleased
 
+- **A transformation model whose transformation saturates outside its knots has
+  no tails, only a floor — and every reported quantile silently truncated at the
+  training range (#2600).** #2600 removed the endpoint renormalizer, so the
+  fitted conditional-transformation-normal density is `φ(h)·h'` and the model's
+  CDF is `F(y|x) = Φ(h(y|x))` on the whole real line. Nothing gave `h` anything
+  to be out there. `ctn_response_bases_at` builds the response basis from the
+  shared I-spline evaluator, which saturates outside its knots (`I_k` constant
+  above the last, zero below the first) with `create_ispline_derivative_dense`
+  zeroing the exterior to match (#2695), so on the chart
+  `h = α₀ + Σ_k I_k(y)·α_k + offset + ε·(y − median)` the entire exterior of the
+  fitted transformation was
+
+  ```text
+  h(y) = h(y_b) + ε·(y − y_b),    ε = TRANSFORMATION_MONOTONICITY_EPS = 1e-8.
+  ```
+
+  Measured on an intercept-only fit to `Y = exp(N(0,1))` at `n = 256` — a law
+  whose true transformation `h(y) = ln y` is pinned exactly by `F = Φ(h)`:
+
+  ```text
+  support [8.123377e-2, 1.444738e1]
+  L = h(y_lo) = -1.971548   U = h(y_hi) = +3.291711
+  Phi(L) = 2.433061e-2      1 - Phi(U) = 4.978986e-4
+  ```
+
+  **2.4 % of the model's own predictive mass lay below the tabulated support**,
+  and BOTH inverse-transform consumers — `invert_transformation_normal_grid` in
+  the predict path and `invert_monotone_grid` in the generate sampler — answered
+  a latent target off the end of the table with the SUPPORT ENDPOINT, a
+  truncation the likelihood does not perform. So the 2.3 %, the 0.13 % and the
+  0.003 % predictive quantiles were the same number, `y_lo`; the observation band
+  was degenerate from the 97.7 % level outward rather than from the 99.99 % the
+  ladder's `z_max = 4` suggests; the sampler had point masses at both fitted
+  endpoints; and two responses a factor 1.8 apart on the far side of the boundary
+  received PIT scores identical to seven digits.
+
+  The boundary derivatives are O(1) — `h'(y_lo+) ≈ 4.47`, `h'(y_hi-) ≈ 0.86` —
+  so the flat exterior was never a property of the fit.
+
+  **Root cause 1 — the transformation needed a slope, not a wider grid.** The
+  response basis is now continued **affinely past the two boundary knots at its
+  own one-sided boundary derivative** (Royston-Parmar's linear tails, `mlt`'s
+  `extrapolate`, and exactly what `apply_linear_extension_from_first_derivative`
+  already does for every clamped *B*-spline value basis in this tree):
+
+  ```text
+  y > right:  I_k(y) = I_k(right) + (y − right)·M_k(right⁻),  M_k(y) = M_k(right⁻)
+  ```
+
+  `h` is C¹ and strictly increasing on all of `ℝ` with `h' ≥ ε` preserved
+  structurally (`M_k(y_b) ≥ 0`, and `α ≥ 0` on the Khatri-Rao monotonicity cone),
+  so `Φ(h)` is a proper CDF whose tails are the fitted transform's. Evaluation at
+  and inside the knots is **bit-identical** — `ctn_response_knots` guards the
+  support by 0.1 % of the response span precisely so every training row is
+  strictly inside — so no fitted quantity moves. The continuation lives in the
+  CTN chart and not in the shared basis: the exterior I-spline entries leave
+  `[0, 1]`, which for a transformation is correct (they are coefficients of a map
+  that must keep increasing) and for the survival link warp that shares the
+  evaluator is not (#2695 genuinely wants saturation).
+
+  **Root cause 2 — the inverse was interpolated with a chord, twice.** Asking the
+  now-total inverse for the identity that defines a quantile, `h(h⁻¹(z)) = z`,
+  exposed the second half. `CtnTransformTable` replaces both clamping inverters
+  with one object carrying `(y_k, h(y_k), h'(y_k))` — the chart computes the
+  value and the derivative together at every node and the derivative was being
+  thrown away — and interpolates the cubic Hermite those three determine. The two
+  exterior branches stop being a separate convention: they are the same rule at
+  its end slopes. The cubic is used only where provably monotone; a cell whose end
+  slopes exceed the Fritsch-Carlson bound relative to its own secant is
+  under-resolved for one and falls back to its chord.
+
+  The same chord sat in `ladder_quantile`, where the tabulated `h⁻¹` becomes the
+  band a user receives — and there it also clamped past `|z| > 4`, so every level
+  beyond 99.994 % produced the same interval. Now shape-preserving (PCHIP) inside
+  and continued at the ladder's own end slope outside, which past the fitted
+  support is the exact continuation.
+
+  ```text
+  round trip max|h(h^-1(z)) - z| over the production ±4 ladder
+    endpoint clamp             2.03        (the distance from z = -4 to L)
+    affine tails + chord       2.1e-3
+    affine tails + Hermite     1.6e-7
+
+  interpolation order, refining 129 -> 257 nodes on h = ln y
+    Hermite  3.015e-6 -> 2.180e-7   order 3.79
+    chord    5.741e-4 -> 1.513e-4   order 1.92
+
+  band ladder, max relative error on h^-1 = exp
+    shape-preserving 5.5e-5    chord 1.9e-3
+  ```
+
+  Bars are derived rather than chosen: the round-trip bar is 1 % of the
+  production ladder's own step (from `TRANSFORMATION_NORMAL_BAND_Z_NODES` and
+  `_Z_MAX`), and the sampler's tail-mass bar is the model's own
+  `Φ(L) + 1 − Φ(U)` ± 4 binomial standard errors — measured `0.02355` against
+  `0.02483`, with **0 of 25 600 draws** on a support endpoint.
+
+  **What this exposes rather than creates.** The fitted CTN puts mass on the whole
+  line, so a strictly positive response can be extrapolated below zero:
+  `h⁻¹(-4) = -3.5e-1` on the lognormal fixture, with `h(h⁻¹(-4)) = -4.000000`
+  confirming it is the model's own quantile. That is a property of a Gaussian
+  transformation model on the RAW response scale — the likelihood the parameters
+  were already estimated under — which the clamp hid behind an atom at the
+  training minimum rather than removed. A model that must respect a bound belongs
+  on the transformed scale (fit `log y`), as `mlt`'s `log_first` does; the chart
+  documentation says so.
+
 - **The post-fit certification was 60.5 % of the fit, and after the half of it
   that had been fixed it was still 99.96 % of `fit_diagnostics_report` — for a
   completely different reason (#2757).** The issue was filed on a dense

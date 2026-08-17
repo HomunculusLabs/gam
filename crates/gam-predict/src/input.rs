@@ -456,12 +456,13 @@ fn transformation_normal_quantile_grid(
     let (y_lo, y_hi) = saved.support();
     let p_cov = design.design.ncols();
     let coefficients = saved.coefficient_matrix(model, p_cov)?;
-    let cov_mat = design
-        .design
-        .try_row_chunk(0..n)
-        .map_err(|error| PredictInputError::InvalidInput {
-            reason: error.to_string(),
-        })?;
+    let cov_mat =
+        design
+            .design
+            .try_row_chunk(0..n)
+            .map_err(|error| PredictInputError::InvalidInput {
+                reason: error.to_string(),
+            })?;
 
     // A shared fine `y`-grid spanning the response support; the I-spline value
     // basis is evaluated once here and reused for every row, so the per-row
@@ -638,8 +639,7 @@ fn transformation_normal_observed_scores(
                 },
                 saved_ref.floors(response[row_index], offset[row_index]),
             );
-            transformation_normal_pit_score(geometry.h, saved_ref.clip_eps)
-            .map_err(|error| {
+            transformation_normal_pit_score(geometry.h, saved_ref.clip_eps).map_err(|error| {
                 format!("transformation-normal observed score failed at row {row_index}: {error}")
             })
         })
@@ -768,8 +768,7 @@ pub fn build_transformation_normal_quantile_grid(
     }
     let table =
         transformation_normal_quantile_grid(model, &design, n, offset).map_err(String::from)?;
-    let conditional_mean =
-        transformation_normal_conditional_mean(&table).map_err(String::from)?;
+    let conditional_mean = transformation_normal_conditional_mean(&table).map_err(String::from)?;
     Ok(TransformationNormalQuantileGrid {
         table,
         conditional_mean,

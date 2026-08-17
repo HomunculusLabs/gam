@@ -602,7 +602,11 @@ mod tests {
         let alpha = [0.5, 1.5, 2.5];
         let doubled: Vec<f64> = alpha.iter().map(|a| 2.0 * a).collect();
         let floor = -0.25;
-        let base = ctn_chart_component(ArrayView1::from(&alpha[..]), ArrayView1::from(&basis[..]), floor);
+        let base = ctn_chart_component(
+            ArrayView1::from(&alpha[..]),
+            ArrayView1::from(&basis[..]),
+            floor,
+        );
         let twice = ctn_chart_component(
             ArrayView1::from(&doubled[..]),
             ArrayView1::from(&basis[..]),

@@ -95,11 +95,7 @@ impl CtnTransformTable {
     /// with `α ≥ 0` on the monotonicity cone — so either one signals a corrupt
     /// coefficient block, and the caller should hear about it here rather than
     /// receive a silently wrong quantile.
-    pub fn new(
-        grid_y: Array1<f64>,
-        h: Array2<f64>,
-        h_prime: Array2<f64>,
-    ) -> Result<Self, String> {
+    pub fn new(grid_y: Array1<f64>, h: Array2<f64>, h_prime: Array2<f64>) -> Result<Self, String> {
         let g = grid_y.len();
         if g < 2 {
             return Err(format!(
@@ -514,8 +510,8 @@ mod tests {
         let grid_y = Array1::from_vec(vec![0.0, 1.0, 2.0]);
         let h = Array2::from_shape_vec((1, 3), vec![0.0, 0.5, 0.5]).expect("shape");
         let h_prime = Array2::from_elem((1, 3), 1.0);
-        let error = CtnTransformTable::new(grid_y, h, h_prime)
-            .expect_err("a flat row must be refused");
+        let error =
+            CtnTransformTable::new(grid_y, h, h_prime).expect_err("a flat row must be refused");
         assert!(error.contains("strictly increasing"), "{error}");
     }
 
@@ -524,8 +520,8 @@ mod tests {
         let grid_y = Array1::from_vec(vec![0.0, 1.0]);
         let h = Array2::from_shape_vec((1, 2), vec![0.0, 1.0]).expect("shape");
         let h_prime = Array2::from_shape_vec((1, 2), vec![0.0, 1.0]).expect("shape");
-        let error = CtnTransformTable::new(grid_y, h, h_prime)
-            .expect_err("a zero slope must be refused");
+        let error =
+            CtnTransformTable::new(grid_y, h, h_prime).expect_err("a zero slope must be refused");
         assert!(error.contains("structurally positive"), "{error}");
     }
 

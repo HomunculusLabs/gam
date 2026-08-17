@@ -176,8 +176,9 @@ fn ctn_predictive_quantiles_invert_the_models_own_transform_2600() {
     const LADDER_NODES: usize = 65;
     const LADDER_Z_MAX: f64 = 4.0;
     let ladder_step = 2.0 * LADDER_Z_MAX / ((LADDER_NODES - 1) as f64);
-    let z_ladder: Vec<f64> =
-        (0..LADDER_NODES).map(|j| -LADDER_Z_MAX + ladder_step * (j as f64)).collect();
+    let z_ladder: Vec<f64> = (0..LADDER_NODES)
+        .map(|j| -LADDER_Z_MAX + ladder_step * (j as f64))
+        .collect();
     let quantiles: Vec<f64> = z_ladder.iter().map(|&z| grid.table.invert(0, z)).collect();
     let round_trip = fixture.scores_at(&quantiles);
     let mut worst = 0.0_f64;

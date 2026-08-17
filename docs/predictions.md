@@ -81,6 +81,32 @@ preds = model.predict(test_df, interval=0.95, observation_interval=True)
 # adds observation_lower, observation_upper when the family supports it
 ```
 
+### Transformation-normal observation intervals
+
+A conditional transformation-normal model is `F(y | x) = Phi(h(y | x))` with
+`h(.|x)` strictly increasing, so its `p`-quantile is `h^-1(Phi^-1(p) | x)` —
+quantiles map through the inverse transform, they are **not**
+`E[Y|x] +- z * sigma` in latent units. `observation_interval=True` returns those
+quantiles.
+
+Two consequences of `h` being the whole model are worth knowing before reading a
+limit:
+
+* **The predictive law is supported on the whole real line, including past the
+  training range.** Beyond the fitted knots the transformation is continued
+  affinely at its own boundary derivative (the classical linear-tail
+  extrapolation), so `Phi(h)` is a proper CDF there and an extreme limit is a
+  genuine extrapolation rather than the largest response ever seen. Under a
+  well-calibrated fit roughly `1/(n+1)` of the predictive mass sits beyond each
+  end of the training range, so levels past about `1 - 2/n` are reporting that
+  extrapolation.
+* **The transformation is fitted on the raw response scale**, so nothing
+  constrains an extrapolated limit to respect a bound the response happens to
+  have — a strictly positive response can have a negative lower limit at an
+  extreme level. If the bound is part of the model, fit the transformed response
+  (`log y` for a positive response); the transformation then extrapolates on that
+  scale and the bound is structural.
+
 For eligible Gaussian-identity models, use conformal intervals:
 
 ```python
