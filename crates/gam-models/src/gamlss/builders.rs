@@ -1672,6 +1672,15 @@ pub(crate) fn fit_binomial_mean_wiggle(
     let mut converged: Option<(UnifiedFitResult, Array2<f64>, Array1<f64>)> = None;
     let mut last_delta = f64::INFINITY;
     let mut last_scale = 1.0_f64;
+    // #2748 instrumentation. The frozen-basis outer loop is a fixed-point
+    // iteration on the warp index, and the quantity that decides whether it is
+    // a contraction is the warp SLOPE `s = B'(eta)*beta_w` — the chain term the
+    // inner solve drops on purpose (`BinomialMeanWiggleFamily::frozen_warp_design`
+    // doc). `previous_step` carries the last `Phi(eta_k) - eta_k` so the ratio
+    // and the alternation angle of successive steps are readable: an
+    // alternating step whose ratio exceeds one IS the divergence, measured
+    // rather than inferred from a terminal `delta`.
+    let mut previous_step: Option<Array1<f64>> = None;
     for _outer in 0..options.outer_max_iter {
         let (wiggle_block, alias, bda) = build_dealiased(
             &frozen_eta,
@@ -1723,6 +1732,40 @@ pub(crate) fn fit_binomial_mean_wiggle(
             .zip(frozen_eta.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
+        // #2748: report the step, its relation to the previous one, and the
+        // warp slope that predicts both.
+        let step = &new_eta - &frozen_eta;
+        let step_norm = step.dot(&step).sqrt();
+        let (step_ratio, step_cosine) = match previous_step.as_ref() {
+            Some(previous) => {
+                let previous_norm = previous.dot(previous).sqrt();
+                if previous_norm > 0.0 && step_norm > 0.0 {
+                    (
+                        step_norm / previous_norm,
+                        step.dot(previous) / (step_norm * previous_norm),
+                    )
+                } else {
+                    (f64::NAN, f64::NAN)
+                }
+            }
+            None => (f64::NAN, f64::NAN),
+        };
+        let warp_slope = family.wiggle_dq_dq0(frozen_eta.view(), new_wiggle_beta.view())?;
+        let max_slope = warp_slope
+            .iter()
+            .map(|value| value - 1.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mean_slope =
+            warp_slope.iter().map(|value| value - 1.0).sum::<f64>() / warp_slope.len() as f64;
+        log::info!(
+            "[WIGGLE-OUTER] #2748 pass {_outer}: delta={last_delta:.6e} scale={last_scale:.6e} \
+             tol={:.6e} |step|={step_norm:.6e} |step_k|/|step_k-1|={step_ratio:.6e} \
+             cos(step_k, step_k-1)={step_cosine:+.6} max_warp_slope={max_slope:.6e} \
+             mean_warp_slope={mean_slope:.6e} |beta_w|_1={:.6e}",
+            options.outer_tol * last_scale,
+            new_wiggle_beta.iter().map(|value| value.abs()).sum::<f64>(),
+        );
+        previous_step = Some(step);
         if last_delta <= options.outer_tol * last_scale {
             converged = Some((fit, alias, frozen_source_beta));
             break;
