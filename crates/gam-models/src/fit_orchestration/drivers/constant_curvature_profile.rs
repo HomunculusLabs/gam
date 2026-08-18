@@ -288,9 +288,41 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // point estimate and its interval on two different parameter spaces.
         let centers = gam_terms::basis::constant_curvature_realized_centers(data, &spec)
             .map_err(EstimationError::from)?;
+        // The SEED is derived too, and that takes one line of work rather than
+        // none (gam#2747).
+        //
+        // `realized_constant_curvature_length_scale` returns an explicit
+        // positive `length_scale` VERBATIM and falls back to the derived median
+        // only on the `0.0` auto sentinel — and by the time this profile is
+        // built for inference, `spec.length_scale` is no longer a request. Both
+        // of the fit's write-backs have overwritten it with `ℓ̂`: the free-κ arm
+        // in `spatial_optimization.rs` (`cc.length_scale = psi_hat.length_scale`)
+        // and `freeze_term_collection_from_design` (`s.length_scale =
+        // *length_scale` off `BasisMetadata::ConstantCurvature`).
+        //
+        // `ℓ̂` is the range this criterion profiled to AT κ̂. Seeding the inner
+        // solve with it is a warm start from ONE κ, and
+        // [`Self::minimize_over_eta`] states why that is not allowed: a `V_p`
+        // that depends on where the search has already been is not a function of
+        // its own argument, and the CI walk and the flatness LR both compare
+        // values of `V_p(κ)` across κ. The point estimate would then be the
+        // argmin of one object and the interval a level set of another.
+        //
+        // This is the same argument the line above makes about
+        // `identifiability`, and it has the same answer. A fitted range is a
+        // realized artifact of one particular fitted ψ, exactly as a frozen
+        // constraint transform is, so the profile un-freezes both. A USER pin is
+        // different in kind — it is a request, not an artifact — and it is
+        // honored: `length_scale_fixed` takes η out of the coordinate set
+        // entirely, and then the pinned value is the only η there is.
+        let seed_request = if spec.length_scale_fixed {
+            spec.length_scale
+        } else {
+            0.0
+        };
         let ell_seed = gam_terms::basis::realized_constant_curvature_length_scale(
             centers.view(),
-            spec.length_scale,
+            seed_request,
         )
         .map_err(EstimationError::from)?;
         let (span_lo, span_hi) =

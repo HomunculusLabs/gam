@@ -471,3 +471,7 @@ path = "examples/probe_2747_range_normalization.rs"
 [[example]]
 name = "probe_2747_pipeline_vs_profile"
 path = "examples/probe_2747_pipeline_vs_profile.rs"
+
+[[example]]
+name = "probe_2747_kappa_range_grid"
+path = "examples/probe_2747_kappa_range_grid.rs"
