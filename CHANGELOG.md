@@ -1,5 +1,68 @@
 ## Unreleased
 
+- **A saved Royston-Parmar model's predicted survival surface depended on the
+  baseline time ANCHOR, which is a reparameterization and not a model
+  (#2705).** `center_survival_time_designs_at_anchor` subtracts the time-basis
+  row at the anchor from every entry and exit design row; its own documentation
+  calls that "an exact affine reparameterization of the baseline offset", and
+  the fit honours it — the same data fitted at five anchors spanning `1e-7 …
+  5.0` reaches the identical maximised log-likelihood to seven digits
+  (`-1.364394e3`). The PREDICTION did not:
+
+  ```text
+  eta(anchor=1e-7)   eta(anchor=1.19)      difference
+    -2.456651466        +0.403170376      +2.859821842
+    -1.813324553        +1.046497296      +2.859821849
+    -1.107764133        +1.752057720      +2.859821852
+    -0.880407739        +1.979414110      +2.859821849
+    -0.237080827        +2.622741029      +2.859821856
+    +0.468479594        +3.328301453      +2.859821859
+  ```
+
+  A constant to eight digits across three covariate values and three times —
+  `X(anchor)ᵀγ`, and a factor `e^2.86 = 17.5` on every reported cumulative
+  hazard.
+
+  **Root cause.** The fit centers unconditionally, for every likelihood mode, so
+  the saved coefficients are the CENTERED design's. `predict_survival` re-centered
+  only `LocationScale | MarginalSlope` plus bare `Weibull`, and that enumerated
+  list omitted `Transformation` — the Royston-Parmar default, and the default
+  survival likelihood. The competing-risks sibling gated the same step on
+  `weibull_baseline_in_beta` alone, so its per-cause Royston-Parmar baselines
+  were uncentered too. Both now center whenever the rebuilt time design has
+  columns at all, which is exactly when the fit centered; the mode list is
+  deleted rather than extended, because a list of modes is a second answer to a
+  question the fit already answers.
+
+  The omission was invisible on ordinary right-censored data: the default anchor
+  there is the earliest entry — the time origin — where `I_k(left) = 0` exactly,
+  so `X(anchor) = 0` and the missing subtraction subtracts nothing. It became a
+  `17.5x` error the moment the anchor moved: on every genuinely left-truncated
+  dataset, which takes the robust interior anchor by rule (#751/#1790/#2631),
+  and on every explicit `--survival-time-anchor`.
+
+  **This is what made delayed-entry survival fits degenerate.** The
+  independently-filed
+  `test_left_truncated_survival_is_nondegenerate_and_covariate_dependent`
+  (recorded red in `bench/gha_results/rust-test-suite/MASTER_FAILURES.md`) is
+  the user-facing face of it: a fit with a covariate hazard ratio of `4.2x`
+  returned survival curves that were collapsed and, at the reported precision,
+  identical across covariate values. The obvious reading — that the delayed-entry
+  factor `Λ(entry)` was wrong — is refuted by sweeping the shared entry time over
+  five decades on identical exit/event data: at `entry = 1e-6`, where the
+  truncation correction is `1e-5` relative, the fit is still off by `e^2.86`.
+  The trigger is not the size of `Λ(entry)`; it is the predicate
+  `survival_data_is_left_truncated`, which selects the interior anchor.
+
+  Gated by `transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705`
+  (two fits of one dataset differing only in `--survival-time-anchor`: the
+  surfaces must agree to `1e-4` AND the coefficient vectors must differ by more
+  than `1e-6`, so the agreement is a statement about the reparameterization and
+  not about two identical models) and by
+  `left_truncated_survival_is_nondegenerate_and_covariate_dependent_2705`, which
+  carries an `entry == 0` control arm so a failure separates the harness from
+  the delayed-entry path.
+
 - **The constant-curvature range solve claimed `dη̂/dκ = 0` on a state that had
   not earned it, and the curvature acceptance measured one of its two signs
   (#2747).** Two things, and the second is the reason the first went unseen.
