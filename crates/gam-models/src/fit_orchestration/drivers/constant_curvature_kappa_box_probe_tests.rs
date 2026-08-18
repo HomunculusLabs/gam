@@ -602,7 +602,9 @@ mod constant_curvature_kappa_range_identification_tests {
             .expect_err("a two-penalty basis has no single-λ profile");
         let message = refusal.to_string();
         eprintln!("[#2747 double-penalty] {message}");
-        for needle in ["double_penalty", "one", "kappa="] {
+        // The flag that caused it, the arity that fails, and both ways out. A
+        // refusal a caller cannot act on is a crash with better prose.
+        for needle in ["double_penalty", "two penalties", "kappa="] {
             assert!(
                 message.contains(needle),
                 "the refusal must name the flag, the arity that fails, and a way out; \
