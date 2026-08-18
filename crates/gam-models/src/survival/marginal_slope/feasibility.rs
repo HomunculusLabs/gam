@@ -422,7 +422,7 @@ impl SurvivalMarginalSlopeFamily {
     /// link-deviation, CTN influence absorber, time-wiggle, frailty) at
     /// construction, so the layout here is exactly `[time, marginal,
     /// log-slope]` and each design is one the family itself owns.
-    fn displaced_block_states(
+    pub(crate) fn displaced_block_states(
         &self,
         block_states: &[ParameterBlockState],
         delta: &Array1<f64>,

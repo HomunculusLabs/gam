@@ -134,6 +134,8 @@ mod feasibility;
 mod fit_entry;
 mod fit_setup;
 mod flex_sensitivity;
+#[cfg(test)]
+mod follow_up_domain_tests;
 mod generated_regressor;
 mod hessian;
 mod intercept;

@@ -1,5 +1,78 @@
 ## Unreleased
 
+- **A follow-up-varying marginal slope carried its likelihood domain as an
+  error instead of as a feasible set, and the outer search halted against a wall
+  it could not see (#2765 / #2767).** The family is a transformation model,
+  `S(t|x,z) = Φ(−η(t))`, so its row log-density carries `log η′₁` and its domain
+  is
+
+  ```text
+    η′₁(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz > 0    at every EVENT row,
+    c = √(1 + bᵀΣb).
+  ```
+
+  With a time-CONSTANT slope the last two terms are identically zero and
+  `η′₁ = q′·c ≥ q′`, so the time block's own linear guard `q′ ≥ derivative_guard
+  > 0` IMPLIES the domain. That implication is why the solver's feasible set has
+  always been one polytope in one block, and why `CustomFamily::
+  max_feasible_step_size` — which is asked one block at a time — sufficed.
+
+  A follow-up-varying slope breaks it: `q·c′` and `b′ᵀz` carry no sign, and they
+  read the marginal and log-slope blocks as well as the time block. The extra
+  condition was placed in the likelihood DOMAIN (refuse outside) rather than in
+  the feasible set. Measured on the #2765 acceptance fixture that costs the fit
+  its convergence in two separate ways:
+
+  * the inner trust region walks trial coefficients out of the domain — the run
+    carries hundreds of `transformed time derivative must be positive at row
+    1531 ... got −8.99e-2` lines, one per step the limiter did not price;
+  * the outer search moves the baseline chart under a warm start, so a `β` that
+    was interior at the previous `θ` is exterior at the next one through no
+    property of `β` at all. The evaluation then refuses, and a refusal carries
+    no descent information: the BFGS halves its step six times, every probe
+    refuses, and the runner halts with
+
+    ```text
+      [OUTER] cost-stall halt (infeasible BFGS probes): 6 consecutive infeasible
+      probes after a finite seed/iterate; halting at best-so-far with residual
+      |g|=3.941e1 (value=2.137621e3)
+    ```
+
+    against its own `1.5e0` escape threshold. Fifty-six of that run's outer
+    evaluations end `outcome=recoverable`, each in `0.003 s` — before any inner
+    solve.
+
+  Two halves, one rule. `CustomFamily::max_feasible_joint_step_size` is the
+  missing coordinate: a JOINT fraction-to-boundary hook, defaulted to `None` so
+  every other family is byte-unchanged, mined in beside the per-block answers by
+  `compute_joint_feasibility_alpha`. And the log-slope warm start is retreated
+  toward its own origin until the domain holds — a PROVABLY interior endpoint,
+  because at `β_g = 0` the layout's exit-derivative design gives `ḃ ≡ 0` exactly
+  (it carries no offset), both follow-up terms vanish, and `η′₁ = q′·c ≥ q′ >
+  0`. That is what makes the bisection terminate rather than usually succeed, and
+  it is the log-slope half of a contract the time block already keeps: its own
+  warm start is projected onto `q′ ≥ guard` before use.
+
+  Both halves read `η′₁` through `rigid_row_admission_witnesses`, the same call
+  the row evaluator admits on, at primaries from the same
+  `rigid_row_kernel_primaries`. A limiter that computed `η′₁` its own way would
+  be a second copy of the model, and two copies eventually disagree about which
+  side of the boundary a coefficient is on.
+
+  **Rejected: a multiplicative safety fraction on the limiter.**
+  `apply_feasible_step_boundary_backoff` already records why a proportional
+  retreat is wrong here (#2695) — it is a proportionality the geometry does not
+  have. There is a second reason on this boundary: the limiter and the objective
+  are the same function at the same primaries, so the endpoint returned is
+  admitted bit for bit, and a step that lands legally but close is not a hazard
+  the limiter should price. `−log η′₁` there is finite and worse, and the trust
+  region rejects it on its own terms — which is the mechanism that is supposed
+  to decide step length.
+
+  Also: `[STAGE] outer eval end ... outcome=recoverable` now logs the trial `θ`
+  and the refusal REASON. A line search that halves forever is diagnosable only
+  if the log says which domain the trial point left.
+
 - **The SAE inner convergence gates removed a direction the fit was still
   sliding down, and could certify a state sitting on a slope of 7.2 as
   stationary (#2720).** `quotient_residual_norm_sq` projected a "chart-gauge
