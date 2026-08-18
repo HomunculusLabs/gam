@@ -6184,6 +6184,26 @@ impl CustomFamily for BoundedLinearFamily {
         true
     }
 
+    /// The latent chart is not a basis (#2748).
+    ///
+    /// `post_update_block_beta` below clamps `theta[term.col_idx]` PER
+    /// COORDINATE, and `block_geometry` above refuses any spec whose width is
+    /// not `designzeroed.ncols()`. Both statements are about these exact
+    /// coordinates, and neither survives `beta -> V' beta`: a rotation mixes a
+    /// bounded latent coordinate with an unbounded one, so the clamp would
+    /// confine the wrong thing, and it narrows the width the rebuild demands.
+    /// The derived default cannot see either hook — this family states its
+    /// feasible set through the clamp rather than through
+    /// `block_linear_constraints` — so the declaration is explicit here.
+    fn block_coefficient_coordinate(
+        &self,
+        _block_states: &[ParameterBlockState],
+        _block_index: usize,
+        _block_spec: &ParameterBlockSpec,
+    ) -> gam_problem::CoefficientCoordinate {
+        gam_problem::CoefficientCoordinate::Structural
+    }
+
     /// Confine every bounded coefficient's latent coordinate to the range
     /// where [`bounded_latent_injective_limit`] says the interval map is still
     /// invertible.

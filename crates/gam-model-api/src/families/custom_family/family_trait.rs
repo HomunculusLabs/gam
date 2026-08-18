@@ -22,9 +22,10 @@ use crate::families::custom_family::psi_design::{
 };
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::{
-    BlockGeometryDirectionalDerivative, BlockWorkingSet, ExactNewtonJointPsiSecondOrderTerms,
-    ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace, ExactNewtonOuterObjective,
-    ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState, PseudoLogdetMode,
+    BlockGeometryDirectionalDerivative, BlockWorkingSet, CoefficientCoordinate,
+    ExactNewtonJointPsiSecondOrderTerms, ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace,
+    ExactNewtonOuterObjective, ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState,
+    PseudoLogdetMode,
 };
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
@@ -803,6 +804,54 @@ pub trait CustomFamily {
             "block linear constraints",
         );
         Ok(None)
+    }
+
+    /// Is block `block_index`'s COEFFICIENT COORDINATE model content, or is only
+    /// its column space? (#2748)
+    ///
+    /// The identifiability canonicaliser may reparameterise a block whose
+    /// coordinate is [`CoefficientCoordinate::Spanning`] — `β ↦ Vᵀβ` with the
+    /// penalties pulled back as `VᵀSV` — which is how it removes a cross-block
+    /// structural confound exactly rather than ridging it away. It may NOT do
+    /// that to a coordinate this family has attached meaning to. See
+    /// [`CoefficientCoordinate`] for the full argument; the short form is that a
+    /// monotone warp's `β_w ≥ 0` is a cone on THOSE coefficients, and the hook
+    /// that produces it is a function of the block's width, so it cannot express
+    /// the rotated cone `A V`.
+    ///
+    /// # The default DERIVES the answer rather than assuming it
+    ///
+    /// Any family that states a coordinate-local feasible set through
+    /// [`Self::block_linear_constraints`] is answering this question already, so
+    /// the default reads that answer instead of asking for it twice — a
+    /// declaration that can drift from the constraint it is about is worse than
+    /// no declaration. A family that cannot answer at the supplied state is
+    /// treated as `Structural`, because declining a reparameterisation always
+    /// preserves the model while performing one may not.
+    ///
+    /// # When to override
+    ///
+    /// Only for a coordinate whose structure this family imposes through some
+    /// OTHER hook, which the derivation above cannot see:
+    ///
+    /// * [`Self::post_update_block_beta`] projecting or clamping coordinates
+    ///   (the bounded-linear latent chart);
+    /// * [`Self::block_geometry`] rebuilding this block's design at its raw
+    ///   width, which a narrower spec desynchronises.
+    ///
+    /// Never override to widen the freedom: `Spanning` on a constrained
+    /// coordinate is not a performance choice, it is a wrong model.
+    fn block_coefficient_coordinate(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> CoefficientCoordinate {
+        match self.block_linear_constraints(block_states, block_index, block_spec) {
+            Ok(Some(_)) => CoefficientCoordinate::Structural,
+            Ok(None) => CoefficientCoordinate::Spanning,
+            Err(_) => CoefficientCoordinate::Structural,
+        }
     }
 
     /// Optional exact directional derivative of a block's ExactNewton Hessian.
