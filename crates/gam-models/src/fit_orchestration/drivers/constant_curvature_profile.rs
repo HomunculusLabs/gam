@@ -685,8 +685,8 @@ impl<'a> ConstantCurvatureProfile<'a> {
         for _ in 0..MAX_NEWTON {
             let g = jet.gradient[1];
             let h = jet.hessian[1][1];
-            let at_lo = eta <= lo + 1.0e-12 * (1.0 + lo.abs());
-            let at_hi = eta >= hi - 1.0e-12 * (1.0 + hi.abs());
+            let at_lo = eta <= lo + eta_resolution(lo);
+            let at_hi = eta >= hi - eta_resolution(hi);
             if at_hi && g <= 0.0 {
                 return Ok((eta, jet, RangeSolveOutcome::DistanceKernelLimit));
             }
@@ -738,8 +738,14 @@ impl<'a> ConstantCurvatureProfile<'a> {
             }
         }
         let h = jet.hessian[1][1];
-        let at_top = eta >= hi - 1.0e-9 * (1.0 + hi.abs());
-        let at_bottom = eta <= lo + 1.0e-9 * (1.0 + lo.abs());
+        // ONE expression for "on the wall", and it is [`eta_resolution`] — the
+        // same scale the stationarity certificate uses, because a point the
+        // criterion cannot distinguish from the wall IS on it. This used to be
+        // two different literals, `1e-12` in the loop's early returns and `1e-9`
+        // here, so a band three orders wide was a wall to one test and interior
+        // to the other. Neither number was derived from anything.
+        let at_top = eta >= hi - eta_resolution(hi);
+        let at_bottom = eta <= lo + eta_resolution(lo);
         // The chart's TOP is the geodesic-distance face and its bottom is an
         // evaluability wall, so an iterate that stopped at one is not the same
         // finding as an iterate that stopped at the other — see

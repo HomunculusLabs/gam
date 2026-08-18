@@ -129,6 +129,40 @@
   `−0.943` at `1×`, `−0.295` at `2×`). The spherical arm reads `covered 9/9,
   railed 1/9, mean κ̂ = +1.070` against the body's `railed 9/9`.
 
+  How big the misfiling was is now measured rather than argued.
+  `the_profiled_second_derivative_is_the_derivative_of_the_profiled_first`
+  differences `V_p′(κ)` — nothing in the tree differenced the PROFILED value
+  before; the existing FD gates hold `V(κ, η)` at fixed `η` — and prints the
+  Schur term beside it:
+
+  ```text
+  κ=-1.1119  V_p″=+5.891e1 (fd +5.891e1, rel 5.3e-8)  schur=2.490e1  unreduced rel 4.16e-1
+  κ=-0.5559  V_p″=+5.553e1 (fd +5.553e1, rel 1.2e-6)  schur=4.320e1  unreduced rel 7.64e-1
+  κ=+0.8339  V_p″=+8.232e1 (fd +8.232e1, rel 2.0e-6)  schur=3.113e1  unreduced rel 3.74e-1
+  ```
+
+  The correction is 30–70% of the reported curvature, so an interior minimum
+  misfiled as "locally fixed" publishes a profile curvature **1.3× to 1.8× too
+  large** — matching the finite difference to `1e-6` when reduced and missing it
+  by `0.3–0.76` RELATIVE when not. The `κ̂` are untouched by all of this (the
+  outer search is gradient-only and both arms return `V_κ`), which is why it took
+  a second-derivative gate to see: all 27 coverage-arm estimates are bit-identical
+  before and after.
+
+  Two arbitrary constants go with it. "On the wall" was `1e-12·(1 + |η|)` in the
+  refinement's early returns and `1e-9·(1 + |η|)` in the terminal classification —
+  a band three orders wide that was a wall to one test and interior to the other,
+  with neither number derived from anything. Both are now `eta_resolution`, the
+  criterion's own forward resolution in `η` and the same scale the stationarity
+  certificate is denominated in: a point the criterion cannot distinguish from
+  the wall is on it.
+
+  Fixture set at the landing: `cargo test --release --test identifiability --
+  constant_curvature` 22 passed / 0 failed (28.2 s), and `cargo test --release -p
+  gam-models --lib -- constant_curvature` 9 passed / 0 failed, with the 3 × 3
+  criterion grid reporting `InteriorMinimum` in all nine cells and `ℓ̂` tracking
+  the planted range to 3%.
+
 - **The streaming lane declared a SADDLE to be a MODE, silently, and the memory
   planner chose which (#2515).** `factor_evidence_unit_deflated_schur` decided a
   direction was a numerical null with
