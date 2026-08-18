@@ -98,6 +98,13 @@ impl Certificate for ResidualGaugeReport {
         );
         e.insert("group_signature", self.group_signature().into());
         e.insert("pinning_rank", self.pinning_rank.into());
+        // #2757 — the rank and what it is a rank OF travel together, always. A
+        // consumer that compares two fits' pinning ranks without comparing this
+        // is comparing two different measurements.
+        e.insert(
+            "pinning_rank_support",
+            self.pinning_rank_support.label().into(),
+        );
         e.insert("residual_gauge_dim", self.residual_gauge_dim.into());
         e.insert(
             "diffeomorphism_unpinned",

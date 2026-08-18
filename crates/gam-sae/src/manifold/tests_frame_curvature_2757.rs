@@ -25,6 +25,7 @@
 //! carries the same spectrum, and the certificate must again be unchanged.
 
 use crate::identifiability::{FrameColumnLayout, ResidualGaugeCurvature};
+use crate::manifold::construction::ResidualGaugeCurvatureSource;
 use crate::manifold::{
     AssignmentMode, PeriodicHarmonicEvaluator, SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator,
     SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm,
@@ -50,6 +51,61 @@ fn lcg(s: &mut u64) -> f64 {
 /// decoder happens to be sparse".
 fn planted_term(n: usize, p: usize, k_atoms: usize, dense_tail: bool) -> SaeManifoldTerm {
     planted_term_with_gate(n, p, k_atoms, dense_tail, 3.0)
+}
+
+/// The materialized curvature a [`ResidualGaugeCurvatureSource`] carries, or a
+/// panic naming why one was expected.
+///
+/// Deliberately a gate-side helper rather than an accessor on the enum: a caller
+/// that wants the stored representation is asserting something about the fit's
+/// metric and its row count, and production never asks — it matches on the arm
+/// and takes the route that arm names.
+pub(crate) fn expect_stored(
+    source: ResidualGaugeCurvatureSource,
+    context: &str,
+) -> ResidualGaugeCurvature {
+    match source {
+        ResidualGaugeCurvatureSource::Stored(curvature) => curvature,
+        // SAFETY: gate-side only. Every caller is a `#[test]` that has just
+        // asserted the fit's metric and row count put it on the materializing
+        // arm; reaching here means that assertion was wrong, which is the
+        // failure the gate exists to report.
+        ResidualGaugeCurvatureSource::Streamed { layout, .. } => panic!(
+            "{context}: expected a materialized curvature, but this fit's curvature is \
+             streamed (param_dim = {})",
+            layout.param_dim()
+        ),
+    }
+}
+
+/// A stable tag for the route a source names: the stored representation's own
+/// structure tag, or `streamed_operator`.
+pub(crate) fn source_structure_tag(source: &ResidualGaugeCurvatureSource) -> &'static str {
+    match source {
+        ResidualGaugeCurvatureSource::Stored(curvature) => curvature.structure_tag(),
+        ResidualGaugeCurvatureSource::Streamed { .. } => "streamed_operator",
+    }
+}
+
+/// How many `f64` the route holds for the curvature itself.
+///
+/// Zero for the streamed route, and that zero is the whole point: it is the
+/// load-immune, exact regression gate on #2757's memory claim, in the same
+/// currency [`ResidualGaugeCurvature::stored_scalars`] already reports.
+pub(crate) fn source_stored_scalars(source: &ResidualGaugeCurvatureSource) -> usize {
+    match source {
+        ResidualGaugeCurvatureSource::Stored(curvature) => curvature.stored_scalars(),
+        ResidualGaugeCurvatureSource::Streamed { .. } => 0,
+    }
+}
+
+/// The row count of the root `R` the source describes — the same number in both
+/// arms, since both describe the same `R`.
+pub(crate) fn source_root_rows(source: &ResidualGaugeCurvatureSource) -> usize {
+    match source {
+        ResidualGaugeCurvatureSource::Stored(curvature) => curvature.root_rows(),
+        ResidualGaugeCurvatureSource::Streamed { root_rows, .. } => *root_rows,
+    }
 }
 
 /// The same fixture, shared with the #2757 cost probe
@@ -338,7 +394,7 @@ fn certificate_is_identical_under_the_structured_and_dense_reductions() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let structured = streamed.expect("unpinned path streams its curvature");
+    let structured = expect_stored(streamed, "unpinned path streams its curvature");
     assert_eq!(structured.structure_tag(), "output_block_roots");
     let dense = ResidualGaugeCurvature::DenseGram {
         gram: structured.to_dense_gram(),
@@ -405,7 +461,7 @@ fn rank_deficient_blocks_agree_with_the_dense_spectrum() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let structured = streamed.expect("unpinned path streams its curvature");
+    let structured = expect_stored(streamed, "unpinned path streams its curvature");
     let dense = ResidualGaugeCurvature::DenseGram {
         gram: structured.to_dense_gram(),
         root_rows: structured.root_rows(),
@@ -535,7 +591,7 @@ fn the_folded_root_and_the_dense_gram_certify_the_same_model() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let folded = streamed.expect("the unpinned path streams its curvature");
+    let folded = expect_stored(streamed, "the unpinned path streams its curvature");
     // n·rank = 72 root rows against param_dim = 36 columns: the fold arm.
     assert_eq!(folded.structure_tag(), "dual_root");
     assert_eq!(folded.root_rows(), n * rank);
@@ -681,7 +737,7 @@ fn dual_root_and_dense_gram_agree_on_a_rank_neither_may_exceed() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let structured = streamed.expect("unpinned path streams its curvature");
+    let structured = expect_stored(streamed, "unpinned path streams its curvature");
     let root_rows = structured.root_rows();
     let dense = ResidualGaugeCurvature::DenseGram {
         gram: structured.to_dense_gram(),
@@ -742,7 +798,7 @@ fn a_non_finite_curvature_is_refused_in_every_representation() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let clean = streamed.expect("unpinned path streams its curvature");
+    let clean = expect_stored(streamed, "unpinned path streams its curvature");
     let root_rows = clean.root_rows();
     let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
     let views: Vec<Option<crate::identifiability::AtomParameterView>> =
@@ -812,7 +868,7 @@ fn an_unassigned_term_certifies_at_rank_zero() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let curvature = streamed.expect("unpinned path streams its curvature");
+    let curvature = expect_stored(streamed, "unpinned path streams its curvature");
     assert_eq!(curvature.structure_tag(), "output_block_roots");
     let views: Vec<Option<crate::identifiability::AtomParameterView>> =
         (0..model.atoms.len()).map(|_| None).collect();
@@ -885,7 +941,7 @@ fn a_curvature_from_a_different_frame_layout_is_refused() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, false)
         .expect("certificate model");
-    let curvature = streamed.expect("unpinned path streams its curvature");
+    let curvature = expect_stored(streamed, "unpinned path streams its curvature");
     let root_rows = curvature.root_rows();
     let mine = FrameColumnLayout::new(p, &[1usize, 1]);
     // One atom of d = 2 rather than two of d = 1: same param_dim, same D.
@@ -938,7 +994,7 @@ fn the_pin_active_branch_streams_instead_of_retaining_a_dense_jacobian() {
             model.jacobian_rows.is_empty(),
             "the pin-active branch must not retain a dense per-row Jacobian"
         );
-        let curvature = streamed.expect("both branches stream their curvature");
+        let curvature = expect_stored(streamed, "both branches stream their curvature");
         assert_eq!(curvature.structure_tag(), "output_block_roots");
         assert!(
             model.isometry_penalty_root.nrows() > 0,
@@ -973,7 +1029,7 @@ fn the_pin_active_certificate_matches_the_dense_gram_exactly() {
     let (model, streamed) = term
         .to_residual_gauge_model(metric, None, true)
         .expect("pin-active certificate model");
-    let structured = streamed.expect("pin-active branch streams its curvature");
+    let structured = expect_stored(streamed, "pin-active branch streams its curvature");
     assert!(model.isometry_penalty_root.nrows() > 0);
     let dense = ResidualGaugeCurvature::DenseGram {
         gram: structured.to_dense_gram(),
@@ -1047,7 +1103,7 @@ fn fit_diagnostics_report_certifies_the_same_thing_on_both_branches() {
         let (model, streamed) = term
             .to_residual_gauge_model(metric, None, pin)
             .expect("certificate model");
-        let structured = streamed.expect("both branches stream their curvature");
+        let structured = expect_stored(streamed, "both branches stream their curvature");
         assert_eq!(
             (model.isometry_penalty_root.nrows() > 0),
             pin,

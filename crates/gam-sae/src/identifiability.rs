@@ -83,8 +83,8 @@
 pub mod frame_curvature;
 
 pub use frame_curvature::{
-    FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature,
-    TriangularRootAccumulator,
+    FrameColumnLayout, OutputBlockRootAccumulator, ResidualGaugeCurvature, StreamedFrameCurvature,
+    StreamedLambdaMax, TriangularRootAccumulator, streamed_lambda_max,
 };
 
 use crate::chart_canonicalization::CanonicalChartTopology;
@@ -1550,6 +1550,49 @@ pub fn frame_inner_rotation_dim(ranks: &[usize]) -> usize {
     ranks.iter().map(|&r| r * r.saturating_sub(1) / 2).sum()
 }
 
+/// What the certificate's reported `pinning_rank` is a rank OF — a property of
+/// the MEASUREMENT, declared rather than inferred (#2757).
+///
+/// The pinning rank is the one thing the certificate reads off the curvature
+/// that no verdict consumes: `ξᵀHξ` is every verdict's numerator and `λ_max(H)`
+/// is its denominator, and both are streamable, but a rank over the whole
+/// parameter space is a full-spectrum question and costs `param_dim²` scalars to
+/// ask from any side. On the branch where `H` has no structure — a per-row
+/// metric that couples output coordinates, at a width where a `param_dim`-square
+/// object is `34 GiB` — the certificate therefore does not ask it, and says so
+/// here instead of reporting a number it did not measure.
+///
+/// The two supports are not two qualities of the same measurement. They are
+/// different measurements, and a consumer comparing pinning ranks across fits
+/// must compare this first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinningRankSupport {
+    /// `rank(H)` over the whole parameter space, at the rank tolerance
+    /// [`curvature_rank_tolerance`] sets: the number of independent directions
+    /// the fit's curvature resolves, out of `param_dim`. Its deficiency
+    /// `param_dim − rank` is the dimension of `ker H`, i.e. of the exactly-flat
+    /// directions INCLUDING the ones no enumerated generator points along.
+    ParameterSpace,
+    /// `rank(ΞᵀHΞ)` over the span of the enumerated generators `Ξ`, at the same
+    /// tolerance taken on singular values of `RΞ`: how many of the
+    /// Terracini-predicted tangent directions the curvature resolves as
+    /// independent, out of `generators.len()`. This is the comparison the rank
+    /// was introduced for — "a smaller pinning rank than the generator count" —
+    /// and it is exact; what it is NOT is a statement about directions outside
+    /// the enumerated span, so its deficiency does not bound `dim ker H`.
+    GeneratorSpan,
+}
+
+impl PinningRankSupport {
+    /// A stable label for summaries, certificates, and the Python surface.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ParameterSpace => "parameter_space",
+            Self::GeneratorSpan => "generator_span",
+        }
+    }
+}
+
 /// The certificate produced by [`residual_gauge`].
 #[derive(Debug, Clone)]
 pub struct ResidualGaugeReport {
@@ -1560,8 +1603,12 @@ pub struct ResidualGaugeReport {
     /// Per-generator pinned/unpinned verdict, in enumeration order.
     pub generators: Vec<GeneratorVerdict>,
     /// Rank of the pinning span `range(H)` (data + isometry penalty) the
-    /// generators were tested against, in the metric.
+    /// generators were tested against, in the metric — over whichever support
+    /// [`Self::pinning_rank_support`] names.
     pub pinning_rank: usize,
+    /// What [`Self::pinning_rank`] is a rank of. Two certificates' pinning ranks
+    /// are comparable only when this agrees (#2757).
+    pub pinning_rank_support: PinningRankSupport,
     /// Number of generators certified as unpinned residual gauge freedoms.
     pub residual_gauge_dim: usize,
     /// `true` when the isometry pin is inactive (`isometry_penalty_root` has no
@@ -3112,7 +3159,171 @@ impl CurvatureReduction {
 ///   (the output-Fisher metric separates the atoms behaviorally). The result is
 ///   carried in `sym_f_trivial_under_output_fisher`.
 pub fn residual_gauge(model: &FittedSaeManifold) -> Result<ResidualGaugeReport, String> {
-    residual_gauge_inner(model, None, None)
+    residual_gauge_inner(model, None, CurvatureAccess::FromModel)
+}
+
+/// How this certificate reaches the curvature.
+///
+/// The three arms are not three algorithms — they are three *availabilities*.
+/// The certificate's arithmetic is identical downstream of
+/// [`CurvatureMeasurement`]; what differs is whether `H` was handed over
+/// reduced, has to be built from a hand-assembled model's retained Jacobian
+/// rows, or exists only as an operator that re-streams its own root (#2757).
+enum CurvatureAccess<'a> {
+    /// Build `R` from the model's retained per-row Jacobian blocks. The general
+    /// path, for callers that hand-build a model whose Jacobian is not
+    /// frame-structured.
+    FromModel,
+    /// A curvature the producer already reduced.
+    Reduced(CurvatureReduction),
+    /// A curvature that is never materialized.
+    Streamed(&'a dyn StreamedFrameCurvature),
+}
+
+/// Exactly what the certificate reads off the curvature, and nothing else.
+///
+/// Writing the three reads down as one struct is what makes the streamed route
+/// checkable against the stored one: the two produce this and are then
+/// indistinguishable to every line below. It is also the enumeration the issue
+/// asked for — "enumerate the actual consumers first" — made structural, so a
+/// fourth consumer cannot be added without deciding how it is streamed.
+struct CurvatureMeasurement {
+    pinning_rank: usize,
+    pinning_rank_support: PinningRankSupport,
+    /// `σ_max(R)² = λ_max(H)`, the stiffness scale every verdict divides by.
+    sigma_max_sq: f64,
+    /// `‖R ξ̂‖²` per enumerated generator, aligned with the generator list.
+    /// `0.0` where the generator is structurally degenerate (no direction to
+    /// measure along) or where the curvature is identically flat.
+    energies: Vec<f64>,
+    /// A short provenance clause for the summary line: empty for a stored
+    /// reduction, and for a streamed one the certified relative residual of the
+    /// Krylov `λ_max` solve. A number a reader cannot see the accuracy of is a
+    /// number they cannot use.
+    stiffness_note: String,
+}
+
+/// The unit direction of each generator, or `None` when it has no direction.
+///
+/// A structurally trivial generator (rotation of a rank-deficient frame, a zero
+/// swap) carries `‖ξ‖ = 0`. It cannot be normalized and it is not a residual
+/// freedom; see the veto in [`residual_gauge_inner`], which is the same
+/// degenerate-tangent exclusion Theorem A requires.
+fn unit_generators(gens: &[(GeneratorFamily, Array1<f64>, String, f64)]) -> Vec<Option<Array1<f64>>> {
+    gens.iter()
+        .map(|(_, g, _, _)| {
+            let norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm <= f64::MIN_POSITIVE {
+                None
+            } else {
+                Some(g.mapv(|v| v / norm))
+            }
+        })
+        .collect()
+}
+
+/// The stored route: the reduction already holds the whole spectrum's worth of
+/// decisions, so every read is a lookup or one `p·D²` contraction.
+fn measure_reduced(
+    curvature: &CurvatureReduction,
+    units: &[Option<Array1<f64>>],
+) -> CurvatureMeasurement {
+    let sigma_max_sq = curvature.sigma_max_sq();
+    let energies = units
+        .iter()
+        .map(|unit| match unit {
+            // An identically-flat curvature makes every fraction zero without
+            // asking the curvature anything, which is also the only regime in
+            // which the ratio would be `0/0`.
+            Some(unit) if sigma_max_sq > f64::MIN_POSITIVE => {
+                curvature.unit_generator_energy(unit)
+            }
+            _ => 0.0,
+        })
+        .collect();
+    CurvatureMeasurement {
+        pinning_rank: curvature.pinning_rank(),
+        pinning_rank_support: PinningRankSupport::ParameterSpace,
+        sigma_max_sq,
+        energies,
+        stiffness_note: String::new(),
+    }
+}
+
+/// The streamed route: `λ_max` by a certified matrix-free Krylov solve, and the
+/// generator energies EXACTLY, from one pass that folds `RΞ` into a `G × G`
+/// upper-triangular factor.
+///
+/// The factor answers both remaining reads at once and it answers them the way
+/// the rest of this module insists on — on singular values rather than on their
+/// squares. Its column norms are the energies (`ξ_jᵀHξ_j = Σ_a T[a,j]²`,
+/// exactly, because `TᵀT = ΞᵀHΞ`), and its singular values above the shared
+/// [`curvature_rank_tolerance`] are the generator-span pinning rank.
+fn measure_streamed(
+    operator: &dyn StreamedFrameCurvature,
+    units: &[Option<Array1<f64>>],
+) -> Result<CurvatureMeasurement, String> {
+    let lambda = streamed_lambda_max(operator)?;
+    let sigma_max_sq = lambda.lambda_max;
+    let present: Vec<usize> = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| unit.as_ref().map(|_| index))
+        .collect();
+    let directions: Vec<ArrayView1<'_, f64>> = present
+        .iter()
+        .map(|&index| units[index].as_ref().expect("filtered to Some").view())
+        .collect();
+    let mut energies = vec![0.0_f64; units.len()];
+    let mut pinning_rank = 0usize;
+    if !directions.is_empty() {
+        let factor = operator.project_root(&directions)?;
+        if factor.nrows() != directions.len() || factor.ncols() != directions.len() {
+            return Err(format!(
+                "residual_gauge: streamed generator factor is {:?}, expected a square factor \
+                 over the {} enumerated directions",
+                factor.dim(),
+                directions.len()
+            ));
+        }
+        if factor.iter().any(|v| !v.is_finite()) {
+            return Err(
+                "residual_gauge: streamed generator factor contains a non-finite entry; the \
+                 fitted decoder Jacobian or the row metric is not finite"
+                    .to_string(),
+            );
+        }
+        for (column, &index) in present.iter().enumerate() {
+            energies[index] = factor
+                .column(column)
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .max(0.0);
+        }
+        let (_u, sv, _vt) = factor
+            .svd(false, false)
+            .map_err(|e| format!("residual_gauge: SVD of the streamed generator factor: {e}"))?;
+        let singular_values: Vec<f64> = sv.iter().copied().collect();
+        let (_projected_sigma_max_sq, rank) =
+            root_spectral_rank(&singular_values, operator.root_rows(), directions.len());
+        pinning_rank = rank;
+    }
+    // An identically-flat curvature is reported the way the stored route reports
+    // it: every fraction zero, rather than `0/0` clamped.
+    if !(sigma_max_sq > f64::MIN_POSITIVE) {
+        energies.iter_mut().for_each(|e| *e = 0.0);
+    }
+    Ok(CurvatureMeasurement {
+        pinning_rank,
+        pinning_rank_support: PinningRankSupport::GeneratorSpan,
+        sigma_max_sq,
+        energies,
+        stiffness_note: format!(
+            "; stiffness scale streamed (Krylov relative residual {:.1e}, tr(H) = {:.6e})",
+            lambda.relative_residual, lambda.trace
+        ),
+    })
 }
 
 /// The #998 full-resolution certificate: within-atom gauge families are
@@ -3140,7 +3351,7 @@ pub fn residual_gauge_exact(
     penalty_ops: &[Option<OrbitPenaltyOperator>],
 ) -> Result<ResidualGaugeReport, String> {
     let exact = residual_gauge_exact_inputs(model, views, penalty_ops)?;
-    residual_gauge_inner(model, Some(exact), None)
+    residual_gauge_inner(model, Some(exact), CurvatureAccess::FromModel)
 }
 
 /// Exact-orbit residual-gauge certificate with a pre-reduced streamed
@@ -3167,7 +3378,44 @@ pub fn residual_gauge_exact_from_curvature(
 ) -> Result<ResidualGaugeReport, String> {
     let curvature = CurvatureReduction::from_curvature(curvature, model)?;
     let exact = residual_gauge_exact_inputs(model, views, penalty_ops)?;
-    residual_gauge_inner(model, Some(exact), Some(curvature))
+    residual_gauge_inner(model, Some(exact), CurvatureAccess::Reduced(curvature))
+}
+
+/// Exact-orbit residual-gauge certificate against a curvature that is **never
+/// materialized** (#2757).
+///
+/// This is the entry point for the branch where the per-row metric couples
+/// output coordinates: there `H = Σ_n J_nᵀ M_n J_n` has no structure to store, so
+/// at any production row count every materialized form of it costs
+/// `min(root_rows, param_dim)²` scalars and an exact full spectrum costs the
+/// cube. The certificate does not need one. It needs `ξᵀHξ` along each enumerated
+/// generator and `λ_max(H)`, and `operator` supplies both by re-streaming its own
+/// root: the first exactly in a single pass, the second to a certified relative
+/// residual by a matrix-free Krylov solve.
+///
+/// The one thing this route does NOT resolve is the rank of `H` over the whole
+/// parameter space, which is a full-spectrum question. The report says so —
+/// [`ResidualGaugeReport::pinning_rank_support`] reads
+/// [`PinningRankSupport::GeneratorSpan`] and the rank is then the exact rank of
+/// `ΞᵀHΞ` over the enumerated generators, which is the comparison the pinning
+/// rank exists to support. Every VERDICT is identical to the one a materialized
+/// curvature would have produced, to the accuracy of the certified `λ_max`.
+pub fn residual_gauge_exact_from_streamed(
+    model: &FittedSaeManifold,
+    views: &[Option<AtomParameterView>],
+    penalty_ops: &[Option<OrbitPenaltyOperator>],
+    operator: &dyn StreamedFrameCurvature,
+) -> Result<ResidualGaugeReport, String> {
+    let param_dim = model.param_dim();
+    if operator.param_dim() != param_dim {
+        return Err(format!(
+            "residual_gauge: streamed curvature is over {} parameters but param_dim = \
+             {param_dim}",
+            operator.param_dim()
+        ));
+    }
+    let exact = residual_gauge_exact_inputs(model, views, penalty_ops)?;
+    residual_gauge_inner(model, Some(exact), CurvatureAccess::Streamed(operator))
 }
 
 fn residual_gauge_exact_inputs(
@@ -3196,7 +3444,7 @@ fn residual_gauge_exact_inputs(
 fn residual_gauge_inner(
     model: &FittedSaeManifold,
     exact: Option<(Vec<bool>, Vec<GeneratorVerdict>)>,
-    precomputed_curvature: Option<CurvatureReduction>,
+    access: CurvatureAccess<'_>,
 ) -> Result<ResidualGaugeReport, String> {
     let metric_provenance = model.metric.provenance();
     let param_dim = model.param_dim();
@@ -3255,14 +3503,23 @@ fn residual_gauge_inner(
         ));
     }
 
-    // 2. Stacked curvature root in the metric; pinning rank via the audit's
-    // RRQR on Rᵀ, stiffness scale σ_max via SVD (magnitudes kept).
-    let curvature = match precomputed_curvature {
-        Some(curvature) => curvature,
-        None => CurvatureReduction::from_model(model)?,
+    // 2. The curvature, reduced to exactly what step 3 reads off it. The
+    // generators are enumerated FIRST because the streamed route measures their
+    // energies in one pass over the root — a pass it can only take once it knows
+    // which directions to project onto — while the stored routes hold enough of
+    // the spectrum to answer either order. `CurvatureMeasurement` is what both
+    // produce, so nothing below this line knows which route ran.
+    let units = unit_generators(&gens);
+    let measurement = match access {
+        CurvatureAccess::Streamed(operator) => measure_streamed(operator, &units)?,
+        CurvatureAccess::Reduced(curvature) => measure_reduced(&curvature, &units),
+        CurvatureAccess::FromModel => {
+            measure_reduced(&CurvatureReduction::from_model(model)?, &units)
+        }
     };
-    let pinning_rank = curvature.pinning_rank();
-    let sigma_max_sq = curvature.sigma_max_sq();
+    let pinning_rank = measurement.pinning_rank;
+    let pinning_rank_support = measurement.pinning_rank_support;
+    let sigma_max_sq = measurement.sigma_max_sq;
 
     // The isometry pin is inactive ⇒ diffeomorphism-unpinned escalation.
     let diffeomorphism_unpinned = model.isometry_penalty_root.nrows() == 0;
@@ -3270,7 +3527,7 @@ fn residual_gauge_inner(
     // 3. Per-generator flatness verdict: relative curvature vs the calibrated
     // tolerance.
     let mut verdicts: Vec<GeneratorVerdict> = Vec::with_capacity(gens.len());
-    for (family, g, description, lowering_error_scale) in &gens {
+    for (index, (family, g, description, lowering_error_scale)) in gens.iter().enumerate() {
         let norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
         // A structurally trivial generator (rotation of a rank-deficient frame,
         // zero swap) carries no direction — it cannot be a residual freedom.
@@ -3314,8 +3571,7 @@ fn residual_gauge_inner(
         let pinned_energy_fraction = if sigma_max_sq <= f64::MIN_POSITIVE {
             0.0
         } else {
-            let unit = g.mapv(|v| v / norm);
-            (curvature.unit_generator_energy(&unit) / sigma_max_sq).clamp(0.0, 1.0)
+            (measurement.energies[index] / sigma_max_sq).clamp(0.0, 1.0)
         };
         let tolerance = GENERATOR_FLAT_ENERGY_TOL.max(*lowering_error_scale);
         let unpinned = pinned_energy_fraction <= tolerance;
@@ -3451,8 +3707,9 @@ fn residual_gauge_inner(
 
     let summary = format!(
         "residual gauge certificate (computed in metric {metric_provenance:?}): \
-         pinning rank {pinning_rank}, {residual_gauge_dim} unpinned residual gauge \
-         generator(s) of {} enumerated; group = {}{}{}",
+         pinning rank {pinning_rank} over the {}, {residual_gauge_dim} unpinned residual gauge \
+         generator(s) of {} enumerated; group = {}{}{}{}",
+        pinning_rank_support.label(),
         verdicts.len(),
         group_signature_of(&verdicts, diffeomorphism_unpinned),
         match sym_f_trivial_under_output_fisher {
@@ -3465,6 +3722,7 @@ fn residual_gauge_inner(
         } else {
             ""
         },
+        measurement.stiffness_note,
     );
     let summary = if canonicalized_charts > 0 {
         format!(
@@ -3506,6 +3764,7 @@ fn residual_gauge_inner(
         metric_provenance,
         generators: verdicts,
         pinning_rank,
+        pinning_rank_support,
         residual_gauge_dim,
         diffeomorphism_unpinned,
         sym_f_trivial_under_output_fisher,
@@ -4358,6 +4617,7 @@ mod tests {
             metric_provenance: MetricProvenance::Euclidean,
             generators: Vec::new(),
             pinning_rank: 5,
+            pinning_rank_support: PinningRankSupport::ParameterSpace,
             residual_gauge_dim: 0,
             diffeomorphism_unpinned: false,
             sym_f_trivial_under_output_fisher: None,
@@ -4391,6 +4651,7 @@ mod tests {
             metric_provenance: MetricProvenance::Euclidean,
             generators: Vec::new(),
             pinning_rank: 0,
+            pinning_rank_support: PinningRankSupport::ParameterSpace,
             residual_gauge_dim: 0,
             diffeomorphism_unpinned: false,
             sym_f_trivial_under_output_fisher: None,

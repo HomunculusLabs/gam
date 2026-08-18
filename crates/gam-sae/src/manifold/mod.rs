@@ -252,6 +252,7 @@ mod stagewise_seed;
 mod stall_polish_progress;
 mod steering;
 mod stratum_births;
+mod streamed_frame_curvature;
 mod streaming_plan;
 mod support_outer;
 mod support_seed;
