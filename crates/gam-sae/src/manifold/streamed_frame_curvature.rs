@@ -292,10 +292,11 @@ impl StreamedFrameCurvature for StreamedFrameCurvatureOperator<'_> {
         let rank = self.metric.metric_rank();
         let mut accumulator = TriangularRootAccumulator::new(count);
         let (mut tangent, mut g, _) = self.scratch();
-        // `a[i, j] = (J_n ξ_j)[i]`, all directions at once so the observation's
-        // Jacobian is built once for the whole batch rather than once per
-        // generator.
-        let mut a = Array2::<f64>::zeros((p, count));
+        // One observation contributes `rank` rows to `W = RΞ`, and this is them:
+        // `columns[j*rank + r]` is `W[(n,r), j] = (U_nᵀ J_n ξ_j)[r]`. Held as one
+        // flat buffer for the whole pass so the parallel region below writes
+        // disjoint `rank`-length slices and allocates nothing per generator.
+        let mut columns = vec![0.0_f64; count * rank];
         let mut root_row = vec![0.0_f64; count];
         for row in 0..self.term.n_obs() {
             if !self
@@ -304,28 +305,60 @@ impl StreamedFrameCurvature for StreamedFrameCurvatureOperator<'_> {
             {
                 continue;
             }
-            a.fill(0.0);
-            for i in 0..p {
-                for l in 0..d {
-                    let gil = g[[i, l]];
-                    if gil == 0.0 {
+            columns.fill(0.0);
+            // The one parallel region in this module, and it is over GENERATORS
+            // rather than over observations — deliberately.
+            //
+            // A generator's column of `W` is computed from `g` and that
+            // generator alone and is written to its own slice, so there is no
+            // reduction and therefore no summation order to depend on the
+            // schedule. Splitting the OBSERVATIONS instead would need per-chunk
+            // partial factors combined pairwise, and Givens rotations do not
+            // commute: the certificate would stop being bit-reproducible across
+            // runs, which is a property it is asserted to have (two replicate
+            // fits are "identified up to the same group" iff their signatures are
+            // equal). This way the serial and parallel passes are the same
+            // arithmetic in the same order, not merely the same in distribution.
+            //
+            // There is enough work here to be worth splitting: one observation is
+            // `p·G·(D + rank)` flops, and it is `G` — not `n` — that grows with
+            // the dictionary (`D(D−1)/2` frame rotations plus `K(K−1)/2` atom
+            // exchanges).
+            let contract = |j: usize, slot: &mut [f64]| {
+                let direction = &directions[j];
+                for i in 0..p {
+                    let mut a = 0.0_f64;
+                    for l in 0..d {
+                        let gil = g[[i, l]];
+                        if gil != 0.0 {
+                            a += gil * direction[self.layout.column(i, l)];
+                        }
+                    }
+                    if a == 0.0 {
                         continue;
                     }
-                    let col = self.layout.column(i, l);
-                    for (j, direction) in directions.iter().enumerate() {
-                        a[[i, j]] += gil * direction[col];
+                    for (r, c) in slot.iter_mut().enumerate() {
+                        *c += self.metric.factor_entry(row, i, r) * a;
                     }
+                }
+            };
+            if count > 1 && rayon::current_thread_index().is_none() {
+                use rayon::prelude::*;
+                columns
+                    .par_chunks_mut(rank)
+                    .enumerate()
+                    .for_each(|(j, slot)| contract(j, slot));
+            } else {
+                for (j, slot) in columns.chunks_mut(rank).enumerate() {
+                    contract(j, slot);
                 }
             }
             for r in 0..rank {
                 let mut any = false;
                 for (j, slot) in root_row.iter_mut().enumerate() {
-                    let mut acc = 0.0_f64;
-                    for i in 0..p {
-                        acc += self.metric.factor_entry(row, i, r) * a[[i, j]];
-                    }
-                    any |= acc != 0.0;
-                    *slot = acc;
+                    let value = columns[j * rank + r];
+                    any |= value != 0.0;
+                    *slot = value;
                 }
                 if !any {
                     continue;

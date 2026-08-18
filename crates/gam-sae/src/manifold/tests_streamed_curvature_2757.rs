@@ -577,6 +577,55 @@ fn the_streamed_certificate_is_reproducible() {
     }
 }
 
+/// The generator projection is split over GENERATORS, which have disjoint
+/// outputs — so the parallel pass is the same arithmetic in the same order as
+/// the serial one, not merely the same in distribution.
+///
+/// The serial arm is reached by running inside a rayon worker, which is exactly
+/// the nesting guard the operator uses; comparing the two factors BIT FOR BIT is
+/// what makes "no reduction, therefore no schedule dependence" a checked claim.
+/// Splitting the observations instead would have needed per-chunk partial
+/// factors combined pairwise, and Givens rotations do not commute — this gate is
+/// the reason that design was not taken.
+#[test]
+fn the_parallel_generator_pass_is_bit_identical_to_the_serial_one() {
+    let (n, p, k_atoms, rank) = (24usize, 12usize, 3usize, 3usize);
+    let (term, metric, layout) =
+        gauge_driving_term(n, p, k_atoms, rank, 1.0, 0x2757_9A9A_0000_0001);
+    let param_dim = layout.param_dim();
+    let pin = Array2::<f64>::zeros((0, param_dim));
+    let operator =
+        StreamedFrameCurvatureOperator::new(&term, &metric, &layout, &pin, n * rank).expect("op");
+    let directions = probe_directions(param_dim, 9, 0x2757_9B9B_0000_0001);
+    let views: Vec<ArrayView1<'_, f64>> = directions.iter().map(|d| d.view()).collect();
+
+    assert!(
+        rayon::current_thread_index().is_none(),
+        "the outer arm must be the parallel one for this gate to compare two passes"
+    );
+    let parallel = operator.project_root(&views).expect("parallel pass");
+
+    let mut serial = Array2::<f64>::zeros(parallel.dim());
+    rayon::scope(|scope| {
+        scope.spawn(|_| {
+            assert!(
+                rayon::current_thread_index().is_some(),
+                "inside a rayon worker the operator must take its serial arm"
+            );
+            serial = operator.project_root(&views).expect("serial pass");
+        });
+    });
+
+    assert_eq!(parallel.dim(), serial.dim());
+    for (a, b) in parallel.iter().zip(serial.iter()) {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "the projected root must not depend on the schedule: {a:.17e} vs {b:.17e}"
+        );
+    }
+}
+
 /// A hand-built operator, so the refusal contract can be exercised without a
 /// fit that has to be made pathological first.
 struct FakeCurvature {
