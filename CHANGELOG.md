@@ -1,5 +1,71 @@
 ## Unreleased
 
+- **The constant-curvature range solve claimed `dη̂/dκ = 0` on a state that had
+  not earned it, and the curvature acceptance measured one of its two signs
+  (#2747).** Two things, and the second is the reason the first went unseen.
+
+  `RangeSolveOutcome::LocallyFixed` named three different terminations — the
+  caller pinned `length_scale=`, the iterate parked at the chart's evaluability
+  wall, and the Newton stopped somewhere without a certificate — and
+  `ConstantCurvatureProfile::evaluate` treated all three alike, taking the plain
+  κ slice, i.e. reporting `V_κ` as the total derivative of `V(κ, η̂(κ))`. That is
+  a theorem for the first two (a pin makes η constant by construction; an ACTIVE
+  bound makes it constant while it stays active) and nothing at all for the
+  third. The error is `V_η·η̂′`, and neither factor is small: `V_η` not being
+  small is what failing the certificate means, and `η̂′` is order tens per unit κ
+  on real geometry — measured on the coverage fixture's own cloud, `ℓ̂` sweeps
+  `0.68 → 34 000` across the κ box.
+
+  The certificate is now a property of the STATE rather than of the exit branch.
+  `converged` was a flag set by two of the loop's several `break`s, so a line
+  search whose every trial is worse than an incumbent that is already the
+  minimum exhausted, left through `None => break`, and had a stationary point
+  classified as a stall. Emulating the shipped inner solve against a
+  brute-force `min_η` over the whole chart, the `2×`-range column reads
+
+  ```text
+  outcomes = ['at_hi', 'at_hi', 'converged', 'stalled', 'stalled', 'converged', …]
+  ℓ̂        = 7.7e7,   7.7e7,   4.9e7,       47.1,      17.3,      10.5, …
+  ```
+
+  and the brute force confirms `47.1` and `17.3` ARE the minimizers. Those cells
+  now reach `InteriorMinimum`, which restores the Schur term to `V_p″` and
+  publishes `RangeEstimateSupport::Interior` for a range that is one.
+  `LocallyFixed` splits into `Pinned`, `EvaluabilityWall`, `DistanceKernelLimit`
+  and `Uncertified`; the first three keep the plain slice on a stated argument,
+  and `Uncertified` REFUSES with `V_η` and `V_ηη` named — the discipline
+  `eta_profiled_kappa_jet` already applies to a non-positive `V_ηη` instead of
+  dividing by it. All four still report as `LocallyFixed` on the public
+  `RangeEstimateSupport`, whose contract already covers all of them.
+
+  Separately, `ConstantCurvatureProfile::new` derived its box and its bracket
+  from the realized center set and read its SEED from `spec.length_scale` —
+  which, by the time the CI and the flatness LR build their profile, is the
+  fit's own `ℓ̂`, written back by the free-κ enrollment and by
+  `freeze_term_collection_from_design`. Seeding the inner solve with it is a
+  warm start from one κ, which `minimize_over_eta`'s own doc forbids: *"a
+  profile likelihood that is not a function of its own argument cannot support
+  an interval"*. The seed is derived when the range is free and honoured
+  verbatim when the user pinned it — the same un-freezing the constructor
+  already did one field up for `identifiability`.
+
+  And the acceptance gained its missing half. `#2747`'s bar is *"an interior
+  optimum of `V_p(κ)` near the planted `κ⋆` … on both curvature signs"*, and the
+  tree measured the curvature × range grid only at `κ⋆ = +1` and `κ⋆ = 0`, with
+  the hyperbolic sign covered only at the auto `ℓ_ref` — the one column a
+  range-blind criterion already handled. `curved_coverage_arm(κ⋆, seed_base)`
+  parameterises the arm by sign; the spherical entry point keeps its seed base
+  so its nine datasets are unchanged. First run of the new arm:
+
+  ```text
+  [cov κ⋆=-1] covered 9 / missed 0 / unresolved 0 of 9   railed κ̂ 0/9
+              sign_correct 9/9   mean κ̂ = -0.947
+  ```
+
+  against the row this issue was filed over (`κ̂ = −1.410` railed at `0.5×`,
+  `−0.943` at `1×`, `−0.295` at `2×`). The spherical arm reads `covered 9/9,
+  railed 1/9, mean κ̂ = +1.070` against the body's `railed 9/9`.
+
 - **The streaming lane declared a SADDLE to be a MODE, silently, and the memory
   planner chose which (#2515).** `factor_evidence_unit_deflated_schur` decided a
   direction was a numerical null with
