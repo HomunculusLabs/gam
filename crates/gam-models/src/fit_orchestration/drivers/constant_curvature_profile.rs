@@ -28,6 +28,13 @@ fn constant_curvature_psi_profile_value(
     y: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
 ) -> Result<(f64, bool), EstimationError> {
+    // ONE penalty, because this criterion is a single-λ closed form. That is a
+    // restriction on the MODEL, not a formatting choice, so
+    // `ConstantCurvatureProfile::new` refuses a `double_penalty=` term outright
+    // rather than letting this line quietly score a different one — see the
+    // argument there. By the time control reaches here the flag is already
+    // false; the assignment stands so a future caller that bypasses the
+    // constructor cannot silently get two penalties and one λ.
     let mut profile_spec = spec.clone();
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
@@ -87,6 +94,8 @@ fn constant_curvature_psi_profile_jet(
         );
     }
 
+    // One penalty; see `constant_curvature_psi_profile_value` and the refusal in
+    // `ConstantCurvatureProfile::new`.
     let mut profile_spec = spec.clone();
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
@@ -407,6 +416,48 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 "constant-curvature profile needs one non-empty response per row: data={}, response={}",
                 data.nrows(),
                 response.len(),
+            );
+        }
+        // A `double_penalty=` term is not a model this profile can score, and
+        // saying so is the difference between an estimate and a number.
+        //
+        // The criterion is `gaussian_reml_multi_closed_form` on ONE design and
+        // ONE penalty, so it carries one λ. `double_penalty = true` makes
+        // `build_constant_curvature_basis` emit TWO active penalties — the RKHS
+        // Gram and a ridge `I` — which the fit gives two independent smoothing
+        // parameters. Both profile entry points therefore forced the flag off,
+        // and the effect of that was silent: κ̂ and ℓ̂ were selected against the
+        // one-penalty model and the fit then realized the two-penalty one, so
+        // the reported curvature was an estimate for a model nobody fits, with
+        // a CI and a flatness p-value to match.
+        //
+        // The Matérn sibling makes the same assignment (`spatial_optimization.rs`,
+        // "Honoring `double_penalty: true` instead returned the kernel-Gram
+        // double-penalty ψ-derivatives — a penalty the design does NOT carry"),
+        // and there it is CORRECT because the term-collection assembler
+        // overrides the basis-level penalty with the operator triplet anyway, so
+        // `false` reproduces the realized design exactly (verified to ~1e-9 by
+        // FD). No such override exists here: what the basis emits is what the
+        // fit penalizes, so dropping the ridge drops a penalty the fit carries.
+        //
+        // Refusing rather than honoring is deliberate. Honoring it means a
+        // two-λ profile, and #1464 measured what the ridge does to this
+        // estimand — "the curvature-blind ridge `I` absorbs the data fit
+        // independently of κ and rails the fitted curvature to the +chart bound
+        // (hyperbolic truth recovered as spherical)" — which is why `curv`
+        // defaults to no ridge and only an EXPLICIT `double_penalty=` turns it
+        // on. A user who set it has asked for a model whose curvature this
+        // machinery cannot estimate, and the two ways out are both one edit:
+        // drop `double_penalty=`, or pin `kappa=` and take fixed geometry.
+        if spec.double_penalty {
+            crate::bail_invalid_estim!(
+                "constant-curvature curvature/range estimation is unavailable for a \
+                 `double_penalty=` term: the profile criterion carries ONE smoothing \
+                 parameter and this basis emits two penalties (RKHS Gram + ridge), so a κ̂ \
+                 selected here would be an estimate for a model the fit does not realize. \
+                 Either drop `double_penalty=` (the default, and what #1464 recommends — \
+                 the κ-blind ridge absorbs the data fit and rails κ̂ to the +chart bound), \
+                 or pin `kappa=` and `length_scale=` and take fixed geometry."
             );
         }
         spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::CenterSumToZero;

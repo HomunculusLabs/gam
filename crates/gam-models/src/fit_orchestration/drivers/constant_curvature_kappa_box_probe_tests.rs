@@ -574,4 +574,46 @@ mod constant_curvature_kappa_range_identification_tests {
              the bars above would pass on a profile that never applied it"
         );
     }
+
+    /// A `double_penalty=` term has no curvature estimate here, and the profile
+    /// says so instead of scoring a different model.
+    ///
+    /// The criterion is a single-λ closed form. `double_penalty = true` makes
+    /// the basis emit TWO active penalties — the RKHS Gram and a ridge `I` —
+    /// which the fit gives two independent smoothing parameters. Both profile
+    /// entry points forced the flag off, so `κ̂` and `ℓ̂` were selected against
+    /// the one-penalty model while the fit realized the two-penalty one: an
+    /// estimate for a model nobody fits, with a CI and a flatness p-value
+    /// attached to it. Nothing anywhere reported the substitution.
+    ///
+    /// The pair below is the whole claim: the flag is the ONLY difference
+    /// between the two specs, one is refused and the other is not, and the
+    /// refusal names both ways out.
+    #[test]
+    fn a_double_penalty_term_is_refused_rather_than_scored_as_a_different_model() {
+        let n = 120usize;
+        let centers = 6usize;
+        let seed = 0x5EED_2747_0000_0006_u64;
+        let (feats, y) = dataset_in_span(n, 0.5, 0.6, 1.0, centers, 0.05, seed);
+
+        let mut ridged = spec_at(0.0, centers, 0.0);
+        ridged.double_penalty = true;
+        let refusal = ConstantCurvatureProfile::new(feats.view(), y.view(), ridged)
+            .expect_err("a two-penalty basis has no single-λ profile");
+        let message = refusal.to_string();
+        eprintln!("[#2747 double-penalty] {message}");
+        for needle in ["double_penalty", "one", "kappa="] {
+            assert!(
+                message.contains(needle),
+                "the refusal must name the flag, the arity that fails, and a way out; \
+                 {needle:?} is missing from {message:?}"
+            );
+        }
+
+        // The control: the same spec without the flag builds, and it is the ONLY
+        // difference between them, so the refusal cannot be blamed on the
+        // fixture.
+        ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+            .expect("the default single-penalty term still profiles");
+    }
 }
