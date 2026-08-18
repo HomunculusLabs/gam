@@ -4070,6 +4070,96 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
             .beta
             .clone(),
     );
+    // THE OUTER SEARCH MUST OPTIMIZE THE CRITERION THE FIT IT GRADES REALIZES
+    // (#2748).
+    //
+    // This driver used to hand the outer `[rho, psi]` evaluator the RAW warp
+    // basis with `frozen_warp_design = None`, i.e. the DYNAMIC `B(eta)` rebuilt
+    // at the moving index — while the baseline fit above and the final refit
+    // below are both `fit_binomial_mean_wiggle`, whose whole construction is the
+    // FROZEN, de-aliased `B_perp = B(eta_hat) - X A`. Three things follow, and
+    // all three were measured on `papuan_oce4_matern_k6`'s `_flexible` cell:
+    //
+    // * **The two are not the same function.** At the identical
+    //   `rho = [-3.996, -8.097, -1.575, -4.136, -2.873, -10.0]` the frozen path
+    //   certifies in three cycles at `cost = 1.967e3`; the dynamic path reports
+    //   `cost = 7.957e8` at `|beta|inf = 1.592e5`. The search was choosing
+    //   `theta*` for a criterion the refit never evaluates.
+    //
+    // * **The frozen one is CONVEX and the dynamic one is not.** With `B` frozen,
+    //   `q = X*beta + B_perp*beta_w` is linear in both blocks, so the joint
+    //   Hessian is `[X B_perp]' diag(m2) [X B_perp] + S` with `m2 = w*mu*(1-mu) >= 0`
+    //   — positive semidefinite by construction. The dynamic arm carries the
+    //   `d2B/deta2` chain terms and is genuinely indefinite: every seed of this
+    //   cell reported `resolvable_negative_curvature=true` and ground its full
+    //   1200-cycle budget at `step_inf = 3.4e4` with the residual at `9.9e2`
+    //   against a `9.9e-4` tolerance.
+    //
+    // * **The declared psi-derivative layout is only complete for the frozen
+    //   arm.** `CustomFamilyHyperLayout::new(vec![eta_derivs, Vec::new()], ..)`
+    //   states that the wiggle block's design does not move with psi. Frozen, that
+    //   is exactly true — `B_perp` is a fixed matrix. Dynamic, it is false:
+    //   `B(eta)` with `eta = X(psi)*beta` carries `dB/dpsi = B'(eta)*(dX/dpsi)*beta`,
+    //   a direct design dependence nothing declared, so the analytic outer
+    //   gradient was missing a term.
+    //
+    // The index is frozen ONCE, at the baseline fixed point, and not per outer
+    // proposal. A per-proposal freeze would make `B_perp` a function of psi and
+    // reintroduce exactly the undeclared psi dependence of the third point; the
+    // baseline's own converged index is the only psi-independent choice, and it
+    // is the point the search starts from. The final refit re-freezes iteratively
+    // from the pilot, so the approximation lives entirely in which nuisance
+    // profile the search minimises — not in the fit that is minted.
+    let baseline_eta = baseline_fit
+        .block_states
+        .get(BinomialMeanWiggleFamily::BLOCK_ETA)
+        .ok_or_else(|| "baseline binomial mean-wiggle fit missing eta block".to_string())?
+        .eta
+        .clone();
+    let baseline_wiggle_eta = baseline_fit
+        .block_states
+        .get(BinomialMeanWiggleFamily::BLOCK_WIGGLE)
+        .ok_or_else(|| "baseline binomial mean-wiggle fit missing wiggle block".to_string())?
+        .eta
+        .clone();
+    let frozen_warp_basis = {
+        let frozen_family = BinomialMeanWiggleFamily {
+            y: y.clone(),
+            weights: weights.clone(),
+            link_kind: link_kind.clone(),
+            wiggle_knots: wiggle_knots.clone(),
+            wiggle_degree,
+            policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            frozen_warp_design: None,
+        };
+        let b_full = frozen_family.wiggle_design(baseline_eta.view())?;
+        // The de-aliasing metric is the curvature of the row loss at the
+        // COMPOSITE index the baseline realized, which is the same choice
+        // `fit_binomial_mean_wiggle`'s own `build_dealiased` makes and for the
+        // same reason (`dealias_warp_against_mean_block`: the only inner product
+        // the rest of the solve uses is the one its own curvature defines).
+        let mut curvature = Array1::<f64>::zeros(y.len());
+        for row in 0..y.len() {
+            let q = baseline_eta[row] + baseline_wiggle_eta[row];
+            let (_, m2, _) = frozen_family.neglog_q_derivatives(y[row], weights[row], q)?;
+            curvature[row] = if m2.is_finite() && m2 > 0.0 { m2 } else { 0.0 };
+        }
+        let x_dense: Array2<f64> = baseline_design.design.to_dense();
+        let (_, bda) = dealias_warp_against_mean_block(&x_dense, &b_full, &curvature)?;
+        let max_b = b_full.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let max_resid = bda.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let resid_tol =
+            1.0e3 * f64::EPSILON * (bda.nrows().max(bda.ncols()).max(1) as f64) * max_b.max(1.0);
+        if max_resid <= resid_tol {
+            return Err(
+                "exact-joint spatial warp de-aliasing left no identifiable warp \
+                        direction at the baseline index (the mean block already spans the \
+                        warp in observation space)"
+                    .to_string(),
+            );
+        }
+        std::sync::Arc::new(bda)
+    };
     let theta_dim = rho_dim + log_kappa0.len();
     let mut theta0 = Array1::<f64>::zeros(theta_dim);
     theta0
@@ -4125,9 +4215,24 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
 
     let pilot_spec_cloned = pilot_spec.clone();
     let pilot_beta = baseline_eta_beta;
-    let wiggle_design = wiggle_block.design.clone();
-    let wiggle_offset = wiggle_block.offset.clone();
-    let wiggle_penalties = wiggle_block.penalties.clone();
+    // The block the outer evaluator solves is the frozen de-aliased warp, so its
+    // DESIGN is that matrix and not the raw basis (#2748). `block_geometry`'s
+    // frozen arm serves `frozen_warp_design` and asserts it matches
+    // `spec.design.ncols()`; `B_perp` has the same width as `B` by construction
+    // (`B - X A`), so the two agree and the family's own width check is what
+    // proves it.
+    let wiggle_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        frozen_warp_basis.as_ref().clone(),
+    ));
+    let wiggle_offset = Array1::<f64>::zeros(frozen_warp_basis.nrows());
+    let wiggle_penalties: Vec<crate::model_types::PenaltySpec> = wiggle_block
+        .penalties
+        .iter()
+        .map(|penalty| {
+            penalty_spec_to_dense(penalty, frozen_warp_basis.ncols())
+                .map(crate::model_types::PenaltySpec::Dense)
+        })
+        .collect::<Result<_, String>>()?;
     let wiggle_initial_beta = baseline_wiggle_beta;
     let wiggle_knots_cloned = wiggle_knots.clone();
     let y_cloned = y.clone();
@@ -4140,9 +4245,13 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         wiggle_knots: wiggle_knots_cloned.clone(),
         wiggle_degree,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
-        // The spatial joint-κ path keeps the dynamic warp basis (#1596 frozen
-        // basis applies to the non-spatial `fit_binomial_mean_wiggle` loop).
-        frozen_warp_design: None,
+        // The FROZEN, de-aliased basis the baseline fixed point realized — the
+        // same object `fit_binomial_mean_wiggle` fits and the same object the
+        // refit below re-derives. See `frozen_warp_basis` above for the three
+        // measured reasons this is not the dynamic `B(eta)` it used to be
+        // (#2748): the two are different functions, only this one is convex, and
+        // only this one makes the declared ψ-derivative layout complete.
+        frozen_warp_design: Some(std::sync::Arc::clone(&frozen_warp_basis)),
     };
     let screening_cap = Arc::new(AtomicUsize::new(0));
     let mut outer_options = options.clone();
@@ -4187,10 +4296,15 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
                 nullspace_dims: vec![],
                 initial_log_lambdas: theta.slice(s![0..eta_penalty_count]).to_owned(),
                 initial_beta: Some(pilot_beta.clone()),
-                // Lower gauge priority on the static eta design: it yields the
-                // shared level/intercept direction to the dynamic full-width
-                // wiggle I-spline block (see fit_binomial_mean_wiggle).
-                gauge_priority: LINK_WIGGLE_GAUGE_PRIORITY,
+                // The warp block here is the RESIDUAL `B_perp`, so precedence
+                // runs the same way it does in `fit_binomial_mean_wiggle`: a
+                // direction the two still share after residualization is one the
+                // mean block can represent and the warp is echoing, so the mean
+                // block keeps its priority and the warp yields
+                // ([`DEALIASED_WARP_GAUGE_PRIORITY`]). This used to be the other
+                // way round because the warp was the DYNAMIC full-width basis,
+                // residualized against nothing (#2748).
+                gauge_priority: DEFAULT_GAUGE_PRIORITY,
                 jacobian_callback: None,
                 stacked_design: None,
                 stacked_offset: None,
@@ -4221,7 +4335,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
                 nullspace_dims: vec![],
                 initial_log_lambdas: theta.slice(s![eta_penalty_count..rho_dim]).to_owned(),
                 initial_beta: wiggle_initial_beta.clone(),
-                gauge_priority: DEFAULT_GAUGE_PRIORITY,
+                gauge_priority: DEALIASED_WARP_GAUGE_PRIORITY,
                 jacobian_callback: None,
                 stacked_design: None,
                 stacked_offset: None,
