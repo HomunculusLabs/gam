@@ -313,13 +313,26 @@ path through a distinct `type=`:
   constant-curvature `M_κ` geodesic-kernel smooth, the κ-generic sibling
   of `sphere()` that interpolates `Sᵈ → ℝᵈ → Hᵈ` via `kappa=` (default
   `0`, flat). See [response-geometry.md](response-geometry.md).
-  Its kernel is `exp(−d_κ/ℓ)`, so it has **two** outer coordinates — the
-  signed curvature `κ` and the range `ℓ` — and both follow the mgcv-`sp=`
+  Its kernel is `ℓ·(exp(−d_κ/ℓ) − 1)`, so it has **two** outer coordinates —
+  the signed curvature `κ` and the range `ℓ` — and both follow the mgcv-`sp=`
   convention: an explicit `kappa=` / `length_scale=` pins that coordinate,
   an omitted one estimates it. Pinning `length_scale=` is not recommended:
   `κ` and `ℓ` enter one exponent and are strongly confounded, so a `κ`
   fitted against a wrong range reports the range error rather than the
   curvature.
+
+  The `ℓ` factor and the subtracted `1` are invisible to the model — the
+  coefficient frame annihilates constants and the smoothing parameter absorbs a
+  positive scale, so this is `exp(−d_κ/ℓ)` in a different gauge — but they are
+  not optional. All of the range's information lives in `K − 1`, and forming it
+  by subtracting `exp(−d_κ/ℓ)` from an implicit `1` costs `log₁₀(ℓ/d)`
+  significant digits, which the Gram then squares. In that gauge the criterion
+  descends about 100 nats per decade into its own rounding at large `ℓ`, so a
+  range search reads an artefact; `expm1` forms `K − 1` directly and the
+  departure is zero to eight figures out to `ℓ = 10⁹`. The same gauge is what
+  decouples `ρ̂` from the range (in the `exp` gauge `ρ̂` falls one-for-one with
+  `ln ℓ`, so a wide range box walks the smoothing parameter into its own bound
+  for no statistical reason).
 - `pca(...)` — PCA-subspace smooth.
 
 Each requires at least one variable and accepts radial-smooth options

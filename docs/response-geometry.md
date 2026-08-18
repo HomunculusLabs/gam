@@ -51,7 +51,19 @@ Aitchison-isometric (`G = I`), so the fit is invariant to the coordinate choice.
 `response_geometry="constant_curvature"` first estimates `kappa_hat` from the
 responses, then fits and predicts on `constant_curvature(dim=D,kappa=kappa_hat)`.
 `model.summary()["curvature"]` carries `kappa_hat`, the profile CI, the
-flatness LR test, and the verdict.
+flatness LR test, and the verdict — plus the two PROVENANCE fields that decide
+how much of it you may read:
+
+| Field | Meaning |
+| --- | --- |
+| `kappa_hat` | The fitted signed sectional curvature. |
+| `ci_lo`, `ci_hi`, `lo_at_bound`, `hi_at_bound` | The 95% profile-likelihood interval, and whether each endpoint is a real χ²₁ crossing or the point where the walk ran out of chart. An `*_at_bound` endpoint is a lower bound on the interval, not the interval. |
+| `kappa_hat_support` | `"interior"`, `"railed_at_lower_bound"`, `"railed_at_upper_bound"`. A railed `kappa_hat` is a readout of the search box rather than of the data: its SIGN carries information, its MAGNITUDE does not, and the CI and flatness statistics are conditioned on the same box. |
+| `verdict` | `"spherical"`, `"hyperbolic"`, `"flat"`, `"indistinguishable"` — the sign of the interval, not of the point estimate. |
+| `flatness_lr_stat`, `flatness_p_value` | The interior `κ = 0` likelihood-ratio test against a full χ²₁ (no half-χ² correction: `κ = 0` is interior to `Sᵈ ← ℝᵈ → Hᵈ`). |
+| `length_scale_hat` | The kernel range the criterion profiles to AT `kappa_hat`. Every statistic above is a profile over it. |
+| `length_scale_estimated` | `false` when you pinned it with `length_scale=`, in which case `kappa_hat` is conditional on that choice rather than profiled — and a curvature fitted against a wrong range reports the range error. |
+| `length_scale_support` | `"interior"`, `"distance_kernel_limit"`, or `"locally_fixed"`. The middle one is an ARRIVAL rather than a rail: as `ℓ → ∞` the kernel becomes the geodesic distance `−d_κ`, which is an ordinary non-degenerate member of the same family, so `length_scale_hat` there is a lower bound with a meaning. `"locally_fixed"` covers a pin, a stop at the numerical evaluability wall, and a solve that could not certify an interior minimizer. |
 
 For curved matrix / subspace responses, pass response columns containing
 the flattened representation expected by the corresponding geometry
