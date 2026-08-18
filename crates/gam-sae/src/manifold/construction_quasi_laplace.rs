@@ -3418,15 +3418,15 @@ impl SaeManifoldTerm {
     /// convenience entries, this requires the rational surrogate to retain its
     /// complete weighted shifted-solve derivative and the exact
     /// `ArrowSchurSystem` used to produce it. Optional shift-zero inverse probes
-    /// are requested separately and are scoped to EFS proposals. Per-row
-    /// spectral deflation is rejected explicitly, and a dense retry would violate
-    /// both the declared memory route and the single-functional derivative
-    /// contract. #2712 corrected the REASON on that rejection: the border-only
-    /// derivative representation does reconstruct the deflated block and does
-    /// carry the Daleckii--Krein correction now; what is unfixed is the
-    /// deflation-INDEPENDENT #2515 beta-Schur desync in the complete matrix-free
-    /// gradient. See the gate itself for the measurement and for what would lift
-    /// it.
+    /// are requested separately and are scoped to EFS proposals.
+    ///
+    /// Per-row spectral deflation is ADMITTED (#2515). It was refused here for as
+    /// long as the arrow route and the dense route priced a deflated direction
+    /// differently; since #2673 unified the classification metric they do not, and
+    /// the two complete gradients agree to `1.6e-9` relative on #2712's certified
+    /// deflated anchor. The body carries the four eras of that refusal's stated
+    /// reason and the measurement that ended it, because the recurring defect at
+    /// this seam is a refusal outliving the disagreement it was written for.
     pub(crate) fn penalized_quasi_laplace_streaming_outer_evaluation(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -3485,8 +3485,11 @@ impl SaeManifoldTerm {
                     .to_string(),
             )
         })?;
-        // #2515 RE-MEASURED RATIONALE — this gate stays, and its reason has changed
-        // for the second time. It is retained on a NUMBER now, not an argument.
+        // #2515 — THE SPECTRAL-DEFLATION REFUSAL THAT STOOD HERE IS GONE, AND THE
+        // NUMBER IT WAS RETAINED ON IS WHY. Four eras, each disproved by a
+        // measurement rather than by an argument; keeping all four because the
+        // failure mode this seam keeps producing is a refusal whose justification
+        // outlives the defect it was written for.
         //
         // Era 1 said the from-probes cluster could not price per-row deflation.
         // #2712 disproved that: `A_i` is the conditioned row Cholesky, so the
@@ -3495,56 +3498,51 @@ impl SaeManifoldTerm {
         //
         // Era 2 named the #2499/#2515 β-Schur smoothness-EDF desync — the dense
         // route contracting a β-Schur deflated pseudo-inverse while the bundle
-        // contracted "whatever `S⁻¹` it carries". That is fixed: the bundle now
-        // carries the exact observed information's own reduced Schur AND its row
-        // factors, and the two routes agree to `1.57e-14` on the complete gradient
-        // at a non-deflating state (`laplace_value_and_gradient_are_route_-
-        // invariant_2515`).
+        // contracted "whatever `S⁻¹` it carries". Fixed by the typed
+        // `BundleEvidenceGeometry`: the bundle now carries the exact observed
+        // information's own reduced Schur AND its row factors, and the two routes
+        // agree to `1.57e-14` on the complete gradient at a non-deflating state
+        // (`laplace_value_and_gradient_are_route_invariant_2515`).
         //
-        // Era 3, MEASURED on #2712's own certified deflated anchor by
-        // `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`:
+        // Era 3 (`ac66e624d`) measured, on #2712's certified deflated anchor, a
+        // complete-gradient gap of `9.131537e0` against `‖g‖∞ = 5.004339e0` and
+        // attributed it to two floors in two metrics — the dense route flooring the
+        // spectrum of the materialized `A` against an ABSOLUTE band while the arrow
+        // route conditions per row. It said, in as many words, that the way to lift
+        // this gate was to reconcile those two prices.
+        //
+        // Era 4: #2673 reconciled them (`00c1fe139`, `758c9d336`) — the absolute
+        // floor is deleted and BOTH sites now classify a direction by its curvature
+        // in the majorizer metric, `max(dim·ε·‖A‖₂, √ε·vᵀBv)`. That was not done for
+        // this gate and this gate was not re-measured against it. Re-measured now,
+        // same anchor, same comparison, `zz_attribute_deflated_route_classification_2515`
+        // and `exact_a_route_parity_holds_on_a_deflated_cache_2515`:
         //
         //     majorizer deflated rows 10, exact-A deflated rows 10
-        //     complete gradient max|Δ| = 9.131537e0 against ‖g‖∞ = 5.004339e0
+        //     complete gradient max|Δ| = 2.798722e-8 against ‖g‖∞ = 1.726754e1
+        //                              = 1.62e-9 RELATIVE, from 1.8 relative
         //
-        // What is left is a DEFLATION-PRICING disagreement, not an operator one.
-        // The dense route floors the spectrum of the materialized `A` globally
-        // (with #2336 clamp-attributable pricing on negative directions); the arrow
-        // route conditions each row block and pseudo-inverts the reduced Schur.
-        // Two floors, two metrics, one `A` — the #2673 genus. That is what a
-        // deflated streaming fit would be ranked and steered by, and it is not the
-        // criterion the dense lane evaluates.
+        // and the classification is now agreed direction for direction: on that
+        // anchor the dense route pins nothing, prices no clamp-attributable negative,
+        // and reads `log|A_tt| = 2.2623032065e1` against the arrow route's
+        // `2.2623032490e1` over the same thirty directions.
         //
-        // TO LIFT THIS GATE: reconcile the two deflation prices, then delete the
-        // assertion in `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`
-        // — which goes RED the moment they agree, and says so.
+        // The residual `1.6e-9` is NOT machine precision and is not noise; it is
+        // attributed, and the attribution is under test. The dense route materializes
+        // `A` through `apply_cached_arrow_hessian`, which applies the CONDITIONED row
+        // factor, so a `B`-deflated direction enters the dense `A` as `1 + ΔC_vv`;
+        // the arrow route assembles `B_raw + ΔC` and unit-pins the result, so the
+        // same direction is exactly `1`. Both honour "a deflated direction is unit
+        // stiffness"; they disagree about whether `ΔC` is added before or after the
+        // pinning, and `ΔC_vv ~ 1e-8` there. See
+        // `dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515`.
         //
-        // The check reads BOTH caches. `cache` is the `B` stationarity geometry the
-        // IFT solve rides; `exact_a_cache` is what the from-probes trace and
-        // θ-adjoint channels reconstruct their inverse blocks from. Since #2515
-        // those are different factorizations of different operators, and either one
-        // deflating puts the gradient in the regime measured above.
-        for (label, inspected) in [("majorizer", &cache), ("exact-A", &exact_a_cache)] {
-            if let Some((row, directions)) = inspected
-                .deflated_row_directions
-                .iter()
-                .enumerate()
-                .find(|(_, directions)| !directions.is_empty())
-            {
-                return Err(SaeCriterionError::Numerical(format!(
-                    "streaming outer derivative is not admitted: the {label} evidence \
-                     factorization spectrally deflates row {row} in {} direction(s). The \
-                     from-probes channels carry the Daleckii--Krein correction (#2712) and \
-                     now differentiate the exact observed information (#2515, parity \
-                     1.57e-14 undeflated), but on a DEFLATING cache the arrow route's \
-                     per-row + reduced-Schur pseudo-inverse and the dense route's global \
-                     spectral floor price deflation differently -- measured complete-gradient \
-                     gap 9.13 against ||g||inf = 5.00. Refusing rather than steering a fit \
-                     with the derivative of an operator the dense criterion does not rank",
-                    directions.len()
-                )));
-            }
-        }
+        // So the criterion is one criterion on both routes, and a deflating state is
+        // ADMITTED rather than refused. `cache` is still the `B` stationarity
+        // geometry the IFT solve rides and `exact_a_cache` is still what the
+        // from-probes channels reconstruct their inverse blocks from — the two are
+        // different factorizations of different operators by design (#2515), which
+        // is exactly why neither one deflating is a reason to withhold the gradient.
         Ok(StreamingOuterEvaluation {
             cost,
             loss,
