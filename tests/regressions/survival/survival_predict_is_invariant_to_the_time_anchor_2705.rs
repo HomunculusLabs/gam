@@ -114,7 +114,7 @@ fn predict_rows() -> EncodedDataset {
     encode_recordswith_inferred_schema(headers, rows).expect("encode predict rows")
 }
 
-/// `(survival surface, fitted time coefficients)` for one anchor.
+/// `(survival surface, fitted coefficient vector)` for one anchor.
 fn fit_at_anchor(train_path: &Path, dir: &Path, anchor: f64, tag: &str) -> (Array2<f64>, Vec<f64>) {
     let model_path = dir.join(format!("model_{tag}.json"));
     let mut fit_cmd = Command::new(gam::gam_binary!());
@@ -129,11 +129,16 @@ fn fit_at_anchor(train_path: &Path, dir: &Path, anchor: f64, tag: &str) -> (Arra
     assert!(model_path.is_file(), "gam fit did not write {model_path:?}");
 
     let model = FittedModel::load_from_path(&model_path).expect("load saved survival model");
-    let beta_time = model
+    // The unified coefficient vector, which the transformation family carries
+    // as one block (`survival_beta_time` is populated only by the families that
+    // split their coefficients into named channels).
+    let beta = model
         .payload()
-        .survival_beta_time
-        .clone()
-        .expect("saved model must carry its time-basis coefficients");
+        .unified
+        .as_ref()
+        .or(model.payload().fit_result.as_ref())
+        .map(|fit| fit.beta.to_vec())
+        .expect("saved model must carry its fitted coefficients");
     let saved_anchor = model
         .payload()
         .survival_time_anchor
@@ -164,7 +169,7 @@ fn fit_at_anchor(train_path: &Path, dir: &Path, anchor: f64, tag: &str) -> (Arra
     };
     let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
         .expect("library survival predict");
-    (result.survival, beta_time)
+    (result.survival, beta)
 }
 
 #[test]
@@ -193,8 +198,8 @@ fn transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705() 
         .fold(0.0_f64, |worst, (a, b)| worst.max((a - b).abs()));
     assert!(
         coefficient_gap > 1.0e-6,
-        "non-vacuity: the two anchors must produce DIFFERENT time coefficients, otherwise the \
-         surfaces agreeing says nothing about the reparameterization. max|Δβ_time| = \
+        "non-vacuity: the two anchors must produce DIFFERENT coefficients, otherwise the \
+         surfaces agreeing says nothing about the reparameterization. max|Δβ| = \
          {coefficient_gap:.3e}"
     );
 
