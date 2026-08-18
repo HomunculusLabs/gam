@@ -265,12 +265,13 @@ mod constant_curvature_kappa_range_identification_tests {
     /// `kappa=` pins the geometry — the same mgcv-`sp=` convention on the
     /// smooth's other coordinate.
     ///
-    /// Pinned means pinned: the inner solve must report `LocallyFixed` at every
-    /// κ, hand back the user's value verbatim, and take the plain κ slice for
-    /// the profile's derivatives, because a range the criterion may not move has
-    /// `dη̂/dκ = 0` and the envelope/Schur reduction does not apply to it. The
-    /// resulting κ̂ is a conditional estimate and the report says so
-    /// (`length_scale_estimated = false`).
+    /// Pinned means pinned: the inner solve must report `Pinned` at every κ,
+    /// hand back the user's value verbatim, and take the plain κ slice for the
+    /// profile's derivatives, because a range the criterion may not move has
+    /// `dη̂/dκ = 0` — by construction, not by assumption, which is exactly what
+    /// distinguishes this outcome from `Uncertified` — and the envelope/Schur
+    /// reduction does not apply to it. The resulting κ̂ is a conditional estimate
+    /// and the report says so (`length_scale_estimated = false`).
     #[test]
     fn a_pinned_range_is_honoured_verbatim_and_never_profiled() {
         let n = 240usize;
@@ -292,8 +293,10 @@ mod constant_curvature_kappa_range_identification_tests {
                 .expect("a pinned range still evaluates");
             assert_eq!(
                 outcome,
-                RangeSolveOutcome::LocallyFixed,
-                "a pinned range is never an interior minimizer of the profile"
+                RangeSolveOutcome::Pinned,
+                "a pinned range is not an interior minimizer, and it is not a stalled solve \
+                 either -- `dη̂/dκ = 0` holds by construction, which is what `Pinned` claims \
+                 and `Uncertified` does not"
             );
             assert!(
                 (eta_hat.exp() - pinned).abs() <= 1.0e-12 * pinned,
@@ -357,6 +360,103 @@ mod constant_curvature_kappa_range_identification_tests {
                 "ℓ̂ ratio {ratio} across a planted factor of 2 ({:?}) does not identify the range",
                 fitted
             );
+        }
+    }
+
+    /// `V_p(κ)` may not depend on a range the search has ALREADY been to.
+    ///
+    /// The profile's box, bracket and seed are documented as DERIVED from the
+    /// realized center set, and two of the three were. The seed was
+    /// `spec.length_scale`, and `realized_constant_curvature_length_scale`
+    /// returns an explicit positive value VERBATIM — falling back to the derived
+    /// median only on the `0.0` auto sentinel. By the time the CI and the
+    /// flatness LR build their profile, that field is no longer a request: both
+    /// of the fit's write-backs have overwritten it with `ℓ̂`, the range this
+    /// same criterion profiled to AT `κ̂`
+    /// (`cc.length_scale = psi_hat.length_scale` in the free-κ enrollment, and
+    /// `s.length_scale = *length_scale` in `freeze_term_collection_from_design`).
+    ///
+    /// `eta_seed` is pushed into the inner solve's candidate list beside the
+    /// deterministic scan, so seeding it at `ℓ̂` is a warm start from ONE κ.
+    /// `minimize_over_eta` states the rule it breaks: *"a profile likelihood
+    /// that is not a function of its own argument cannot support an interval"*.
+    /// The point estimate is the argmin of the criterion built with the auto
+    /// seed; the interval and the LR are level sets of the criterion built with
+    /// `ℓ̂`. Nothing makes `κ̂` stationary for the second one, and
+    /// `curvature_profile_lr_endpoint` hard-errors — *"fitted curvature is not
+    /// the minimum of its inference profile"* — exactly when it is not.
+    ///
+    /// This is the same argument the constructor already makes one field up
+    /// about `identifiability`, whose frozen transform it un-freezes because it
+    /// *"is the global identifiability frame realized at one particular fitted
+    /// ψ"*. A fitted range is that too.
+    ///
+    /// The bar is BIT equality, not a tolerance. Two profiles that differ in the
+    /// last place are two functions, and the failure this gate exists to catch —
+    /// a search whose answer depends on where a previous search ended — shows up
+    /// there first. The fixture is chosen so the injected seed is genuinely a
+    /// different starting point: on hyperbolic truth at twice the auto range,
+    /// `ℓ̂(κ)` moves by an order of magnitude across the κ box, so a seed pinned
+    /// at one κ's answer is nowhere near the next κ's.
+    #[test]
+    fn the_profile_is_the_same_function_whatever_range_the_spec_arrives_carrying() {
+        let n = 240usize;
+        let centers = 6usize;
+        let radius = 0.6_f64;
+        let seed = 0x5EED_2747_0000_0004_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, radius, 1.0, centers, 0.0, seed);
+        let (ell_ref, cap) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, -1.0, radius, ell_ref * 2.0, centers, 0.03, seed);
+
+        // What the FIT writes back: the range this criterion profiles to at one
+        // κ. Taken at the box's hyperbolic end, which is where `ℓ̂` is furthest
+        // from the auto rule.
+        let derived = ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+            .expect("profile is constructible from an auto-range spec");
+        let anchor_kappa = -0.9 * cap;
+        let (eta_at_anchor, _, _) = derived
+            .minimize_over_eta(anchor_kappa)
+            .expect("the range box is searchable at the anchor");
+        let fitted_ell = eta_at_anchor.exp();
+        assert!(
+            (fitted_ell / ell_ref - 1.0).abs() > 0.1,
+            "this gate needs an ℓ̂ that is NOT the auto rule to be a test at all; \
+             got ℓ̂ = {fitted_ell} against ℓ_ref = {ell_ref}"
+        );
+
+        // The same spec as the fit hands to `curvature_inference_forspec`: the
+        // realized range written back, `length_scale_fixed` still false because
+        // the USER did not pin anything.
+        let mut carried = spec_at(0.0, centers, fitted_ell);
+        assert!(!carried.length_scale_fixed);
+        carried.kappa = anchor_kappa;
+        let replayed = ConstantCurvatureProfile::new(feats.view(), y.view(), carried)
+            .expect("profile is constructible from a fitted spec");
+
+        eprintln!(
+            "[#2747 seed] ℓ_ref={ell_ref:.6} ℓ̂(κ={anchor_kappa:+.4})={fitted_ell:.6}  \
+             box ±{cap:.4}"
+        );
+        for i in 0..=12u32 {
+            let kappa = -cap + 2.0 * cap * f64::from(i) / 12.0;
+            let a = derived.evaluate(kappa);
+            let b = replayed.evaluate(kappa);
+            match (a, b) {
+                (Ok(a), Ok(b)) => assert_eq!(
+                    a, b,
+                    "κ={kappa}: V_p and its two derivatives moved when the spec arrived \
+                     carrying ℓ̂={fitted_ell} instead of the auto sentinel — the profile is \
+                     not a function of κ alone"
+                ),
+                (Err(a), Err(b)) => assert_eq!(
+                    a.to_string(),
+                    b.to_string(),
+                    "κ={kappa}: the two profiles refuse for different reasons"
+                ),
+                (a, b) => panic!(
+                    "κ={kappa}: one profile evaluated and the other refused: {a:?} vs {b:?}"
+                ),
+            }
         }
     }
 }
