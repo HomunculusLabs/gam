@@ -241,6 +241,31 @@ pub enum ArrowEvidencePolicy {
     Strict,
     PositiveDefinite,
     UnitDeflation { relative_floor: f64 },
+    /// [`Self::UnitDeflation`]'s NULL band, and a typed REFUSAL for a RESOLVED
+    /// NEGATIVE direction instead of a unit pin (#2515).
+    ///
+    /// `UnitDeflation` deflates on `λ < floor` — one-sided, so it swallows every
+    /// negative eigenvalue however large, and prices it as `log 1 = 0` with a
+    /// `1/λ → 1` inverse. For the Gauss--Newton majorizer that is right: `B` is
+    /// PSD by construction, so a negative eigenvalue there is a rounding artefact
+    /// of a direction that is numerically null anyway. For an operator whose
+    /// negative curvature is a MODELLING VERDICT it is wrong, and silently so.
+    ///
+    /// Under this policy the band is two-sided: `|λ| ≤ floor·max|λ|` is still the
+    /// unit-pinned null, while `λ < −floor·max|λ|` is resolved negative curvature
+    /// and the factorization refuses with the direction and its magnitude named.
+    /// The caller — which is the only layer that knows whether that curvature is
+    /// attributable — decides what the refusal means.
+    ///
+    /// Measured on #2712's deflated anchor at `log λ_smooth = −1.05`
+    /// (`zz_attribute_the_broken_ladder_rung_2515`): the reduced Schur of the
+    /// exact observed information carries eigenvalues `−7.997610e-3` and
+    /// `−2.033493e-3`, relative magnitudes `1.4e-3` and `3.6e-4`, five decades
+    /// OUTSIDE the `1e-8` null band. `UnitDeflation` pinned both to `+1`; the
+    /// dense route classified the same two directions as clamp-attributable
+    /// negative curvature and priced them at their basin. The two complete outer
+    /// gradients then differed by `1.009` RELATIVE.
+    UnitDeflationRefusingIndefinite { relative_floor: f64 },
 }
 
 impl ArrowEvidencePolicy {
@@ -251,10 +276,24 @@ impl ArrowEvidencePolicy {
     pub(crate) fn reduced_schur_policy(self) -> ReducedSchurPolicy {
         match self {
             Self::Strict | Self::PositiveDefinite => ReducedSchurPolicy::StrictNewton,
-            Self::UnitDeflation { relative_floor } => {
-                ReducedSchurPolicy::EvidenceUnitDeflation { relative_floor }
+            Self::UnitDeflation { relative_floor } => ReducedSchurPolicy::EvidenceUnitDeflation {
+                relative_floor,
+                refuse_resolved_indefinite: false,
+            },
+            Self::UnitDeflationRefusingIndefinite { relative_floor } => {
+                ReducedSchurPolicy::EvidenceUnitDeflation {
+                    relative_floor,
+                    refuse_resolved_indefinite: true,
+                }
             }
         }
+    }
+
+    /// Whether a resolved negative direction of the evidence operator is a
+    /// refusal rather than a unit pin. Read by every conditioning site so the
+    /// decision is made once, here, and not re-derived per site.
+    pub(crate) fn refuses_resolved_indefinite(self) -> bool {
+        matches!(self, Self::UnitDeflationRefusingIndefinite { .. })
     }
 }
 
@@ -509,6 +548,19 @@ impl ArrowSolveOptions {
     /// deflation at `relative_floor`.
     pub fn with_evidence_unit_deflation(mut self, relative_floor: f64) -> Self {
         self.evidence_policy = ArrowEvidencePolicy::UnitDeflation { relative_floor };
+        self
+    }
+
+    /// [`Self::with_evidence_unit_deflation`], but the operator being factored is
+    /// one whose negative curvature is a modelling verdict rather than a rounding
+    /// artefact, so a RESOLVED negative direction is refused instead of pinned
+    /// (#2515). See [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`].
+    pub fn with_indefinite_refusing_evidence_unit_deflation(
+        mut self,
+        relative_floor: f64,
+    ) -> Self {
+        self.evidence_policy =
+            ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { relative_floor };
         self
     }
 

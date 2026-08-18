@@ -1510,12 +1510,20 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
         super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
             "#2515 route parity across a deflating rho ladder",
         );
+    // The PRODUCTION exact-`A` evidence policy since #2515: the null band is
+    // unit-pinned and a RESOLVED negative direction is refused rather than pinned.
+    // Factoring the ladder under `with_evidence_unit_deflation` instead would test
+    // a policy production no longer uses on this operator — and would restore
+    // exactly the silent saddle-as-null pricing this gate exists to keep out.
     let evidence_options = ArrowSolveOptions::direct()
         .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-        .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        .with_indefinite_refusing_evidence_unit_deflation(
+            gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+        );
     let majorizer_options = ArrowSolveOptions::direct().with_positive_definite_evidence();
 
     let mut deflating_states = 0usize;
+    let mut indefinite_states = 0usize;
     let mut worst_relative = 0.0_f64;
     let mut worst_label = String::new();
     // Rungs are excursions AROUND the certified anchor `(-0.5, -1.0, -0.5)`, not a
@@ -1570,11 +1578,42 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
             println!("[#2515 LADDER] {label}: exact-A evidence system refused");
             continue;
         };
-        let Ok((_, _, a_cache)) =
-            solve_arrow_newton_step_with_options(&a_sys, 0.0, 0.0, &evidence_options)
-        else {
-            println!("[#2515 LADDER] {label}: exact-A arrow factorization refused");
-            continue;
+        let a_cache = match solve_arrow_newton_step_with_options(
+            &a_sys,
+            0.0,
+            0.0,
+            &evidence_options,
+        ) {
+            Ok((_, _, cache)) => cache,
+            Err(err) => {
+                let rendered = err.to_string();
+                // A RESOLVED-INDEFINITE refusal is not a skip: it is the arrow
+                // route reaching the dense route's own verdict, and the assertion
+                // below requires the dense route to agree that this state's exact
+                // `A` really is indefinite. Any OTHER refusal is a skip.
+                if gam_solve::arrow_schur::ArrowSchurError::rendered_is_indefinite_evidence(
+                    &rendered,
+                ) {
+                    let min_eig = dense_exact_a_min_eigenvalue_2515(&mut term, &rho, &target, &b_cache);
+                    println!(
+                        "[#2515 LADDER] {label}: exact-A arrow factorization REFUSED as \
+                         indefinite; dense min eig(A) = {min_eig:+.6e}"
+                    );
+                    assert!(
+                        min_eig < 0.0,
+                        "#2515: the arrow route refused [{label}] as indefinite while the \
+                         DENSE spectrum of the same exact A has min eigenvalue \
+                         {min_eig:+.6e} >= 0. The two routes must reach the same \
+                         mode-or-saddle verdict; a refusal the dense route does not \
+                         corroborate is an over-refusal, and it costs the streaming lane \
+                         states it can legitimately rank."
+                    );
+                    indefinite_states += 1;
+                } else {
+                    println!("[#2515 LADDER] {label}: exact-A arrow factorization refused: {rendered}");
+                }
+                continue;
+            }
         };
         let Ok(loss) = term.loss(target.view(), &rho) else {
             println!("[#2515 LADDER] {label}: loss unavailable");
@@ -1632,8 +1671,9 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
     }
 
     println!(
-        "[#2515 LADDER] deflating states compared = {deflating_states}, worst relative gap = \
-         {worst_relative:.6e} at [{worst_label}]"
+        "[#2515 LADDER] deflating states compared = {deflating_states}, indefinite states \
+         refused = {indefinite_states}, worst relative gap = {worst_relative:.6e} at \
+         [{worst_label}]"
     );
     assert!(
         deflating_states >= 6,
@@ -1648,6 +1688,34 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
          streaming lane's spectral-deflation refusal was lifted on the claim that the \
          classification is shared across the deflating regime, not at one ρ."
     );
+    assert!(
+        indefinite_states > 0,
+        "#2515: this ladder must also reach at least one state whose exact A is genuinely \
+         INDEFINITE, or it says nothing about the half of the classification that used to \
+         disagree by 1.009 relative — the arrow route pinning a resolved negative direction \
+         to +1 while the dense route priced it as #2336 clamp-attributable curvature. That \
+         is the regime the refusal now covers, and an assertion that never enters it is an \
+         assertion about the easy half."
+    );
+}
+
+/// The smallest eigenvalue of the DENSE exact observed information at one state —
+/// the dense route's own mode-or-saddle verdict, in one number, for the ladder to
+/// corroborate an arrow-route refusal against.
+fn dense_exact_a_min_eigenvalue_2515(
+    term: &mut SaeManifoldTerm,
+    rho: &SaeManifoldRho,
+    target: &Array2<f64>,
+    cache: &ArrowFactorCache,
+) -> f64 {
+    let Ok(a_dense) = term.materialize_exact_hessian_dense(rho, target.view(), cache) else {
+        return f64::NAN;
+    };
+    let Ok((evals, _)) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a_dense, faer::Side::Lower)
+    else {
+        return f64::NAN;
+    };
+    evals.iter().copied().fold(f64::INFINITY, f64::min)
 }
 
 /// MEASUREMENT — the ρ rung where the ladder breaks, taken apart.
@@ -1816,6 +1884,44 @@ fn zz_attribute_the_broken_ladder_rung_2515() {
              a_rows_deflated={a_deflated} b_beta_deflated={b_beta_deflated:?} \
              a_beta_deflated={a_beta_deflated:?}{dense_report}"
         );
+        if let Some(spectrum) = a_cache.beta_schur_deflation.as_ref() {
+            let norm = spectrum
+                .raw_evals
+                .iter()
+                .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+            for idx in 0..spectrum.raw_evals.len() {
+                if spectrum.deflated[idx] {
+                    println!(
+                        "[#2515 RUNG] smooth={smooth:.2} S_A dir {idx}: raw={:+.6e} \
+                         cond={:+.6e} relative={:+.6e} (floor {:.6e})",
+                        spectrum.raw_evals[idx],
+                        spectrum.cond_evals[idx],
+                        spectrum.raw_evals[idx] / norm.max(f64::MIN_POSITIVE),
+                        gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR
+                    );
+                }
+            }
+        }
+        for row in 0..a_cache.n_rows() {
+            if let Some(spectrum) = a_cache.deflation_row_spectra.get(row).and_then(Option::as_ref)
+            {
+                let norm = spectrum
+                    .raw_evals
+                    .iter()
+                    .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+                for idx in 0..spectrum.raw_evals.len() {
+                    let raw = spectrum.raw_evals[idx];
+                    if raw < -gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR * norm {
+                        println!(
+                            "[#2515 RUNG] smooth={smooth:.2} A_tt row {row} dir {idx}: RESOLVED \
+                             NEGATIVE raw={raw:+.6e} cond={:+.6e} relative={:+.6e}",
+                            spectrum.cond_evals[idx],
+                            raw / norm.max(f64::MIN_POSITIVE)
+                        );
+                    }
+                }
+            }
+        }
         let dense_g = dense.gradient();
         let bundled_g = bundled.gradient();
         for i in 0..dense_g.len() {
@@ -1835,5 +1941,90 @@ fn zz_attribute_the_broken_ladder_rung_2515() {
             "[#2515 RUNG] smooth={smooth:.2} logdet_trace bundle={:?}",
             bundled.logdet_trace.to_vec()
         );
+    }
+}
+
+/// MEASUREMENT — the same ρ sweep, through PRODUCTION, both routes.
+///
+/// [`zz_attribute_the_broken_ladder_rung_2515`] compares the two gradient
+/// ASSEMBLERS at a frozen state and finds the break where the exact `A` goes
+/// indefinite. What production does there is a separate question and a more
+/// important one: the dense value route returns the typed
+/// `IndefiniteObservedInformation` refusal at an exact-`A` saddle, which makes
+/// that ρ INFEASIBLE (`+inf`) and steers the outer solver away, while the
+/// streaming route's evidence conditioning unit-pins every non-positive
+/// direction and therefore has no way to reach that verdict at all.
+///
+/// If that is what happens, route selection — a memory-planner decision — decides
+/// whether a saddle is a saddle, which is the #2486 genus and the substantive
+/// half of this issue.
+#[test]
+fn zz_attribute_the_broken_rung_through_production_2515() {
+    let (term, anchor_rho, target, _cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 the broken rung through production",
+        );
+    for smooth in [-0.9_f64, -1.0, -1.05, -1.1, -1.2, -1.4] {
+        let mut rho = anchor_rho.clone();
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        let mut dense = SaeManifoldOuterObjective::new(
+            term.clone(),
+            target.clone(),
+            None,
+            rho.clone(),
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        );
+        let mut streaming = SaeManifoldOuterObjective::new(
+            term.clone(),
+            target.clone(),
+            None,
+            rho.clone(),
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        );
+        let rho_flat = dense.baseline_rho.to_flat();
+        let route_rho = match streaming.baseline_rho.from_flat(rho_flat.view()) {
+            Ok(rho) => rho,
+            Err(err) => {
+                println!("[#2515 PROD] smooth={smooth:.2}: rho layout: {err}");
+                continue;
+            }
+        };
+        let dense_report = match dense.evaluate_outer_criterion_route(&route_rho, true, false) {
+            Ok(artifact) => {
+                match dense.analytic_gradient_for_outer_evaluation(&route_rho, &artifact) {
+                    Ok(gradient) => format!(
+                        "cost={:.10e} ‖g‖∞={:.6e}",
+                        artifact.cost,
+                        gradient.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+                    ),
+                    Err(err) => format!("cost={:.10e} GRADIENT REFUSED: {err}", artifact.cost),
+                }
+            }
+            Err(err) => format!("VALUE REFUSED: {err}"),
+        };
+        let streaming_report =
+            match streaming.evaluate_outer_criterion_route(&route_rho, false, false) {
+                Ok(artifact) => {
+                    match streaming.analytic_gradient_for_outer_evaluation(&route_rho, &artifact) {
+                        Ok(gradient) => format!(
+                            "cost={:.10e} ‖g‖∞={:.6e}",
+                            artifact.cost,
+                            gradient.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+                        ),
+                        Err(err) => format!("cost={:.10e} GRADIENT REFUSED: {err}", artifact.cost),
+                    }
+                }
+                Err(err) => format!("VALUE REFUSED: {err}"),
+            };
+        println!("[#2515 PROD] smooth={smooth:.2} dense    : {dense_report}");
+        println!("[#2515 PROD] smooth={smooth:.2} streaming: {streaming_report}");
     }
 }

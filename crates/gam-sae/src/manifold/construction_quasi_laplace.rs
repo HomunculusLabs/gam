@@ -3652,13 +3652,22 @@ impl SaeManifoldTerm {
         // #9: accumulate the per-atom Grams + N_eff + log_det_tt in the same
         // log-det pass. These are required by the canonical rank-charge criterion.
         let mut rank_inputs = StreamingRankInputs::default();
-        let (log_det, evidence_artifacts) = self.streaming_exact_arrow_log_det_with_lane_and_system(
-            target,
-            rho,
-            registry,
-            Some(&mut rank_inputs),
-            lane,
-        )?;
+        // #2515 — an INDEFINITE exact-A verdict from the arrow evidence route must
+        // arrive here as the SAME typed error the dense route raises, not as a
+        // generic `Numerical`. Both routes are saying "this state is a saddle, so
+        // `½log|A|` is not a Laplace normalizer"; the outer solver reads the typed
+        // one as an infeasible ρ (`+inf`, steer away) and the untyped one as a
+        // defect that aborts the fit. Same verdict, two behaviours, chosen by which
+        // route the memory planner picked — this issue's genus one level up.
+        let (log_det, evidence_artifacts) = self
+            .streaming_exact_arrow_log_det_with_lane_and_system(
+                target,
+                rho,
+                registry,
+                Some(&mut rank_inputs),
+                lane,
+            )
+            .map_err(SaeCriterionError::from_arrow_refusal)?;
         // The returned row-factor cache and the external matrix-free log|S|
         // estimate are one evidence operator. Stamp the authoritative joint
         // value onto the cache so from-probes theta-adjoint consumers can verify
@@ -4121,10 +4130,24 @@ impl SaeManifoldTerm {
             // Cholesky-factoring the dense Schur. Peak memory is the per-row block
             // storage the inner PCG already holds, not the extra O(k²) dense S.
             //
+            // #2515 — the operator this factors is `a_sys`, the EXACT OBSERVED
+            // INFORMATION, whose sign is a modelling verdict and not a rounding
+            // artefact. `with_evidence_unit_deflation` deflates on `λ < floor` —
+            // one-sided — so it swallowed every negative direction of `A` however
+            // large and priced it as the ρ-independent null `log 1 = 0` with a `1/λ
+            // → 1` inverse, while the dense route classified the same direction as
+            // #2336 clamp-attributable curvature (priced at its basin) or as a
+            // genuine saddle (the typed `IndefiniteObservedInformation` refusal
+            // that makes the ρ infeasible). Measured on #2712's deflated anchor at
+            // `log λ_smooth = −1.05`: reduced-Schur eigenvalues `−7.997610e-3` and
+            // `−2.033493e-3`, five decades outside the `1e-8` band, both pinned to
+            // `+1`, and the two complete outer gradients `1.009` RELATIVE apart.
             let options = ArrowSolveOptions::direct()
                 .with_gpu_policy(self.gpu_policy)
                 .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-                .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+                .with_indefinite_refusing_evidence_unit_deflation(
+                    gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+                );
             // Assemble the WHOLE system once (a single "chunk" over all rows) so the
             // matrix-free reduced-Schur apply `v ↦ S·v` can iterate every row; the
             // per-row block storage is exactly what the inner solve already holds.
@@ -4224,10 +4247,16 @@ impl SaeManifoldTerm {
         };
         let mut schur_acc = Array2::<f64>::zeros((border_dim, border_dim));
         let mut log_det_tt = 0.0_f64;
+        // #2515 — same substitution as the matrix-free branch above, and for the
+        // same reason: every factorization below is of `exact_a_evidence_system`'s
+        // output, so a resolved negative direction is a saddle verdict rather than
+        // a numerical null, and unit-pinning it would price a saddle as `log 1 = 0`.
         let options = ArrowSolveOptions::direct()
             .with_gpu_policy(self.gpu_policy)
             .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+            .with_indefinite_refusing_evidence_unit_deflation(
+                gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+            );
         let mut start = 0usize;
         while start < n_total {
             let end = (start + chunk_size).min(n_total);

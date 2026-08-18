@@ -269,6 +269,33 @@ impl SaeCriterionError {
     }
 }
 
+impl SaeCriterionError {
+    /// #2515 — the ONE place a rendered arrow-Schur refusal becomes the typed
+    /// indefinite verdict.
+    ///
+    /// The streaming/arrow evidence route reaches the same conclusion the dense
+    /// route reaches — this state's exact observed information has resolved
+    /// negative curvature, so `½log|A|` is not the Laplace normalizer of a mode —
+    /// but it reaches it inside `gam-solve`, whose spine to here is
+    /// `Result<_, String>`. Routing it through `Numerical` would make the SAME
+    /// verdict INFEASIBLE (`+inf`, outer solver steers away) on one route and a
+    /// hard `RemlOptimizationFailed` on the other, which is the route dependence
+    /// this issue is about, one level up from the criterion itself.
+    ///
+    /// `block` is `"streaming evidence"`: the arrow route reaches the verdict
+    /// through the per-row blocks and the reduced Schur of `A` rather than through
+    /// a joint or coordinate eigendecomposition, so naming either of the dense
+    /// route's two blocks here would be a false localization.
+    pub(crate) fn from_arrow_refusal(message: String) -> Self {
+        if gam_solve::arrow_schur::ArrowSchurError::rendered_is_indefinite_evidence(&message) {
+            return Self::IndefiniteObservedInformation {
+                block: "streaming evidence",
+            };
+        }
+        Self::Numerical(message)
+    }
+}
+
 impl From<String> for SaeCriterionError {
     fn from(message: String) -> Self {
         Self::Numerical(message)
