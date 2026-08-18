@@ -9313,3 +9313,88 @@ fn mode_response_operator_is_the_one_the_drift_trace_uses_2612() {
     );
     assert_relative_eq!(drift_doubled, 0.5 * drift_inherited, max_relative = 1e-12);
 }
+
+/// gam#2765: **a constraint that holds with equality and carries a zero
+/// multiplier is a description of the mode, not a change of model — so the
+/// outer criterion may not move when it is listed in the active set.**
+///
+/// Take β̂ at the exact unconstrained penalized optimum, so `∇F(β̂) = 0` and
+/// every KKT multiplier is zero. Now list one linear row in the active set.
+/// Nothing about the fitted model changed: the same β̂ maximizes the same
+/// penalized likelihood under the same penalties, and the row it is being
+/// told about is satisfied with slack-free equality and zero force. If the
+/// criterion moves, then it is reading the ACTIVE SET rather than the fit,
+/// and its value depends on a classification whose own inputs (a slack
+/// against a tolerance, the QP's working set) are discontinuous functions of
+/// θ. That is exactly what the #2765 acceptance fit measures at the scale of
+/// the criterion itself: two outer trial points 3e-3 apart in θ, the same β̂
+/// to four digits, and costs `3.585739e2` and `3.568383e2` — a `1.736` jump
+/// that no line search can descend through, taken as the recorded active set
+/// went from 5 rows to 6.
+///
+/// The invariant is stated on the criterion VALUE because that is what the
+/// outer line search compares. `ActiveLinearConstraintBlock` carries only the
+/// normals `A` — not the bounds, not the multipliers — so a criterion that
+/// depends on it at all cannot tell a binding row from a non-binding one, and
+/// the value it returns is a statement about a subspace rather than about a
+/// model.
+#[test]
+pub(crate) fn criterion_value_is_invariant_to_listing_a_zero_multiplier_active_row_2765() {
+    use crate::model_types::ActiveLinearConstraintBlock;
+
+    let rho: Vec<f64> = vec![0.4, -0.3];
+    // The exact unconstrained penalized optimum β̂ = H⁻¹X'y at this ρ, using
+    // the same (X'X, S₁, S₂, X'y) `build_gaussian_solution_at_beta` carries.
+    let xtx = array![[10.0, 2.0, 1.0], [2.0, 8.0, 0.5], [1.0, 0.5, 6.0]];
+    let s1 = array![[1.0, 0.2, 0.0], [0.2, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s2 = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let xty = array![5.0, 3.0, 2.0];
+    let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
+    let mut h = xtx.clone();
+    h.scaled_add(lambdas[0], &s1);
+    h.scaled_add(lambdas[1], &s2);
+    let beta_hat = DenseSpectralOperator::from_symmetric(&h).unwrap().solve(&xty);
+    // Certify the premise rather than assume it: at this β̂ the penalized
+    // gradient is zero, so every multiplier of every row is zero and no row
+    // can be "binding" in any sense the criterion is entitled to price.
+    let gradient = &h.dot(&beta_hat) - &xty;
+    let gradient_inf = gradient.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        gradient_inf <= 1.0e-12,
+        "the premise of this test is an exact-KKT mode; |∇F(β̂)|∞ = {gradient_inf:.3e}"
+    );
+
+    let evaluate = |active: Option<Array2<f64>>| -> f64 {
+        let mut sol = build_gaussian_solution_at_beta(&rho, beta_hat.clone(), false);
+        sol.dispersion = DispersionHandling::Fixed {
+            phi: 1.0,
+            include_logdet_h: true,
+            include_logdet_s: true,
+        };
+        sol.active_constraints = active
+            .map(|a| std::sync::Arc::new(ActiveLinearConstraintBlock { a }));
+        reml_laml_evaluate(&sol, &rho, EvalMode::ValueOnly, None)
+            .expect("the criterion must evaluate in both descriptions")
+            .cost
+    };
+
+    let free = evaluate(None);
+    // Three different rows, so the assertion is about the RULE and not about
+    // one lucky normal: a coordinate row, a row mixing two coefficients, and
+    // a row aligned with the second penalty's only column.
+    for (label, row) in [
+        ("e₀", array![[1.0, 0.0, 0.0]]),
+        ("e₀+e₁", array![[0.6, 0.8, 0.0]]),
+        ("e₂", array![[0.0, 0.0, 1.0]]),
+    ] {
+        let listed = evaluate(Some(row));
+        assert!(
+            (listed - free).abs() <= 1.0e-9 * (1.0 + free.abs()),
+            "listing the zero-multiplier row {label} in the active set moved the \
+             criterion by {:.6e}: free={free:.9e} listed={listed:.9e}. The criterion \
+             must be a function of the fit, not of which rows a solver recorded as \
+             tight (gam#2765).",
+            listed - free,
+        );
+    }
+}
