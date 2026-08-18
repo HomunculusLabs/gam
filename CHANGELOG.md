@@ -1,5 +1,158 @@
 ## Unreleased
 
+- **The post-fit certification's surviving `param_dim`-square object is gone:
+  the certificate stopped asking for a full spectrum (#2757).** #2757 was filed
+  on a dense symmetric eigendecomposition of a `param_dim × param_dim` curvature
+  Gram in `fit_diagnostics_report` — 3160.5 s and 45.97 GiB at `p = 4096`, 60.5 %
+  of the whole fit. Two earlier rounds took most of it: `2af28dddb` held the
+  curvature in the block structure the decoder-frame parameterization gives it
+  (`p` blocks of `D × D`) on the branch a Euclidean metric takes, and
+  `b7e148809` rewrote the topology filtration that turned out to be the real wall
+  behind it (547.8 s → 52.0 s). What neither reached is the branch where the
+  per-row metric **couples output coordinates**: there `H = Σ_n J_nᵀ M_n J_n` is a
+  sum of `n · metric_rank` rank-one terms whose only exploitable structure — the
+  output-coordinate diagonality of `J_n` — is destroyed by `M_n`. `8adae9a67`
+  moved the `param_dim`-square object from a Gram to a triangular factor and its
+  own entry said outright that no storage change could fix it, naming the route
+  out. This is that route.
+
+  **The enumeration is the fix.** The certificate reads three things off `H`, and
+  only two enter a verdict:
+
+  | read | enters a verdict | streamable |
+  |---|---|---|
+  | `ξᵀHξ` per generator | yes — every verdict's numerator | **exactly**, one pass |
+  | `λ_max(H)` | yes — every verdict's denominator | to a certified relative residual |
+  | the pinning rank | **no** | not over the whole parameter space |
+
+  Confirmed by reading the call graph, not by grep: `pinning_rank` reaches the
+  summary string, the certificate evidence map and the Python dict, and no
+  verdict, no group signature, no `residual_gauge_dim`, and no `Sym(F)` check.
+  `CurvatureMeasurement` makes that enumeration structural — both routes produce
+  it and nothing downstream can tell which one ran, so a fourth consumer cannot
+  be added without deciding how it is streamed.
+
+  **`λ_max`** goes through the *existing* certified Krylov solver
+  (`symmetric_extreme_lanczos_eigenpairs`: full reorthogonalization, sharp
+  `β_k|e_kᵀy|` Ritz residual, refuses if it never certifies) rather than a new
+  one. Its step budget is `min(param_dim, root_rows)` — the exact Krylov
+  dimension bound for `H = RᵀR`, not a guess — and its breakdown threshold and
+  its acceptance check are both denominated in `tr(H)`, computed in the same
+  `diagonal()` pass. For a PSD operator the trace is a rigorous upper bound on
+  `λ_max` and vanishes only for `H = 0`, so an identically-flat curvature is
+  recognised **exactly, in one pass, with no iteration and no tolerance**, and a
+  Ritz value outside `[0, tr(H)]` is a disagreement between the operator's two
+  readings and is refused rather than reported. The relative-residual target is
+  `√ε ≈ 1.5e-8`: bracketed from below by the `≈ ε` a Ritz value of an operator of
+  norm `λ_max` can attain, and from above by the `1e-3` the verdict resolves.
+
+  **The energies** come from one pass that folds `RΞ` into a `G × G`
+  upper-triangular factor with the same Givens routine the stored accumulators
+  use. Its column norms ARE the energies (`ξ_jᵀHξ_j = Σ_a T[a,j]²`, exactly, since
+  `TᵀT = ΞᵀHΞ`) and its singular values above the shared
+  `curvature_rank_tolerance` are the generator-span pinning rank — so the rank
+  decision stays on `σ` rather than being squared into `λ`, which is the
+  discipline the rest of the module already insists on.
+
+  **What is not claimed, and is now declarable rather than inferable.** The rank
+  of `H` over the whole parameter space is a full-spectrum question and costs
+  `param_dim²` scalars from any side. `ResidualGaugeReport` carries
+  `pinning_rank_support: PinningRankSupport` — `ParameterSpace` or
+  `GeneratorSpan` — and the support rides with the number through the certificate
+  evidence map and the Python dict, so no consumer can compare two ranks that are
+  ranks of different things. `GeneratorSpan` is exact, and it is the comparison
+  the pinning rank was introduced for ("a smaller pinning rank than the generator
+  count").
+
+  **The A/B, on the identical phase** (release, 4-core, `n = 64`, `charts = 8`,
+  `metric rank = 9`, so `root_rows = 576` puts every cell on the branch under
+  test):
+
+  ```text
+       p  param_dim  mat scalars    mat gauge stream gauge    speedup   passes
+      16        128        16384       0.0079       0.0048       1.65       22
+      32        256        65536       0.0215       0.0074       2.90       22
+      48        384       147456       0.0500       0.0100       4.99       22
+      64        512       262144       0.0888       0.0159       5.58       32
+    fitted exponent d(log t)/d(log param_dim): materialized 1.75, streamed 0.82
+  ```
+
+  `mat scalars` is `param_dim²` in every cell and the streamed route's is **0**,
+  asserted rather than printed. 1.75 is not 3 yet — at `param_dim ≤ 512` the cubic
+  is not the dominant term, enumerating and embedding the generators is — which is
+  why the probe prints exponents rather than asserting a wall-clock bar. `passes`
+  is now a reported field: the Krylov solve reaches `√ε` in 22 passes over the
+  root, plus one for the diagonal and one for the projection. Extrapolated to the
+  #2731 production cell (`p = 2048`, `charts = 32`, `param_dim = 65 536`), the
+  materialized route is `2.8e14` flops to fold `480 000` rows into a 34 GiB factor
+  plus `2.8e14` to read its spectrum; the streamed route is `~3.5e11` for the
+  projection plus `~6e9` for the Krylov passes, against `O(param_dim)` of working
+  set.
+
+  The first version of that table read the streamed route as **10–50× slower**,
+  because it timed the whole `fit_diagnostics_report` against the materialized
+  route's curvature phase alone — it was timing the topology audit. Recorded
+  because the number was wrong and the correction is the finding.
+
+  **The one parallel region is over GENERATORS, and that is a correctness
+  decision.** Splitting the observations would need per-chunk partial triangular
+  factors combined pairwise, and Givens rotations do not commute — the certificate
+  would stop being bit-reproducible across runs, which is a property it is
+  asserted to have and which "two replicate fits are identified up to the same
+  group iff this signature is equal" depends on. A generator's column of `RΞ` is
+  computed from one observation's Jacobian and that generator alone and written to
+  its own slice, so there is no reduction and no summation order to depend on the
+  schedule; the serial and parallel passes are gated **bit for bit**. The
+  restructure also removed an object: accumulating `c_j[r] += U[n,i,r]·a`
+  incrementally makes the old `p × G` batch buffer unnecessary, so the pass
+  allocates nothing per observation and nothing per generator.
+
+  **Rejected.** Parallelising the cubic — it leaves `param_dim²` memory on the
+  trajectory to ~184 GiB at `p = 8192`, against SPEC.md, and #2724's own lesson is
+  that a byte-denominated admission cannot gate a cubic. A width threshold for
+  materializing — an arbitrary constant; the fork stays exactly where it already
+  was (`root_rows > param_dim` is where a materialized root stops being the
+  smaller object), so the block branch and the small-root branch are byte
+  unchanged. Making the report lazy — the other phases are already cheap and the
+  curvature is not the caller's to skip.
+
+  **Verification.** Fourteen new gates, taken against an *independently built*
+  root: `reference_dense_root` writes the `offset_k + i·d_k + a` arithmetic out
+  inline and never calls `fill_row_frame_jacobian`, so "the operator is the
+  curvature" is a checked claim rather than a shared bug. The operator's three
+  reads are that `R` and `RᵀR` entry by entry; `λ_max` is the dense spectrum's to
+  `1e-9` relative, inside the two-sided PSD bracket its own trace gives; the
+  generator-span rank is `root_spectral_rank` applied to the singular values of
+  the reference `RΞ`; the certificate is identical — every verdict, every energy
+  fraction to `1e-9`, the group signature, the residual gauge dimension, the
+  `Sym(F)` check — and stays identical at a factor scale that puts `H`'s entries
+  near `1e120`, where the fractions are exactly scale-invariant and a route that
+  squared a condition number somewhere would not reproduce them; production
+  streams exactly where a materialized root stops being smaller and nowhere else,
+  all three arms; the whole report decomposes nothing at the parameter dimension,
+  read off the process's own eigendecomposition census on a freshly spawned
+  thread; bit-for-bit reproducibility across runs and across the parallel/serial
+  fork; and four refusal gates (non-finite diagonal, negative diagonal, a matvec
+  inflated relative to its own diagonal, and a consistent hand-built operator that
+  still certifies).
+
+  Two findings from writing them, recorded rather than smoothed over. A
+  flat-curvature gate cannot use a constant decoder: zero tangents give zero
+  *frames*, so every generator is vetoed by the degenerate-tangent rule and the
+  gate measures nothing — the zero has to go in the metric. And the #998
+  exact-orbit verdicts carry `VerdictProvenance::CurvatureTest` but are not
+  decided by `H` at all; a gate that reads "no generator carries energy" off the
+  whole verdict list is reading their residual too.
+
+  Left standing, and named: once the curvature is streamed the largest object the
+  certificate holds is its own generator list — `D(D−1)/2` frame rotations plus
+  `K(K−1)/2` atom exchanges, each a `param_dim`-long vector, ~520 MiB at the
+  #2731 shape against ~16 MiB for the whole streamed working set. It is now one
+  copy rather than two (`EnumeratedGenerator` normalizes in place), which is what
+  it was before this work, but the `O(G · param_dim)` law is untouched and the
+  generators are structurally sparse — the per-atom families touch one atom's
+  block and the frame rotations are rank-two in `(i, c)`.
+
 - **A saved Royston-Parmar model's predicted survival surface depended on the
   baseline time ANCHOR, which is a reparameterization and not a model
   (#2705).** `center_survival_time_designs_at_anchor` subtracts the time-basis
