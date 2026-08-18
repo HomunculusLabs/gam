@@ -24,8 +24,9 @@ use gam_problem::outer_subsample::RowSet;
 use gam_problem::{InverseLink, StandardLink};
 use gam_terms::basis::{
     BSplineBasisSpec, BSplineBoundaryConditions, BSplineIdentifiability, BSplineKnotSpec,
-    BasisMetadata, BasisOptions, Dense, KnotSource, OneDimensionalBoundary, build_bspline_basis_1d,
-    create_basis, evaluate_bspline_derivative_scalar,
+    BasisMetadata, BasisOptions, Dense, ISplineBoundary, KnotSource, OneDimensionalBoundary,
+    build_bspline_basis_1d, create_basis, evaluate_bspline_derivative_scalar,
+    ispline_modelling_interval, ispline_value, ispline_value_and_first_derivative,
 };
 use gam_terms::inference::formula_dsl::LinkWiggleFormulaSpec;
 use ndarray::{Array1, Array2, Array3, array, s};
@@ -1523,34 +1524,88 @@ pub fn build_survival_time_basis(
                 (knots, degree, requested_bspline_degree)
             };
 
-            let (db_exit_arc, _) = create_basis::<Dense>(
+            // ONE boundary convention for the baseline value AND its slope
+            // (gam#2705).
+            //
+            // The Royston-Parmar baseline is `log Λ(t) = Σ_k γ_k·I_k(log t)`,
+            // and the likelihood, the hazard and the predictive surface all read
+            // BOTH `I_k` and `I'_k = M_k`. Those two used to be built by
+            // different code paths here: the value by the shared I-spline
+            // evaluator, which holds `I_k` CONSTANT past the boundary knots, and
+            // the slope by a hand-rolled right-cumulative sum of a *clamped*
+            // B-spline first-derivative basis, which returns the BOUNDARY SLOPE
+            // there because a clamped B-spline's value extends linearly. So
+            // outside the fitted knot span the two described different
+            // functions, and a saved fit published a FLAT `Λ(t)` next to a
+            // NONZERO `h(t) = Λ·d(log Λ)/dt` — measured on the #1564 heart-failure
+            // fixture as `Λ ≡ 5.055558` with `t·h(t) ≡ 6.26088` from `t = 285`
+            // out to `t = 2.85e6`, i.e. a surviving log-log slope of `1.23842`
+            // in the derivative that the value does not have. `h = dΛ/dt`, so a
+            // flat `Λ` forces `h = 0`; the two cannot both be the model.
+            //
+            // The convention is `LinearTails` rather than `Saturate` because
+            // that IS the Royston-Parmar model: a *restricted* spline is linear
+            // beyond its boundary knots by construction (Royston & Parmar 2002),
+            // which gives the classical Weibull-shaped extrapolation
+            // `Λ(t) ∝ t^c` used whenever a survival curve is projected past the
+            // observed follow-up. Saturating instead asserts two things the data
+            // never said: that the hazard drops to exactly zero at the last
+            // observed exit time, and — on the lower tail, which
+            // `default_survival_time_grid` reaches on its very first node —
+            // that `Λ(t) → Λ(t_min) > 0` as `t → 0`, i.e. an atom of failures at
+            // time zero and `S(0) < 1`.
+            //
+            // Nothing about a FIT moves: the knot vector is inferred from
+            // `survival_time_knot_input(log_entry, log_exit)`, so every training
+            // row is inside `[left, right]` where the two conventions are
+            // bit-identical, `keep_cols` is inferred from those same interior
+            // rows, and the penalty is built on `log_exit`. What moves is
+            // evaluation OUTSIDE the fitted span — prediction grids, entry times
+            // below the first knot, and any replay at a fresh time.
+            let (x_exit_full, d_exit_log_full) = ispline_value_and_first_derivative(
                 log_exit.view(),
-                KnotSource::Provided(knotvec.view()),
-                bspline_degree,
-                BasisOptions::first_derivative(),
+                knotvec.view(),
+                degree,
+                ISplineBoundary::LinearTails,
             )
-            .map_err(|e| format!("failed to build ispline derivative basis: {e}"))?;
+            .map_err(|e| format!("failed to build ispline exit basis and derivative: {e}"))?;
+            // A row that ENTERS AT THE ORIGIN is not a row whose entry time
+            // sits below the first knot — it is a row with no left truncation
+            // at all, and the likelihood says so: `entry_active` is
+            // `age_entry > ENTRY_AT_ORIGIN_THRESHOLD`, and the `S(entry)` factor
+            // is dropped outright for the rest (`survival/base.rs`). Its entry
+            // design row is therefore never read, and what it holds is a
+            // conditioning choice rather than a model statement.
+            //
+            // `log_entry` for such a row is `ln(SURVIVAL_TIME_FLOOR) = −20.7`,
+            // a NUMERICAL FLOOR and not a datum, so a linear tail evaluated
+            // there would put a large arbitrary constant into a design column
+            // (and into the column-scaling statistics computed from it) purely
+            // as a readout of `1e-9`. The saturating basis got the right answer
+            // here for the wrong reason: every time at or below the first knot
+            // maps to the anchored ZERO row (`I_k(left) = 0` exactly). Keep that
+            // answer, and keep it for the reason that holds — the likelihood's
+            // own origin predicate — so a genuine delayed entry below the first
+            // knot still receives the real extrapolation.
+            let interval = ispline_modelling_interval(knotvec.view(), degree)
+                .map_err(|e| format!("failed to resolve ispline modelling interval: {e}"))?;
+            let mut log_entry_for_basis = log_entry.clone();
+            if let Some((left, _right)) = interval {
+                for i in 0..n {
+                    if age_entry[i] <= crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD {
+                        log_entry_for_basis[i] = left;
+                    }
+                }
+            }
+            let x_entry_full = ispline_value(
+                log_entry_for_basis.view(),
+                knotvec.view(),
+                degree,
+                ISplineBoundary::LinearTails,
+            )
+            .map_err(|e| format!("failed to build ispline entry basis: {e}"))?;
 
-            // Build full-width I-spline bases inside a block scope so the
-            // large Arc allocations are freed when the block ends.
             let (x_entry_time, x_exit_time, keep_cols, p_time, p_time_full) = {
-                let (entry_arc, _) = create_basis::<Dense>(
-                    log_entry.view(),
-                    KnotSource::Provided(knotvec.view()),
-                    degree,
-                    BasisOptions::i_spline(),
-                )
-                .map_err(|e| format!("failed to build ispline entry basis: {e}"))?;
-                let (exit_arc, _) = create_basis::<Dense>(
-                    log_exit.view(),
-                    KnotSource::Provided(knotvec.view()),
-                    degree,
-                    BasisOptions::i_spline(),
-                )
-                .map_err(|e| format!("failed to build ispline exit basis: {e}"))?;
-
-                let x_entry_full = entry_arc.as_ref();
-                let x_exit_full = exit_arc.as_ref();
                 let p_time_full = x_exit_full.ncols();
                 if p_time_full == 0 {
                     return Err(SurvivalConstructionError::BasisConstructionFailed {
@@ -1558,12 +1613,15 @@ pub fn build_survival_time_basis(
                     }
                     .into());
                 }
-                let db_exit = db_exit_arc.as_ref();
-                if db_exit.ncols() != p_time_full + 1 {
-                    return Err(
-                        "internal error: ispline derivative basis width must exceed basis width by one"
-                            .to_string(),
-                    );
+                if d_exit_log_full.ncols() != p_time_full
+                    || d_exit_log_full.nrows() != x_exit_full.nrows()
+                {
+                    return Err(format!(
+                        "internal error: ispline time derivative basis is {:?} but its value basis \
+                         is {:?}",
+                        d_exit_log_full.dim(),
+                        x_exit_full.dim()
+                    ));
                 }
 
                 let keep_cols = if keep_cols.is_empty() {
@@ -1602,31 +1660,23 @@ pub fn build_survival_time_basis(
                 let p_time = keep_cols.len();
                 let x_entry_time = x_entry_full.select(ndarray::Axis(1), &keep_cols);
                 let x_exit_time = x_exit_full.select(ndarray::Axis(1), &keep_cols);
-                // entry_arc and exit_arc go out of scope here, freeing the
-                // full-width bases before derivative computation below.
                 (x_entry_time, x_exit_time, keep_cols, p_time, p_time_full)
             };
-            let db_exit = db_exit_arc.as_ref();
+            // The full-width VALUE bases are no longer needed; the retained
+            // blocks above own their own storage. The full-width derivative is
+            // still read below, one row at a time, so it stays.
+            drop(x_entry_full);
+            drop(x_exit_full);
 
-            // Build I-spline derivative as sparse triplets.  The derivative
-            // is a cumulative sum of B-spline derivatives and typically has
-            // more nonzeros per row than a plain B-spline, but still much
-            // fewer than p_time for modest bases.
+            // `d(log Λ)/dt = d(log Λ)/d(log t) · 1/t`. The `d/d(log t)` half is
+            // the M-spline block the value basis was built with, so no second
+            // opinion about the exterior can arise here.
             let mut deriv_triplets = Vec::with_capacity(n * p_time.min(16));
             let mut found_nonfinite: Option<(usize, usize)> = None;
             for i in 0..n {
-                let mut running = 0.0_f64;
-                let mut d_i_log_full = vec![0.0_f64; p_time_full];
-                for j in (1..db_exit.ncols()).rev() {
-                    let term = db_exit[[i, j]];
-                    if term.is_finite() {
-                        running += term;
-                    }
-                    d_i_log_full[j - 1] = running;
-                }
                 let chain = 1.0 / age_exit[i].max(SURVIVAL_TIME_FLOOR);
                 for (j_new, &j_old) in keep_cols.iter().enumerate() {
-                    let raw_v = d_i_log_full[j_old] * chain;
+                    let raw_v = d_exit_log_full[[i, j_old]] * chain;
                     let v = if (-1e-12..0.0).contains(&raw_v) {
                         0.0
                     } else {
@@ -2123,8 +2173,35 @@ pub fn evaluate_survival_time_basis_row(
                         .to_string(),
                 );
             }
+            // The anchor is the ORIGIN of the baseline reparameterization, not
+            // a prediction: `center_survival_time_designs_at_anchor` subtracts
+            // this row from every entry and exit design row, and the fit is
+            // invariant to it up to the baseline offset. So it has to be a time
+            // the baseline is IDENTIFIED at.
+            //
+            // The default anchor for ordinary right-censored data is the
+            // earliest entry, which is the time origin, which
+            // `evaluate_survival_time_basis_row` floors to
+            // `SURVIVAL_TIME_FLOOR = 1e-9` so `ln` stays finite — i.e. `−20.7`
+            // in the basis's own coordinate, far below the first knot and a
+            // readout of the floor rather than of the data. Under the saturating
+            // convention that was invisible, because every time at or below the
+            // first knot maps to the anchored ZERO row. Under the linear tails
+            // the baseline now carries (gam#2705) it would instead re-center
+            // every design column by a large constant — which is exactly the
+            // #751 inflation the anchor rule exists to avoid.
+            //
+            // Clamping the anchor into the modelling interval says the thing
+            // that is actually meant, and is numerically identical to what
+            // shipped for every anchor at or below the first knot.
+            let interval = ispline_modelling_interval(knots.view(), *degree)
+                .map_err(|e| format!("failed to resolve ispline modelling interval: {e}"))?;
+            let anchor_log_age = match interval {
+                Some((left, right)) => array![log_age[0].clamp(left, right)],
+                None => log_age.clone(),
+            };
             let (basis_arc, _) = create_basis::<Dense>(
-                log_age.view(),
+                anchor_log_age.view(),
                 KnotSource::Provided(knots.view()),
                 *degree,
                 BasisOptions::i_spline(),
@@ -6930,5 +7007,185 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The defect gam#2705 names, at the level it is created: the survival
+    /// I-spline time block's `x_derivative_time` must be the derivative of its
+    /// own `x_exit_time`, OUTSIDE the fitted knot span as well as inside it.
+    ///
+    /// Before the repair the value basis saturated past the boundary knots
+    /// while the derivative — hand-rolled from a CLAMPED B-spline
+    /// first-derivative basis — returned the boundary slope, so a saved
+    /// Royston-Parmar fit published a flat `Λ(t)` beside a nonzero
+    /// `h(t) = Λ·d(log Λ)/dt`. `h = dΛ/dt`, so those cannot both be one model.
+    ///
+    /// The check is a central difference in `t` (not in `log t`), because `t`
+    /// is the variable `x_derivative_time` is a derivative with respect to —
+    /// the `1/t` chain factor is part of what has to agree.
+    #[test]
+    fn ispline_time_derivative_is_a_finite_difference_of_its_value_2705() {
+        let n = 24usize;
+        let age_entry = Array1::<f64>::zeros(n);
+        let age_exit =
+            Array1::from_iter((0..n).map(|i| 4.0 + 40.0 * (i as f64) / ((n - 1) as f64)));
+        let build = build_survival_time_basis(
+            &age_entry,
+            &age_exit,
+            SurvivalTimeBasisConfig::ISpline {
+                degree: 3,
+                knots: Array1::zeros(0),
+                keep_cols: Vec::new(),
+                smooth_lambda: 1.0,
+            },
+            Some((3, 1.0)),
+        )
+        .expect("ispline time basis builds");
+        let resolved = resolved_survival_time_basis_config_from_build(
+            &build.basisname,
+            build.degree,
+            build.knots.as_ref(),
+            build.keep_cols.as_ref(),
+            build.smooth_lambda,
+        )
+        .expect("resolved ispline config");
+
+        // Inside the fitted span, far below it, and far above it — the last two
+        // are where every `predict(...).survival_at(grid)` call lands, because
+        // `default_survival_time_grid` starts at 0 and ends past `max(exit)`.
+        let queries = [1.0_f64, 3.0, 12.0, 30.0, 44.0, 60.0, 400.0, 2_850.0];
+        let step = 1.0e-5_f64;
+        let mut exterior_rows_with_slope = 0usize;
+        for &t in queries.iter() {
+            let times = Array1::from_vec(vec![t - step, t, t + step]);
+            let probe =
+                build_survival_time_basis(&Array1::<f64>::zeros(3), &times, resolved.clone(), None)
+                    .expect("ispline time basis replays at the query times");
+            let value = probe.x_exit_time.to_dense();
+            let derivative = probe.x_derivative_time.to_dense();
+            let mut row_slope = 0.0_f64;
+            for column in 0..value.ncols() {
+                let difference = (value[[2, column]] - value[[0, column]]) / (2.0 * step);
+                let analytic = derivative[[1, column]];
+                row_slope += analytic.abs();
+                let scale = analytic.abs().max(difference.abs()).max(1.0e-6);
+                assert!(
+                    (difference - analytic).abs() <= 1.0e-4 * scale,
+                    "t={t}: column {column} analytic d/dt {analytic:.9e} disagrees with the \
+                     central difference of its own value basis {difference:.9e}"
+                );
+            }
+            if !(4.0..=44.0).contains(&t) {
+                exterior_rows_with_slope += usize::from(row_slope > 0.0);
+            }
+        }
+        // Non-vacuity: a basis whose exterior derivative is identically zero
+        // passes every assertion above by agreeing with a flat value. The
+        // Royston-Parmar tail is LINEAR, so the exterior slope is the boundary
+        // slope and is nonzero on both sides.
+        assert!(
+            exterior_rows_with_slope >= 2,
+            "the exterior must carry a nonzero boundary slope on both sides; \
+             {exterior_rows_with_slope} of the exterior query times did"
+        );
+    }
+
+    /// The fit itself must not move. Every training row is inside the knot span
+    /// the training rows themselves induced, so the linear-tail convention is
+    /// inert there — and a row entering AT THE ORIGIN keeps the anchored zero
+    /// entry row rather than a tail evaluated at `ln(SURVIVAL_TIME_FLOOR)`,
+    /// which is a readout of `1e-9` and not of the data.
+    #[test]
+    fn the_linear_tail_convention_is_inert_on_the_training_rows_2705() {
+        let n = 16usize;
+        let age_entry = Array1::<f64>::zeros(n);
+        let age_exit =
+            Array1::from_iter((0..n).map(|i| 2.0 + 20.0 * (i as f64) / ((n - 1) as f64)));
+        let build = build_survival_time_basis(
+            &age_entry,
+            &age_exit,
+            SurvivalTimeBasisConfig::ISpline {
+                degree: 3,
+                knots: Array1::zeros(0),
+                keep_cols: Vec::new(),
+                smooth_lambda: 1.0,
+            },
+            Some((3, 1.0)),
+        )
+        .expect("ispline time basis builds");
+        let entry = build.x_entry_time.to_dense();
+        let exit = build.x_exit_time.to_dense();
+        for row in 0..n {
+            for column in 0..entry.ncols() {
+                assert_eq!(
+                    entry[[row, column]],
+                    0.0,
+                    "an entry-at-origin row must carry the anchored zero row at ({row}, {column})"
+                );
+            }
+        }
+        // The exit rows are I-spline values on their own knot span, so every
+        // entry stays in [0, 1]: no tail is being evaluated at a training row.
+        for row in 0..n {
+            for column in 0..exit.ncols() {
+                let value = exit[[row, column]];
+                assert!(
+                    (-1.0e-12..=1.0 + 1.0e-12).contains(&value),
+                    "training exit row ({row}, {column}) = {value} is outside [0, 1], so the \
+                     linear tail is being evaluated on the training data"
+                );
+            }
+        }
+    }
+
+    /// The anchor is the ORIGIN of the baseline reparameterization, and the
+    /// default anchor for ordinary right-censored data is the time origin,
+    /// which `evaluate_survival_time_basis_row` floors to `SURVIVAL_TIME_FLOOR`.
+    /// Under a linear-tailed baseline an unclamped anchor there would re-center
+    /// every design column by a large constant read off `1e-9` — the #751
+    /// inflation the anchor rule exists to avoid. Clamping into the modelling
+    /// interval keeps the shipped answer: `I_k(left) = 0` exactly.
+    #[test]
+    fn the_anchor_row_is_clamped_into_the_modelling_interval_2705() {
+        let n = 16usize;
+        let age_entry = Array1::<f64>::zeros(n);
+        let age_exit =
+            Array1::from_iter((0..n).map(|i| 5.0 + 50.0 * (i as f64) / ((n - 1) as f64)));
+        let build = build_survival_time_basis(
+            &age_entry,
+            &age_exit,
+            SurvivalTimeBasisConfig::ISpline {
+                degree: 3,
+                knots: Array1::zeros(0),
+                keep_cols: Vec::new(),
+                smooth_lambda: 1.0,
+            },
+            Some((3, 1.0)),
+        )
+        .expect("ispline time basis builds");
+        let resolved = resolved_survival_time_basis_config_from_build(
+            &build.basisname,
+            build.degree,
+            build.knots.as_ref(),
+            build.keep_cols.as_ref(),
+            build.smooth_lambda,
+        )
+        .expect("resolved ispline config");
+        let anchor_at_origin = evaluate_survival_time_basis_row(0.0, &resolved)
+            .expect("anchor row at the time origin");
+        for (column, value) in anchor_at_origin.iter().enumerate() {
+            assert_eq!(
+                *value, 0.0,
+                "the anchor row at the time origin must be exactly zero at column {column}, \
+                 got {value}"
+            );
+        }
+        // And an anchor INSIDE the span is still a real evaluation, so the
+        // clamp has not turned the anchor into a constant.
+        let interior =
+            evaluate_survival_time_basis_row(30.0, &resolved).expect("anchor row inside the span");
+        assert!(
+            interior.iter().any(|value| *value > 1.0e-9),
+            "an interior anchor must still evaluate the basis, got {interior:?}"
+        );
     }
 }

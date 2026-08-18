@@ -1,33 +1,46 @@
-//! Regression for #1564 (bug 2): saved Royston-Parmar (`transformation`)
-//! survival prediction must not fail at the top of its default time grid.
+//! Regression for #1564 (bug 2) and #2705: saved Royston-Parmar
+//! (`transformation`) survival prediction must not fail at the top of its
+//! default time grid, and the surface it returns must be ONE model.
 //!
-//! Root cause: the RP baseline `log Λ(t)` is a monotone I-spline cumulative
-//! hazard. At the top boundary of the fitted knot span the I-spline saturates
-//! (the rightmost retained basis reaches its plateau and the would-be-rising
-//! tail columns were dropped as constant over training), so the time-derivative
-//! `d(log Λ)/dt` is exactly `0` there — and the instantaneous hazard is `0`
-//! (the survival curve is locally flat). The saved predict path drove
-//! `royston_parmar_survival_hazard_components`, whose guard required a STRICTLY
-//! positive derivative and therefore aborted with `eta_t=0`.
-//!
-//! The Python prediction surface always evaluates a grid whose top node sits at
-//! `max_observed_exit * (1 + 1e-6)` (see `default_survival_time_grid`), i.e.
-//! exactly in this saturated regime, so **every** transformation-RP surface
+//! #1564: the saved predict path drove `royston_parmar_survival_hazard_components`,
+//! whose guard required a STRICTLY positive `d(log Λ)/dt` and therefore aborted
+//! with `eta_t=0`. The Python prediction surface always evaluates a grid whose
+//! top node sits at `max_observed_exit * (1 + 1e-6)` (see
+//! `default_survival_time_grid`), so **every** transformation-RP surface
 //! prediction failed on its last grid node — the user saw no survival curves at
-//! all. The fix relaxes the guard to accept `eta_derivative >= 0` (still
-//! rejecting NaN and genuinely-negative / non-monotone slopes) and maps the
-//! zero boundary to a zero hazard, matching the probit / marginal-slope guard.
+//! all. The fix relaxed the guard to `eta_derivative >= 0` (still rejecting NaN
+//! and genuinely-negative slopes) and maps a zero boundary to a zero hazard.
+//! That guard is pinned directly, at the function, by
+//! `royston_parmar_hazard_accepts_zero_derivative_as_flat_boundary` and
+//! `royston_parmar_hazard_zero_derivative_in_saturated_tail_is_zero_not_nan`
+//! (`crates/gam-models/src/survival/predict.rs`), so this fixture does not have
+//! to manufacture an exactly-zero hazard node to keep it covered.
 //!
-//! This test reproduces the failure on real data: the UCI Heart Failure Clinical
-//! Records dataset (Chicco & Jurman, 2020; CC BY 4.0) with the exact
-//! multi-smooth formula from the #1564 report. It fits through the real `gam
-//! fit` path, loads the saved model, and drives the library predict surface on
-//! the default-style grid — the exact code path the Python
-//! `model.predict(...).survival_at(grid)` FFI uses. It asserts predict returns
-//! `Ok` (the regression), that the surface is finite / monotone / in `[0, 1]`,
-//! and — to prove the `eta_t=0` path is genuinely exercised — that at least one
-//! grid node carries an exactly-zero hazard atop a finite positive cumulative
-//! hazard.
+//! #2705: it could not manufacture one honestly anyway. The premise that
+//! "beyond its last interior knot the baseline is flat, so the hazard there is
+//! 0" was a defect and not a model. The value basis saturated while the
+//! derivative basis — hand-rolled from a clamped B-spline first-derivative
+//! basis — returned the boundary slope, so the published surface carried a FLAT
+//! `Λ(t)` beside a NONZERO `h(t)`: measured on this very fixture as
+//! `Λ ≡ 5.055558` with `t·h(t) ≡ 6.26088` from `t = 285` out to `t = 2.85e6`.
+//! `h = dΛ/dt`, so those two cannot both describe one model. The baseline now
+//! carries Royston & Parmar's own LINEAR TAILS on both sides
+//! (`ISplineBoundary::LinearTails`), which is what makes `Λ` and `h` agree and
+//! what gives the classical `Λ(t) ∝ t^c` extrapolation past the observed
+//! follow-up.
+//!
+//! So what this fixture guards is no longer "some node has hazard exactly 0" —
+//! that assertion pinned the defect — but the invariant the defect violated:
+//! **the reported hazard is the derivative of the reported cumulative hazard**,
+//! at grid nodes inside the support and outside it, plus `S(0) = 1` (a
+//! saturating lower tail put a spurious atom of failures at time zero) and a
+//! tail that is not a plateau.
+//!
+//! Data: the UCI Heart Failure Clinical Records dataset (Chicco & Jurman, 2020;
+//! CC BY 4.0) with the exact multi-smooth formula from the #1564 report, fitted
+//! through the real `gam fit` path and driven through the library predict
+//! surface — the exact code path the Python `model.predict(...).survival_at(grid)`
+//! FFI uses.
 
 use std::path::Path;
 use std::process::Command;
@@ -175,13 +188,7 @@ fn royston_parmar_saved_predict_at_grid_top_does_not_fail() {
         "surface covers every grid time"
     );
 
-    let mut zero_hazard_nodes = 0usize;
-    // Diagnostics for the precondition below: it demands `haz == 0.0` BIT-EXACTLY
-    // on a computed hazard, so a change that yields a tiny positive instead of a
-    // true zero silently withdraws this fixture's coverage. Record what the grid
-    // actually held so one run distinguishes the two.
     let mut smallest_haz_over_positive_cum = f64::INFINITY;
-    let mut near_zero_haz_nodes = 0usize;
     let mut nodes_with_positive_cum = 0usize;
     for r in 0..n {
         let surv: Vec<f64> = result.survival.row(r).to_vec();
@@ -208,35 +215,124 @@ fn royston_parmar_saved_predict_at_grid_top_does_not_fail() {
             );
         }
 
-        // Count the exactly-zero-hazard nodes (the `eta_t=0` boundary) that sit
-        // atop a finite positive cumulative hazard. Each one is a node that the
-        // pre-fix strict `> 0.0` guard would have rejected.
         for j in 0..grid.len() {
             if cum[j] > 1e-9 {
                 nodes_with_positive_cum += 1;
                 if haz[j] < smallest_haz_over_positive_cum {
                     smallest_haz_over_positive_cum = haz[j];
                 }
-                if haz[j] > 0.0 && haz[j] < 1e-12 {
-                    near_zero_haz_nodes += 1;
-                }
-                if haz[j] == 0.0 {
-                    zero_hazard_nodes += 1;
-                }
             }
         }
     }
 
     assert!(
-        zero_hazard_nodes > 0,
-        "expected at least one exactly-zero-hazard grid node (the #1564 eta_t=0 \
-         boundary); without one this fixture would not guard the regression. \
-         Measured over {nodes_with_positive_cum} node(s) with cum > 1e-9: \
-         smallest hazard = {smallest_haz_over_positive_cum:.6e}, \
-         nodes with 0 < haz < 1e-12 = {near_zero_haz_nodes}. A smallest hazard \
-         that is tiny-but-positive means the boundary is no longer reached \
-         bit-exactly and the fixture needs rebuilding, not that the guard \
-         regressed; a large smallest hazard means the grid no longer reaches \
-         the eta_t=0 boundary at all"
+        nodes_with_positive_cum > 0,
+        "the surface must carry at least one node with a positive cumulative \
+         hazard for the checks below to mean anything"
     );
+
+    // ---------------------------------------------------------------------
+    // #2705: the published hazard IS the derivative of the published
+    // cumulative hazard — inside the fitted support and outside it.
+    // ---------------------------------------------------------------------
+    //
+    // Taken on a dedicated three-point stencil per probe time rather than on
+    // the 64-node display grid, whose ~4.5-unit spacing is far too coarse to
+    // difference a curved `Lambda`. The stencil is `t·(1 ± 1e-4)`, which keeps
+    // the truncation error at third order in `h` and still leaves ~13
+    // significant digits after the cancellation in `Λ(t+h) − Λ(t−h)`.
+    let probes = [
+        0.25 * max_exit,
+        0.75 * max_exit,
+        max_exit,
+        1.5 * max_exit,
+        4.0 * max_exit,
+    ];
+    let mut stencil: Vec<f64> = Vec::with_capacity(3 * probes.len());
+    for &t in probes.iter() {
+        let h = 1.0e-4 * t;
+        stencil.push(t - h);
+        stencil.push(t);
+        stencil.push(t + h);
+    }
+    let stencil_request = SurvivalPredictRequest {
+        model: &model,
+        data: dataset.values.view(),
+        col_map: &col_map,
+        training_headers,
+        primary_offset: &primary_offset,
+        noise_offset: &noise_offset,
+        time_grid: Some(&stencil),
+        with_uncertainty: false,
+        estimand: gam::families::survival::predict::SurvivalPredictEstimand::Plugin,
+    };
+    let stencil_result = predict_survival(
+        stencil_request,
+        SurvivalPredictionCovarianceMode::Conditional,
+    )
+    .expect("RP saved predict must succeed on the derivative stencil");
+
+    let mut exterior_probes_with_hazard = 0usize;
+    for (probe_index, &t) in probes.iter().enumerate() {
+        let h = 1.0e-4 * t;
+        let lo = 3 * probe_index;
+        let mid = lo + 1;
+        let hi_node = lo + 2;
+        for r in 0..n {
+            let cum = stencil_result.cumulative_hazard.row(r);
+            let haz = stencil_result.hazard.row(r);
+            let difference = (cum[hi_node] - cum[lo]) / (2.0 * h);
+            let analytic = haz[mid];
+            let scale = analytic.abs().max(difference.abs());
+            assert!(
+                (difference - analytic).abs() <= 1.0e-4 * scale.max(1.0e-12),
+                "row {r} at t={t}: reported hazard {analytic:.9e} is not the derivative of \
+                 the reported cumulative hazard {difference:.9e} (cum(t-h)={:.9e}, \
+                 cum(t+h)={:.9e}, h={h:.3e}). A flat cumulative hazard beside a nonzero \
+                 hazard is gam#2705; a rising one beside a zero hazard is its mirror image.",
+                cum[lo],
+                cum[hi_node]
+            );
+            if t > max_exit && r == 0 && analytic > 0.0 {
+                exterior_probes_with_hazard += 1;
+            }
+        }
+    }
+
+    // Non-vacuity, and the modelling claim itself: past the observed follow-up
+    // the baseline must still have a TAIL. A saturating baseline satisfies the
+    // derivative check above trivially — flat cumulative hazard, zero hazard —
+    // which is exactly the state gam#2705 replaced, and it is the state that
+    // says nobody fails after the last observed exit time.
+    assert!(
+        exterior_probes_with_hazard > 0,
+        "every probe past max_exit={max_exit} reported a zero hazard, i.e. the baseline \
+         saturates rather than continuing at its boundary slope (gam#2705). Smallest \
+         hazard over {nodes_with_positive_cum} display node(s) with cum > 1e-9 was \
+         {smallest_haz_over_positive_cum:.6e}"
+    );
+
+    // ---------------------------------------------------------------------
+    // #2705, the lower tail: `S(0) = 1`.
+    // ---------------------------------------------------------------------
+    //
+    // `default_survival_time_grid` starts at `t = 0`, which the time basis
+    // floors to `SURVIVAL_TIME_FLOOR = 1e-9` before taking a log. A saturating
+    // baseline returns `I_k = 0` for every node below the first knot, so
+    // `Lambda(t) = exp(intercept + x·beta)` — a CONSTANT positive cumulative
+    // hazard all the way down to the origin, i.e. an atom of failures at time
+    // zero. With the tail it is `Lambda(t) -> 0`.
+    for r in 0..n {
+        let survival_at_origin = result.survival[[r, 0]];
+        let cum_at_origin = result.cumulative_hazard[[r, 0]];
+        assert!(
+            cum_at_origin <= 1.0e-6,
+            "row {r}: cumulative hazard at t=0 is {cum_at_origin:.6e}; a survival model \
+             cannot have failures before its own time origin (gam#2705)"
+        );
+        assert!(
+            survival_at_origin >= 1.0 - 1.0e-6,
+            "row {r}: S(0) = {survival_at_origin:.9} must be 1"
+        );
+    }
 }
