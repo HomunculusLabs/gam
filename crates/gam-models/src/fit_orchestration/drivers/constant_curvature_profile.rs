@@ -202,22 +202,91 @@ struct ConstantCurvatureProfile<'a> {
     value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), (f64, bool)>>,
 }
 
-/// Is `η` a stationary point of `V(κ, ·)`, at the resolution the criterion's
-/// own VALUE can express?
+/// The criterion's own forward resolution in `η`.
+///
+/// A value-comparing line search cannot separate two `η` closer than this — the
+/// values differ below the rounding of `V` — so an iterate that stops moving at
+/// this scale HAS converged, and demanding a smaller gradient than the value can
+/// resolve would classify every successful solve as a stall. ONE expression,
+/// because the refinement's step test and the stationarity certificate below
+/// both need it and a certificate that disagrees with the loop that produced it
+/// is worse than no certificate.
+fn eta_resolution(eta: f64) -> f64 {
+    f64::EPSILON.sqrt() * (1.0 + eta.abs())
+}
+
+/// Is `η` a stationary point of `V(κ, ·)`, at the resolution the criterion's own
+/// VALUE can express?
 ///
 /// Two tests, because a gradient bar alone is not achievable near a flat
 /// minimum: `|V_η|` below a relative floor, or an exact Newton step already
-/// shorter than `√ε·(1 + |η|)` — the scale at which two η are indistinguishable
-/// to a value-comparing search, so demanding more is demanding a certificate the
-/// criterion cannot issue. Shared by the refinement loop and by the terminal
-/// classification so the two cannot disagree about what "converged" means.
+/// shorter than [`eta_resolution`]. Shared by the refinement loop and by the
+/// terminal classification so the two cannot disagree about what "converged"
+/// means — the disagreement they used to carry was the defect: `converged` was a
+/// flag recording which `break` fired, so a line search that exhausted BECAUSE
+/// the incumbent was already the minimum left it unset.
 fn eta_is_stationary(gradient: f64, curvature: f64, eta: f64, value: f64) -> bool {
     if gradient.abs() <= 1.0e-9 * (1.0 + value.abs()) {
         return true;
     }
     curvature.is_finite()
         && curvature > 0.0
-        && (gradient / curvature).abs() <= f64::EPSILON.sqrt() * (1.0 + eta.abs())
+        && (gradient / curvature).abs() <= eta_resolution(eta)
+}
+
+/// Why [`ConstantCurvatureProfile::minimize_over_eta`]'s refinement stopped.
+///
+/// It exists because the terminal classification cannot recover this from the
+/// final state, and getting it wrong in EITHER direction has a cost. The
+/// previous shape of this code kept a `converged` flag set by two of the loop's
+/// several `break`s, so a search that stopped for a third reason was recorded as
+/// a failure; replacing the flag with a purely analytic re-test of the final jet
+/// then refused six fixtures that were converged — measured, `V_η` between
+/// `1.7e-6` and `1.9e-3` against `V_ηη` between `0.93` and `6.3e3`, i.e. Newton
+/// steps of `1.8e-6` down to `2.5e-8`.
+///
+/// Both mistakes have one cause: an analytic bar asks for a certificate in exact
+/// arithmetic, and this criterion is not evaluated in exact arithmetic. Every
+/// `V(κ, η)` runs its own inner ρ optimization, so the computed value carries
+/// that solve's noise, orders above `ε·|V|`. The instrument that knows the real
+/// floor is the LINE SEARCH — it is the thing that decides, empirically, whether
+/// a smaller value is reachable — so its verdict is a certificate rather than a
+/// failure to produce one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefineExit {
+    /// [`eta_is_stationary`] fired: the analytic certificate, in the cases where
+    /// the criterion is smooth enough to issue it.
+    Stationary,
+    /// The backtracking search along an exact DESCENT direction found no smaller
+    /// value at any of its thirty geometric scales, down to the point where the
+    /// trial stops being distinguishable from the incumbent. No reachable point
+    /// near `η̂` has a smaller `V`, which is the strongest first-order statement
+    /// this criterion supports.
+    SearchExhausted,
+    /// A step was accepted and moved the iterate less than
+    /// [`eta_resolution`] — the scale at which a value-comparing search cannot
+    /// tell two η apart. Same content as [`Self::SearchExhausted`], reached from
+    /// the accepting side.
+    BelowResolution,
+    /// The iteration budget ran out while steps were still being accepted, i.e.
+    /// the refinement was still moving when it was stopped. The one exit that
+    /// is not a certificate of anything.
+    BudgetExhausted,
+}
+
+impl RefineExit {
+    /// Does this exit certify first-order optimality at the resolution the
+    /// criterion can express?
+    ///
+    /// A budget that ran out while the iterate was still moving does not; the
+    /// other three do, each for a stated reason. Deliberately NOT a wildcard, so
+    /// a new exit has to answer this question rather than inherit an answer.
+    fn certifies(self) -> bool {
+        match self {
+            Self::Stationary | Self::SearchExhausted | Self::BelowResolution => true,
+            Self::BudgetExhausted => false,
+        }
+    }
 }
 
 /// How the inner range solve at one κ terminated.
@@ -231,8 +300,17 @@ fn eta_is_stationary(gradient: f64, curvature: f64, eta: f64, value: f64) -> boo
 /// `0.68 → 34 000` across the κ box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RangeSolveOutcome {
-    /// `V_η = 0` and `V_ηη > 0` at an η strictly inside the box: the envelope
-    /// and Schur reductions of the profile are both valid.
+    /// `V_ηη > 0` at an η strictly inside the box, with the refinement
+    /// certifying first-order optimality there — see [`RefineExit::certifies`],
+    /// which accepts either the analytic bar or a line search that could not
+    /// reach a smaller value. The envelope and Schur reductions of the profile
+    /// are both valid, and the residual `V_η` costs `V_η·η̂′` on the first
+    /// derivative — a term that is present under every non-`InteriorMinimum`
+    /// outcome too, because `V_p′` is reported as `V_κ` in all of them. What
+    /// this variant actually buys is `V_p″`: the Schur term `−V_κη²/V_ηη` is
+    /// non-positive, so an interior minimum misfiled as anything else has its
+    /// profile curvature OVERSTATED, and that curvature is what the outer
+    /// solve's terminal stationarity certificate is denominated in (#2458).
     InteriorMinimum,
     /// The user pinned the range with an explicit `length_scale=`, so η is not
     /// a coordinate at all: `η̂(κ) ≡ η_pinned` and `dη̂/dκ = 0` identically.
@@ -599,12 +677,11 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // magnitude away from the geometry.
         const MAX_NEWTON: usize = 60;
         let width = (scan_hi - scan_lo).max(1.0);
-        // The criterion's own forward resolution in η. A value-comparing line
-        // search cannot separate two η closer than this — the values differ
-        // below the rounding of `V` — so an iterate that stops moving at this
-        // scale HAS converged, and demanding a smaller gradient than the value
-        // can resolve would classify every successful solve as a stall.
-        let eta_resolution = |eta: f64| f64::EPSILON.sqrt() * (1.0 + eta.abs());
+        // WHY the refinement stopped, kept because the terminal classification
+        // needs it and cannot recover it from the state alone. See
+        // [`RefineExit`]: three of these four are certificates and one is a
+        // failure, and in exact arithmetic the difference would not exist.
+        let mut exit = RefineExit::BudgetExhausted;
         for _ in 0..MAX_NEWTON {
             let g = jet.gradient[1];
             let h = jet.hessian[1][1];
@@ -617,6 +694,7 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 return Ok((eta, jet, RangeSolveOutcome::EvaluabilityWall));
             }
             if eta_is_stationary(g, h, eta, jet.value) {
+                exit = RefineExit::Stationary;
                 break;
             }
             let raw = if h.is_finite() && h > 0.0 {
@@ -649,21 +727,16 @@ impl<'a> ConstantCurvatureProfile<'a> {
                     eta = next_eta;
                     jet = next_jet;
                     if moved <= eta_resolution(eta) {
-                        // The iterate stopped MOVING, which is not the same as
-                        // the gradient having vanished — the classification
-                        // below re-asks that question of the state we ended on
-                        // rather than of how we got there.
+                        exit = RefineExit::BelowResolution;
                         break;
                     }
                 }
-                None => break,
+                None => {
+                    exit = RefineExit::SearchExhausted;
+                    break;
+                }
             }
         }
-        // The certificate is a property of the STATE the solve ended on, not
-        // of the branch it left the loop by: a step-size stall, an exhausted
-        // budget and a vanished gradient all arrive here, and only the last is a
-        // stationary point. So the question is re-asked of the final jet.
-        let g = jet.gradient[1];
         let h = jet.hessian[1][1];
         let at_top = eta >= hi - 1.0e-9 * (1.0 + hi.abs());
         let at_bottom = eta <= lo + 1.0e-9 * (1.0 + lo.abs());
@@ -672,16 +745,19 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // finding as an iterate that stopped at the other — see
         // `RangeSolveOutcome::DistanceKernelLimit`. Both give the plain κ slice,
         // because at an ACTIVE bound `η̂(κ)` is the bound; only one of them is an
-        // answer about the model. An iterate that stopped anywhere else without
-        // a stationarity certificate has earned neither reduction.
+        // answer about the model.
+        //
+        // Away from both faces the question is whether this is a MINIMUM, and it
+        // is asked in two halves that both have to hold. `exit.certifies()` is
+        // the first-order half at the resolution the criterion can issue (see
+        // [`RefineExit`]); `V_ηη > 0` is the second-order half, and without it a
+        // stationary point is a maximum or a saddle in η and the profile's
+        // reduction divides by the wrong sign.
         let outcome = if at_top {
             RangeSolveOutcome::DistanceKernelLimit
         } else if at_bottom {
             RangeSolveOutcome::EvaluabilityWall
-        } else if eta_is_stationary(g, h, eta, jet.value)
-            && h.is_finite()
-            && h > 0.0
-        {
+        } else if exit.certifies() && h.is_finite() && h > 0.0 {
             RangeSolveOutcome::InteriorMinimum
         } else {
             RangeSolveOutcome::Uncertified
