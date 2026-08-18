@@ -3516,11 +3516,21 @@ fn enumerate_generators(
     gens
 }
 
-/// The unit generators a certificate would test, for a caller that needs the
-/// same list the certificate builds — the gates, which check a measured energy
-/// against an independently constructed `Rξ̂`.
-#[cfg(any(test, doc))]
-pub(crate) fn enumerated_unit_generators(
+/// The unit directions [`residual_gauge`] would test, in the order it tests
+/// them, for the model and exact-orbit split a caller is about to certify with.
+///
+/// `views` is the same slice handed to [`residual_gauge_exact`]: an atom with a
+/// view has its within-atom families realised as exact orbits (#998) and is
+/// therefore absent from this list, exactly as it is absent from the
+/// curvature-tested block of the report.
+///
+/// The alignment is positional and it is the whole reason this is public: the
+/// report's first `len()` verdicts are the verdicts on these directions, in this
+/// order, so a caller that wants to re-derive a measured energy — or check one
+/// against its own construction of `Rξ̂` — can do it without re-implementing the
+/// enumeration and hoping the two agree. `None` marks a structurally trivial
+/// generator, which carries no direction and is vetoed rather than measured.
+pub fn enumerated_unit_generators(
     model: &FittedSaeManifold,
     views: &[Option<AtomParameterView>],
 ) -> Vec<Option<Array1<f64>>> {
