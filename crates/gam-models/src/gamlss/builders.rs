@@ -4102,12 +4102,47 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         }
         .into());
     }
-    let baseline_eta_beta = baseline_fit
+    // THE WARM START MUST BE IN THE FITTING FRAME, NOT THE SAVED FRAME (#2748).
+    //
+    // `fit_binomial_mean_wiggle` returns `beta_saved`, which satisfies
+    // `q = X*beta_saved + B(eta_hat)*beta_w`: the mean coefficient has absorbed
+    // `-A*beta_w`. Every consumer below seeds a frozen-index construction with
+    // it, and `fit_binomial_mean_wiggle`'s own entry computes its FIRST frozen
+    // index as `X*initial_beta + offset`. Seeded with `beta_saved` that index is
+    // the DE-ALIASED predictor, so the warp basis is built at the one index the
+    // mean block already spans — and the refit refuses its own warm start with
+    // "no identifiable warp direction". MEASURED on `papuan_oce4_matern_k6`: the
+    // outer search certified `theta*` (`|Pg| = 4.445e-3` against `1.968e-2`,
+    // `hessian_psd=yes`) and the refit at that same `theta*` then died on exactly
+    // that message.
+    //
+    // `beta_frozen_source = beta_saved + saved_index_shift` is the fitting-frame
+    // coefficient whose predictor IS `eta_hat` (#2141 defines the shift as
+    // `beta_frozen_source - beta_saved` for precisely this reconstruction). It is
+    // also the right frame for the outer evaluator, whose wiggle block is
+    // `B_perp`: there the model is `q = X*beta + B_perp*beta_w`, which is the
+    // fitting frame and not the saved one.
+    let baseline_saved_eta_beta = baseline_fit
         .block_states
         .get(BinomialMeanWiggleFamily::BLOCK_ETA)
         .ok_or_else(|| "baseline binomial mean-wiggle fit missing eta block".to_string())?
         .beta
         .clone();
+    let baseline_eta_beta = match baseline.saved_index_shift.as_ref() {
+        Some(shift) if shift.len() == baseline_saved_eta_beta.len() => {
+            &baseline_saved_eta_beta + &Array1::from(shift.clone())
+        }
+        // No warp engaged (`saved_index_shift` is only produced alongside a
+        // fitted warp), so the two frames coincide.
+        None => baseline_saved_eta_beta,
+        Some(shift) => {
+            return Err(format!(
+                "baseline binomial mean-wiggle fit reported a {}-coefficient frozen-index                  shift for a {}-coefficient mean block",
+                shift.len(),
+                baseline_saved_eta_beta.len(),
+            ));
+        }
+    };
     let baseline_wiggle_beta = Some(
         baseline_fit
             .block_states
