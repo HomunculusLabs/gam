@@ -2151,10 +2151,36 @@ mod binomial_mean_wiggle_dealias_metric_tests {
 /// Fit the binomial mean link-wiggle model. The observation-space de-aliasing
 /// preserves the standard I-spline coefficient coordinate, which is returned
 /// for the saved-model predict runtime.
+/// What a converged frozen-index binomial mean link-wiggle fit IS, named rather
+/// than positional.
+///
+/// The third and fourth fields exist because the fit is returned in the SAVED
+/// frame (`finalize_binomial_mean_wiggle_saved_frame`), where the mean
+/// coefficient has absorbed `−A·β_w`: `q = X·β_saved + B(η̂)·β_w`. So neither
+/// `block_states[BLOCK_ETA].eta` nor the wiggle block's eta is the frozen index
+/// the warp was pinned at, and a caller that needs the CRITERION this fit
+/// realizes cannot reconstruct it from the states alone.
+///
+/// `frozen_warp_design` is that criterion's warp block: the accepted `B⊥` the
+/// fixed point converged with. Returning it means the exact-joint spatial driver
+/// consumes the very matrix the baseline fit used rather than re-deriving one
+/// from the saved-frame states — which is how gam#2748's first attempt at this
+/// went wrong, since `wiggle_design(X·β_saved)` is the warp basis at the
+/// DE-ALIASED predictor and not at `η̂`.
+pub(crate) struct BinomialMeanWiggleFrozenFit {
+    pub(crate) fit: UnifiedFitResult,
+    pub(crate) saved_warp_beta: Option<Vec<f64>>,
+    /// `β_frozen_source − β_saved` in mean coordinates, so `X·(β_saved + shift)`
+    /// is the frozen index `η̂` (#2141).
+    pub(crate) saved_index_shift: Option<Vec<f64>>,
+    /// The accepted `B⊥ = B(η̂) − X A`, in the row order of the training data.
+    pub(crate) frozen_warp_design: std::sync::Arc<Array2<f64>>,
+}
+
 pub(crate) fn fit_binomial_mean_wiggle(
     spec: BinomialMeanWiggleSpec,
     options: &BlockwiseFitOptions,
-) -> Result<(UnifiedFitResult, Option<Vec<f64>>, Option<Vec<f64>>), String> {
+) -> Result<BinomialMeanWiggleFrozenFit, String> {
     let n = spec.y.len();
     validate_len_match("weights vs y", n, spec.weights.len())?;
     validateweights(&spec.weights, "fit_binomial_mean_wiggle")?;
@@ -2359,7 +2385,12 @@ pub(crate) fn fit_binomial_mean_wiggle(
     let mut eta_block_warm = eta_block_input.clone();
     let mut wiggle_beta_warm = wiggle_beta_initial;
     let mut wiggle_log_lambda_warm = wiggle_log_lambdas.clone();
-    let mut converged: Option<(UnifiedFitResult, Array2<f64>, Array1<f64>)> = None;
+    let mut converged: Option<(
+        UnifiedFitResult,
+        Array2<f64>,
+        Array1<f64>,
+        std::sync::Arc<Array2<f64>>,
+    )> = None;
     let mut last_delta = f64::INFINITY;
     let mut last_scale = 1.0_f64;
     // #2748 instrumentation. The frozen-basis outer loop is a fixed-point
@@ -2395,6 +2426,10 @@ pub(crate) fn fit_binomial_mean_wiggle(
                 .intospec_with_gauge_priority("wiggle", DEALIASED_WARP_GAUGE_PRIORITY)?,
         ];
         let mut fam = family.clone();
+        // The pass's own frozen warp block, retained so the accepted pass can
+        // hand it to the caller: it IS the criterion this fixed point realizes,
+        // and it is not reconstructible from the saved-frame states (#2748).
+        let accepted_frozen_warp_design = std::sync::Arc::clone(&bda);
         fam.frozen_warp_design = Some(bda);
         let fit = fit_custom_family(&fam, &blocks, options).map_err(|e| e.to_string())?;
         let mean_state = fit
@@ -2474,7 +2509,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
         );
         previous_step = Some(step.clone());
         if last_delta <= options.outer_tol * last_scale {
-            converged = Some((fit, alias, frozen_source_beta));
+            converged = Some((fit, alias, frozen_source_beta, accepted_frozen_warp_design));
             break;
         }
 
@@ -2505,7 +2540,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
         frozen_source_beta = next_source_beta;
         frozen_eta = next_eta;
     }
-    let (mut fit, last_alias, frozen_source_beta) = converged.ok_or_else(|| {
+    let converged = converged.ok_or_else(|| {
         GamlssError::NumericalFailure {
             reason: format!(
                 "fit_binomial_mean_wiggle frozen-index fixed point did not converge in {} outer \
@@ -2525,6 +2560,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
         }
         .to_string()
     })?;
+    let (mut fit, last_alias, frozen_source_beta, frozen_warp_design) = converged;
     // Capture the mean coefficients whose linear predictor is the *frozen index*
     // `η̂` the warp basis `B(η̂)` was pinned at (#2141). The reported deviance is
     // evaluated with `q = X·β_saved + B(η̂)·β_w`, so `predict` must re-evaluate the
@@ -2576,7 +2612,12 @@ pub(crate) fn fit_binomial_mean_wiggle(
         ));
     }
     let saved_index_shift = Some((&frozen_source_beta - &saved_mean_state.beta).to_vec());
-    Ok((fit, Some(saved_warp_beta), saved_index_shift))
+    Ok(BinomialMeanWiggleFrozenFit {
+        fit,
+        saved_warp_beta: Some(saved_warp_beta),
+        saved_index_shift,
+        frozen_warp_design,
+    })
 }
 
 /// Densify a wiggle-block penalty spec to its full `p×p` matrix for the
@@ -3947,7 +3988,12 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
 
     let spatial_terms = spatial_length_scale_term_indices(pilot_spec);
     if spatial_terms.is_empty() {
-        let (fit, saved_warp_beta, saved_index_shift) = fit_binomial_mean_wiggle(
+        let BinomialMeanWiggleFrozenFit {
+            fit,
+            saved_warp_beta,
+            saved_index_shift,
+            ..
+        } = fit_binomial_mean_wiggle(
             BinomialMeanWiggleSpec {
                 y: y.clone(),
                 weights: weights.clone(),
@@ -4016,7 +4062,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         .map_err(|e| e.to_string())?;
     let baseline_design =
         build_term_collection_design(data, &baseline_resolvedspec).map_err(|e| e.to_string())?;
-    let baseline_fit = fit_binomial_mean_wiggle(
+    let baseline = fit_binomial_mean_wiggle(
         BinomialMeanWiggleSpec {
             y: y.clone(),
             weights: weights.clone(),
@@ -4041,8 +4087,8 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
             wiggle_block: wiggle_block.clone(),
         },
         options,
-    )?
-    .0;
+    )?;
+    let baseline_fit = baseline.fit;
     let baseline_log_lambdas = fitted_log_lambdas(
         &baseline_fit.lambdas,
         "binomial mean-wiggle baseline lambda",
@@ -4110,56 +4156,18 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     // is the point the search starts from. The final refit re-freezes iteratively
     // from the pilot, so the approximation lives entirely in which nuisance
     // profile the search minimises — not in the fit that is minted.
-    let baseline_eta = baseline_fit
-        .block_states
-        .get(BinomialMeanWiggleFamily::BLOCK_ETA)
-        .ok_or_else(|| "baseline binomial mean-wiggle fit missing eta block".to_string())?
-        .eta
-        .clone();
-    let baseline_wiggle_eta = baseline_fit
-        .block_states
-        .get(BinomialMeanWiggleFamily::BLOCK_WIGGLE)
-        .ok_or_else(|| "baseline binomial mean-wiggle fit missing wiggle block".to_string())?
-        .eta
-        .clone();
-    let frozen_warp_basis = {
-        let frozen_family = BinomialMeanWiggleFamily {
-            y: y.clone(),
-            weights: weights.clone(),
-            link_kind: link_kind.clone(),
-            wiggle_knots: wiggle_knots.clone(),
-            wiggle_degree,
-            policy: gam_runtime::resource::ResourcePolicy::default_library(),
-            frozen_warp_design: None,
-        };
-        let b_full = frozen_family.wiggle_design(baseline_eta.view())?;
-        // The de-aliasing metric is the curvature of the row loss at the
-        // COMPOSITE index the baseline realized, which is the same choice
-        // `fit_binomial_mean_wiggle`'s own `build_dealiased` makes and for the
-        // same reason (`dealias_warp_against_mean_block`: the only inner product
-        // the rest of the solve uses is the one its own curvature defines).
-        let mut curvature = Array1::<f64>::zeros(y.len());
-        for row in 0..y.len() {
-            let q = baseline_eta[row] + baseline_wiggle_eta[row];
-            let (_, m2, _) = frozen_family.neglog_q_derivatives(y[row], weights[row], q)?;
-            curvature[row] = if m2.is_finite() && m2 > 0.0 { m2 } else { 0.0 };
-        }
-        let x_dense: Array2<f64> = baseline_design.design.to_dense();
-        let (_, bda) = dealias_warp_against_mean_block(&x_dense, &b_full, &curvature)?;
-        let max_b = b_full.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let max_resid = bda.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let resid_tol =
-            1.0e3 * f64::EPSILON * (bda.nrows().max(bda.ncols()).max(1) as f64) * max_b.max(1.0);
-        if max_resid <= resid_tol {
-            return Err(
-                "exact-joint spatial warp de-aliasing left no identifiable warp \
-                        direction at the baseline index (the mean block already spans the \
-                        warp in observation space)"
-                    .to_string(),
-            );
-        }
-        std::sync::Arc::new(bda)
-    };
+    // The criterion the baseline fixed point realized, taken from the fit rather
+    // than re-derived: `fit_binomial_mean_wiggle` returns the ACCEPTED `B_perp`
+    // (`BinomialMeanWiggleFrozenFit::frozen_warp_design`). Re-deriving it here
+    // was the first attempt at this and it was wrong for a reason worth keeping
+    // written down: the returned fit is in the SAVED frame, so
+    // `block_states[BLOCK_ETA].eta` is `X*beta_saved = eta_hat - X*A*beta_w` and
+    // NOT the frozen index. `wiggle_design` at that predictor is the warp basis
+    // at the de-aliased index, whose residual against the mean block measured
+    // `<= 1.33e-9` on `papuan_oce4_matern_k6` — the driver refused its own fit
+    // with "no identifiable warp direction" while the loop that produced it had
+    // just converged. One matrix, one owner (#2748).
+    let frozen_warp_basis = baseline.frozen_warp_design;
     let theta_dim = rho_dim + log_kappa0.len();
     let mut theta0 = Array1::<f64>::zeros(theta_dim);
     theta0
@@ -4630,7 +4638,12 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         },
         options,
     )?;
-    let (fit, saved_warp_beta, saved_index_shift) = fit;
+    let BinomialMeanWiggleFrozenFit {
+        fit,
+        saved_warp_beta,
+        saved_index_shift,
+        ..
+    } = fit;
 
     Ok(BinomialMeanWiggleTermFitResult {
         fit,
