@@ -459,4 +459,108 @@ mod constant_curvature_kappa_range_identification_tests {
             }
         }
     }
+
+    /// The PROFILED derivatives must be the derivatives of the PROFILED value.
+    ///
+    /// `constant_curvature_kappa_jet_fd_tests` differences `V(κ, η)` at fixed
+    /// `η`. Nothing differences `V_p(κ) = min_η V(κ, η)`, and the reduction from
+    /// one to the other is where the range coordinate's whole cost lands:
+    /// `V_p′ = V_κ` by the envelope theorem, and `V_p″ = V_κκ − V_κη²/V_ηη` by
+    /// one more differentiation. The Schur term is NON-POSITIVE, so a profile
+    /// that fails to apply it does not produce a wrong fit — it produces an
+    /// OVERSTATED curvature, which is what the outer solve's terminal
+    /// stationarity certificate is denominated in (#2458). Exactly the class of
+    /// defect that is invisible in the fitted numbers.
+    ///
+    /// And it was reachable. `minimize_over_eta` decided whether the reduction
+    /// applied from a `converged` flag set by two of its several `break`s, so a
+    /// backtracking search that exhausted BECAUSE the incumbent was already the
+    /// minimum left the flag unset and the reduction unapplied. Six shipped
+    /// fixtures were measured in that state, at `V_η` between `1.7e-6` and
+    /// `1.9e-3` against `V_ηη` between `0.93` and `6.3e3` (gam#2747).
+    ///
+    /// So this gate asks the question in the form that does not depend on the
+    /// classification at all: a central difference. It also asserts its own
+    /// TEETH — that the unreduced `V_κκ` fails the same bar wherever the Schur
+    /// term is material — because a gate on a correction is worthless at a
+    /// fixture where the correction is zero.
+    #[test]
+    fn the_profiled_second_derivative_is_the_derivative_of_the_profiled_first() {
+        let n = 200usize;
+        let centers = 6usize;
+        let radius = 0.6_f64;
+        let seed = 0x5EED_2747_0000_0005_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, radius, 1.0, centers, 0.0, seed);
+        let (ell_ref, cap) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, 0.8, radius, ell_ref * 1.7, centers, 0.03, seed);
+        let profile =
+            ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+                .expect("profile is constructible on the fixture");
+
+        // `h` differences an ANALYTIC first derivative, whose only noise is the
+        // inner solve's `η̂` wobble entering through `V_κη·δη`. A step three
+        // orders inside the κ box keeps the difference in the smooth regime
+        // while staying far above that floor.
+        let h = 1.0e-3_f64 * cap;
+        let mut interior_cells = 0usize;
+        let mut toothy_cells = 0usize;
+        for i in 0..=8u32 {
+            let kappa = -0.8 * cap + 1.6 * cap * f64::from(i) / 8.0;
+            let (_, jet, outcome) = profile
+                .minimize_over_eta(kappa)
+                .expect("the range box is searchable");
+            if outcome != RangeSolveOutcome::InteriorMinimum {
+                eprintln!("[#2747 profile-fd] κ={kappa:+.4}: {outcome:?}, not gated here");
+                continue;
+            }
+            interior_cells += 1;
+            let (value, first, second) = profile.evaluate(kappa).expect("profiled jet");
+            let (plus, first_plus, _) = profile.evaluate(kappa + h).expect("profiled jet at +h");
+            let (minus, first_minus, _) =
+                profile.evaluate(kappa - h).expect("profiled jet at -h");
+            let fd_first = (plus - minus) / (2.0 * h);
+            let fd_second = (first_plus - first_minus) / (2.0 * h);
+            let schur = jet.hessian[0][1] * jet.hessian[0][1] / jet.hessian[1][1];
+            let unreduced = second + schur;
+            let rel_first = (first - fd_first).abs() / (1.0 + fd_first.abs());
+            let rel_second = (second - fd_second).abs() / (1.0 + fd_second.abs());
+            let rel_unreduced = (unreduced - fd_second).abs() / (1.0 + fd_second.abs());
+            eprintln!(
+                "[#2747 profile-fd] κ={kappa:+.4} V_p={value:.6} \
+                 V_p′={first:+.6e} (fd {fd_first:+.6e}, rel {rel_first:.2e})  \
+                 V_p″={second:+.6e} (fd {fd_second:+.6e}, rel {rel_second:.2e})  \
+                 schur={schur:.6e} unreduced rel {rel_unreduced:.2e}"
+            );
+            assert!(
+                rel_first <= 1.0e-4,
+                "κ={kappa}: V_p′={first:.9e} against a central difference of V_p \
+                 {fd_first:.9e} (rel {rel_first:.3e}); the envelope reduction does not \
+                 differentiate the value beside it"
+            );
+            assert!(
+                rel_second <= 1.0e-3,
+                "κ={kappa}: V_p″={second:.9e} against a central difference of V_p′ \
+                 {fd_second:.9e} (rel {rel_second:.3e}); the Schur reduction does not \
+                 differentiate the first derivative beside it"
+            );
+            // Teeth. Where the Schur correction is material, the UNREDUCED
+            // `V_κκ` — what a profile that misfiles an interior minimum
+            // returns — must fail the same bar by an order of magnitude, so a
+            // regression cannot slip through on a cell where the correction
+            // happens to vanish.
+            if rel_unreduced > 1.0e-2 {
+                toothy_cells += 1;
+            }
+        }
+        assert!(
+            interior_cells >= 5,
+            "only {interior_cells} of nine κ reached an interior range minimum; this gate \
+             measures the reduction and cannot do it on a fixture that never applies one"
+        );
+        assert!(
+            toothy_cells >= 1,
+            "the Schur correction was immaterial at every one of {interior_cells} gated κ, so \
+             the bars above would pass on a profile that never applied it"
+        );
+    }
 }
