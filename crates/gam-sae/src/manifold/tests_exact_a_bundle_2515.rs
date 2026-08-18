@@ -1518,13 +1518,21 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
     let mut deflating_states = 0usize;
     let mut worst_relative = 0.0_f64;
     let mut worst_label = String::new();
+    // Rungs are excursions AROUND the certified anchor `(-0.5, -1.0, -0.5)`, not a
+    // sweep across the whole box: far from it the dense route refuses outright
+    // (`IndefiniteObservedInformation` at an off-optimum inner state), and a rung
+    // where only one route has an answer states nothing about parity. Those rungs
+    // are reported and skipped, and the `deflating_states` floor below is what stops
+    // the whole ladder from silently degenerating into them.
     for (sparse, smooth, ard) in [
         (-0.5_f64, -1.0_f64, -0.5_f64),
         (-0.5, -1.0, -0.2),
-        (-0.2, -1.2, -0.5),
-        (0.0, -1.5, -0.8),
-        (0.2, -1.5, -1.0),
-        (0.5, -2.0, -1.2),
+        (-0.5, -1.0, -0.8),
+        (-0.5, -0.9, -0.5),
+        (-0.5, -1.1, -0.5),
+        (-0.35, -1.0, -0.5),
+        (-0.65, -1.0, -0.5),
+        (-0.65, -0.9, -0.35),
         (-0.8, -0.8, -0.3),
     ] {
         let mut rho = anchor_rho.clone();
@@ -1628,8 +1636,8 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
          {worst_relative:.6e} at [{worst_label}]"
     );
     assert!(
-        deflating_states >= 3,
-        "#2515: this ladder must reach at least three genuinely deflating states, or it \
+        deflating_states >= 6,
+        "#2515: this ladder must reach at least six genuinely deflating states, or it \
          is a parity claim about the undeflated regime the gate next door already \
          covers; got {deflating_states}"
     );
@@ -1640,4 +1648,192 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
          streaming lane's spectral-deflation refusal was lifted on the claim that the \
          classification is shared across the deflating regime, not at one ρ."
     );
+}
+
+/// MEASUREMENT — the ρ rung where the ladder breaks, taken apart.
+///
+/// [`exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515`] widened from
+/// one anchor to nine rungs and immediately found one where the two routes do NOT
+/// agree — `log λ_smooth = −1.1`, one tenth of a decade from the certified anchor:
+///
+/// ```text
+/// smooth=−1.0  max|Δ|=3.267663e-8  ‖g‖∞=1.726754e1  relative=1.89e-9
+/// smooth=−1.1  max|Δ|=4.411584e2   ‖g‖∞=4.371555e2  relative=1.01e0
+/// smooth=−0.9  max|Δ|=2.909077e-8  ‖g‖∞=7.659687e-1 relative=3.80e-8
+/// ```
+///
+/// `‖g‖∞` itself moves `0.77 → 17.3 → 437` across those three rungs, so the state
+/// is doing something violent of its own accord. This probe prints, for each of
+/// the three, every classification either route makes — per-row deflation counts
+/// on both caches, β-Schur deflation on the exact-`A` cache, the dense joint and
+/// coordinate pinned counts and clamp-priced-negative counts — plus the
+/// per-coordinate gradient split, so the `1.01` is attributed to one of them
+/// rather than guessed at.
+#[test]
+fn zz_attribute_the_broken_ladder_rung_2515() {
+    let (mut term, anchor_rho, target, _anchor_cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 the broken ladder rung",
+        );
+    let evidence_options = ArrowSolveOptions::direct()
+        .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+    let majorizer_options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+
+    for smooth in [-0.9_f64, -1.0, -1.05, -1.1, -1.2] {
+        let mut rho = anchor_rho.clone();
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        let Ok(sys) = term.assemble_arrow_schur(target.view(), &rho, None) else {
+            println!("[#2515 RUNG] smooth={smooth:.2}: majorizer assembly refused");
+            continue;
+        };
+        let Ok((_, _, b_cache)) =
+            solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &majorizer_options)
+        else {
+            println!("[#2515 RUNG] smooth={smooth:.2}: majorizer factorization refused");
+            continue;
+        };
+        let Ok(a_sys) = term.exact_a_evidence_system(target.view(), &rho, &sys) else {
+            println!("[#2515 RUNG] smooth={smooth:.2}: exact-A evidence system refused");
+            continue;
+        };
+        let Ok((_, _, a_cache)) =
+            solve_arrow_newton_step_with_options(&a_sys, 0.0, 0.0, &evidence_options)
+        else {
+            println!("[#2515 RUNG] smooth={smooth:.2}: exact-A arrow factorization refused");
+            continue;
+        };
+        let b_deflated = b_cache
+            .deflated_row_directions
+            .iter()
+            .filter(|d| !d.is_empty())
+            .count();
+        let a_deflated = a_cache
+            .deflated_row_directions
+            .iter()
+            .filter(|d| !d.is_empty())
+            .count();
+        let a_beta_deflated = a_cache
+            .beta_schur_deflation
+            .as_ref()
+            .map(|spectrum| spectrum.deflated.iter().filter(|d| **d).count());
+        let b_beta_deflated = b_cache
+            .beta_schur_deflation
+            .as_ref()
+            .map(|spectrum| spectrum.deflated.iter().filter(|d| **d).count());
+
+        // The dense classification on the same state.
+        let a_dense = term
+            .materialize_exact_hessian_dense(&rho, target.view(), &b_cache)
+            .expect("#2515: the rung's exact Hessian materializes");
+        let e_diag = term
+            .materialize_ard_concave_clamp_diagonal(&rho, &b_cache)
+            .expect("#2515: the rung's clamp diagonal");
+        let total_t = b_cache.delta_t_len();
+        let mut dense_report = String::new();
+        for (label, block, metric) in [
+            ("joint", a_dense.clone(), ArrowMetric::Joint(&b_cache)),
+            (
+                "coord",
+                a_dense.slice(s![..total_t, ..total_t]).to_owned(),
+                ArrowMetric::Coordinate(&b_cache),
+            ),
+        ] {
+            let (evals, evecs) =
+                gam_linalg::faer_ndarray::FaerEigh::eigh(&block, faer::Side::Lower)
+                    .expect("a symmetric block diagonalizes");
+            let norm = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+            let mut pinned = 0usize;
+            let mut priced_negative = 0usize;
+            let mut min_eig = f64::INFINITY;
+            for idx in 0..evals.len() {
+                let lambda = evals[idx];
+                min_eig = min_eig.min(lambda);
+                let v = evecs.column(idx);
+                let bvv = metric.quadratic_form(v).unwrap_or(0.0);
+                let floor = sae_exact_a_direction_floor(evals.len(), norm, bvv);
+                let e_v: f64 = (0..total_t.min(v.len()))
+                    .map(|j| e_diag[j] * v[j] * v[j])
+                    .sum();
+                let priced = if lambda < -floor {
+                    priced_negative += 1;
+                    lambda + e_v
+                } else {
+                    lambda
+                };
+                if !(priced > floor) {
+                    pinned += 1;
+                }
+            }
+            dense_report.push_str(&format!(
+                " dense-{label}(min_eig={min_eig:+.3e} pinned={pinned} negpriced={priced_negative})"
+            ));
+        }
+
+        let Ok(loss) = term.loss(target.view(), &rho) else {
+            println!("[#2515 RUNG] smooth={smooth:.2}: loss unavailable");
+            continue;
+        };
+        let solver = DeflatedArrowSolver::plain(&b_cache);
+        let dense = match term.analytic_outer_rho_gradient_components(
+            target.view(),
+            &rho,
+            &loss,
+            &b_cache,
+            &solver,
+        ) {
+            Ok(components) => components,
+            Err(err) => {
+                println!("[#2515 RUNG] smooth={smooth:.2}: dense gradient refused: {err}");
+                continue;
+            }
+        };
+        let (probes, sinv) = full_basis_probe_bundle(&a_cache);
+        let bundled = match term.analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &b_cache,
+            &solver,
+            Some(BundleEvidenceGeometry {
+                operator: EvidenceOperator::ExactObservedInformation,
+                cache: &a_cache,
+                probes: &probes,
+                sinv: &sinv,
+            }),
+            None,
+        ) {
+            Ok(components) => components,
+            Err(err) => {
+                println!("[#2515 RUNG] smooth={smooth:.2}: bundle gradient refused: {err}");
+                continue;
+            }
+        };
+        println!(
+            "[#2515 RUNG] smooth={smooth:.2}: b_rows_deflated={b_deflated} \
+             a_rows_deflated={a_deflated} b_beta_deflated={b_beta_deflated:?} \
+             a_beta_deflated={a_beta_deflated:?}{dense_report}"
+        );
+        let dense_g = dense.gradient();
+        let bundled_g = bundled.gradient();
+        for i in 0..dense_g.len() {
+            println!(
+                "[#2515 RUNG] smooth={smooth:.2} coord {i}: dense={:+.10e} bundle={:+.10e} \
+                 |Δ|={:.6e}",
+                dense_g[i],
+                bundled_g[i],
+                (dense_g[i] - bundled_g[i]).abs()
+            );
+        }
+        println!(
+            "[#2515 RUNG] smooth={smooth:.2} logdet_trace dense={:?}",
+            dense.logdet_trace.to_vec()
+        );
+        println!(
+            "[#2515 RUNG] smooth={smooth:.2} logdet_trace bundle={:?}",
+            bundled.logdet_trace.to_vec()
+        );
+    }
 }

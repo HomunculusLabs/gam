@@ -1,5 +1,60 @@
 ## Unreleased
 
+- **A deflating state had a Laplace criterion on one route and NO ANSWER on the
+  other (#2515).** `penalized_quasi_laplace_streaming_outer_evaluation` refused
+  every evaluation whose evidence factorization spectrally deflated a row. The
+  refusal was honest — it was retained on a measured number, not an argument —
+  but it is still route-dependence, and at production `p` the streaming lane is
+  the only lane there is, so a deflating fit simply had nowhere to go.
+
+  Its own note named the lift condition: reconcile the dense route's ABSOLUTE
+  spectral floor with the arrow route's per-row relative one. #2673 did exactly
+  that (`00c1fe139`, `758c9d336`) — the absolute floor is deleted and both sites
+  classify a direction by its curvature in the majorizer metric,
+  `max(dim·ε·‖A‖₂, √ε·vᵀBv)` — and nobody re-measured this comparison against
+  it. Re-measured on #2712's certified deflated anchor:
+
+  ```text
+                                    before (ac66e624d)        now
+  complete gradient max|Δ|          9.131537e0                2.798722e-8
+  against ‖g‖∞                      5.004339e0                1.726754e1
+  RELATIVE                          1.8                       1.62e-9
+  ```
+
+  and direction for direction the classifications now agree: over the anchor's
+  thirty coordinate directions the dense route pins nothing, prices no
+  clamp-attributable negative, and reads `log|A_tt| = 2.2623032065e1` against the
+  arrow route's `2.2623032490e1`. End to end through the production entry point,
+  forced onto the streaming route at the same state, `cost` is
+  `1.7469252484e1` against `1.7469252476e1` and the complete gradient agrees to
+  `3.301233e-8`.
+
+  The refusal is gone. Four gates replace it: parity on the certified anchor,
+  parity across a ρ ladder of deflating states (one anchor is not a contract),
+  the same parity through `evaluate_outer_criterion_route` itself, and an
+  attribution gate for the residual.
+
+  **The residual is `1.6e-9`, not machine precision, and it is attributed rather
+  than absorbed into a bar.** The dense route materializes `A` through
+  `apply_cached_arrow_hessian`, which applies `L Lᵀ` of the row's UNDAMPED
+  FACTOR — the majorizer already unit-pinned by its own factorization — so a
+  `B`-deflated direction enters the dense `A` as `1 + vᵀΔCv`. The arrow route
+  folds `ΔC` into the untouched majorizer blocks and unit-pins the result, so the
+  same direction is exactly `1`. Measured on all ten deflated directions of the
+  anchor:
+
+  ```text
+  row 0:  vᵀB_raw v = 6.903136e-8   vᵀ(B_raw+ΔC)v = 3.471846e-8
+          vᵀΔCv = −3.431291e-8      dense vᵀ(B̃+ΔC)v = 9.9999996569e-1
+  ```
+
+  `1 + vᵀΔCv` to every digit. Both routes honour "a unit-deflated direction
+  contributes `log 1 = 0`"; only one honours it exactly, because `vᵀΔCv` is a
+  function of `ρ`. The gate is an IDENTITY — the two exact-`A` row blocks differ
+  by the majorizer's own conditioning increment and by nothing else,
+  `3.552714e-15` over a block scale of `2.513448e1` — so a second cause cannot
+  hide inside the parity bar next door.
+
 - **A Royston-Parmar fit published a FLAT cumulative hazard beside a NONZERO
   hazard past its training support, and those two cannot both describe one
   model (#2705).** `h = dΛ/dt`, so a flat `Λ` forces `h = 0`. Measured on the

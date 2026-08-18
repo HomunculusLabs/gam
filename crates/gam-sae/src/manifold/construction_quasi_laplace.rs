@@ -3522,6 +3522,19 @@ impl SaeManifoldTerm {
         //     complete gradient max|Δ| = 2.798722e-8 against ‖g‖∞ = 1.726754e1
         //                              = 1.62e-9 RELATIVE, from 1.8 relative
         //
+        // and END TO END through this very function, forced onto the streaming route
+        // at the same state (`forced_streaming_admits_a_deflating_state_and_matches_-
+        // dense_2515`):
+        //
+        //     cost      dense 1.7469252484e1   streaming 1.7469252476e1
+        //     gradient  max|Δ| = 3.301233e-8 against ‖g‖∞ = 1.726754e1
+        //
+        // and across a ρ ladder of deflating states rather than one anchor
+        // (`exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515`), where the
+        // gap stays ABSOLUTE at ~3e-8 while ‖g‖∞ moves over a decade — which is the
+        // signature of the attributed cause below and not of a route-dependent
+        // criterion.
+        //
         // and the classification is now agreed direction for direction: on that
         // anchor the dense route pins nothing, prices no clamp-attributable negative,
         // and reads `log|A_tt| = 2.2623032065e1` against the arrow route's
