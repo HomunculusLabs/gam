@@ -3920,7 +3920,10 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<BinomialMeanWiggleTermFitResult, String> {
-    const RHO_BOUND: f64 = 12.0;
+    // The joint `[rho, psi]` box rule, shared with the standard spatial route
+    // (`spatial_optimization.rs` is `include!`d into `drivers`, so it lives at
+    // the module root).
+    use crate::fit_orchestration::drivers::{JOINT_RHO_BOUND, joint_rho_search_box};
 
     validate_term_weights(
         data,
@@ -4076,8 +4079,43 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         .slice_mut(s![rho_dim..theta_dim])
         .assign(log_kappa0.as_array());
 
-    let mut lower = Array1::<f64>::from_elem(theta_dim, -RHO_BOUND);
-    let mut upper = Array1::<f64>::from_elem(theta_dim, RHO_BOUND);
+    // The ρ half of the joint box, through the SAME rule the standard joint
+    // `[ρ, ψ]` spatial route uses (#2454, corrected by #2760): a `±12` PRIOR
+    // that falls back per coordinate to the engine's own `±RHO_BOUND` the
+    // moment the incumbent it will be GRADED against is not strictly inside it.
+    //
+    // This site used to write a flat local `RHO_BOUND = 12.0` across every ρ
+    // coordinate while grading the joint minimum against `baseline_fit` — whose
+    // λ̂ was found by `fit_binomial_mean_wiggle`'s own outer search over the
+    // engine's `±30`. When that λ̂ lands outside `±12`, `min` is taken over a set
+    // that does not contain the point it is compared with, the seed is pasted
+    // onto the wall, and the coordinate is an ACTIVE constraint from iteration
+    // zero: `joint_rho_search_box`'s own doc states the mechanism and #2760
+    // measured it. MEASURED here too, on `papuan_oce4_matern_k6` at
+    // `5f6bddb16`: all six ρ terminate at `11.9971 … 11.99998` against this
+    // `±12`, `|Pg| = |g| = 2.163` (so the projection removed NOTHING — every
+    // railed coordinate still has feasible descent), and the search gives up
+    // after TWO iterations on a cost stall.
+    let (rho_lower, rho_upper) = joint_rho_search_box(baseline_log_lambdas.view(), JOINT_RHO_BOUND);
+    let widened: Vec<usize> = (0..rho_dim)
+        .filter(|&k| rho_lower[k] < -JOINT_RHO_BOUND || rho_upper[k] > JOINT_RHO_BOUND)
+        .collect();
+    if !widened.is_empty() {
+        log::info!(
+            "[binomial-mean-wiggle] joint rho box fell back to the engine's own \
+             +/-RHO_BOUND on coordinate(s) {widened:?}: the baseline fit's own lambda-hat is \
+             not strictly inside the joint +/-{JOINT_RHO_BOUND} prior, so the prior is \
+             falsified there and the search region becomes the one the graded incumbent was \
+             found in (gam#2760). seed={:?} box=[{:?}, {:?}]",
+            baseline_log_lambdas.to_vec(),
+            rho_lower.to_vec(),
+            rho_upper.to_vec(),
+        );
+    }
+    let mut lower = Array1::<f64>::zeros(theta_dim);
+    let mut upper = Array1::<f64>::zeros(theta_dim);
+    lower.slice_mut(s![0..rho_dim]).assign(&rho_lower);
+    upper.slice_mut(s![0..rho_dim]).assign(&rho_upper);
     lower
         .slice_mut(s![rho_dim..theta_dim])
         .assign(log_kappa_lower.as_array());
@@ -4286,7 +4324,12 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
             ..Default::default()
         })
         .with_screening_cap(Arc::clone(&screening_cap))
-        .with_rho_bound(12.0)
+        // The saturation REFERENCE stays at the joint prior even where the box
+        // above widened a coordinate to `±RHO_BOUND`, exactly as the standard
+        // joint `[ρ, ψ]` route does: the box is the per-dimension `lower`/`upper`
+        // pair, and this scalar only feeds the seed grid and the bound-free
+        // fallback box.
+        .with_rho_bound(JOINT_RHO_BOUND)
         .with_heuristic_lambdas(seed_heuristic);
 
     let eval_outer = |state: &mut MeanWiggleOuterState,

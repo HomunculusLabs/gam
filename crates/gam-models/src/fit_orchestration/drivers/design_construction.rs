@@ -6197,10 +6197,27 @@ impl CustomFamily for BoundedLinearFamily {
     /// `block_linear_constraints` — so the declaration is explicit here.
     fn block_coefficient_coordinate(
         &self,
-        _block_states: &[ParameterBlockState],
-        _block_index: usize,
-        _block_spec: &ParameterBlockSpec,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
     ) -> gam_problem::CoefficientCoordinate {
+        // This family carries exactly ONE block and both hooks that make its
+        // coordinate structural are indexed against that block, so the answer is
+        // the same for every question it can be asked. Say so when the question
+        // does not describe the block this family holds, rather than answering
+        // silently about a coordinate that is not its own: a mismatched index or
+        // width IS the desynchronisation this declaration exists to prevent, and
+        // `Structural` is the safe answer to it too.
+        if block_index != 0 || block_spec.design.ncols() != self.designzeroed.ncols() {
+            log::debug!(
+                "bounded linear family: coefficient coordinate asked for block {block_index} \
+                 at spec width {} ({} block state(s) supplied) while this family carries one \
+                 block of width {}; the coordinate is structural either way",
+                block_spec.design.ncols(),
+                block_states.len(),
+                self.designzeroed.ncols(),
+            );
+        }
         gam_problem::CoefficientCoordinate::Structural
     }
 

@@ -22,11 +22,13 @@ use crate::families::custom_family::psi_design::{
 };
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::{
-    BlockGeometryDirectionalDerivative, BlockWorkingSet, CoefficientCoordinate,
-    ExactNewtonJointPsiSecondOrderTerms, ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace,
-    ExactNewtonOuterObjective, ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState,
-    PseudoLogdetMode,
+    BlockGeometryDirectionalDerivative, BlockWorkingSet, ExactNewtonJointPsiSecondOrderTerms,
+    ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace, ExactNewtonOuterObjective,
+    ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState, PseudoLogdetMode,
 };
+// The coordinate declaration `block_coefficient_coordinate` returns, re-exported
+// beside the constraint types it is derived from (#2748).
+pub use gam_problem::CoefficientCoordinate;
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -2154,7 +2154,8 @@ mod tests {
             s[[i, 1]] = x[i] * x[i] * x[i];
         }
         let specs = [spec_from_dense("p", p), spec_from_dense("s", s)];
-        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect("clean canonical must succeed");
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+            .expect("clean canonical must succeed");
         assert_eq!(canon.reduced_specs.len(), 2);
         assert_eq!(canon.gauge.block_transform(0).dim(), (2, 2));
         assert_eq!(canon.gauge.block_transform(1).dim(), (2, 2));
@@ -3221,7 +3222,7 @@ mod tests {
             &[anchor_spec, callback_spec],
             &[CoefficientCoordinate::Spanning; 2],
         )
-            .expect("callback-only overlap must reduce safely (#933)");
+        .expect("callback-only overlap must reduce safely (#933)");
 
         let reduced_block = &canon.reduced_specs[1];
         let reduced_design = &reduced_block.design;
@@ -3338,7 +3339,7 @@ mod tests {
             &[anchor_spec, callback_spec],
             &[CoefficientCoordinate::Spanning; 2],
         )
-            .expect("multi-channel callback overlap must reduce safely (#933)");
+        .expect("multi-channel callback overlap must reduce safely (#933)");
 
         let reduced_block = &canon.reduced_specs[1];
         let reduced_design = &reduced_block.design;
@@ -3481,7 +3482,8 @@ mod tests {
             spec_from_dense_with_priority("p", p, 150),
             spec_from_dense_with_priority("s", s, 120),
         ];
-        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect("clean design canonicalises");
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+            .expect("clean design canonicalises");
         // Identity transforms (nothing to orthogonalise) on the clean design.
         assert_eq!(canon.gauge.block_transform(0).dim(), (2, 2));
         assert_eq!(canon.gauge.block_transform(1).dim(), (2, 2));
