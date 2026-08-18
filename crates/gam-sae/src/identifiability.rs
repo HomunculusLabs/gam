@@ -2736,7 +2736,11 @@ fn curvature_rank_tolerance(sigma_max: f64, root_rows: usize, param_dim: usize) 
 /// `singular_values` is the multiset of *nonzero* singular values; the
 /// structural zeros a rank-deficient representation omits never clear a
 /// positive tolerance, so omitting them is exact rather than an approximation.
-fn root_spectral_rank(singular_values: &[f64], root_rows: usize, param_dim: usize) -> (f64, usize) {
+pub(crate) fn root_spectral_rank(
+    singular_values: &[f64],
+    root_rows: usize,
+    param_dim: usize,
+) -> (f64, usize) {
     let sigma_max = singular_values
         .iter()
         .cloned()
@@ -3441,19 +3445,25 @@ fn residual_gauge_exact_inputs(
     Ok((mask, exact_verdicts))
 }
 
-fn residual_gauge_inner(
+/// The symmetry generators of a fitted model, tagged by family, embedded in the
+/// joint parameter vector, and each carrying its #995 lowering-error tolerance
+/// scale.
+///
+/// `exact_mask` names the atoms whose within-atom families are realised exactly
+/// (#998); those are skipped here, because the frame-space lift of a compensated
+/// orbit measures compression rather than the symmetry, and the report must not
+/// carry both a lossy and an exact verdict for the same group element.
+///
+/// Extracted from [`residual_gauge_inner`] so the certificate and its gates
+/// enumerate from ONE definition: a gate that rebuilt this list for itself would
+/// be checking the certificate against a second enumeration, and the alignment
+/// between a generator and its measured energy is positional.
+fn enumerate_generators(
     model: &FittedSaeManifold,
-    exact: Option<(Vec<bool>, Vec<GeneratorVerdict>)>,
-    access: CurvatureAccess<'_>,
-) -> Result<ResidualGaugeReport, String> {
-    let metric_provenance = model.metric.provenance();
+    exact_mask: Option<&[bool]>,
+) -> Vec<(GeneratorFamily, Array1<f64>, String, f64)> {
     let param_dim = model.param_dim();
-    let (exact_mask, exact_verdicts) = match exact {
-        Some((mask, verdicts)) => (Some(mask), verdicts),
-        None => (None, Vec::new()),
-    };
-
-    // 1. Enumerate generators, tagged by family. The per-atom builders speak
+    // Enumerate generators, tagged by family. The per-atom builders speak
     // the atom's LOCAL flattened-frame coordinates (length `frame.len()`); the
     // certificate's rank arithmetic runs in the joint parameter vector, so each
     // local generator is embedded at its atom's offset here. (Single-atom
@@ -3469,7 +3479,7 @@ fn residual_gauge_inner(
         // skipped here: the frame-space lift of a compensated orbit measures
         // compression, not the symmetry, and the report must not carry both a
         // lossy and an exact verdict for the same group element.
-        if exact_mask.as_ref().is_some_and(|mask| mask[k]) {
+        if exact_mask.is_some_and(|mask| mask[k]) {
             continue;
         }
         let base = model.atom_offset(k);
@@ -3502,6 +3512,37 @@ fn residual_gauge_inner(
             scale_of(ka).max(scale_of(kb)),
         ));
     }
+
+    gens
+}
+
+/// The unit generators a certificate would test, for a caller that needs the
+/// same list the certificate builds — the gates, which check a measured energy
+/// against an independently constructed `Rξ̂`.
+#[cfg(any(test, doc))]
+pub(crate) fn enumerated_unit_generators(
+    model: &FittedSaeManifold,
+    views: &[Option<AtomParameterView>],
+) -> Vec<Option<Array1<f64>>> {
+    let mask: Vec<bool> = views.iter().map(|view| view.is_some()).collect();
+    unit_generators(&enumerate_generators(model, Some(&mask)))
+}
+
+fn residual_gauge_inner(
+    model: &FittedSaeManifold,
+    exact: Option<(Vec<bool>, Vec<GeneratorVerdict>)>,
+    access: CurvatureAccess<'_>,
+) -> Result<ResidualGaugeReport, String> {
+    let metric_provenance = model.metric.provenance();
+    let (exact_mask, exact_verdicts) = match exact {
+        Some((mask, verdicts)) => (Some(mask), verdicts),
+        None => (None, Vec::new()),
+    };
+
+    // 1. Enumerate generators, tagged by family (see
+    // [`enumerate_generators`], which is also what the gates rebuild the same
+    // list from).
+    let gens = enumerate_generators(model, exact_mask.as_deref());
 
     // 2. The curvature, reduced to exactly what step 3 reads off it. The
     // generators are enumerated FIRST because the streamed route measures their

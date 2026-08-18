@@ -186,7 +186,7 @@ fn planted_term_with_gate(
 
 /// A term whose decoder carries only the constant harmonic, so every decoded
 /// tangent — and therefore the whole residual-gauge curvature — is exactly zero.
-fn planted_constant_decoder_term(n: usize, p: usize, k_atoms: usize) -> SaeManifoldTerm {
+pub(crate) fn planted_constant_decoder_term(n: usize, p: usize, k_atoms: usize) -> SaeManifoldTerm {
     let mut s = 0x2757_0000_0000_0009u64;
     let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("harmonic order 3"));
     let mut atoms = Vec::with_capacity(k_atoms);
@@ -238,7 +238,7 @@ fn unit_rho(k_atoms: usize) -> SaeManifoldRho {
 /// certificate's doc comment describes. Deliberately naive: this is the
 /// reference the structured builder is judged against, so it must not share
 /// any of its reasoning.
-fn reference_dense_gram(
+pub(crate) fn reference_dense_gram(
     term: &SaeManifoldTerm,
     metric: &gam_problem::RowMetric,
     layout: &FrameColumnLayout,
@@ -280,6 +280,56 @@ fn reference_dense_gram(
         gram = gram + whitened.t().dot(&whitened);
     }
     gram
+}
+
+/// The stacked metric-whitened root `R` itself (`n·rank × param_dim`), built the
+/// same independent way [`reference_dense_gram`] is — no
+/// `fill_row_frame_jacobian`, no accumulator, no layout arithmetic beyond
+/// `offset_k + i·d_k + a` written out inline.
+///
+/// This is the object the streamed operator claims to be an operator OVER, so
+/// checking the operator against it is checking it against an independent
+/// derivation rather than against the code it shares. `RᵀR` is
+/// [`reference_dense_gram`]'s output by construction.
+pub(crate) fn reference_dense_root(
+    term: &SaeManifoldTerm,
+    metric: &gam_problem::RowMetric,
+    layout: &FrameColumnLayout,
+) -> Array2<f64> {
+    let n = term.n_obs();
+    let p = term.output_dim();
+    let param_dim = layout.param_dim();
+    let rank = metric.metric_rank();
+    let assignments = term.assignment.assignments();
+    let mut root = Array2::<f64>::zeros((n * rank, param_dim));
+    let mut tangent = vec![0.0_f64; p];
+    for row in 0..n {
+        let mut j = Array2::<f64>::zeros((p, param_dim));
+        let mut base = 0usize;
+        for (atom_idx, atom) in term.atoms.iter().enumerate() {
+            let d = atom.latent_dim();
+            let a_nk = assignments[[row, atom_idx]];
+            if a_nk > 0.0 {
+                for axis in 0..d {
+                    atom.fill_decoded_derivative_row(row, axis, &mut tangent);
+                    for i in 0..p {
+                        j[[i, base + i * d + axis]] += a_nk * tangent[i];
+                    }
+                }
+            }
+            base += p * d;
+        }
+        for r in 0..rank {
+            for c in 0..param_dim {
+                let mut acc = 0.0_f64;
+                for i in 0..p {
+                    acc += metric.factor_entry(row, i, r) * j[[i, c]];
+                }
+                root[[row * rank + r, c]] = acc;
+            }
+        }
+    }
+    root
 }
 
 /// Gate 1 + 2 — the structured curvature IS the dense Gram, and its off-block
@@ -588,11 +638,23 @@ fn the_folded_root_and_the_dense_gram_certify_the_same_model() {
     term.set_row_metric(metric.clone())
         .expect("metric is conformable");
 
-    let (model, streamed) = term
-        .to_residual_gauge_model(metric, None, false)
+    let layout = FrameColumnLayout::new(p, &vec![1usize; k_atoms]);
+    let (model, source) = term
+        .to_residual_gauge_model(metric.clone(), None, false)
         .expect("certificate model");
-    let folded = expect_stored(streamed, "the unpinned path streams its curvature");
-    // n·rank = 72 root rows against param_dim = 36 columns: the fold arm.
+    // n·rank = 72 root rows against param_dim = 36 columns, so production streams
+    // this fit rather than materializing it (#2757). That route is gated in
+    // `tests_streamed_curvature_2757`; THIS gate is about the two MATERIALIZED
+    // reductions agreeing, so it asks the builder for the folded factor
+    // explicitly — the witness the streamed route is judged against.
+    assert_eq!(source_structure_tag(&source), "streamed_operator");
+    let folded = term
+        .residual_gauge_streamed_data_curvature(
+            &metric,
+            &layout,
+            Array2::<f64>::zeros((0, layout.param_dim())),
+        )
+        .expect("materialized curvature");
     assert_eq!(folded.structure_tag(), "dual_root");
     assert_eq!(folded.root_rows(), n * rank);
 
