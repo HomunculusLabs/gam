@@ -990,6 +990,12 @@ pub struct StreamedLambdaMax {
     pub relative_residual: f64,
     /// `tr(H)`, the rigorous PSD upper bound `λ_max` was checked against.
     pub trace: f64,
+    /// How many passes over the root the solve took: one for the diagonal, then
+    /// one per Krylov step. This is the certificate's whole cost on this route
+    /// besides the single generator-projection pass, so it is reported rather
+    /// than left to a profiler — a solve that needed hundreds of passes would be
+    /// a spectrum this instrument is wrong for, and the number says so.
+    pub passes: usize,
 }
 
 /// The relative accuracy the certificate requires of a streamed `λ_max`.
@@ -1060,6 +1066,7 @@ pub fn streamed_lambda_max(
             lambda_max: 0.0,
             relative_residual: 0.0,
             trace: 0.0,
+            passes: 0,
         });
     }
     let diagonal = operator.diagonal()?;
@@ -1083,11 +1090,13 @@ pub fn streamed_lambda_max(
             lambda_max: 0.0,
             relative_residual: 0.0,
             trace: 0.0,
+            passes: 1,
         });
     }
     let steps = dim.min(operator.root_rows()).max(1);
     let check_every = 10usize.min((dim / 10).max(1));
     let start = streamed_lanczos_start(dim);
+    let mut matvecs = 0usize;
     let pairs = symmetric_extreme_lanczos_eigenpairs(
         dim,
         &start,
@@ -1098,7 +1107,10 @@ pub fn streamed_lambda_max(
             relative_residual_tol: streamed_lambda_max_relative_tol(),
             breakdown_tol: f64::EPSILON * trace,
         },
-        |q, image| operator.apply(q, image),
+        |q, image| {
+            matvecs += 1;
+            operator.apply(q, image)
+        },
     )
     .map_err(|e| format!("streamed curvature: λ_max solve did not certify: {e}"))?;
     let lambda_max = pairs.eigenvalues[0];
@@ -1123,6 +1135,7 @@ pub fn streamed_lambda_max(
         lambda_max,
         relative_residual: residual / lambda_max.max(1.0),
         trace,
+        passes: matvecs + 1,
     })
 }
 

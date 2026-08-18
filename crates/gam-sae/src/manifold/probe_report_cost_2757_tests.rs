@@ -41,6 +41,8 @@ use super::tests_frame_curvature_2757::{
     unit_rho_for_probe,
 };
 use crate::identifiability::FrameColumnLayout;
+use crate::manifold::construction::ResidualGaugeCurvatureSource;
+use crate::manifold::streamed_frame_curvature::StreamedFrameCurvatureOperator;
 use ndarray::Array2;
 use std::time::Instant;
 
@@ -204,18 +206,37 @@ fn probe_2757_report_phase_profile_gauge_driving() {
         let tag = curvature.structure_tag();
         let root_rows = curvature.root_rows();
 
-        let (model, streamed) = term
+        let (model, source) = term
             .to_residual_gauge_model(metric.clone(), None, false)
             .expect("certificate model");
-        let streamed = super::tests_frame_curvature_2757::expect_stored(streamed, "unpinned path streams its curvature");
         let views = term.atom_parameter_views();
         let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
             (0..charts).map(|_| None).collect();
+        // The production route, whichever arm this shape lands on.
+        let pin = Array2::<f64>::zeros((0, param_dim));
         let t2 = Instant::now();
-        let gauge = crate::identifiability::residual_gauge_exact_from_curvature(
-            &model, &views, &ops, streamed,
-        )
-        .expect("residual gauge");
+        let gauge = match source {
+            ResidualGaugeCurvatureSource::Stored(stored) => {
+                crate::identifiability::residual_gauge_exact_from_curvature(
+                    &model, &views, &ops, stored,
+                )
+                .expect("residual gauge")
+            }
+            ResidualGaugeCurvatureSource::Streamed { .. } => {
+                let operator = StreamedFrameCurvatureOperator::new(
+                    &term,
+                    &metric,
+                    &layout,
+                    &pin,
+                    n * rank,
+                )
+                .expect("streamed operator");
+                crate::identifiability::residual_gauge_exact_from_streamed(
+                    &model, &views, &ops, &operator,
+                )
+                .expect("residual gauge")
+            }
+        };
         let reduce_and_generators = t2.elapsed().as_secs_f64();
 
         println!(
@@ -224,28 +245,31 @@ fn probe_2757_report_phase_profile_gauge_driving() {
             curvature_build + reduce_and_generators
         );
         println!(
-            "        stored_scalars={} (dense Gram would be {}) pinning_rank={} verdicts={}",
+            "        stored_scalars={} (dense Gram would be {}) pinning_rank={} ({}) verdicts={}",
             curvature.stored_scalars(),
             param_dim * param_dim,
             gauge.pinning_rank,
+            gauge.pinning_rank_support.label(),
             gauge.generators.len()
         );
     }
 }
 
 /// Rows in the gauge-branch cost-law sweep.
-const PROBE_LAW_ROWS: usize = 96;
+const PROBE_LAW_ROWS: usize = 64;
 /// Charts in the gauge-branch cost-law sweep.
 const PROBE_LAW_CHARTS: usize = 8;
 /// Metric root rank in the gauge-branch cost-law sweep. `root_rows = n · rank`
 /// is held FIXED across the sweep so the only thing that moves is `param_dim`,
-/// which is what makes the fitted exponent below a statement about `param_dim`
-/// and not about the row count.
-const PROBE_LAW_METRIC_RANK: usize = 4;
-/// Output widths in the gauge-branch cost-law sweep. Every cell satisfies
-/// `root_rows = 384 > param_dim = 8·p`, so every cell takes the branch where no
-/// materialized representation of `H` is smaller than `param_dim²`.
-const PROBE_LAW_WIDTHS: [usize; 5] = [8, 16, 24, 32, 40];
+/// which is what makes the fitted exponents below statements about `param_dim`
+/// and not about the row count. It is also the smallest rank that keeps every
+/// cell on the branch under test (`root_rows > param_dim` at the widest cell).
+const PROBE_LAW_METRIC_RANK: usize = 9;
+/// Output widths in the gauge-branch cost-law sweep. `param_dim = 8·p` runs
+/// `128 → 512`, a factor of 4, over which a cubic moves 64x and a linear pass
+/// moves 4x. The #2731 production cell is `p = 2048, charts = 32` at
+/// `param_dim = 65 536`; raise these to walk toward it.
+const PROBE_LAW_WIDTHS: [usize; 4] = [16, 32, 48, 64];
 
 /// The cost LAW of the gauge-driving branch, measured on both routes at once.
 ///
@@ -256,20 +280,26 @@ const PROBE_LAW_WIDTHS: [usize; 5] = [8, 16, 24, 32, 40];
 /// rewritten in `b7e148809`. What is left is this branch, where the per-row
 /// metric couples output coordinates so `H` has no block structure at all.
 ///
-/// Two routes are timed on identical data:
+/// The two routes are timed on identical data over the IDENTICAL phase — build
+/// the curvature, reduce it, verdict every generator — so the ratio is a
+/// statement about that phase and nothing else:
 ///
 /// * **materialize** — fold every root row into a `param_dim`-square triangular
 ///   factor and take its singular values. `param_dim²` scalars,
 ///   `root_rows·param_dim²` to build and `param_dim³` to read. This is what
-///   production did before #2757's streamed route and it is retained as the
-///   equivalence witness.
+///   production did between `8adae9a67` and the streamed route, and it is
+///   retained as the equivalence witness `tests_streamed_curvature_2757` judges
+///   against.
 /// * **stream** — never materialize anything: `λ_max` by a certified matrix-free
 ///   Krylov solve, `ξᵀHξ` exactly from one pass that folds `RΞ` into a `G × G`
 ///   factor. `0` curvature scalars, `O(param_dim)` working set.
 ///
-/// Both fitted exponents are printed. The materialized one is the cubic the
-/// issue names; the streamed one is what a route that stopped asking for a full
-/// spectrum costs instead.
+/// Both fitted exponents are printed. At the committed shape the cubic is not
+/// yet the dominant term — `param_dim ≤ 512` is small enough that enumerating
+/// and embedding the generators is — which is exactly why the exponents are
+/// printed rather than a wall-clock bar asserted: the number to watch as the
+/// sweep is raised is the materialized exponent climbing toward 3 while the
+/// streamed one stays flat.
 #[test]
 fn probe_2757_gauge_branch_cost_law() {
     let n = PROBE_LAW_ROWS;
@@ -281,8 +311,8 @@ fn probe_2757_gauge_branch_cost_law() {
         n * rank
     );
     println!(
-        "{:>6} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
-        "p", "param_dim", "mat scalars", "mat total", "stream tag", "stream total", "speedup"
+        "{:>6} {:>10} {:>12} {:>12} {:>12} {:>10} {:>8} {:>6}",
+        "p", "param_dim", "mat scalars", "mat gauge", "stream gauge", "speedup", "passes", "gens"
     );
     let mut seed = 0x2757_0C05_7A00_0001u64;
     let mut lcg = move || {
@@ -312,21 +342,20 @@ fn probe_2757_gauge_branch_cost_law() {
         let (model, source) = term
             .to_residual_gauge_model(metric.clone(), None, false)
             .expect("certificate model");
+        assert_eq!(source_structure_tag(&source), "streamed_operator");
+        assert_eq!(source_stored_scalars(&source), 0);
+        assert_eq!(source_root_rows(&source), n * rank);
         let views = term.atom_parameter_views();
         let ops: Vec<Option<crate::identifiability::OrbitPenaltyOperator>> =
             (0..charts).map(|_| None).collect();
+        let pin = Array2::<f64>::zeros((0, param_dim));
 
-        // Route 1 — materialize, exactly as the pre-#2757 production path did.
+        // Route 1 — materialize, exactly as the pre-streamed production path did.
         let t0 = Instant::now();
         let materialized = term
-            .residual_gauge_streamed_data_curvature(
-                &metric,
-                &layout,
-                Array2::<f64>::zeros((0, param_dim)),
-            )
+            .residual_gauge_streamed_data_curvature(&metric, &layout, pin.clone())
             .expect("materialized curvature");
         let mat_scalars = materialized.stored_scalars();
-        let mat_tag = materialized.structure_tag();
         let mat_report = crate::identifiability::residual_gauge_exact_from_curvature(
             &model,
             &views,
@@ -336,45 +365,40 @@ fn probe_2757_gauge_branch_cost_law() {
         .expect("materialized residual gauge");
         let mat_total = t0.elapsed().as_secs_f64();
 
-        // Route 2 — the production route at current main.
-        let stream_tag = source_structure_tag(&source);
-        let stream_scalars = source_stored_scalars(&source);
+        // Route 2 — the production route at current main, same phase.
         let t1 = Instant::now();
-        let stream_report = term
-            .fit_diagnostics_report(
-                None,
-                false,
-                None,
-                Array2::<f64>::zeros((n, p)).view(),
-                None,
-            )
-            .expect("diagnostics report")
-            .residual_gauge;
+        let operator =
+            StreamedFrameCurvatureOperator::new(&term, &metric, &layout, &pin, n * rank)
+                .expect("streamed operator");
+        let stream_report = crate::identifiability::residual_gauge_exact_from_streamed(
+            &model, &views, &ops, &operator,
+        )
+        .expect("streamed residual gauge");
         let stream_total = t1.elapsed().as_secs_f64();
+        let passes = crate::identifiability::streamed_lambda_max(&operator)
+            .expect("certified λ_max")
+            .passes;
 
         log_dim.push((param_dim as f64).ln());
         log_materialized.push(mat_total.max(1e-9).ln());
         log_streamed.push(stream_total.max(1e-9).ln());
 
         println!(
-            "{p:>6} {param_dim:>10} {mat_scalars:>12} {mat_total:>12.4} {stream_tag:>12} \
-             {stream_total:>12.4} {:>10.2}",
-            mat_total / stream_total.max(1e-9)
+            "{p:>6} {param_dim:>10} {mat_scalars:>12} {mat_total:>12.4} {stream_total:>12.4} \
+             {:>10.2} {passes:>8} {:>6}",
+            mat_total / stream_total.max(1e-9),
+            stream_report.generators.len()
         );
         assert_eq!(
-            source_root_rows(&source),
-            n * rank,
-            "both routes describe the same R, so they must agree on its row count"
+            mat_scalars,
+            param_dim * param_dim,
+            "the witness must be the param_dim-square object this route exists to avoid"
         );
-        println!(
-            "        materialized={mat_tag} scalars={mat_scalars} (= param_dim^2? {}) | \
-             streamed scalars={stream_scalars} | verdicts {} vs {} | unpinned {} vs {}",
-            mat_scalars == param_dim * param_dim,
-            mat_report.generators.len(),
-            stream_report.generators.len(),
-            mat_report.residual_gauge_dim,
-            stream_report.residual_gauge_dim
+        assert_eq!(
+            mat_report.residual_gauge_dim, stream_report.residual_gauge_dim,
+            "the two routes must certify the same group at every cell of the sweep"
         );
+        assert_eq!(mat_report.group_signature(), stream_report.group_signature());
     }
     let slope = |ys: &[f64]| -> f64 {
         let m = log_dim.len() as f64;
