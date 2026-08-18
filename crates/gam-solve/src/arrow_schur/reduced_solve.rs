@@ -1685,7 +1685,7 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     num_probes: usize,
     lanczos_steps: usize,
     seed: u64,
-) -> SlqLogDet {
+) -> Result<SlqLogDet, ArrowSchurError> {
     let k = sys.k;
     // Stage the reduced-Schur operator ONCE; every probe/Lanczos apply reuses the
     // pre-staged residency (no per-apply operator re-capture). The probes fan
@@ -1706,32 +1706,53 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     // ρ-dependent Occam reward). `Strict` / `PositiveDefinite` keep the plain SPD
     // estimator — they never form an undamped evidence with nulls.
     match evidence_policy {
-        // #2515 — `UnitDeflationRefusingIndefinite` shares this estimator with
-        // `UnitDeflation` deliberately. The refusal it names is a statement about a
-        // RESOLVED eigenvalue, and a stochastic Lanczos quadrature has no
-        // eigenvalues: it has Ritz values from a `lanczos_steps`-dimensional Krylov
-        // space per Rademacher probe, and a Ritz value below the null band is as
-        // often an unconverged interior approximation as it is a real negative
-        // direction. Refusing on one would refuse healthy fits at random, which is
-        // a worse failure than the one being fixed. The resolved-negative verdict
-        // is therefore made where a resolved spectrum exists — the dense reduced
-        // Schur in `factor_evidence_unit_deflated_schur`, which is what the
-        // chunked lane and every direct-mode evidence factorization form — and this
-        // lane inherits it through the caller that owns both.
-        ArrowEvidencePolicy::UnitDeflation { relative_floor }
-        | ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { relative_floor } => {
-            slq_logdet_unit_deflated(
+        ArrowEvidencePolicy::UnitDeflation { relative_floor } => Ok(slq_logdet_unit_deflated(
+            k,
+            |v| op.apply(v),
+            num_probes,
+            lanczos_steps,
+            seed,
+            relative_floor,
+        )
+        .as_logdet()),
+        // #2515 — this lane has no eigenvalues, only Ritz values, so it cannot
+        // make the full resolved-negative verdict the dense reduced Schur makes.
+        // What it CAN do is certify one direction of it. Every Ritz value of a
+        // symmetric operator is a Rayleigh quotient of a Krylov vector and so lies
+        // in `[λ_min, λ_max]`; a Ritz value below `−band` therefore PROVES
+        // `λ_min < −band`. The converse fails — an unconverged Krylov space can
+        // miss a negative eigenvalue entirely — so this refuses only states that
+        // really are indefinite and silently admits some that are. One-sided is
+        // the usable direction: a false refusal would decline a state the dense
+        // route legitimately ranks, and there are none.
+        ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { relative_floor } => {
+            let deflated = slq_logdet_unit_deflated(
                 k,
                 |v| op.apply(v),
                 num_probes,
                 lanczos_steps,
                 seed,
                 relative_floor,
-            )
-            .as_logdet()
+            );
+            if deflated.min_ritz < -deflated.deflate_floor {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "matrix-free reduced-Schur {}: a Ritz value of {:.6e} certifies an \
+                         eigenvalue below the null band of {:.6e} (spectral radius \
+                         {:.6e}). Every Ritz value lies in [lambda_min, lambda_max], so \
+                         this is a proof of indefiniteness and not an estimate of one \
+                         (#2515/#2336)",
+                        ArrowSchurError::indefinite_evidence_marker(),
+                        deflated.min_ritz,
+                        deflated.deflate_floor,
+                        deflated.lambda_max_abs
+                    ),
+                });
+            }
+            Ok(deflated.as_logdet())
         }
         ArrowEvidencePolicy::Strict | ArrowEvidencePolicy::PositiveDefinite => {
-            slq_logdet(k, |v| op.apply(v), num_probes, lanczos_steps, seed)
+            Ok(slq_logdet(k, |v| op.apply(v), num_probes, lanczos_steps, seed))
         }
     }
 }
@@ -1805,7 +1826,7 @@ pub fn matrix_free_arrow_evidence_log_det(
         lanczos_steps,
         seed,
     );
-    Ok((log_det_tt, slq))
+    Ok((log_det_tt, slq?))
 }
 
 /// #1017 Phase-3: build the reduced-Schur device matvec ONCE for a matrix-free
@@ -2188,7 +2209,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 slq_lanczos_steps,
                 slq_seed,
             );
-            slq.estimate
+            slq?.estimate
         }
         Some(state) => {
             let dim = sys.k;

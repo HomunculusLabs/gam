@@ -5401,7 +5401,8 @@ fn slq_reduced_schur_log_det_matches_dense_evidence() {
         48,
         60,
         seed,
-    );
+    )
+    .expect("the Strict policy never refuses on sign");
     let rel = (slq.estimate - exact_logdet).abs() / exact_logdet.abs();
     eprintln!(
         "matrix-free reduced-Schur log|S|: slq={:.6} exact={:.6} rel={:.3e} std_err={:.3e}",
@@ -5426,7 +5427,8 @@ fn slq_reduced_schur_log_det_matches_dense_evidence() {
         48,
         60,
         seed,
-    );
+    )
+    .expect("the Strict policy never refuses on sign");
     assert_eq!(
         slq.estimate, slq_again.estimate,
         "matrix-free reduced-Schur SLQ log-det must be bit-reproducible for a fixed seed"
@@ -7950,6 +7952,65 @@ fn per_row_evidence_conditioning_refuses_a_resolved_negative_direction_2515() {
         assert_eq!(
             conditioned.gauge_deflated_directions, 1,
             "#2515: exactly the in-band direction is pinned ({band_direction:e})"
+        );
+    }
+}
+
+/// #2515 — THE MATRIX-FREE LANE'S ONE-SIDED CERTIFICATE, both arms.
+///
+/// The reduced Schur is only an operator on this lane, so there is no spectrum to
+/// classify — only Ritz values from a `lanczos_steps`-dimensional Krylov space per
+/// probe. That is enough for HALF the verdict and this gate pins exactly that
+/// half: every Ritz value of a symmetric operator is a Rayleigh quotient of a
+/// Krylov vector, so it lies in `[lambda_min, lambda_max]`, and one below the null
+/// band PROVES an eigenvalue below the null band. The converse fails, which is why
+/// the predicate is one-sided and why that is the usable direction — a false
+/// refusal would decline a state the dense route legitimately ranks.
+///
+/// Both arms matter. Without the refusal arm the matrix-free value lane would keep
+/// pricing a saddle direction as `log 1 = 0`, which is the defect. Without the
+/// admit arm a policy that refused on any negative Ritz value at all — including
+/// the round-off-negative ones an SPD operator produces routinely — would pass the
+/// refusal arm while making the streaming lane useless.
+#[test]
+fn matrix_free_evidence_certifies_indefiniteness_from_a_ritz_value_2515() {
+    let indefinite = ndarray::Array1::from(vec![4.0_f64, 2.0, -7.997_610e-3]);
+    let positive = ndarray::Array1::from(vec![4.0_f64, 2.0, 1.0e-3]);
+    for (label, spectrum, expect_refusal) in [
+        ("indefinite", &indefinite, true),
+        ("positive-definite", &positive, false),
+    ] {
+        let dim = spectrum.len();
+        let owned = spectrum.clone();
+        let deflated = slq_logdet_unit_deflated(
+            dim,
+            |v| {
+                let mut out = ndarray::Array1::<f64>::zeros(dim);
+                for index in 0..dim {
+                    out[index] = owned[index] * v[index];
+                }
+                out
+            },
+            8,
+            dim,
+            0xC0FFEE,
+            SPECTRAL_DEFLATION_REL_FLOOR,
+        );
+        let certified = deflated.min_ritz < -deflated.deflate_floor;
+        eprintln!(
+            "[#2515 RITZ] {label}: min_ritz={:.6e} deflate_floor={:.6e} \
+             lambda_max_abs={:.6e} certified_indefinite={certified}",
+            deflated.min_ritz, deflated.deflate_floor, deflated.lambda_max_abs
+        );
+        assert_eq!(
+            certified, expect_refusal,
+            "#2515: the {label} operator must{} be certified indefinite by its Ritz \
+             values (min_ritz={:.6e} against a band of {:.6e}). A diagonal operator's \
+             Krylov space is exact at `lanczos_steps = dim`, so this is the case where \
+             the certificate is REQUIRED to fire, not merely allowed to.",
+            if expect_refusal { "" } else { " NOT" },
+            deflated.min_ritz,
+            deflated.deflate_floor
         );
     }
 }
