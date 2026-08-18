@@ -1,5 +1,97 @@
 ## Unreleased
 
+- **A Royston-Parmar fit published a FLAT cumulative hazard beside a NONZERO
+  hazard past its training support, and those two cannot both describe one
+  model (#2705).** `h = dΛ/dt`, so a flat `Λ` forces `h = 0`. Measured on the
+  #1564 heart-failure fixture, at every time from the largest observed exit out
+  to ten thousand times it:
+
+  ```text
+       m         t     cumulative_hazard      hazard      t · hazard
+   1.000001   285.0          5.055558    2.196795e-2       6.26088
+   1.5        427.5          5.055558    1.464532e-2       6.26088
+   10        2850.0          5.055558    2.196798e-3       6.26088
+   10000  2850000.0          5.055558    2.196798e-6       6.26088
+  ```
+
+  `Λ` is constant to eight digits and `t·h(t)` is constant, i.e. the DERIVATIVE
+  evaluation kept a log-log slope of `1.23842` that the VALUE evaluation does
+  not have. Every `model.predict(...).survival_at(grid)` call reaches it,
+  because `default_survival_time_grid`'s top node is already past `max_exit`.
+
+  **Root cause.** `build_survival_time_basis`'s `ISpline` arm hand-rolled the
+  baseline's `d(log Λ)/d(log t)` as a right-cumulative sum of a CLAMPED B-spline
+  first-derivative basis. A clamped B-spline's VALUE extends linearly, so that
+  sum returns the boundary slope outside the knot span — while the I-spline
+  value basis it claims to differentiate SATURATES.
+
+  That is the same disagreement `create_ispline_derivative_dense` was repaired
+  for in #2695, and the same one #1348 repaired for open-knot B-splines, and the
+  same one #2600 repaired a third time by hand inside the CTN chart. The
+  survival lane had its own copy of the cumulative sum and so never received
+  any of them. **Four repairs of one defect is a missing abstraction**, so the
+  repair is an abstraction: `ISplineBoundary::{Saturate, LinearTails}` and
+  `ispline_value_and_first_derivative`, which produce the value and the
+  derivative together under ONE declared convention. Producing the halves
+  separately and letting them disagree is no longer expressible.
+
+  **The convention is `LinearTails`, because that IS the Royston-Parmar model.**
+  A *restricted* spline is linear beyond its boundary knots by construction
+  (Royston & Parmar 2002), which is what gives the classical `Λ(t) ∝ t^c`
+  extrapolation used whenever a survival curve is projected past the observed
+  follow-up. Saturating asserts two things the data never said: that the hazard
+  drops to exactly zero at the last observed exit time, and — on the lower tail,
+  which the default grid reaches on its FIRST node — that `Λ(t) → Λ(t_min) > 0`
+  as `t → 0`, i.e. an atom of failures at the time origin and `S(0) < 1`.
+
+  Two places the fit could have moved, both closed rather than hoped:
+
+  * **Entry rows at the time origin.** `log_entry` for such a row is
+    `ln(SURVIVAL_TIME_FLOOR) = −20.7`, a numerical floor and not a datum. The
+    likelihood already knows these rows are not left-truncated
+    (`entry_active = age_entry > ENTRY_AT_ORIGIN_THRESHOLD`) and drops their
+    `S(entry)` factor outright, so they now evaluate at the first knot, where
+    `I_k(left) = 0` exactly — the same zero row that shipped, for the reason
+    that actually holds. A genuine delayed entry below the first knot still
+    receives the real extrapolation.
+  * **The anchor row.** `center_survival_time_designs_at_anchor` subtracts the
+    basis row at the anchor from every design row, and the default anchor for
+    ordinary right-censored data is the earliest entry — the time origin. Under
+    saturation that mapped to the zero row and centering was a no-op; under
+    tails it would re-center every column by a large constant read off `1e-9`,
+    which is exactly the #751 inflation the anchor rule exists to avoid. The
+    anchor is the ORIGIN of a reparameterization, so it is now clamped into the
+    modelling interval — numerically identical to what shipped for every anchor
+    at or below the first knot.
+
+  Every training EXIT row is inside the knot span those same rows induced, so
+  `x_exit_time`, `x_derivative_time`, `keep_cols` and the penalty are untouched.
+  Two fits do move, both deliberately and both toward the model: a cohort whose
+  rows share one strictly-positive entry time (the entry times are then dropped
+  from knot inference, so every entry row lands in the left exterior, and the
+  saturating basis was asserting that a subject accumulated the entire baseline
+  hazard up to the first observed exit time BEFORE entering), and the
+  interval-censored right endpoint `R` where `R > max(L)`.
+
+  The CTN chart's private copy of the affine continuation
+  (`ctn_extend_bases_affinely_past_the_knots`, `ctn_ispline_modelling_interval`,
+  152 lines landed for #2600) is deleted and routed through the shared
+  evaluator.
+
+  **The fixture assertion that pinned the defect is replaced, not relaxed.**
+  `royston_parmar_saved_predict_at_grid_top_does_not_fail` demanded
+  `zero_hazard_nodes > 0` — a BIT-EXACT zero hazard — which cannot hold on a
+  model with tails; its own doc taught the retired premise. That assertion was
+  never what kept #1564 covered: the `eta_t == 0` guard is pinned at the
+  function by `royston_parmar_hazard_accepts_zero_derivative_as_flat_boundary`
+  and `royston_parmar_hazard_zero_derivative_in_saturated_tail_is_zero_not_nan`,
+  untouched here. What replaces it is the invariant the defect violated — the
+  reported hazard IS the derivative of the reported cumulative hazard — on a
+  `t·(1 ± 1e-4)` stencil at five probe times from `0.25·max_exit` to
+  `4·max_exit`, plus `S(0) = 1`, plus a non-vacuity check that a probe past
+  `max_exit` carries a nonzero hazard, since a saturating baseline passes the
+  derivative check trivially.
+
 - **A follow-up-varying marginal slope carried its likelihood domain as an
   error instead of as a feasible set, and the outer search halted against a wall
   it could not see (#2765 / #2767).** The family is a transformation model,
