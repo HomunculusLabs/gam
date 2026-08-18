@@ -64,8 +64,16 @@
   `b5506eeaa` named this "Cause 2 (real, but not sufficient)" and landed the test
   that attributes it; its Cause 1 was retracted in `60feddc2e`, which fixed the
   fingerprint's IDENTITY but not the state the fingerprint correctly reports as
-  different. The freeze now spans the whole criterion evaluation, which is the
-  scope its own "ONE CRITERION EVALUATION = ONE OBJECTIVE" discipline names.
+  different. The freeze now spans the criterion evaluation, which is the scope its
+  own "ONE CRITERION EVALUATION = ONE OBJECTIVE" discipline names. The initial
+  fit stays outside it deliberately: the dense sibling runs the identical driver
+  outside its own freeze, and the two routes have to put the inner solve at the
+  SAME state or the criterion each prices is a different criterion — this issue's
+  own defect, in the one place it would be easiest to reintroduce while fixing it.
+
+  Measured on the same sweep, after: `‖g‖∞` is `1.580471e1`, `1.448392e1` and
+  `1.222628e1` at `smooth = −1.10, −1.20, −1.40` on BOTH routes, where the
+  streaming one previously had no gradient at all.
 
   It also refreshes the #2343 amplitude-barrier gate, which it never did. The
   assembler refreshes three gates when unfrozen and the freeze refreshed two, so
