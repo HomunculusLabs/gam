@@ -1104,6 +1104,13 @@ fn exact_a_route_parity_holds_on_a_deflated_cache_2515() {
 /// So there are two independent disagreements — the BAND and the SIGN — and
 /// which of them carries the `9.13` decides whether the repair is a metric or a
 /// pricing rule.
+///
+/// HISTORICAL, AND DELIBERATELY SO. This probe factors the exact-`A` system under
+/// `with_evidence_unit_deflation`, which is the MAJORIZER's policy and no longer
+/// what production uses on this operator (see
+/// `with_indefinite_refusing_evidence_unit_deflation`). That is the point: it is
+/// the negative control for the repair, and re-pointing it at the production
+/// policy would delete the only in-tree record of what the one-sided band did.
 #[test]
 fn zz_attribute_deflated_route_classification_2515() {
     let (mut term, rho, target, b_cache) =
@@ -1737,6 +1744,14 @@ fn dense_exact_a_min_eigenvalue_2515(
 /// coordinate pinned counts and clamp-priced-negative counts — plus the
 /// per-coordinate gradient split, so the `1.01` is attributed to one of them
 /// rather than guessed at.
+///
+/// HISTORICAL, AND DELIBERATELY SO. Like its sibling above, this factors the
+/// exact-`A` system under the MAJORIZER's `with_evidence_unit_deflation`, which
+/// production no longer uses on this operator. That is what lets it still PRINT
+/// the mechanism it found — `S_A dir 0: raw=-7.997610e-3 cond=+1.000000e0`, a
+/// resolved negative direction priced as the ρ-independent null — where the
+/// production policy now refuses instead. The parity gates assert the repair; this
+/// keeps the disease under glass.
 #[test]
 fn zz_attribute_the_broken_ladder_rung_2515() {
     let (mut term, anchor_rho, target, _anchor_cache) =
