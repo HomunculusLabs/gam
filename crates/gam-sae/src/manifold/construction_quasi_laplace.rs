@@ -662,7 +662,35 @@ impl SaeManifoldTerm {
     /// (`exact_observed_information_log_dets`), streaming prices the Arrow–Schur
     /// majorizer `B` (`streaming_exact_arrow_log_det`). The #847 bit-identity
     /// claim held for `B` against `B` and does not survive that migration.
-    pub(crate) fn converge_inner_for_undamped_logdet(
+     /// Freeze the collapse-prevention gates for one criterion evaluation,
+    /// returning whether they were ALREADY frozen so the caller can restore.
+    ///
+    /// One place, because the set has to be the same set. Before #2515 the freeze
+    /// refreshed two gates — decoder repulsion and barrier coactivation — while
+    /// `assemble_arrow_schur_scaled` refreshes THREE when unfrozen, the third being
+    /// the #2343 amplitude barrier. So the amplitude gate was the only one that
+    /// never got refreshed at the entry state at all: inside the frozen window the
+    /// assembler skips it, and the freeze did not do it either, leaving it carrying
+    /// whatever the PREVIOUS evaluation left behind. That is the same
+    /// value-versus-gradient desync #1625 and #2343 each fixed for their own gate,
+    /// reintroduced by the freeze that was supposed to prevent it.
+    ///
+    /// The list is exhaustive against its consumer by construction: this is the
+    /// only producer, `assemble_arrow_schur_scaled`'s `if !streaming_gates_frozen`
+    /// block is the only consumer, and a gate added to one without the other is a
+    /// gate whose frozen value is not the entry state's.
+    fn freeze_collapse_prevention_gates(&mut self) -> bool {
+        let gates_were_frozen = self.streaming_gates_frozen;
+        if !gates_were_frozen {
+            self.refresh_decoder_repulsion_gate();
+            self.refresh_barrier_coactivation_gate();
+            self.refresh_amplitude_barrier_gate();
+            self.streaming_gates_frozen = true;
+        }
+        gates_were_frozen
+    }
+
+   pub(crate) fn converge_inner_for_undamped_logdet(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -694,12 +722,7 @@ impl SaeManifoldTerm {
         // so a settled state re-prices identically — the #2253 idempotence
         // certificate is preserved, and V(ρ) still tracks routing changes
         // across ρ moves.
-        let gates_were_frozen = self.streaming_gates_frozen;
-        if !gates_were_frozen {
-            self.refresh_decoder_repulsion_gate();
-            self.refresh_barrier_coactivation_gate();
-            self.streaming_gates_frozen = true;
-        }
+        let gates_were_frozen = self.freeze_collapse_prevention_gates();
         let out = self.converge_inner_for_undamped_logdet_gate_frozen(
             target,
             rho,
@@ -3567,6 +3590,36 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// #2515 — ONE CRITERION EVALUATION = ONE OBJECTIVE, and the evidence
+    /// assembly is part of the evaluation.
+    ///
+    /// `converge_inner_for_undamped_logdet` freezes the collapse-prevention gates,
+    /// converges, and then RESTORES the flag. The evidence assembly that prices
+    /// the criterion runs after that restore, so `assemble_arrow_schur_scaled`
+    /// re-refreshed all three gates from the MOVED state: the factor cache held
+    /// the entry-state gates and the system it is paired with held the
+    /// post-convergence ones. `validate_matrix_free_arrow_pair` then refused the
+    /// pair, and the streaming outer gradient did not exist at all on a state the
+    /// dense route ranks and differentiates without complaint:
+    ///
+    /// ```text
+    /// smooth=-1.10  dense     cost=1.8195496423e1  ||g||inf=1.580471e1
+    ///               streaming cost=1.8195496415e1  GRADIENT REFUSED: … refuses a
+    ///                         stale matrix-free system/cache pair (row fingerprint
+    ///                         4241518385832902043 vs 17638973738998200310,
+    ///                         manifold fingerprint EQUAL)
+    /// ```
+    ///
+    /// The manifold fingerprints match and the row ones do not, which is the
+    /// signature `evidence_assembly_row_fingerprint_sources_2515` attributes: with
+    /// gates held frozen the two assemblers agree bit for bit, and with one
+    /// assembler the gate state alone moves the row fingerprint. That test was
+    /// landed by `b5506eeaa` naming this as "Cause 2 (real, but not sufficient)";
+    /// its Cause 1 was retracted in `60feddc2e`, which fixed the fingerprint's
+    /// IDENTITY but not the state the fingerprint correctly reports as different.
+    ///
+    /// So the freeze belongs at the EVALUATION scope, which is here. The body is
+    /// the same function; this wrapper only decides when the gates move.
     fn penalized_quasi_laplace_criterion_streaming_exact_with_cache_lane_and_system(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -3588,6 +3641,12 @@ impl SaeManifoldTerm {
     > {
         self.assignment.validate_rho_domain(rho)?;
         let mut rho_fixed = rho.clone();
+        // The initial fit stays OUTSIDE the freeze, deliberately. The dense sibling
+        // `penalized_quasi_laplace_criterion_with_cache` runs the identical driver
+        // outside its own freeze, and the two routes have to put the inner solve at
+        // the SAME state or the criterion they each price is a different criterion —
+        // which is the defect this issue is, in the one place it would be easiest to
+        // reintroduce while fixing it.
         let initial_fit = self.run_joint_fit_arrow_schur_for_quasi_laplace(
             target,
             &mut rho_fixed,
@@ -3597,6 +3656,44 @@ impl SaeManifoldTerm {
             ridge_ext_coord,
             ridge_beta,
         )?;
+        let gates_were_frozen = self.freeze_collapse_prevention_gates();
+        let out = self.penalized_quasi_laplace_criterion_streaming_exact_gate_frozen(
+            target,
+            rho,
+            &mut rho_fixed,
+            registry,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            initial_fit,
+            lane,
+        );
+        self.streaming_gates_frozen = gates_were_frozen;
+        out
+    }
+
+    fn penalized_quasi_laplace_criterion_streaming_exact_gate_frozen(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        rho_fixed: &mut SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        inner_max_iter: usize,
+        learning_rate: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+        initial_fit: crate::manifold::fit_drivers::EvidenceJointFitOutcome,
+        lane: Option<&mut SurrogateLaneState>,
+    ) -> Result<
+        (
+            f64,
+            SaeManifoldLoss,
+            ArrowFactorCache,
+            Option<StreamingEvidenceArtifacts>,
+        ),
+        SaeCriterionError,
+    > {
         let mut loss = initial_fit.loss;
         let mut criterion_fixed_point = initial_fit.fixed_point;
         // Drive the inner (t, β) state to the SAME KKT/step-converged optimum the
@@ -3638,7 +3735,7 @@ impl SaeManifoldTerm {
         let mut converged_cache = self.converge_inner_for_undamped_logdet(
             target,
             rho,
-            &mut rho_fixed,
+            rho_fixed,
             registry,
             inner_max_iter,
             learning_rate,

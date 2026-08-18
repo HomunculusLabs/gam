@@ -1,59 +1,109 @@
 ## Unreleased
 
-- **A deflating state had a Laplace criterion on one route and NO ANSWER on the
-  other (#2515).** `penalized_quasi_laplace_streaming_outer_evaluation` refused
-  every evaluation whose evidence factorization spectrally deflated a row. The
-  refusal was honest — it was retained on a measured number, not an argument —
-  but it is still route-dependence, and at production `p` the streaming lane is
-  the only lane there is, so a deflating fit simply had nowhere to go.
+- **The streaming lane declared a SADDLE to be a MODE, silently, and the memory
+  planner chose which (#2515).** `factor_evidence_unit_deflated_schur` decided a
+  direction was a numerical null with
 
-  Its own note named the lift condition: reconcile the dense route's ABSOLUTE
-  spectral floor with the arrow route's per-row relative one. #2673 did exactly
-  that (`00c1fe139`, `758c9d336`) — the absolute floor is deleted and both sites
-  classify a direction by its curvature in the majorizer metric,
-  `max(dim·ε·‖A‖₂, √ε·vᵀBv)` — and nobody re-measured this comparison against
-  it. Re-measured on #2712's certified deflated anchor:
-
-  ```text
-                                    before (ac66e624d)        now
-  complete gradient max|Δ|          9.131537e0                2.798722e-8
-  against ‖g‖∞                      5.004339e0                1.726754e1
-  RELATIVE                          1.8                       1.62e-9
+  ```rust
+  let deflated = raw_evals.iter().map(|&v| !v.is_finite() || v < deflate_floor)
   ```
 
-  and direction for direction the classifications now agree: over the anchor's
-  thirty coordinate directions the dense route pins nothing, prices no
-  clamp-attributable negative, and reads `log|A_tt| = 2.2623032065e1` against the
-  arrow route's `2.2623032490e1`. End to end through the production entry point,
-  forced onto the streaming route at the same state, `cost` is
-  `1.7469252484e1` against `1.7469252476e1` and the complete gradient agrees to
-  `3.301233e-8`.
-
-  The refusal is gone. Four gates replace it: parity on the certified anchor,
-  parity across a ρ ladder of deflating states (one anchor is not a contract),
-  the same parity through `evaluate_outer_criterion_route` itself, and an
-  attribution gate for the residual.
-
-  **The residual is `1.6e-9`, not machine precision, and it is attributed rather
-  than absorbed into a bar.** The dense route materializes `A` through
-  `apply_cached_arrow_hessian`, which applies `L Lᵀ` of the row's UNDAMPED
-  FACTOR — the majorizer already unit-pinned by its own factorization — so a
-  `B`-deflated direction enters the dense `A` as `1 + vᵀΔCv`. The arrow route
-  folds `ΔC` into the untouched majorizer blocks and unit-pins the result, so the
-  same direction is exactly `1`. Measured on all ten deflated directions of the
-  anchor:
+  `v < deflate_floor` is ONE-SIDED: it admits every negative eigenvalue however
+  large, prices it as the ρ-independent `log 1 = 0`, and inverts it at `1`.
+  Measured on #2712's certified deflated anchor at `log λ_smooth = −1.05`, the
+  reduced Schur of the exact observed information carries
 
   ```text
-  row 0:  vᵀB_raw v = 6.903136e-8   vᵀ(B_raw+ΔC)v = 3.471846e-8
-          vᵀΔCv = −3.431291e-8      dense vᵀ(B̃+ΔC)v = 9.9999996569e-1
+  S_A dir 0: raw=-7.997610e-3  cond=+1.000000e0  relative=-1.414389e-3  (floor 1e-8)
+  S_A dir 1: raw=-2.033493e-3  cond=+1.000000e0  relative=-3.596263e-4  (floor 1e-8)
   ```
 
-  `1 + vᵀΔCv` to every digit. Both routes honour "a unit-deflated direction
-  contributes `log 1 = 0`"; only one honours it exactly, because `vᵀΔCv` is a
-  function of `ρ`. The gate is an IDENTITY — the two exact-`A` row blocks differ
-  by the majorizer's own conditioning increment and by nothing else,
-  `3.552714e-15` over a block scale of `2.513448e1` — so a second cause cannot
-  hide inside the parity bar next door.
+  five decades outside the band, both pinned to `+1`. The dense route classified
+  the same two directions as #2336 clamp-attributable negative curvature and
+  priced them at their basin, and the two complete outer gradients were then
+  `1.009` RELATIVE apart. No row block is resolved-negative there: all of `A`'s
+  negative inertia lands in `S_A`, exactly as Haynsworth's inertia additivity
+  predicts. Nothing downstream could tell — the conditioned factor is PD and its
+  log-determinant is finite — and the dense route's verdict on the same state is
+  the typed `IndefiniteObservedInformation` refusal that makes the ρ infeasible.
+
+  The band is now TWO-SIDED under an opt-in
+  `ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`: `|λ| ≤ floor·max|λ|` is
+  still the unit-pinned null on both sides of zero, and `λ < −floor·max|λ|`
+  refuses with the direction and its magnitude named. Both conditioning sites take
+  it — reduced Schur and per-row — because the inertia arrives through either. The
+  historical `UnitDeflation` is untouched and stays the majorizer's policy, where
+  it is correct: `B` is PSD by construction, so a negative eigenvalue there can
+  only be rounding on a direction that is null anyway.
+
+  The verdict also had to ARRIVE as the same thing. gam-solve's spine to gam-sae
+  is `Result<_, String>`, so a refusal routed through `Numerical` would make one
+  identical verdict an infeasible ρ on one route and a fatal
+  `RemlOptimizationFailed` on the other. Following #2598,
+  `ArrowSchurError::indefinite_evidence_marker()` is interpolated by both
+  producers and matched by its reader, and `SaeCriterionError::from_arrow_refusal`
+  maps it to `IndefiniteObservedInformation`.
+
+- **The streaming outer gradient did not exist on states the dense route
+  differentiates without complaint, because the gate freeze stopped one call too
+  early (#2515).** `converge_inner_for_undamped_logdet` freezes the
+  collapse-prevention gates, converges, and RESTORES the flag; the evidence
+  assembly that prices the criterion runs after that restore, so
+  `assemble_arrow_schur_scaled` re-refreshed all three gates from the moved state.
+  The factor cache then held entry-state gates and the system it is paired with
+  held post-convergence ones, and `validate_matrix_free_arrow_pair` refused the
+  pair:
+
+  ```text
+  smooth=-1.10  dense     cost=1.8195496423e1  ‖g‖∞=1.580471e1
+                streaming cost=1.8195496415e1  GRADIENT REFUSED: … stale matrix-free
+                          system/cache pair (row fingerprints DIFFER, manifold
+                          fingerprints EQUAL)
+  ```
+
+  `b5506eeaa` named this "Cause 2 (real, but not sufficient)" and landed the test
+  that attributes it; its Cause 1 was retracted in `60feddc2e`, which fixed the
+  fingerprint's IDENTITY but not the state the fingerprint correctly reports as
+  different. The freeze now spans the whole criterion evaluation, which is the
+  scope its own "ONE CRITERION EVALUATION = ONE OBJECTIVE" discipline names.
+
+  It also refreshes the #2343 amplitude-barrier gate, which it never did. The
+  assembler refreshes three gates when unfrozen and the freeze refreshed two, so
+  the amplitude gate was the one gate never refreshed at the entry state at all —
+  inside the frozen window the assembler skips it, and the freeze did not do it
+  either, leaving it carrying whatever the previous evaluation left behind. Both
+  producers now live in one function, `freeze_collapse_prevention_gates`.
+
+- **A deflating cache is no longer a reason to withhold the streaming outer
+  gradient (#2515).** `penalized_quasi_laplace_streaming_outer_evaluation` refused
+  every evaluation whose evidence factorization spectrally deflated a row. Its own
+  note named the lift condition — reconcile the dense route's ABSOLUTE spectral
+  floor with the arrow route's per-row relative one — and #2673 did exactly that
+  (`00c1fe139`, `758c9d336`) without anyone re-measuring this comparison against
+  it. Re-measured on the same anchor: `2.798722e-8` against `‖g‖∞ = 1.726754e1`,
+  `1.62e-9` relative, from `9.131537e0` against `5.004339e0`. Direction for
+  direction the classifications agree — the dense route pins nothing and prices no
+  clamp-attributable negative over the anchor's thirty coordinate directions.
+
+  One anchor is not a contract, and widening to a nine-rung ρ ladder is what found
+  the saddle defect above. The gates that replace the refusal are the ladder
+  (either both routes price a state and agree within `1e-6` relative, or both call
+  it a saddle — with the dense spectrum required to corroborate every refusal, so
+  an over-refusal goes red rather than passing as caution), the same parity through
+  `evaluate_outer_criterion_route` itself, and an attribution gate for the residual.
+
+  **That residual is `1.6e-9`, and it is attributed rather than absorbed into a
+  bar.** The dense route materializes `A` through `apply_cached_arrow_hessian`,
+  which applies `L Lᵀ` of the row's UNDAMPED FACTOR — the majorizer already
+  unit-pinned by its own factorization — so a `B`-deflated direction enters the
+  dense `A` as `1 + vᵀΔCv`; the arrow route folds `ΔC` into the untouched
+  majorizer blocks and unit-pins the result, so the same direction is exactly `1`.
+  Measured on all ten deflated directions of the anchor: `vᵀΔCv = −3.431291e-8`
+  against a dense `vᵀ(B̃+ΔC)v = 9.9999996569e-1`, which is `1 + vᵀΔCv` to every
+  digit. The gate is an IDENTITY — the two exact-`A` row blocks differ by the
+  majorizer's own conditioning increment and by nothing else, `3.552714e-15` over
+  a block scale of `2.513448e1` — so a second cause cannot hide inside the parity
+  bar next door.
 
 - **A Royston-Parmar fit published a FLAT cumulative hazard beside a NONZERO
   hazard past its training support, and those two cannot both describe one

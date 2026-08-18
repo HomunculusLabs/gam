@@ -2028,3 +2028,135 @@ fn zz_attribute_the_broken_rung_through_production_2515() {
         println!("[#2515 PROD] smooth={smooth:.2} streaming: {streaming_report}");
     }
 }
+
+/// #2515 — THE STREAMING OUTER GRADIENT EXISTS ON EVERY STATE THE DENSE ROUTE
+/// DIFFERENTIATES, and this is the gate that says so at the production entry
+/// point.
+///
+/// Before the gate freeze was scoped to the whole criterion evaluation, the
+/// streaming lane returned a VALUE and then refused its GRADIENT across a whole
+/// band of smoothing strengths:
+///
+/// ```text
+/// smooth=-1.10  dense     cost=1.8195496423e1  ‖g‖∞=1.580471e1
+///               streaming cost=1.8195496415e1  GRADIENT REFUSED: … refuses a stale
+///                         matrix-free system/cache pair (row fingerprints DIFFER,
+///                         manifold fingerprints EQUAL)
+/// smooth=-1.20  same
+/// smooth=-1.40  same
+/// ```
+///
+/// The cache was factored inside `converge_inner_for_undamped_logdet`'s frozen
+/// window and the system was assembled after that window closed, so
+/// `assemble_arrow_schur_scaled` re-refreshed all three collapse-prevention gates
+/// from the moved state and the pair described two operators. Equal manifold
+/// fingerprints with unequal row ones is exactly the signature
+/// `evidence_assembly_row_fingerprint_sources_2515` attributes to the gate state.
+///
+/// This walks the same band and requires BOTH routes to produce a `(value,
+/// gradient)` pair and to agree on it. A refusal on either side fails, and so does
+/// a disagreement — the two are the same defect seen from opposite ends, and a
+/// gate that accepted a refusal as "well, it declined safely" would have passed
+/// throughout the era this fixes.
+#[test]
+fn forced_streaming_has_a_gradient_wherever_the_dense_route_does_2515() {
+    let (term, anchor_rho, target, _cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 the streaming gradient exists wherever the dense one does",
+        );
+    let mut compared = 0usize;
+    for smooth in [-0.9_f64, -1.05, -1.1, -1.4] {
+        let mut rho = anchor_rho.clone();
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        let mut dense = SaeManifoldOuterObjective::new(
+            term.clone(),
+            target.clone(),
+            None,
+            rho.clone(),
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        );
+        let mut streaming = SaeManifoldOuterObjective::new(
+            term.clone(),
+            target.clone(),
+            None,
+            rho.clone(),
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        );
+        let rho_flat = dense.baseline_rho.to_flat();
+        let route_rho = streaming
+            .baseline_rho
+            .from_flat(rho_flat.view())
+            .expect("#2515: both objectives own the same typed rho layout");
+
+        // The dense route decides whether this state is rankable at all. Where it
+        // declines (an exact-A saddle, say), there is nothing for the streaming
+        // lane to match and the rung is not a counter-example to anything.
+        let Ok(dense_artifact) = dense.evaluate_outer_criterion_route(&route_rho, true, false)
+        else {
+            println!("[#2515 EXISTS] smooth={smooth:.2}: dense route declines this state");
+            continue;
+        };
+        let Ok(dense_gradient) =
+            dense.analytic_gradient_for_outer_evaluation(&route_rho, &dense_artifact)
+        else {
+            println!("[#2515 EXISTS] smooth={smooth:.2}: dense gradient declines this state");
+            continue;
+        };
+
+        let streaming_artifact = streaming
+            .evaluate_outer_criterion_route(&route_rho, false, false)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "#2515: the dense route ranks smooth={smooth:.2} and the forced streaming \
+                     route must too. Got: {err}"
+                )
+            });
+        let streaming_gradient = streaming
+            .analytic_gradient_for_outer_evaluation(&route_rho, &streaming_artifact)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "#2515: the dense route DIFFERENTIATES smooth={smooth:.2} and the forced \
+                     streaming route refused. A `stale matrix-free system/cache pair` here is \
+                     the gate freeze stopping one call short of the evidence assembly that \
+                     prices the criterion; anything else is a new defect at the same seam. \
+                     Got: {err}"
+                )
+            });
+
+        let mut worst = 0.0_f64;
+        let mut scale = 0.0_f64;
+        for (streamed, direct) in streaming_gradient.iter().zip(dense_gradient.iter()) {
+            worst = worst.max((streamed - direct).abs());
+            scale = scale.max(direct.abs());
+        }
+        println!(
+            "[#2515 EXISTS] smooth={smooth:.2}: cost dense={:.10e} streaming={:.10e} \
+             gradient max|Δ|={worst:.6e} against ‖g‖∞={scale:.6e}",
+            dense_artifact.cost, streaming_artifact.cost
+        );
+        assert_abs_diff_eq!(
+            streaming_artifact.cost,
+            dense_artifact.cost,
+            epsilon = 1.0e-7
+        );
+        assert!(
+            worst <= 1.0e-6 * scale.max(1.0),
+            "#2515: the two routes both produced a gradient at smooth={smooth:.2} and they \
+             disagree (max|Δ|={worst:.6e} against ‖g‖∞={scale:.6e})"
+        );
+        compared += 1;
+    }
+    assert!(
+        compared >= 3,
+        "#2515: at least three rungs must be rankable by the dense route, or this gate is \
+         about a band the dense route also declines; got {compared}"
+    );
+}
