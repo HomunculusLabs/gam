@@ -1041,3 +1041,168 @@ fn exact_a_route_parity_still_fails_on_a_deflated_cache_2515() {
          loosen this bar."
     );
 }
+
+/// MEASUREMENT — attribute the deflating-anchor route gap to the
+/// CLASSIFICATION, not to a channel.
+///
+/// `exact_a_route_parity_still_fails_on_a_deflated_cache_2515` establishes that
+/// the two routes disagree by `9.13` against `‖g‖∞ = 5.00` once a cache
+/// deflates, and the production streaming gate refuses on that number. It does
+/// not say WHICH directions the two routes classify differently, and the repair
+/// is a different one for each answer. This probe prints both classifications
+/// direction by direction.
+///
+/// The two rules under comparison, both on the SAME `A`:
+///
+/// * DENSE (`ExactHessianSpectralBlock::rank_floor`, #2673) — the null band of
+///   an eigendirection `v` is `max(dim·ε·‖A‖₂, √ε·vᵀBv)`, i.e. the pencil
+///   curvature against the majorizer metric the gradient path also uses; a
+///   negative direction is priced at its ARD-clamp basin `λ+vᵀEv` (#2336) and
+///   only a basin below `−floor` refuses.
+/// * ARROW (`factor_spectral_deflated_criterion_row`,
+///   `factor_evidence_unit_deflated_schur`) — the band is
+///   `SPECTRAL_DEFLATION_REL_FLOOR·max|λ|` of the block ALONE, which sees
+///   neither `B` nor the rest of the operator, and EVERY non-positive
+///   eigenvalue is unit-pinned regardless of what the clamp explains.
+///
+/// So there are two independent disagreements — the BAND and the SIGN — and
+/// which of them carries the `9.13` decides whether the repair is a metric or a
+/// pricing rule.
+#[test]
+fn zz_attribute_deflated_route_classification_2515() {
+    let (mut term, rho, target, b_cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 deflation-pricing attribution",
+        );
+    let total_t = b_cache.delta_t_len();
+    let k = b_cache.k;
+    println!("[#2515 CLASSIFY] total_t={total_t} k={k} rows={}", b_cache.n_rows());
+
+    let a = term
+        .materialize_exact_hessian_dense(&rho, target.view(), &b_cache)
+        .expect("the anchor's exact Hessian materializes");
+    let e_diag = term
+        .materialize_ard_concave_clamp_diagonal(&rho, &b_cache)
+        .expect("the anchor's ARD concave clamp diagonal is available");
+
+    for (label, block, metric) in [
+        ("joint", a.clone(), ArrowMetric::Joint(&b_cache)),
+        (
+            "coordinate",
+            a.slice(s![..total_t, ..total_t]).to_owned(),
+            ArrowMetric::Coordinate(&b_cache),
+        ),
+    ] {
+        let (evals, evecs) =
+            gam_linalg::faer_ndarray::FaerEigh::eigh(&block, faer::Side::Lower)
+                .expect("a symmetric block diagonalizes");
+        let spectral_norm = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        let mut pinned = 0usize;
+        let mut priced_negative = 0usize;
+        let mut log_det = 0.0_f64;
+        for idx in 0..evals.len() {
+            let lambda = evals[idx];
+            let v = evecs.column(idx);
+            let bvv = metric
+                .quadratic_form(v)
+                .expect("the majorizer metric is defined on every direction");
+            let floor = sae_exact_a_direction_floor(evals.len(), spectral_norm, bvv);
+            let e_v: f64 = (0..total_t.min(v.len()))
+                .map(|j| e_diag[j] * v[j] * v[j])
+                .sum();
+            let priced = if lambda < -floor {
+                priced_negative += 1;
+                lambda + e_v
+            } else {
+                lambda
+            };
+            if priced > floor {
+                log_det += priced.ln();
+            } else {
+                pinned += 1;
+                println!(
+                    "[#2515 CLASSIFY] dense {label} dir {idx}: lambda={lambda:+.6e} \
+                     floor={floor:.6e} v'Bv={bvv:.6e} v'Ev={e_v:.6e} priced={priced:+.6e} PINNED"
+                );
+            }
+        }
+        println!(
+            "[#2515 CLASSIFY] dense {label}: dim={} ||A||2={spectral_norm:.6e} pinned={pinned} \
+             clamp-priced-negative={priced_negative} log_det={log_det:.10e}",
+            evals.len()
+        );
+    }
+
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("the anchor assembles");
+    let a_sys = term
+        .exact_a_evidence_system(target.view(), &rho, &sys)
+        .expect("the anchor's exact-A evidence system builds");
+    let options = ArrowSolveOptions::direct()
+        .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+    let (_, _, a_cache) = solve_arrow_newton_step_with_options(&a_sys, 0.0, 0.0, &options)
+        .expect("the production evidence policy factors the anchor's exact-A system");
+
+    let mut arrow_row_log_det = 0.0_f64;
+    let mut arrow_pinned = 0usize;
+    for row in 0..a_cache.n_rows() {
+        let Some(spectrum) = a_cache.deflation_row_spectra.get(row).and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        let a_row = &a_sys.rows[row].htt;
+        let b_row = &sys.rows[row].htt;
+        let norm = spectrum
+            .raw_evals
+            .iter()
+            .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        for idx in 0..spectrum.raw_evals.len() {
+            let lambda = spectrum.raw_evals[idx];
+            let v = spectrum.evecs.column(idx);
+            let bvv = v.dot(&b_row.dot(&v));
+            let avv = v.dot(&a_row.dot(&v));
+            let pencil_floor = sae_exact_a_direction_floor(spectrum.raw_evals.len(), norm, bvv);
+            let base = a_cache.row_offsets[row];
+            let e_v: f64 = (0..v.len()).map(|j| e_diag[base + j] * v[j] * v[j]).sum();
+            let arrow_floor = gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR * norm;
+            let conditioned = spectrum.cond_evals[idx];
+            if conditioned > 0.0 {
+                arrow_row_log_det += conditioned.ln();
+            }
+            let deflated = matches!(
+                spectrum.conditioning[idx],
+                gam_solve::arrow_schur::RowSpectralConditioning::UnitDeflated
+            );
+            if deflated {
+                arrow_pinned += 1;
+            }
+            println!(
+                "[#2515 CLASSIFY] arrow row {row} dir {idx}: lambda={lambda:+.6e} \
+                 cond={conditioned:+.6e} arrow_floor={arrow_floor:.6e} \
+                 pencil_floor={pencil_floor:.6e} v'Bv={bvv:.6e} v'Av={avv:+.6e} \
+                 v'Ev={e_v:.6e} basin={:+.6e} deflated={deflated} \
+                 pencil_would_pin={}",
+                lambda + e_v,
+                (if lambda < -pencil_floor { lambda + e_v } else { lambda }) <= pencil_floor
+            );
+        }
+    }
+    println!(
+        "[#2515 CLASSIFY] arrow rows: pinned={arrow_pinned} \
+         sum_log_cond_row={arrow_row_log_det:.10e}"
+    );
+    match a_cache.beta_schur_deflation.as_ref() {
+        Some(spectrum) => {
+            for idx in 0..spectrum.raw_evals.len() {
+                println!(
+                    "[#2515 CLASSIFY] arrow schur dir {idx}: lambda={:+.6e} cond={:+.6e} \
+                     deflated={}",
+                    spectrum.raw_evals[idx], spectrum.cond_evals[idx], spectrum.deflated[idx]
+                );
+            }
+        }
+        None => println!("[#2515 CLASSIFY] arrow schur: no deflation recorded"),
+    }
+}
