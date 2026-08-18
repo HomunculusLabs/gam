@@ -5501,6 +5501,68 @@ pub(crate) fn an_impossible_resolution_claim_is_refused_and_a_real_one_is_kept_2
     );
 }
 
+/// The CONSEQUENCE of the refusal, on the attempt that was actually accepted
+/// (gam#2748).
+///
+/// Attempt 5 of `papuan_oce4_matern_k6`'s cycle-0 ladder, verbatim: a realized
+/// change of `-8.049e8` (an INCREASE of eight hundred million) against a
+/// predicted decrease of `+1.609e8`, at an objective of `2.0e3`. Whether the
+/// controller takes that step is decided entirely by which noise floor it is
+/// handed, so the two arms differ in that one argument and nothing else.
+#[test]
+pub(crate) fn the_runaway_step_is_rejected_once_its_resolution_claim_is_refused_2748() {
+    let objective_scale = 2.0e3_f64;
+    let objective_tol = 1.0e-6 * (1.0 + objective_scale.abs());
+    let attempt = |measured_resolution: f64| {
+        update_joint_trust_region_radius(
+            7.899e2,  // radius at the fifth rung
+            8.376e2,  // ||delta|| there
+            -8.049e8, // actual reduction: the objective got WORSE by 8.049e8
+            1.609e8,  // predicted reduction
+            objective_scale,
+            objective_tol,
+            measured_resolution,
+            true, // the stationarity residual is far above tolerance
+        )
+    };
+
+    // NON-VACUITY: with the ladder's own claim installed as the noise floor,
+    // the controller reports `rho = 1` and TAKES the step. This is the defect,
+    // asserted so the fixture cannot stop exercising it.
+    let with_claim = attempt(9.658287e8);
+    assert!(
+        with_claim.accepted,
+        "the measured-resolution floor is what accepted an 8.049e8 increase; if this \
+         stops being true the arm below is no longer a repair of anything"
+    );
+    assert!(
+        (with_claim.rho - 1.0).abs() < 1.0e-12,
+        "the accept is the noise-floor branch's neutral rho, not a genuine gain ratio: \
+         rho={:.6e}",
+        with_claim.rho,
+    );
+
+    // With the claim refused as impossible, `measured_resolution` stays 0 and the
+    // controller falls back to its own `eps|F|` floor, which an 8.049e8 increase
+    // clears by fifteen orders.
+    let refused = attempt(0.0);
+    assert!(
+        !refused.accepted,
+        "an eight-hundred-million objective INCREASE must reject once the impossible \
+         floor is gone"
+    );
+    assert!(
+        refused.rho.is_finite() && refused.rho < 0.0 || refused.rho.is_infinite(),
+        "the rejection must be a model-disagreement rejection: rho={:.6e}",
+        refused.rho,
+    );
+    assert!(
+        refused.radius < 7.899e2,
+        "and it must SHRINK: radius {:.6e} did not fall below the 7.899e2 it started at",
+        refused.radius,
+    );
+}
+
 /// The ceiling is a bound and never a suppressor: a non-finite accumulation
 /// cannot be sized, so it must license everything rather than refuse everything.
 #[test]
