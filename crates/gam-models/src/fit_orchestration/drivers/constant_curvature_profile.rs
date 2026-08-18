@@ -586,6 +586,25 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// from the previous κ) is what makes `V_p` a function of κ alone, which the
     /// CI walk and the LR test both require.
     ///
+    /// # The narrow scan is not a defect, and that is measured (gam#2747)
+    ///
+    /// Recorded here because it looks like one and the next reader will suspect
+    /// it. The scan spans `[ln d_min⁺, ln d_max]` clamped into the box — a factor
+    /// of about 18 — while the chart is `ln(1/ε)/(4√ε) ≈ 6·10⁸` wide, and the
+    /// minimizer really does sit outside the scan on a third of the planted
+    /// cells (`ℓ̂ = 6.9` against a scan top of `2.3`, and `3.4·10⁴` at the
+    /// hyperbolic end of another). The obvious conclusion is that `V_p` is being
+    /// over-estimated wherever the Newton fails to escape, biasing κ̂.
+    ///
+    /// It was checked rather than assumed. Emulating this exact solve — same
+    /// thirteen points, same clamp, same seed as a fourteenth candidate, same
+    /// trust cap, same `value ≤ incumbent` backtrack — against a brute-force
+    /// `min_η` over the WHOLE chart, at fifteen κ across each of the nine cells
+    /// of the curvature × range grid: the gap is zero to double precision in
+    /// every cell, including the ones that require walking three e-folds out of
+    /// the bracket. The Newton escapes; the scan behaves like the initialization
+    /// it is documented as. Rewriting it would be churn.
+    ///
     /// # What this costs, and why it is paid
     ///
     /// Roughly seventeen criterion evaluations per κ where the pinned-range

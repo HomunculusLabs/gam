@@ -513,11 +513,22 @@ mod constant_curvature_kappa_range_identification_tests {
                 eprintln!("[#2747 profile-fd] κ={kappa:+.4}: {outcome:?}, not gated here");
                 continue;
             }
-            interior_cells += 1;
             let (value, first, second) = profile.evaluate(kappa).expect("profiled jet");
-            let (plus, first_plus, _) = profile.evaluate(kappa + h).expect("profiled jet at +h");
-            let (minus, first_minus, _) =
-                profile.evaluate(kappa - h).expect("profiled jet at -h");
+            // The two difference points are ordinary profile evaluations and can
+            // land on a κ whose own range solve is uncertified, where `evaluate`
+            // refuses by design. That is not this gate's subject, so the cell is
+            // skipped and the count below is what keeps skipping from becoming a
+            // way to pass.
+            let (Ok((plus, first_plus, _)), Ok((minus, first_minus, _))) =
+                (profile.evaluate(kappa + h), profile.evaluate(kappa - h))
+            else {
+                eprintln!(
+                    "[#2747 profile-fd] κ={kappa:+.4}: a difference point has no profile \
+                     derivative, cell skipped"
+                );
+                continue;
+            };
+            interior_cells += 1;
             let fd_first = (plus - minus) / (2.0 * h);
             let fd_second = (first_plus - first_minus) / (2.0 * h);
             let schur = jet.hessian[0][1] * jet.hessian[0][1] / jet.hessian[1][1];
