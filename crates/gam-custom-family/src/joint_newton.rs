@@ -2963,6 +2963,26 @@ pub(crate) fn compute_joint_feasibility_alpha<F: CustomFamily + ?Sized>(
             }
         }
     }
+    // The JOINT barrier, after the per-block ones and on the same footing
+    // (gam#2765). A domain whose argument reads more than one block cannot be
+    // stated per block: every block answers `None` — each is individually free
+    // — while the joint ray leaves the domain. `limiting_block` stays `None`
+    // when this is what binds, which is exactly the right thing downstream: a
+    // joint barrier has no single block's linear cone to project onto, so the
+    // `BlockedByActiveFace` handler falls through to shrink-and-retry rather
+    // than to a projection that does not exist.
+    if let Some(alpha_max) = family.max_feasible_joint_step_size(states, trial_delta)? {
+        if !alpha_max.is_finite() || !(0.0..=1.0).contains(&alpha_max) {
+            return Err(CustomFamilyError::trial_point(format!(
+                "joint Newton reported a JOINT feasible step fraction of {alpha_max:.6e}, \
+                 which is not a fraction in [0, 1]"
+            )));
+        }
+        if alpha_max < joint_alpha {
+            joint_alpha = alpha_max;
+            limiting_block = None;
+        }
+    }
     Ok((joint_alpha, limiting_block))
 }
 

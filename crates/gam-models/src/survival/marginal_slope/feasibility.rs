@@ -226,3 +226,389 @@ impl SurvivalMarginalSlopeFamily {
         Ok(())
     }
 }
+
+// ── The follow-up-varying likelihood domain (gam#2765 / gam#2767) ───────────
+//
+// The row log-density carries `log η′₁`, so the family's domain is
+//
+//     η′₁(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz > 0   at every EVENT row,
+//
+// with `c = √(1 + bᵀΣb)`. With a time-CONSTANT slope the last two terms are
+// identically zero and `η′₁ = q′·c ≥ q′`, so the time block's own linear guard
+// `q′ ≥ derivative_guard > 0` IMPLIES the domain — which is exactly why the
+// solver's feasible set has always been that one polytope, and why a per-BLOCK
+// `max_feasible_step_size` sufficed.
+//
+// A follow-up-varying slope breaks the implication: `q·c′` and `b′ᵀz` carry no
+// sign, and they read the marginal and log-slope blocks. The condition was
+// therefore placed in the likelihood DOMAIN — `+∞` outside, refusal at the row
+// evaluator — rather than in the FEASIBLE SET. Measured on the #2765 acceptance
+// fixture that costs the fit its convergence: the criterion is finite on one
+// side of a surface the outer BFGS cannot see, every probe across it is refused
+// with no gradient information, the line search halves to nothing, and the outer
+// runner reports `cost-stall STUCK (infeasible BFGS probes)` at `|g| = 5.4e1`
+// against its own `1.5e0` escape threshold.
+//
+// The rule below puts the condition back where a solver can use it: a JOINT
+// fraction-to-boundary limit, evaluated on the SAME witness the row program
+// admits on, so "the step limiter says feasible" and "the row program accepts"
+// are the same arithmetic and cannot disagree.
+impl SurvivalMarginalSlopeFamily {
+    /// `min η′₁` over the rows whose likelihood contains `log η′₁` — the EVENT
+    /// rows — at the given coefficients.
+    ///
+    /// `None` on the time-constant frame: there the quantity is implied by the
+    /// time block's linear guard and this rule has nothing to add.
+    ///
+    /// The witness is read through [`rigid_row_admission_witnesses`], the same
+    /// call the row evaluator's own admission uses, at primaries built by the
+    /// same [`rigid_row_kernel_primaries`]. That is deliberate and load-bearing:
+    /// a step limiter that computed `η′₁` its own way would be a second copy of
+    /// the model, and the two copies would eventually disagree about which side
+    /// of the boundary a coefficient is on.
+    pub(crate) fn follow_up_domain_margin(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        if !self.slope_is_follow_up_varying() {
+            return Ok(None);
+        }
+        let margin = (0..self.n)
+            .into_par_iter()
+            .map(|row| -> Result<f64, String> {
+                // A censored row's density has no `log η′₁` factor, so it
+                // imposes no domain condition. Mirrors the `di != 0.0` gate in
+                // `validate_rigid_row_admission` exactly.
+                if self.event[row] == 0.0 {
+                    return Ok(f64::INFINITY);
+                }
+                let inputs = rigid_row_inputs(
+                    self,
+                    block_states,
+                    row,
+                    "survival marginal-slope follow-up domain margin",
+                )?;
+                let primaries = rigid_row_kernel_primaries::<
+                    DYNAMIC_SLOPE_PRIMARIES,
+                    DynamicSlopeGeometry,
+                >(self, block_states, row)?;
+                let [_, _, adjusted_derivative] = rigid_row_admission_witnesses::<
+                    DYNAMIC_SLOPE_PRIMARIES,
+                    DynamicSlopeGeometry,
+                >(&primaries, &inputs);
+                // A NaN witness is not "a large margin": report it as the worst
+                // possible value so a step that produces one is never taken.
+                Ok(if adjusted_derivative.is_nan() {
+                    f64::NEG_INFINITY
+                } else {
+                    adjusted_derivative
+                })
+            })
+            .try_reduce(|| f64::INFINITY, |a, b| Ok(a.min(b)))?;
+        Ok(Some(margin))
+    }
+
+    /// The largest `α ∈ [0, 1]` for which `β + α·δ` is strictly inside the
+    /// follow-up-varying likelihood domain, or `None` when the rule does not
+    /// apply (time-constant slope, or the whole step is already inside).
+    ///
+    /// # Why there is no safety fraction
+    ///
+    /// The usual interior-point retreat exists because the limiter and the
+    /// objective compute the boundary differently, so a step taken to the
+    /// limiter's boundary can land outside the objective's. Here they are the
+    /// same function evaluated by the same code at the same primaries, so the
+    /// endpoint this returns is admitted by the row program bit for bit. What
+    /// remains — a step that lands legally but very close, where `−log η′₁` is
+    /// large — is not a hazard the limiter should price: the objective there is
+    /// finite and worse, and the trust region rejects it on its own terms. That
+    /// is the mechanism that is supposed to decide step length, and inventing a
+    /// second one would shorten steps the criterion is happy with.
+    ///
+    /// This mirrors [`apply_feasible_step_boundary_backoff`]'s finding on the
+    /// linear guard (gam#2695): a multiplicative retreat is a proportionality
+    /// the geometry does not have, and it can walk a coefficient toward a face
+    /// it never reaches.
+    ///
+    /// # Search
+    ///
+    /// `η′₁(α)` is smooth but not monotone in `α`, so the answer is found by
+    /// bisecting the bracket `[feasible, infeasible]` and returning the
+    /// FEASIBLE end — a point the rule has actually evaluated, never an
+    /// interpolated one. The bracket stops once it is finer than the step's own
+    /// representability, `α·‖δ‖∞ ≲ ε·‖β‖∞`, below which `β + α·δ` is not a
+    /// different point in f64 and no smaller `α` can change the answer.
+    pub(crate) fn max_feasible_follow_up_joint_step(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+    ) -> Result<Option<f64>, String> {
+        if !self.slope_is_follow_up_varying() {
+            return Ok(None);
+        }
+        let Some(base_margin) = self.follow_up_domain_margin(block_states)? else {
+            return Ok(None);
+        };
+        let margin_at = |alpha: f64| -> Result<f64, String> {
+            let states = self.displaced_block_states(block_states, delta, alpha)?;
+            Ok(self
+                .follow_up_domain_margin(&states)?
+                .expect("the follow-up frame is what this rule is gated on"))
+        };
+
+        if margin_at(1.0)? > 0.0 {
+            return Ok(None);
+        }
+        if !(base_margin > 0.0) {
+            // The rule has no bracket: the CURRENT iterate is already outside
+            // the domain, which is a statement about how it got there and not
+            // about this step. Decline rather than invent an answer — the row
+            // program refuses at `β` itself and names the row.
+            log::debug!(
+                "[survival-marginal-slope/follow-up-domain] declining a joint step limit: the \
+                 base iterate is already outside the domain (min η′₁ = {base_margin:.6e})"
+            );
+            return Ok(None);
+        }
+
+        let step_scale = delta.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let beta_scale = block_states
+            .iter()
+            .flat_map(|state| state.beta.iter())
+            .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+            .max(1.0);
+        // Below this the displaced coefficients are not a different f64 point,
+        // so no finer bracket can change which side of the boundary they sit on.
+        let resolution = if step_scale > 0.0 {
+            (beta_scale * f64::EPSILON) / step_scale
+        } else {
+            return Ok(None);
+        };
+
+        let mut feasible = 0.0_f64;
+        let mut infeasible = 1.0_f64;
+        while infeasible - feasible > resolution {
+            let midpoint = 0.5 * (feasible + infeasible);
+            if midpoint <= feasible || midpoint >= infeasible {
+                break;
+            }
+            if margin_at(midpoint)? > 0.0 {
+                feasible = midpoint;
+            } else {
+                infeasible = midpoint;
+            }
+        }
+        log::debug!(
+            "[survival-marginal-slope/follow-up-domain] joint step limited to α={feasible:.6e} \
+             (base min η′₁ = {base_margin:.6e}, |δ|∞ = {step_scale:.6e})"
+        );
+        Ok(Some(feasible))
+    }
+
+    /// `(β + α·δ, η + α·Xδ)` for every block: the displaced coefficients AND the
+    /// linear predictors that must travel with them.
+    ///
+    /// The predictors are updated INCREMENTALLY rather than rebuilt. Each
+    /// block's `η = X·β + offset` is affine in `β` with a `β`-independent
+    /// offset, so `η(β + αδ) = η(β) + α·(X·δ)` exactly — which is what lets
+    /// this run without the block SPECS, which the joint feasibility hook is
+    /// not handed. Leaving `η` stale instead would silently evaluate the
+    /// domain at a mixture of two coefficient vectors: the marginal index `q`
+    /// reads `states[1].eta` and the slope's exit channel reads
+    /// `states[2].eta`, so a step that moved either block would be graded at
+    /// the OLD one.
+    ///
+    /// The follow-up-varying frame refuses every optional block (score-warp,
+    /// link-deviation, CTN influence absorber, time-wiggle, frailty) at
+    /// construction, so the layout here is exactly `[time, marginal,
+    /// log-slope]` and each design is one the family itself owns.
+    fn displaced_block_states(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+        alpha: f64,
+    ) -> Result<Vec<ParameterBlockState>, String> {
+        let designs: [&DesignMatrix; 3] = [
+            &self.design_exit,
+            &self.marginal_design,
+            self.logslope_layout.coefficient_design(),
+        ];
+        if block_states.len() != designs.len() {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "a follow-up-varying survival marginal-slope fit carries exactly {} \
+                     coefficient blocks (time, marginal, log-slope); got {}",
+                    designs.len(),
+                    block_states.len(),
+                ),
+            }
+            .into());
+        }
+        let total: usize = block_states.iter().map(|state| state.beta.len()).sum();
+        if delta.len() != total {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "survival marginal-slope joint feasibility step has {} entries for {total} \
+                     coefficients",
+                    delta.len(),
+                ),
+            }
+            .into());
+        }
+        let mut offset = 0usize;
+        let mut out = Vec::with_capacity(block_states.len());
+        for (state, design) in block_states.iter().zip(designs) {
+            let width = state.beta.len();
+            let block_delta = delta.slice(s![offset..offset + width]).to_owned();
+            let mut moved = state.clone();
+            moved.beta = &state.beta + &(&block_delta * alpha);
+            let eta_step = design.matrixvectormultiply(&block_delta);
+            if eta_step.len() != state.eta.len() {
+                return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "survival marginal-slope joint feasibility predictor step has {} rows \
+                         against a block predictor of {}",
+                        eta_step.len(),
+                        state.eta.len(),
+                    ),
+                }
+                .into());
+            }
+            moved.eta = &state.eta + &(&eta_step * alpha);
+            out.push(moved);
+            offset += width;
+        }
+        Ok(out)
+    }
+
+
+    /// Bring a WARM-START coefficient vector back inside the follow-up-varying
+    /// likelihood domain, by retreating the log-slope block toward its own
+    /// origin.
+    ///
+    /// # Why a seed can be outside a domain it was inside
+    ///
+    /// The domain condition `η′₁ > 0` reads the baseline chart through `q′` and
+    /// `q`. The outer search moves that chart (ρ and the parametric-baseline ψ)
+    /// while the warm start carries β forward unchanged, so a β that was
+    /// interior at the previous θ can be exterior at the next one — through no
+    /// property of β at all. The evaluation then refuses the whole trial point,
+    /// and because it refuses rather than returns a value the outer line search
+    /// gets no information from it: measured on the #2765 acceptance fixture the
+    /// BFGS halves its step six times, every probe refuses, and the runner
+    /// halts with `cost-stall (infeasible BFGS probes)` at `|g| = 3.9e1` against
+    /// its own `1.5e0` escape threshold.
+    ///
+    /// Restoring feasibility is the inner solve's job, not the caller's, and it
+    /// is the exact analogue of what the time block already does: its warm start
+    /// is projected onto `q′ ≥ derivative_guard` before it is used
+    /// (`project_onto_linear_constraints` in the block builder). This is the
+    /// log-slope block's half of the same contract.
+    ///
+    /// # Why the origin is the retreat target
+    ///
+    /// At `β_g = 0` the block's rate channel is `X_ġ · 0 = 0` exactly — the
+    /// layout's exit-derivative design carries no offset — so `ḃ ≡ 0`, both
+    /// follow-up terms of `η′₁` vanish identically, and
+    /// `η′₁ = q′·c ≥ q′ ≥ derivative_guard > 0` because `c = √(1 + bᵀΣb) ≥ 1`.
+    /// The retreat therefore has a PROVABLY interior endpoint, which is what
+    /// makes the bisection below terminate rather than merely usually succeed.
+    /// It is also the block's own cold start, so the worst case is "start this
+    /// evaluation's log-slope block from scratch", not "start it somewhere
+    /// arbitrary".
+    ///
+    /// Returns the retreat fraction actually applied (`0.0` when the seed was
+    /// already interior, in which case nothing is written).
+    pub(crate) fn retreat_seed_into_follow_up_domain(
+        &self,
+        blocks: &mut [ParameterBlockSpec],
+    ) -> Result<f64, String> {
+        if !self.slope_is_follow_up_varying() {
+            return Ok(0.0);
+        }
+        let states: Vec<ParameterBlockState> = blocks
+            .iter()
+            .map(|block| {
+                let width = block.design.ncols();
+                let beta = block
+                    .initial_beta
+                    .as_ref()
+                    .filter(|seed| seed.len() == width)
+                    .cloned()
+                    .unwrap_or_else(|| Array1::<f64>::zeros(width));
+                let eta = block.solver_design().matrixvectormultiply(&beta)
+                    + block.solver_offset();
+                ParameterBlockState { beta, eta }
+            })
+            .collect();
+        let Some(margin) = self.follow_up_domain_margin(&states)? else {
+            return Ok(0.0);
+        };
+        if margin > 0.0 {
+            return Ok(0.0);
+        }
+        // The retreat direction: the log-slope block's own coefficients, pointing
+        // at the origin. Every other block is held, because they are not what
+        // made the domain condition non-trivial.
+        let logslope = 2usize;
+        let total: usize = states.iter().map(|state| state.beta.len()).sum();
+        let mut direction = Array1::<f64>::zeros(total);
+        let start: usize = states[..logslope]
+            .iter()
+            .map(|state| state.beta.len())
+            .sum();
+        let width = states[logslope].beta.len();
+        for column in 0..width {
+            direction[start + column] = -states[logslope].beta[column];
+        }
+        let margin_at = |fraction: f64| -> Result<f64, String> {
+            let moved = self.displaced_block_states(&states, &direction, fraction)?;
+            Ok(self
+                .follow_up_domain_margin(&moved)?
+                .expect("the follow-up frame is what this rule is gated on"))
+        };
+        if !(margin_at(1.0)? > 0.0) {
+            // The origin is interior whenever the time block's own guard holds,
+            // so reaching here means the time seed is itself infeasible. That is
+            // a different defect and this rule must not paper over it: leave the
+            // seed alone and let the row evaluator refuse and name its row.
+            log::warn!(
+                "[survival-marginal-slope/follow-up-domain] the log-slope origin does not                  restore the domain (min η′₁ = {:.6e} there, {margin:.6e} at the seed); the                  time block's derivative guard must be violated at this theta",
+                margin_at(1.0)?,
+            );
+            return Ok(0.0);
+        }
+        // Smallest retreat that restores the domain. `interior` is always a
+        // fraction this rule has EVALUATED, never an interpolated one.
+        let mut exterior = 0.0_f64;
+        let mut interior = 1.0_f64;
+        let seed_scale = states[logslope]
+            .beta
+            .iter()
+            .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let resolution = if seed_scale > 0.0 {
+            f64::EPSILON * seed_scale.max(1.0) / seed_scale
+        } else {
+            return Ok(0.0);
+        };
+        while interior - exterior > resolution {
+            let midpoint = 0.5 * (exterior + interior);
+            if midpoint <= exterior || midpoint >= interior {
+                break;
+            }
+            if margin_at(midpoint)? > 0.0 {
+                interior = midpoint;
+            } else {
+                exterior = midpoint;
+            }
+        }
+        let retreated = &states[logslope].beta * (1.0 - interior);
+        log::info!(
+            "[survival-marginal-slope/follow-up-domain] warm-start log-slope seed was outside              the domain (min η′₁ = {margin:.6e}); retreated {:.4}% toward the block origin",
+            100.0 * interior,
+        );
+        blocks[logslope].initial_beta = Some(retreated);
+        Ok(interior)
+    }
+
+}

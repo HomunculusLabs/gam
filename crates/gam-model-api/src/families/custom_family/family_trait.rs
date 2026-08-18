@@ -688,6 +688,53 @@ pub trait CustomFamily {
         Ok(None)
     }
 
+    /// Optional barrier-aware maximum feasible step size for the JOINT update.
+    ///
+    /// [`max_feasible_step_size`](Self::max_feasible_step_size) asks one block
+    /// at a time, which can only express a barrier whose argument is a function
+    /// of that block's coefficients alone. A family whose likelihood domain
+    /// couples blocks has no way to state its constraint there: the per-block
+    /// answers are each `None` — every block is individually free — while the
+    /// joint step walks straight out of the domain.
+    ///
+    /// The survival marginal-slope family with a follow-up-varying slope is
+    /// exactly that shape (gam#2765 / gam#2767). Its row log-density carries
+    /// `log η′(t)`, and
+    ///
+    /// ```text
+    ///     η′(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz,   c = √(1 + bᵀΣb)
+    /// ```
+    ///
+    /// reads the time block (`q′`, `q`), the marginal block (`q`) and the
+    /// log-slope block (`b`, `b′`) at once. With a time-CONSTANT slope the last
+    /// two terms vanish and `η′ = q′·c ≥ q′`, so the time block's own linear
+    /// guard `q′ ≥ guard > 0` implies the domain — which is why a per-block
+    /// hook sufficed until the slope was allowed to move.
+    ///
+    /// `delta` is the full joint step, laid out in the same flattened
+    /// coefficient order as the block states. Return `Some(alpha_max)` with
+    /// `alpha_max ∈ [0, 1]` the largest fraction for which `beta + alpha·delta`
+    /// is strictly inside the domain (apply the fraction-to-boundary safety
+    /// factor internally), or `None` when no joint barrier applies — the
+    /// default, so every existing family is unchanged.
+    fn max_feasible_joint_step_size(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+    ) -> Result<Option<f64>, String> {
+        let total: usize = block_states.iter().map(|state| state.beta.len()).sum();
+        assert_eq!(
+            delta.len(),
+            total,
+            "max feasible joint step size: direction is not in the joint coefficient space"
+        );
+        assert!(
+            delta.iter().all(|v| !v.is_nan()),
+            "max feasible joint step size: NaN entry in the joint coefficient direction"
+        );
+        Ok(None)
+    }
+
     /// Optional scale-aware floor for the joint trust-region metric `D`.
     ///
     /// The joint Newton globalization whitens its step by a positive diagonal
