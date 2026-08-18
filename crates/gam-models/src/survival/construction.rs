@@ -7052,7 +7052,17 @@ mod tests {
         // Inside the fitted span, far below it, and far above it — the last two
         // are where every `predict(...).survival_at(grid)` call lands, because
         // `default_survival_time_grid` starts at 0 and ends past `max(exit)`.
-        let queries = [1.0_f64, 3.0, 12.0, 30.0, 44.0, 60.0, 400.0, 2_850.0];
+        //
+        // The two BOUNDARY knots themselves (`t = 4` and `t = 44`, the extreme
+        // training exits) are deliberately not central-differenced, and the
+        // boundary is checked exactly below instead. An M-spline has a
+        // one-sided kink at a clamped boundary knot — the trailing columns
+        // vanish there like `(t_b − t)^k` — so the analytic derivative is the
+        // one-sided LIMIT (zero for those columns) while a symmetric window of
+        // half-width `h` averages the rising side and returns `O(h)`. Measured
+        // at `t = 44`, `h = 1e-5`: analytic `0`, central difference `8.99e-8`,
+        // which shrinks with `h` rather than marking a disagreement.
+        let queries = [1.0_f64, 3.0, 12.0, 30.0, 43.0, 60.0, 400.0, 2_850.0];
         let step = 1.0e-5_f64;
         let mut exterior_rows_with_slope = 0usize;
         for &t in queries.iter() {
@@ -7087,6 +7097,42 @@ mod tests {
             "the exterior must carry a nonzero boundary slope on both sides; \
              {exterior_rows_with_slope} of the exterior query times did"
         );
+
+        // The boundary itself, exactly rather than by difference: the tail is
+        // ANCHORED at the spline's own one-sided value and slope there, so
+        // crossing `t_b` must not move the derivative at all and must move the
+        // value by exactly `Δ(log t) · slope`.
+        let boundary = 44.0_f64;
+        let outside = 44.05_f64;
+        let pair = build_survival_time_basis(
+            &Array1::<f64>::zeros(2),
+            &Array1::from_vec(vec![boundary, outside]),
+            resolved.clone(),
+            None,
+        )
+        .expect("ispline time basis replays across the boundary knot");
+        let value = pair.x_exit_time.to_dense();
+        let derivative = pair.x_derivative_time.to_dense();
+        // `x_derivative_time` carries the `1/t` chain factor, so undo it to
+        // compare slopes in the basis's own `log t` coordinate.
+        let log_gap = outside.ln() - boundary.ln();
+        for column in 0..value.ncols() {
+            let boundary_slope = derivative[[0, column]] * boundary;
+            let outside_slope = derivative[[1, column]] * outside;
+            assert!(
+                (outside_slope - boundary_slope).abs() <= 1.0e-12 * boundary_slope.abs().max(1.0),
+                "column {column}: the tail slope {outside_slope:.9e} is not the boundary slope \
+                 {boundary_slope:.9e}"
+            );
+            let expected = value[[0, column]] + log_gap * boundary_slope;
+            assert!(
+                (value[[1, column]] - expected).abs() <= 1.0e-12 * expected.abs().max(1.0),
+                "column {column}: the tail value {:.9e} is not the affine continuation \
+                 {expected:.9e} of the boundary value {:.9e} at slope {boundary_slope:.9e}",
+                value[[1, column]],
+                value[[0, column]]
+            );
+        }
     }
 
     /// The fit itself must not move. Every training row is inside the knot span
