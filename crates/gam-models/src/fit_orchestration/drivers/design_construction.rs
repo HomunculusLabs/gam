@@ -7517,17 +7517,15 @@ pub(crate) fn spatial_length_scale_term_indices(spec: &TermCollectionSpec) -> Ve
         .collect()
 }
 
-/// Returns `true` when every spatial term in `spec` has a locked kernel
-/// scale (explicit `length_scale=X` without anisotropy) and therefore
-/// contributes no outer ψ/κ optimization axis. Empty term collections
-/// also return `true` — there are no kappas to optimize.
+/// The scalar a multi-start / candidate comparison ranks one realized fit by.
 ///
-/// Used by family entry points that want to honor a user-supplied scalar
-/// length scale exactly: when all spatial terms are locked the n-block
-/// joint-spatial outer solver has nothing to optimize, and routing
-/// through it merely spends ~80 outer iters chasing a stalled ARC at the
-/// user's chosen ρ. Skipping straight to the rho-only path avoids that
-/// waste and respects the user's explicit kernel-scale input.
+/// The REML/LAML score is the criterion the outer search itself minimizes, so
+/// it is what a comparison between two realized fits must use when it exists.
+/// A route that produced no outer score (a fixed-ρ path, or a family whose
+/// criterion is not assembled) still has a penalized deviance, and
+/// `½·deviance + ½·stable_penalty_term` is the same objective up to the terms
+/// those routes do not form. A non-finite score is `+∞`, i.e. never preferred,
+/// which is what makes this usable as a plain `total_cmp` key.
 fn fit_score(fit: &UnifiedFitResult) -> f64 {
     if let Some(score) = fit.reml_score().filter(|value| value.is_finite()) {
         return score;
