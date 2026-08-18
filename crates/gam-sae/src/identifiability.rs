@@ -3207,35 +3207,69 @@ struct CurvatureMeasurement {
     stiffness_note: String,
 }
 
-/// The unit direction of each generator, or `None` when it has no direction.
+/// One enumerated symmetry generator, normalized in place.
 ///
-/// A structurally trivial generator (rotation of a rank-deficient frame, a zero
-/// swap) carries `‖ξ‖ = 0`. It cannot be normalized and it is not a residual
-/// freedom; see the veto in [`residual_gauge_inner`], which is the same
-/// degenerate-tangent exclusion Theorem A requires.
-fn unit_generators(gens: &[(GeneratorFamily, Array1<f64>, String, f64)]) -> Vec<Option<Array1<f64>>> {
-    gens.iter()
-        .map(|(_, g, _, _)| {
-            let norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if norm <= f64::MIN_POSITIVE {
-                None
-            } else {
-                Some(g.mapv(|v| v / norm))
-            }
-        })
-        .collect()
+/// The certificate needs the generator's DIRECTION (to measure curvature along)
+/// and its NORM (which it reports, and which vetoes a structurally trivial
+/// generator), and never the unnormalized vector again — so the enumeration
+/// hands over the unit and the norm rather than the raw tangent. That matters at
+/// production width: a dictionary of `K` atoms over `D` frame axes enumerates
+/// `D(D−1)/2` frame rotations plus `K(K−1)/2` atom exchanges, each a
+/// `param_dim`-long vector, so the enumerated list is the largest object the
+/// certificate holds once the curvature is streamed. Keeping the raw vectors AND
+/// their units alive at once would double it for no reader.
+struct EnumeratedGenerator {
+    family: GeneratorFamily,
+    description: String,
+    /// The #995 lowering-error tolerance scale: the largest `lowering_error`
+    /// over the atoms this generator touches.
+    lowering_error_scale: f64,
+    /// `‖ξ‖` of the generator as enumerated.
+    norm: f64,
+    /// `ξ/‖ξ‖`, or `None` when the generator is structurally trivial (rotation
+    /// of a rank-deficient frame, a zero swap). Such a generator carries no
+    /// direction, cannot be normalized, and is not a residual freedom — see the
+    /// veto in [`residual_gauge_inner`], which is the degenerate-tangent
+    /// exclusion Theorem A requires.
+    unit: Option<Array1<f64>>,
+}
+
+impl EnumeratedGenerator {
+    /// Normalize one enumerated tangent in place.
+    fn from_tangent(
+        family: GeneratorFamily,
+        tangent: Array1<f64>,
+        description: String,
+        lowering_error_scale: f64,
+    ) -> Self {
+        let norm = tangent.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let unit = if norm <= f64::MIN_POSITIVE {
+            None
+        } else {
+            let mut unit = tangent;
+            unit.mapv_inplace(|v| v / norm);
+            Some(unit)
+        };
+        Self {
+            family,
+            description,
+            lowering_error_scale,
+            norm,
+            unit,
+        }
+    }
 }
 
 /// The stored route: the reduction already holds the whole spectrum's worth of
 /// decisions, so every read is a lookup or one `p·D²` contraction.
 fn measure_reduced(
     curvature: &CurvatureReduction,
-    units: &[Option<Array1<f64>>],
+    gens: &[EnumeratedGenerator],
 ) -> CurvatureMeasurement {
     let sigma_max_sq = curvature.sigma_max_sq();
-    let energies = units
+    let energies = gens
         .iter()
-        .map(|unit| match unit {
+        .map(|generator| match &generator.unit {
             // An identically-flat curvature makes every fraction zero without
             // asking the curvature anything, which is also the only regime in
             // which the ratio would be `0/0`.
@@ -3265,20 +3299,20 @@ fn measure_reduced(
 /// [`curvature_rank_tolerance`] are the generator-span pinning rank.
 fn measure_streamed(
     operator: &dyn StreamedFrameCurvature,
-    units: &[Option<Array1<f64>>],
+    gens: &[EnumeratedGenerator],
 ) -> Result<CurvatureMeasurement, String> {
     let lambda = streamed_lambda_max(operator)?;
     let sigma_max_sq = lambda.lambda_max;
-    let present: Vec<usize> = units
+    let present: Vec<usize> = gens
         .iter()
         .enumerate()
-        .filter_map(|(index, unit)| unit.as_ref().map(|_| index))
+        .filter_map(|(index, generator)| generator.unit.as_ref().map(|_| index))
         .collect();
     let directions: Vec<ArrayView1<'_, f64>> = present
         .iter()
-        .map(|&index| units[index].as_ref().expect("filtered to Some").view())
+        .map(|&index| gens[index].unit.as_ref().expect("filtered to Some").view())
         .collect();
-    let mut energies = vec![0.0_f64; units.len()];
+    let mut energies = vec![0.0_f64; gens.len()];
     let mut pinning_rank = 0usize;
     if !directions.is_empty() {
         let factor = operator.project_root(&directions)?;
@@ -3461,19 +3495,16 @@ fn residual_gauge_exact_inputs(
 fn enumerate_generators(
     model: &FittedSaeManifold,
     exact_mask: Option<&[bool]>,
-) -> Vec<(GeneratorFamily, Array1<f64>, String, f64)> {
+) -> Vec<EnumeratedGenerator> {
     let param_dim = model.param_dim();
-    // Enumerate generators, tagged by family. The per-atom builders speak
-    // the atom's LOCAL flattened-frame coordinates (length `frame.len()`); the
-    // certificate's rank arithmetic runs in the joint parameter vector, so each
-    // local generator is embedded at its atom's offset here. (Single-atom
-    // models have local == joint, which is why only multi-atom models can
-    // expose a missed embedding.)
-    // Each generator carries its #995 lowering-error tolerance scale: the
-    // largest `lowering_error` over the atoms it touches.
+    // The per-atom builders speak the atom's LOCAL flattened-frame coordinates
+    // (length `frame.len()`); the certificate's rank arithmetic runs in the
+    // joint parameter vector, so each local generator is embedded at its atom's
+    // offset here. (Single-atom models have local == joint, which is why only
+    // multi-atom models can expose a missed embedding.)
     let scale_of = |k: usize| -> f64 { model.atoms[k].lowering_error.clamp(0.0, 1.0) };
     let global_scale = (0..model.atoms.len()).map(scale_of).fold(0.0_f64, f64::max);
-    let mut gens: Vec<(GeneratorFamily, Array1<f64>, String, f64)> = Vec::new();
+    let mut gens: Vec<EnumeratedGenerator> = Vec::new();
     for (k, atom) in model.atoms.iter().enumerate() {
         // Atoms whose within-atom families are realised exactly (#998) are
         // skipped here: the frame-space lift of a compensated orbit measures
@@ -3484,7 +3515,7 @@ fn enumerate_generators(
         }
         let base = model.atom_offset(k);
         for (g, desc) in atom_isometry_generators(atom) {
-            gens.push((
+            gens.push(EnumeratedGenerator::from_tangent(
                 GeneratorFamily::IsomAtom,
                 embed_local_generator(base, &g, param_dim),
                 desc,
@@ -3492,7 +3523,7 @@ fn enumerate_generators(
             ));
         }
         for (g, desc) in equal_ard_rotation_generators(atom) {
-            gens.push((
+            gens.push(EnumeratedGenerator::from_tangent(
                 GeneratorFamily::EqualArdRotation,
                 embed_local_generator(base, &g, param_dim),
                 desc,
@@ -3502,10 +3533,15 @@ fn enumerate_generators(
     }
     for (g, desc) in frame_rotation_generators(model) {
         // A global output rotation moves every atom's frame at once.
-        gens.push((GeneratorFamily::FrameRotation, g, desc, global_scale));
+        gens.push(EnumeratedGenerator::from_tangent(
+            GeneratorFamily::FrameRotation,
+            g,
+            desc,
+            global_scale,
+        ));
     }
     for (g, desc, ka, kb) in atom_permutation_generators(model) {
-        gens.push((
+        gens.push(EnumeratedGenerator::from_tangent(
             GeneratorFamily::AtomPermutation,
             g,
             desc,
@@ -3535,7 +3571,10 @@ pub fn enumerated_unit_generators(
     views: &[Option<AtomParameterView>],
 ) -> Vec<Option<Array1<f64>>> {
     let mask: Vec<bool> = views.iter().map(|view| view.is_some()).collect();
-    unit_generators(&enumerate_generators(model, Some(&mask)))
+    enumerate_generators(model, Some(&mask))
+        .into_iter()
+        .map(|generator| generator.unit)
+        .collect()
 }
 
 fn residual_gauge_inner(
@@ -3560,12 +3599,11 @@ fn residual_gauge_inner(
     // which directions to project onto — while the stored routes hold enough of
     // the spectrum to answer either order. `CurvatureMeasurement` is what both
     // produce, so nothing below this line knows which route ran.
-    let units = unit_generators(&gens);
     let measurement = match access {
-        CurvatureAccess::Streamed(operator) => measure_streamed(operator, &units)?,
-        CurvatureAccess::Reduced(curvature) => measure_reduced(&curvature, &units),
+        CurvatureAccess::Streamed(operator) => measure_streamed(operator, &gens)?,
+        CurvatureAccess::Reduced(curvature) => measure_reduced(&curvature, &gens),
         CurvatureAccess::FromModel => {
-            measure_reduced(&CurvatureReduction::from_model(model)?, &units)
+            measure_reduced(&CurvatureReduction::from_model(model)?, &gens)
         }
     };
     let pinning_rank = measurement.pinning_rank;
@@ -3578,8 +3616,10 @@ fn residual_gauge_inner(
     // 3. Per-generator flatness verdict: relative curvature vs the calibrated
     // tolerance.
     let mut verdicts: Vec<GeneratorVerdict> = Vec::with_capacity(gens.len());
-    for (index, (family, g, description, lowering_error_scale)) in gens.iter().enumerate() {
-        let norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+    for (index, generator) in gens.iter().enumerate() {
+        let family = generator.family;
+        let description = &generator.description;
+        let lowering_error_scale = generator.lowering_error_scale;
         // A structurally trivial generator (rotation of a rank-deficient frame,
         // zero swap) carries no direction — it cannot be a residual freedom.
         // Report it pinned with zero norm rather than as a spurious gauge.
@@ -3597,14 +3637,14 @@ fn residual_gauge_inner(
         // CONDITION for the certificate's rank arithmetic — Theorem A's
         // tangent-space decomposition is only meaningful once degenerate
         // summands are excluded from it — not a heuristic tie-break.
-        if norm <= f64::MIN_POSITIVE {
+        if generator.unit.is_none() {
             verdicts.push(GeneratorVerdict {
-                family: *family,
+                family,
                 description: description.clone(),
                 unpinned: false,
                 generator_norm: 0.0,
                 pinned_energy_fraction: 1.0,
-                lowering_error_scale: *lowering_error_scale,
+                lowering_error_scale,
                 provenance: VerdictProvenance::CurvatureTest,
             });
             continue;
@@ -3624,15 +3664,15 @@ fn residual_gauge_inner(
         } else {
             (measurement.energies[index] / sigma_max_sq).clamp(0.0, 1.0)
         };
-        let tolerance = GENERATOR_FLAT_ENERGY_TOL.max(*lowering_error_scale);
+        let tolerance = GENERATOR_FLAT_ENERGY_TOL.max(lowering_error_scale);
         let unpinned = pinned_energy_fraction <= tolerance;
         verdicts.push(GeneratorVerdict {
-            family: *family,
+            family,
             description: description.clone(),
             unpinned,
-            generator_norm: norm,
+            generator_norm: generator.norm,
             pinned_energy_fraction,
-            lowering_error_scale: *lowering_error_scale,
+            lowering_error_scale,
             provenance: VerdictProvenance::CurvatureTest,
         });
     }
