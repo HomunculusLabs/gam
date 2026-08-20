@@ -3,14 +3,14 @@
 collected            1478
 passed               1254
 skipped              79
-failed (diagnosed)   110
+failed (diagnosed)   112
 errored (diagnosed)  0
-CENSORED             35   (worker killed at the per-test bound;
+CENSORED             33   (worker killed at the per-test bound;
                           the JUnit records no reason and time=0.000)
 
-faulthandler dumps in the step log: 38
+faulthandler dumps in the step log: 35
 
-## The 35 censored tests, with the frame each was stuck in
+## The 33 censored tests, with the frame each was stuck in
 
 Recovered from the faulthandler dumps, which fire before the kill and
 write straight to fd 2. A test listed here is NOT a crashed interpreter:
@@ -66,12 +66,6 @@ it is a call that had not returned when the bound expired.
       test_selected_rho_survives_save_load_roundtrip
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
 
-[2] tests.test_sae_manifold_shape_uncertainty
-      test_more_data_tightens_the_posterior_band
-          stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
-      test_posterior_shape_band_is_tighter_than_data_deviation
-          stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
-
 [2] tests.test_sae_manifold_single_circle_default_795
       test_single_circle_positive_isometry_recovers_honest_chart_span
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
@@ -112,6 +106,10 @@ it is a call that had not returned when the bound expired.
       test_heterogeneous_mixed_topology_atoms_reconstruct
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
 
+[1] tests.test_sae_manifold_shape_uncertainty
+      test_posterior_shape_band_is_tighter_than_data_deviation
+          stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
+
 [1] tests.test_sae_manifold_speed
       test_periodic_atom_fit_recovers_one_harmonic_within_iteration_cap
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
@@ -120,36 +118,32 @@ it is a call that had not returned when the bound expired.
       test_topk_fit_uses_exact_fixed_support[1]
           stuck in gamfit/_sae_manifold.py:220 in sae_manifold_fit
 
-[1] tests.test_survival_api_regressions
-      test_joint_competing_risks_survival_is_reachable_from_fit
-          stuck in gamfit/_api.py:1277 in fit
-
 ## Entry-point census over the censored population
 
-    29  gamfit/_sae_manifold.py:220 in sae_manifold_fit
-     5  gamfit/_api.py:1277 in fit
+    28  gamfit/_sae_manifold.py:220 in sae_manifold_fit
+     4  gamfit/_api.py:1277 in fit
      1  (no gamfit frame)
 
 ## 20 slowest tests that DID report a duration
 
-      294.6s  tests.test_sae_manifold_shape_uncertainty::test_shape_uncertainty_fields_present_and_well_shaped
-      260.6s  tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test::test_negbin_dispersion_location_scale_is_predictable
-      228.6s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
-      135.0s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
-      133.7s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
-      130.0s  tests.test_python_api::test_transformation_normal_pgs_conditional_mean_tracks_response
-      109.5s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
-       94.9s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate
+      299.5s  tests.test_survival_api_regressions::test_joint_competing_risks_survival_is_reachable_from_fit
+      258.1s  tests.bug_hunt_gamma_dispersion_location_scale_unpredictable_test::test_negbin_dispersion_location_scale_is_predictable
+      235.5s  tests.test_sae_manifold_shape_band_save_load::test_restored_covariance_reproduces_analytic_band
+      224.4s  tests.test_sae_manifold_shape_uncertainty::test_more_data_tightens_the_posterior_band
+      208.1s  tests.test_sae_manifold_shape_uncertainty::test_shape_uncertainty_fields_present_and_well_shaped
+      189.7s  tests.test_sae_manifold_top_k_issue::test_topk_fit_uses_exact_fixed_support[2]
+      166.8s  tests.test_sae_manifold_public_api_shapes::test_per_atom_uncertainty_shape_band_shapes_are_sane
+      151.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_primitive_names_metadata_is_not_a_substitute_for_effect
+      128.9s  tests.test_python_api::test_transformation_normal_pgs_conditional_mean_tracks_response
+       95.8s  tests.bug_hunt_2299_affine_design_link_wiggle_test::test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate
        90.0s  tests.test_survival_marginal_slope_clustered_pc_808::test_survival_marginal_slope_clustered_pc_converges_808
-       75.8s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
-       73.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
-       71.8s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
-       65.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
-       65.3s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
-       62.9s  tests.test_sae_manifold_top_k_issue::test_topk_payload_is_one_unprojected_model
-       60.2s  tests.test_fit_model_spec_kwargs_match_config::test_rust_flexible_link_fit_kwarg_matches_config
+       78.2s  tests.test_sae_manifold_shape_uncertainty::test_band_sd_matches_analytic_phi_cov_phi_propagation
+       74.1s  tests.test_sae_manifold_regularizer_noops_issue_240::test_isometry_weight_is_not_a_silent_noop
+       73.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_ard_per_atom_is_not_a_silent_noop
+       72.9s  tests.test_sae_manifold_regularizer_noops_issue_240::test_block_orthogonality_weight_is_not_a_silent_noop
+       72.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_is_not_a_silent_noop
+       61.3s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
+       60.7s  tests.test_fit_model_spec_kwargs_match_config::test_rust_flexible_link_fit_kwarg_matches_config
        60.1s  tests.test_survival_save_load_roundtrip::test_survival_marginal_slope_save_load_predict_roundtrips
-       54.7s  tests.test_sae_manifold_regularizer_noops_issue_240::test_decoder_feature_sparsity_groups_produces_nontrivial_gradient
-       45.1s  tests.test_survival_api_regressions::test_survival_marginal_slope_fit_returns
-       43.6s  tests.bug_hunt_univariate_matern_gp_smooth_degenerate_range_penalty_test::test_univariate_gp_basis_alias_fits_ordinary_1d_data
+       57.4s  tests.test_sae_manifold_top_k_issue::test_topk_payload_is_one_unprojected_model
 
