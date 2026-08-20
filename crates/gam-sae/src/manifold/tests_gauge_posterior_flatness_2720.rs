@@ -238,14 +238,13 @@ pub(crate) fn directional_derivative_terms(
     // `apply_newton_step` refuses a non-positive step, so the backward arm walks
     // the NEGATED direction at the same positive length rather than a negative
     // length along the same one. Same point, same code path.
-    let evaluate = |term: &mut SaeManifoldTerm,
-                    walk: &Array1<f64>|
-     -> Result<ObjectiveTerms, String> {
-        term.apply_newton_step(walk.slice(s![..dense_len]), walk.slice(s![dense_len..]), h)?;
-        let out = objective_terms(term, target, rho, registry);
-        term.restore_mutable_state(&snapshot)?;
-        out
-    };
+    let evaluate =
+        |term: &mut SaeManifoldTerm, walk: &Array1<f64>| -> Result<ObjectiveTerms, String> {
+            term.apply_newton_step(walk.slice(s![..dense_len]), walk.slice(s![dense_len..]), h)?;
+            let out = objective_terms(term, target, rho, registry);
+            term.restore_mutable_state(&snapshot)?;
+            out
+        };
     let backward = direction.mapv(|value| -value);
     let plus = evaluate(term, direction)?;
     let minus = evaluate(term, &backward)?;
@@ -269,7 +268,7 @@ pub(crate) fn active_rows_and_basis_size(
     Ok((active, term.atoms[atom_idx].basis_size()))
 }
 
-fn unit_norm(mut v: Array1<f64>) -> Option<Array1<f64>> {
+pub(crate) fn unit_norm(mut v: Array1<f64>) -> Option<Array1<f64>> {
     let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
     if !(norm.is_finite() && norm > 0.0) {
         return None;
@@ -296,7 +295,11 @@ fn chart_orbit_directional_derivative_splits_by_objective_term_2720() {
     let mut worst_data_fit_slope = 0.0_f64;
     for &(kind, latent_dim) in GAUGE_SWEEP_KINDS {
         let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
-        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())]);
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.0,
+            vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())],
+        );
         let base = objective_terms(&term, z.view(), &rho, &registry).expect("base objective");
         let gauges = term.dense_step_gauge_vectors().expect("gauge vectors");
         let (active, basis_size) = active_rows_and_basis_size(&term, 0).expect("active rows");
@@ -320,17 +323,13 @@ fn chart_orbit_directional_derivative_splits_by_objective_term_2720() {
             // second-order term is below the difference's own truncation error,
             // large enough that the difference is not cancellation noise.
             let h = 1.0e-5;
-            let slope = directional_derivative_terms(
-                &mut term,
-                z.view(),
-                &rho,
-                &registry,
-                &direction,
-                h,
-            )
-            .expect("directional derivative");
-            let barriers =
-                slope.analytic + slope.repulsion + slope.amplitude_barrier + slope.separation_barrier;
+            let slope =
+                directional_derivative_terms(&mut term, z.view(), &rho, &registry, &direction, h)
+                    .expect("directional derivative");
+            let barriers = slope.analytic
+                + slope.repulsion
+                + slope.amplitude_barrier
+                + slope.separation_barrier;
             println!(
                 "[2720-split]   {index:>4} {:>12.4e} {:>12.4e} {:>12.4e} {:>12.4e} {:>12.4e} {:>12.4e}",
                 slope.data_fit,
@@ -365,7 +364,8 @@ pub(crate) fn quotient_family_sizes(
 ) -> Result<(usize, usize, usize), String> {
     Ok((
         term.dense_step_gauge_vectors()?.len(),
-        term.joint_decoder_beta_null_directions(lambda_smooth)?.len(),
+        term.joint_decoder_beta_null_directions(lambda_smooth)?
+            .len(),
         term.decoder_channel_null_directions()?.len(),
     ))
 }
@@ -394,7 +394,11 @@ fn quotient_span_is_flat_for_the_penalized_objective_2720() {
     let mut measured = 0usize;
     for &(kind, latent_dim) in GAUGE_SWEEP_KINDS {
         let mut term = seeded_term_of_kind(z.view(), kind, latent_dim);
-        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())]);
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.0,
+            vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())],
+        );
         let lambda_smooth = rho
             .lambda_smooth_vec()
             .expect("the fixture rho carries one smoothing block per atom");
@@ -575,7 +579,11 @@ fn option_two_prior_aware_compensation_has_no_state_independent_solution_2720() 
     .expect("a step along the shift field applies");
 
     let (away_directions, away_slopes) = at_state(&mut term);
-    assert_eq!(away_directions.len(), 2, "the field family is state-independent in SIZE");
+    assert_eq!(
+        away_directions.len(),
+        2,
+        "the field family is state-independent in SIZE"
+    );
     let away_combination = combine(&away_directions);
     let away_slope = slopes_along(
         &mut term,
@@ -745,11 +753,17 @@ fn quotient_span_is_flat_with_decoder_frames_active_2720() {
             basis.len(),
         );
         for (index, direction) in basis.into_iter().enumerate() {
-            let slope =
-                directional_derivative_terms(&mut term, z.view(), &rho, &registry, &direction, 1.0e-5)
-                    .expect("directional derivative")
-                    .total()
-                    .abs();
+            let slope = directional_derivative_terms(
+                &mut term,
+                z.view(),
+                &rho,
+                &registry,
+                &direction,
+                1.0e-5,
+            )
+            .expect("directional derivative")
+            .total()
+            .abs();
             measured += 1;
             if slope > tolerance {
                 violations.push(format!(
