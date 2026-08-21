@@ -72,6 +72,59 @@ fn pre_fit_operating_scalars<F: CustomFamily + ?Sized>(
         })
 }
 
+/// Ask the family, block by block, whether that block's COEFFICIENT COORDINATE
+/// is model content or only its column space is (#2748).
+///
+/// The identifiability canonicaliser decides whether it may reparameterise a
+/// block — `β ↦ Vᵀβ`, penalties pulled back as `VᵀSV` — and that is exact only
+/// when any basis of the block's column space is the same model. It is not for a
+/// monotone link-wiggle warp, whose family imposes `β_w ≥ 0` componentwise on
+/// those very coefficients and rebuilds its design at that exact width. The
+/// canonicaliser takes only specs, so the family has to be asked here, at the
+/// one site that holds both.
+///
+/// The probe state mirrors [`pre_fit_operating_scalars`]: the warm start when
+/// there is one, zeros otherwise, at RAW block width — which is what every
+/// implementor of `block_linear_constraints` validates its index and width
+/// against, so the derived default in
+/// [`CustomFamily::block_coefficient_coordinate`] can answer for every family
+/// instead of panicking on an empty state slice.
+fn pre_fit_coefficient_coordinates<F: CustomFamily + ?Sized>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+) -> Vec<CoefficientCoordinate> {
+    let states: Vec<ParameterBlockState> = specs
+        .iter()
+        .map(|spec| {
+            let beta = spec
+                .initial_beta
+                .clone()
+                .unwrap_or_else(|| Array1::zeros(spec.design.ncols()));
+            let eta = Array1::zeros(spec.design.nrows());
+            ParameterBlockState { beta, eta }
+        })
+        .collect();
+    let coordinates: Vec<CoefficientCoordinate> = specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| family.block_coefficient_coordinate(&states, index, spec))
+        .collect();
+    let structural: Vec<&str> = specs
+        .iter()
+        .zip(coordinates.iter())
+        .filter(|(_, coordinate)| coordinate.is_structural())
+        .map(|(spec, _)| spec.name.as_str())
+        .collect();
+    if !structural.is_empty() {
+        log::info!(
+            "[CANON] structural coefficient coordinate(s) declared: [{}] — these blocks keep \
+             their basis AND their width through canonicalisation (#2748)",
+            structural.join(", "),
+        );
+    }
+    coordinates
+}
+
 /// The `(pilot, current)` β pair the converged drift audit prices against each
 /// other, flattened over blocks in spec order.
 ///
@@ -2548,6 +2601,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
+            &pre_fit_coefficient_coordinates(family, raw_specs),
             pre_fit_operating_scalars(family, raw_specs)?,
         )?;
     let canonical_n_cols_red: usize = canonical
@@ -4052,6 +4106,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
+            &pre_fit_coefficient_coordinates(family, raw_specs),
             pre_fit_operating_scalars(family, raw_specs)?,
         )?;
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;
@@ -4313,6 +4368,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             specs,
+            &pre_fit_coefficient_coordinates(family, specs),
             pre_fit_operating_scalars(family, specs)?,
         )?;
     if !canonical.gauge.is_identity()
@@ -4548,6 +4604,7 @@ pub fn fit_custom_family_fixed_log_lambda_warm_start<
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
+            &pre_fit_coefficient_coordinates(family, raw_specs),
             pre_fit_operating_scalars(family, raw_specs)?,
         )?;
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;
@@ -4651,6 +4708,7 @@ pub fn evaluate_labeled_outer_criterion_for_diagnostics<
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
+            &pre_fit_coefficient_coordinates(family, raw_specs),
             pre_fit_operating_scalars(family, raw_specs)?,
         )?;
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;

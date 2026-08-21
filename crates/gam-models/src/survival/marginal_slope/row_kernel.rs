@@ -778,7 +778,6 @@ pub(crate) fn rigid_row_inputs(
 /// map to the sliced witness surface emitted from the sole rigid likelihood
 /// declaration.
 #[inline(always)]
-#[cfg(target_os = "linux")]
 pub(crate) fn rigid_row_admission_witnesses<const P: usize, G: SlopeRowGeometry<P>>(
     primaries: &[f64; P],
     inputs: &RigidRowInputs,

@@ -26,6 +26,9 @@ use gam_problem::{
     ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace, ExactNewtonOuterObjective,
     ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState, PseudoLogdetMode,
 };
+// The coordinate declaration `block_coefficient_coordinate` returns, re-exported
+// beside the constraint types it is derived from (#2748).
+pub use gam_problem::CoefficientCoordinate;
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -688,6 +691,53 @@ pub trait CustomFamily {
         Ok(None)
     }
 
+    /// Optional barrier-aware maximum feasible step size for the JOINT update.
+    ///
+    /// [`max_feasible_step_size`](Self::max_feasible_step_size) asks one block
+    /// at a time, which can only express a barrier whose argument is a function
+    /// of that block's coefficients alone. A family whose likelihood domain
+    /// couples blocks has no way to state its constraint there: the per-block
+    /// answers are each `None` — every block is individually free — while the
+    /// joint step walks straight out of the domain.
+    ///
+    /// The survival marginal-slope family with a follow-up-varying slope is
+    /// exactly that shape (gam#2765 / gam#2767). Its row log-density carries
+    /// `log η′(t)`, and
+    ///
+    /// ```text
+    ///     η′(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz,   c = √(1 + bᵀΣb)
+    /// ```
+    ///
+    /// reads the time block (`q′`, `q`), the marginal block (`q`) and the
+    /// log-slope block (`b`, `b′`) at once. With a time-CONSTANT slope the last
+    /// two terms vanish and `η′ = q′·c ≥ q′`, so the time block's own linear
+    /// guard `q′ ≥ guard > 0` implies the domain — which is why a per-block
+    /// hook sufficed until the slope was allowed to move.
+    ///
+    /// `delta` is the full joint step, laid out in the same flattened
+    /// coefficient order as the block states. Return `Some(alpha_max)` with
+    /// `alpha_max ∈ [0, 1]` the largest fraction for which `beta + alpha·delta`
+    /// is strictly inside the domain (apply the fraction-to-boundary safety
+    /// factor internally), or `None` when no joint barrier applies — the
+    /// default, so every existing family is unchanged.
+    fn max_feasible_joint_step_size(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+    ) -> Result<Option<f64>, String> {
+        let total: usize = block_states.iter().map(|state| state.beta.len()).sum();
+        assert_eq!(
+            delta.len(),
+            total,
+            "max feasible joint step size: direction is not in the joint coefficient space"
+        );
+        assert!(
+            delta.iter().all(|v| !v.is_nan()),
+            "max feasible joint step size: NaN entry in the joint coefficient direction"
+        );
+        Ok(None)
+    }
+
     /// Optional scale-aware floor for the joint trust-region metric `D`.
     ///
     /// The joint Newton globalization whitens its step by a positive diagonal
@@ -756,6 +806,54 @@ pub trait CustomFamily {
             "block linear constraints",
         );
         Ok(None)
+    }
+
+    /// Is block `block_index`'s COEFFICIENT COORDINATE model content, or is only
+    /// its column space? (#2748)
+    ///
+    /// The identifiability canonicaliser may reparameterise a block whose
+    /// coordinate is [`CoefficientCoordinate::Spanning`] — `β ↦ Vᵀβ` with the
+    /// penalties pulled back as `VᵀSV` — which is how it removes a cross-block
+    /// structural confound exactly rather than ridging it away. It may NOT do
+    /// that to a coordinate this family has attached meaning to. See
+    /// [`CoefficientCoordinate`] for the full argument; the short form is that a
+    /// monotone warp's `β_w ≥ 0` is a cone on THOSE coefficients, and the hook
+    /// that produces it is a function of the block's width, so it cannot express
+    /// the rotated cone `A V`.
+    ///
+    /// # The default DERIVES the answer rather than assuming it
+    ///
+    /// Any family that states a coordinate-local feasible set through
+    /// [`Self::block_linear_constraints`] is answering this question already, so
+    /// the default reads that answer instead of asking for it twice — a
+    /// declaration that can drift from the constraint it is about is worse than
+    /// no declaration. A family that cannot answer at the supplied state is
+    /// treated as `Structural`, because declining a reparameterisation always
+    /// preserves the model while performing one may not.
+    ///
+    /// # When to override
+    ///
+    /// Only for a coordinate whose structure this family imposes through some
+    /// OTHER hook, which the derivation above cannot see:
+    ///
+    /// * [`Self::post_update_block_beta`] projecting or clamping coordinates
+    ///   (the bounded-linear latent chart);
+    /// * [`Self::block_geometry`] rebuilding this block's design at its raw
+    ///   width, which a narrower spec desynchronises.
+    ///
+    /// Never override to widen the freedom: `Spanning` on a constrained
+    /// coordinate is not a performance choice, it is a wrong model.
+    fn block_coefficient_coordinate(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> CoefficientCoordinate {
+        match self.block_linear_constraints(block_states, block_index, block_spec) {
+            Ok(Some(_)) => CoefficientCoordinate::Structural,
+            Ok(None) => CoefficientCoordinate::Spanning,
+            Err(_) => CoefficientCoordinate::Structural,
+        }
     }
 
     /// Optional exact directional derivative of a block's ExactNewton Hessian.

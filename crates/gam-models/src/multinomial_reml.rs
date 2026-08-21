@@ -5045,7 +5045,10 @@ mod tests {
         family.design = Arc::new(deficient);
         let specs = family.build_block_specs();
 
-        let canonical = gam_identifiability::canonical::canonicalize_for_identifiability(&specs)
+        let canonical = gam_identifiability::canonical::canonicalize_for_identifiability(
+            &specs,
+            &vec![gam_problem::CoefficientCoordinate::Spanning; specs.len()],
+        )
             .expect("a rank-deficient shared design must canonicalise, not fail closed");
 
         // NON-VACUITY CONTROL: the audit must actually have found the

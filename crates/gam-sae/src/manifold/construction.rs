@@ -269,6 +269,33 @@ impl SaeCriterionError {
     }
 }
 
+impl SaeCriterionError {
+    /// #2515 — the ONE place a rendered arrow-Schur refusal becomes the typed
+    /// indefinite verdict.
+    ///
+    /// The streaming/arrow evidence route reaches the same conclusion the dense
+    /// route reaches — this state's exact observed information has resolved
+    /// negative curvature, so `½log|A|` is not the Laplace normalizer of a mode —
+    /// but it reaches it inside `gam-solve`, whose spine to here is
+    /// `Result<_, String>`. Routing it through `Numerical` would make the SAME
+    /// verdict INFEASIBLE (`+inf`, outer solver steers away) on one route and a
+    /// hard `RemlOptimizationFailed` on the other, which is the route dependence
+    /// this issue is about, one level up from the criterion itself.
+    ///
+    /// `block` is `"streaming evidence"`: the arrow route reaches the verdict
+    /// through the per-row blocks and the reduced Schur of `A` rather than through
+    /// a joint or coordinate eigendecomposition, so naming either of the dense
+    /// route's two blocks here would be a false localization.
+    pub(crate) fn from_arrow_refusal(message: String) -> Self {
+        if gam_solve::arrow_schur::ArrowSchurError::rendered_is_indefinite_evidence(&message) {
+            return Self::IndefiniteObservedInformation {
+                block: "streaming evidence",
+            };
+        }
+        Self::Numerical(message)
+    }
+}
+
 impl From<String> for SaeCriterionError {
     fn from(message: String) -> Self {
         Self::Numerical(message)
@@ -805,6 +832,29 @@ pub(crate) struct DeflatedEvidenceFactor {
     pub(crate) cache: ArrowFactorCache,
     pub(crate) grad_norm: f64,
     pub(crate) quotient_grad_norm: f64,
+}
+
+/// How a fitted term hands its residual-gauge curvature to the certificate.
+///
+/// Two arms, and the difference between them is whether a materialized
+/// representation of `H` exists that is smaller than `param_dim²` (#2757). It is
+/// a statement about the fit's own structure — its metric and its row count —
+/// not a policy knob: see
+/// [`SaeManifoldTerm::residual_gauge_curvature_source`].
+pub(crate) enum ResidualGaugeCurvatureSource {
+    /// Materialized, in the structure the metric gives it.
+    Stored(ResidualGaugeCurvature),
+    /// Not materialized at all. Carries the two objects the streaming operator
+    /// needs that the term does not already hold: the frame column layout and
+    /// the isometry pin's root rows.
+    Streamed {
+        layout: FrameColumnLayout,
+        dense_rows: Array2<f64>,
+        /// The row count `R` would have had. Carried rather than recomputed
+        /// because it is what calibrates the certificate's rank tolerance, and a
+        /// second derivation of it is a second chance to disagree.
+        root_rows: usize,
+    },
 }
 
 impl SaeManifoldTerm {
@@ -2251,7 +2301,7 @@ impl SaeManifoldTerm {
         let atom_two_lens =
             crate::inference::atom_lens::atom_two_lens(self, &metric, assignments_override)?;
 
-        let (certificate_model, streamed_curvature): (_, Option<ResidualGaugeCurvature>) =
+        let (certificate_model, curvature_source): (_, ResidualGaugeCurvatureSource) =
             self.to_residual_gauge_model(metric, per_atom_ard_variances, isometry_pin_active)?;
         // #998: within-atom gauge families are certified on their EXACT orbits
         // in the model's own (decoder, coordinate) parameter space — compensated
@@ -2295,15 +2345,41 @@ impl SaeManifoldTerm {
         // producer at all. The general `residual_gauge` / `residual_gauge_exact`
         // path remains for callers that hand-build a model whose Jacobian is not
         // frame-structured.
-        let curvature = streamed_curvature.ok_or_else(|| {
-            "fit_diagnostics_report: missing streamed residual-gauge curvature".to_string()
-        })?;
-        let residual_gauge = crate::identifiability::residual_gauge_exact_from_curvature(
-            &certificate_model,
-            &views,
-            &ops,
-            curvature,
-        )?;
+        let residual_gauge = match curvature_source {
+            ResidualGaugeCurvatureSource::Stored(curvature) => {
+                crate::identifiability::residual_gauge_exact_from_curvature(
+                    &certificate_model,
+                    &views,
+                    &ops,
+                    curvature,
+                )?
+            }
+            // #2757 — the coupling-metric branch reads `H` as an operator. The
+            // operator borrows THIS term, so it is built here rather than being
+            // carried out of `to_residual_gauge_model`: what it streams is the
+            // fitted decoder's own Jacobians, through the identical
+            // `fill_row_frame_jacobian` the materializing builder uses, so the
+            // two routes cannot describe two curvatures.
+            ResidualGaugeCurvatureSource::Streamed {
+                ref layout,
+                ref dense_rows,
+                root_rows,
+            } => {
+                let operator = super::streamed_frame_curvature::StreamedFrameCurvatureOperator::new(
+                    self,
+                    &certificate_model.metric,
+                    layout,
+                    dense_rows,
+                    root_rows,
+                )?;
+                crate::identifiability::residual_gauge_exact_from_streamed(
+                    &certificate_model,
+                    &views,
+                    &ops,
+                    &operator,
+                )?
+            }
+        };
 
         // #1097 / #1103: per-atom Riesz-debiased functionals and the any-n-valid
         // split-LRT smooth-structure e-value (non-constant vs constant inner
@@ -2598,7 +2674,7 @@ impl SaeManifoldTerm {
     ) -> Result<
         (
             crate::identifiability::FittedSaeManifold,
-            Option<ResidualGaugeCurvature>,
+            ResidualGaugeCurvatureSource,
         ),
         String,
     > {
@@ -2814,7 +2890,7 @@ impl SaeManifoldTerm {
         // of such a row fills in every block). The reduction counts the sum's
         // eigenvalues above any shift exactly, by inertia, so nothing is
         // approximated by carrying them separately.
-        let streamed_curvature = self.residual_gauge_streamed_data_curvature(
+        let curvature_source = self.residual_gauge_curvature_source(
             &metric,
             &layout,
             isometry_penalty_root.clone(),
@@ -2827,7 +2903,50 @@ impl SaeManifoldTerm {
                 isometry_penalty_root,
                 metric,
             },
-            Some(streamed_curvature),
+            curvature_source,
+        ))
+    }
+
+    /// Which way the certificate will reach this term's curvature — materialized
+    /// in the structure the fit's metric gives it, or as an operator over a root
+    /// that is re-streamed on demand (#2757).
+    ///
+    /// The fork is structural, not a threshold anyone chose:
+    ///
+    /// * a metric that does NOT couple output coordinates leaves `H` exactly
+    ///   block diagonal, `p` blocks of `D × D`, so it is materialized in `p·D²`
+    ///   scalars — a factor of `p` under the Gram — and every spectral decision is
+    ///   exact and cheap;
+    /// * a coupling metric with `root_rows ≤ param_dim` has a ROOT that is the
+    ///   smaller object, and `spec(RᵀR) = spec(RRᵀ) ∪ {0}` makes it sufficient;
+    /// * a coupling metric with more root rows than columns has neither. Its
+    ///   smallest materialized form is a `param_dim`-square triangular factor —
+    ///   `34 GiB` at the #2283 production shape, reached by folding `480 000` rows
+    ///   at `1.0e15` flops, and then read by a `2.8e14`-flop spectrum. That is the
+    ///   surviving half of #2757, and nothing about how the curvature is STORED
+    ///   can fix it: `min(root_rows, param_dim)²` is what an exact full spectrum
+    ///   costs from either side. So this branch stops asking for one. See
+    ///   [`crate::identifiability::residual_gauge_exact_from_streamed`].
+    pub(crate) fn residual_gauge_curvature_source(
+        &self,
+        metric: &gam_problem::RowMetric,
+        layout: &FrameColumnLayout,
+        dense_rows: Array2<f64>,
+    ) -> Result<ResidualGaugeCurvatureSource, String> {
+        let param_dim = layout.param_dim();
+        let root_rows = self
+            .n_obs()
+            .saturating_mul(metric.metric_rank())
+            .saturating_add(dense_rows.nrows());
+        if metric.drives_gauge() && param_dim > 0 && root_rows > param_dim {
+            return Ok(ResidualGaugeCurvatureSource::Streamed {
+                layout: layout.clone(),
+                dense_rows,
+                root_rows,
+            });
+        }
+        Ok(ResidualGaugeCurvatureSource::Stored(
+            self.residual_gauge_streamed_data_curvature(metric, layout, dense_rows)?,
         ))
     }
 
@@ -3009,7 +3128,7 @@ impl SaeManifoldTerm {
     /// Fill `g[i, l] = a_{nk} · ∂g_k/∂t_a(row)[i]` (local axis `l = (k, a)`)
     /// for one observation, returning whether the row carries any assignment
     /// mass at all. `g` is zeroed here, so callers may reuse one buffer.
-    fn fill_row_frame_jacobian(
+    pub(crate) fn fill_row_frame_jacobian(
         &self,
         row: usize,
         assignments: &Array2<f64>,

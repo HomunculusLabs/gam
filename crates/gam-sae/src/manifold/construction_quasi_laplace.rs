@@ -662,7 +662,35 @@ impl SaeManifoldTerm {
     /// (`exact_observed_information_log_dets`), streaming prices the Arrow–Schur
     /// majorizer `B` (`streaming_exact_arrow_log_det`). The #847 bit-identity
     /// claim held for `B` against `B` and does not survive that migration.
-    pub(crate) fn converge_inner_for_undamped_logdet(
+     /// Freeze the collapse-prevention gates for one criterion evaluation,
+    /// returning whether they were ALREADY frozen so the caller can restore.
+    ///
+    /// One place, because the set has to be the same set. Before #2515 the freeze
+    /// refreshed two gates — decoder repulsion and barrier coactivation — while
+    /// `assemble_arrow_schur_scaled` refreshes THREE when unfrozen, the third being
+    /// the #2343 amplitude barrier. So the amplitude gate was the only one that
+    /// never got refreshed at the entry state at all: inside the frozen window the
+    /// assembler skips it, and the freeze did not do it either, leaving it carrying
+    /// whatever the PREVIOUS evaluation left behind. That is the same
+    /// value-versus-gradient desync #1625 and #2343 each fixed for their own gate,
+    /// reintroduced by the freeze that was supposed to prevent it.
+    ///
+    /// The list is exhaustive against its consumer by construction: this is the
+    /// only producer, `assemble_arrow_schur_scaled`'s `if !streaming_gates_frozen`
+    /// block is the only consumer, and a gate added to one without the other is a
+    /// gate whose frozen value is not the entry state's.
+    fn freeze_collapse_prevention_gates(&mut self) -> bool {
+        let gates_were_frozen = self.streaming_gates_frozen;
+        if !gates_were_frozen {
+            self.refresh_decoder_repulsion_gate();
+            self.refresh_barrier_coactivation_gate();
+            self.refresh_amplitude_barrier_gate();
+            self.streaming_gates_frozen = true;
+        }
+        gates_were_frozen
+    }
+
+   pub(crate) fn converge_inner_for_undamped_logdet(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -694,12 +722,7 @@ impl SaeManifoldTerm {
         // so a settled state re-prices identically — the #2253 idempotence
         // certificate is preserved, and V(ρ) still tracks routing changes
         // across ρ moves.
-        let gates_were_frozen = self.streaming_gates_frozen;
-        if !gates_were_frozen {
-            self.refresh_decoder_repulsion_gate();
-            self.refresh_barrier_coactivation_gate();
-            self.streaming_gates_frozen = true;
-        }
+        let gates_were_frozen = self.freeze_collapse_prevention_gates();
         let out = self.converge_inner_for_undamped_logdet_gate_frozen(
             target,
             rho,
@@ -3418,15 +3441,15 @@ impl SaeManifoldTerm {
     /// convenience entries, this requires the rational surrogate to retain its
     /// complete weighted shifted-solve derivative and the exact
     /// `ArrowSchurSystem` used to produce it. Optional shift-zero inverse probes
-    /// are requested separately and are scoped to EFS proposals. Per-row
-    /// spectral deflation is rejected explicitly, and a dense retry would violate
-    /// both the declared memory route and the single-functional derivative
-    /// contract. #2712 corrected the REASON on that rejection: the border-only
-    /// derivative representation does reconstruct the deflated block and does
-    /// carry the Daleckii--Krein correction now; what is unfixed is the
-    /// deflation-INDEPENDENT #2515 beta-Schur desync in the complete matrix-free
-    /// gradient. See the gate itself for the measurement and for what would lift
-    /// it.
+    /// are requested separately and are scoped to EFS proposals.
+    ///
+    /// Per-row spectral deflation is ADMITTED (#2515). It was refused here for as
+    /// long as the arrow route and the dense route priced a deflated direction
+    /// differently; since #2673 unified the classification metric they do not, and
+    /// the two complete gradients agree to `1.6e-9` relative on #2712's certified
+    /// deflated anchor. The body carries the four eras of that refusal's stated
+    /// reason and the measurement that ended it, because the recurring defect at
+    /// this seam is a refusal outliving the disagreement it was written for.
     pub(crate) fn penalized_quasi_laplace_streaming_outer_evaluation(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -3485,8 +3508,11 @@ impl SaeManifoldTerm {
                     .to_string(),
             )
         })?;
-        // #2515 RE-MEASURED RATIONALE — this gate stays, and its reason has changed
-        // for the second time. It is retained on a NUMBER now, not an argument.
+        // #2515 — THE SPECTRAL-DEFLATION REFUSAL THAT STOOD HERE IS GONE, AND THE
+        // NUMBER IT WAS RETAINED ON IS WHY. Four eras, each disproved by a
+        // measurement rather than by an argument; keeping all four because the
+        // failure mode this seam keeps producing is a refusal whose justification
+        // outlives the defect it was written for.
         //
         // Era 1 said the from-probes cluster could not price per-row deflation.
         // #2712 disproved that: `A_i` is the conditioned row Cholesky, so the
@@ -3495,56 +3521,64 @@ impl SaeManifoldTerm {
         //
         // Era 2 named the #2499/#2515 β-Schur smoothness-EDF desync — the dense
         // route contracting a β-Schur deflated pseudo-inverse while the bundle
-        // contracted "whatever `S⁻¹` it carries". That is fixed: the bundle now
-        // carries the exact observed information's own reduced Schur AND its row
-        // factors, and the two routes agree to `1.57e-14` on the complete gradient
-        // at a non-deflating state (`laplace_value_and_gradient_are_route_-
-        // invariant_2515`).
+        // contracted "whatever `S⁻¹` it carries". Fixed by the typed
+        // `BundleEvidenceGeometry`: the bundle now carries the exact observed
+        // information's own reduced Schur AND its row factors, and the two routes
+        // agree to `1.57e-14` on the complete gradient at a non-deflating state
+        // (`laplace_value_and_gradient_are_route_invariant_2515`).
         //
-        // Era 3, MEASURED on #2712's own certified deflated anchor by
-        // `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`:
+        // Era 3 (`ac66e624d`) measured, on #2712's certified deflated anchor, a
+        // complete-gradient gap of `9.131537e0` against `‖g‖∞ = 5.004339e0` and
+        // attributed it to two floors in two metrics — the dense route flooring the
+        // spectrum of the materialized `A` against an ABSOLUTE band while the arrow
+        // route conditions per row. It said, in as many words, that the way to lift
+        // this gate was to reconcile those two prices.
+        //
+        // Era 4: #2673 reconciled them (`00c1fe139`, `758c9d336`) — the absolute
+        // floor is deleted and BOTH sites now classify a direction by its curvature
+        // in the majorizer metric, `max(dim·ε·‖A‖₂, √ε·vᵀBv)`. That was not done for
+        // this gate and this gate was not re-measured against it. Re-measured now,
+        // same anchor, same comparison, `zz_attribute_deflated_route_classification_2515`
+        // and `exact_a_route_parity_holds_on_a_deflated_cache_2515`:
         //
         //     majorizer deflated rows 10, exact-A deflated rows 10
-        //     complete gradient max|Δ| = 9.131537e0 against ‖g‖∞ = 5.004339e0
+        //     complete gradient max|Δ| = 2.798722e-8 against ‖g‖∞ = 1.726754e1
+        //                              = 1.62e-9 RELATIVE, from 1.8 relative
         //
-        // What is left is a DEFLATION-PRICING disagreement, not an operator one.
-        // The dense route floors the spectrum of the materialized `A` globally
-        // (with #2336 clamp-attributable pricing on negative directions); the arrow
-        // route conditions each row block and pseudo-inverts the reduced Schur.
-        // Two floors, two metrics, one `A` — the #2673 genus. That is what a
-        // deflated streaming fit would be ranked and steered by, and it is not the
-        // criterion the dense lane evaluates.
+        // and END TO END through this very function, forced onto the streaming route
+        // at the same state (`forced_streaming_admits_a_deflating_state_and_matches_-
+        // dense_2515`):
         //
-        // TO LIFT THIS GATE: reconcile the two deflation prices, then delete the
-        // assertion in `exact_a_route_parity_still_fails_on_a_deflated_cache_2515`
-        // — which goes RED the moment they agree, and says so.
+        //     cost      dense 1.7469252484e1   streaming 1.7469252476e1
+        //     gradient  max|Δ| = 3.301233e-8 against ‖g‖∞ = 1.726754e1
         //
-        // The check reads BOTH caches. `cache` is the `B` stationarity geometry the
-        // IFT solve rides; `exact_a_cache` is what the from-probes trace and
-        // θ-adjoint channels reconstruct their inverse blocks from. Since #2515
-        // those are different factorizations of different operators, and either one
-        // deflating puts the gradient in the regime measured above.
-        for (label, inspected) in [("majorizer", &cache), ("exact-A", &exact_a_cache)] {
-            if let Some((row, directions)) = inspected
-                .deflated_row_directions
-                .iter()
-                .enumerate()
-                .find(|(_, directions)| !directions.is_empty())
-            {
-                return Err(SaeCriterionError::Numerical(format!(
-                    "streaming outer derivative is not admitted: the {label} evidence \
-                     factorization spectrally deflates row {row} in {} direction(s). The \
-                     from-probes channels carry the Daleckii--Krein correction (#2712) and \
-                     now differentiate the exact observed information (#2515, parity \
-                     1.57e-14 undeflated), but on a DEFLATING cache the arrow route's \
-                     per-row + reduced-Schur pseudo-inverse and the dense route's global \
-                     spectral floor price deflation differently -- measured complete-gradient \
-                     gap 9.13 against ||g||inf = 5.00. Refusing rather than steering a fit \
-                     with the derivative of an operator the dense criterion does not rank",
-                    directions.len()
-                )));
-            }
-        }
+        // and across a ρ ladder of deflating states rather than one anchor
+        // (`exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515`), where the
+        // gap stays ABSOLUTE at ~3e-8 while ‖g‖∞ moves over a decade — which is the
+        // signature of the attributed cause below and not of a route-dependent
+        // criterion.
+        //
+        // and the classification is now agreed direction for direction: on that
+        // anchor the dense route pins nothing, prices no clamp-attributable negative,
+        // and reads `log|A_tt| = 2.2623032065e1` against the arrow route's
+        // `2.2623032490e1` over the same thirty directions.
+        //
+        // The residual `1.6e-9` is NOT machine precision and is not noise; it is
+        // attributed, and the attribution is under test. The dense route materializes
+        // `A` through `apply_cached_arrow_hessian`, which applies the CONDITIONED row
+        // factor, so a `B`-deflated direction enters the dense `A` as `1 + ΔC_vv`;
+        // the arrow route assembles `B_raw + ΔC` and unit-pins the result, so the
+        // same direction is exactly `1`. Both honour "a deflated direction is unit
+        // stiffness"; they disagree about whether `ΔC` is added before or after the
+        // pinning, and `ΔC_vv ~ 1e-8` there. See
+        // `dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515`.
+        //
+        // So the criterion is one criterion on both routes, and a deflating state is
+        // ADMITTED rather than refused. `cache` is still the `B` stationarity
+        // geometry the IFT solve rides and `exact_a_cache` is still what the
+        // from-probes channels reconstruct their inverse blocks from — the two are
+        // different factorizations of different operators by design (#2515), which
+        // is exactly why neither one deflating is a reason to withhold the gradient.
         Ok(StreamingOuterEvaluation {
             cost,
             loss,
@@ -3556,6 +3590,36 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// #2515 — ONE CRITERION EVALUATION = ONE OBJECTIVE, and the evidence
+    /// assembly is part of the evaluation.
+    ///
+    /// `converge_inner_for_undamped_logdet` freezes the collapse-prevention gates,
+    /// converges, and then RESTORES the flag. The evidence assembly that prices
+    /// the criterion runs after that restore, so `assemble_arrow_schur_scaled`
+    /// re-refreshed all three gates from the MOVED state: the factor cache held
+    /// the entry-state gates and the system it is paired with held the
+    /// post-convergence ones. `validate_matrix_free_arrow_pair` then refused the
+    /// pair, and the streaming outer gradient did not exist at all on a state the
+    /// dense route ranks and differentiates without complaint:
+    ///
+    /// ```text
+    /// smooth=-1.10  dense     cost=1.8195496423e1  ||g||inf=1.580471e1
+    ///               streaming cost=1.8195496415e1  GRADIENT REFUSED: … refuses a
+    ///                         stale matrix-free system/cache pair (row fingerprint
+    ///                         4241518385832902043 vs 17638973738998200310,
+    ///                         manifold fingerprint EQUAL)
+    /// ```
+    ///
+    /// The manifold fingerprints match and the row ones do not, which is the
+    /// signature `evidence_assembly_row_fingerprint_sources_2515` attributes: with
+    /// gates held frozen the two assemblers agree bit for bit, and with one
+    /// assembler the gate state alone moves the row fingerprint. That test was
+    /// landed by `b5506eeaa` naming this as "Cause 2 (real, but not sufficient)";
+    /// its Cause 1 was retracted in `60feddc2e`, which fixed the fingerprint's
+    /// IDENTITY but not the state the fingerprint correctly reports as different.
+    ///
+    /// So the freeze belongs at the EVALUATION scope, which is here. The body is
+    /// the same function; this wrapper only decides when the gates move.
     fn penalized_quasi_laplace_criterion_streaming_exact_with_cache_lane_and_system(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -3577,6 +3641,12 @@ impl SaeManifoldTerm {
     > {
         self.assignment.validate_rho_domain(rho)?;
         let mut rho_fixed = rho.clone();
+        // The initial fit stays OUTSIDE the freeze, deliberately. The dense sibling
+        // `penalized_quasi_laplace_criterion_with_cache` runs the identical driver
+        // outside its own freeze, and the two routes have to put the inner solve at
+        // the SAME state or the criterion they each price is a different criterion —
+        // which is the defect this issue is, in the one place it would be easiest to
+        // reintroduce while fixing it.
         let initial_fit = self.run_joint_fit_arrow_schur_for_quasi_laplace(
             target,
             &mut rho_fixed,
@@ -3586,6 +3656,44 @@ impl SaeManifoldTerm {
             ridge_ext_coord,
             ridge_beta,
         )?;
+        let gates_were_frozen = self.freeze_collapse_prevention_gates();
+        let out = self.penalized_quasi_laplace_criterion_streaming_exact_gate_frozen(
+            target,
+            rho,
+            &mut rho_fixed,
+            registry,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            initial_fit,
+            lane,
+        );
+        self.streaming_gates_frozen = gates_were_frozen;
+        out
+    }
+
+    fn penalized_quasi_laplace_criterion_streaming_exact_gate_frozen(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        rho_fixed: &mut SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        inner_max_iter: usize,
+        learning_rate: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+        initial_fit: crate::manifold::fit_drivers::EvidenceJointFitOutcome,
+        lane: Option<&mut SurrogateLaneState>,
+    ) -> Result<
+        (
+            f64,
+            SaeManifoldLoss,
+            ArrowFactorCache,
+            Option<StreamingEvidenceArtifacts>,
+        ),
+        SaeCriterionError,
+    > {
         let mut loss = initial_fit.loss;
         let mut criterion_fixed_point = initial_fit.fixed_point;
         // Drive the inner (t, β) state to the SAME KKT/step-converged optimum the
@@ -3627,7 +3735,7 @@ impl SaeManifoldTerm {
         let mut converged_cache = self.converge_inner_for_undamped_logdet(
             target,
             rho,
-            &mut rho_fixed,
+            rho_fixed,
             registry,
             inner_max_iter,
             learning_rate,
@@ -3641,13 +3749,22 @@ impl SaeManifoldTerm {
         // #9: accumulate the per-atom Grams + N_eff + log_det_tt in the same
         // log-det pass. These are required by the canonical rank-charge criterion.
         let mut rank_inputs = StreamingRankInputs::default();
-        let (log_det, evidence_artifacts) = self.streaming_exact_arrow_log_det_with_lane_and_system(
-            target,
-            rho,
-            registry,
-            Some(&mut rank_inputs),
-            lane,
-        )?;
+        // #2515 — an INDEFINITE exact-A verdict from the arrow evidence route must
+        // arrive here as the SAME typed error the dense route raises, not as a
+        // generic `Numerical`. Both routes are saying "this state is a saddle, so
+        // `½log|A|` is not a Laplace normalizer"; the outer solver reads the typed
+        // one as an infeasible ρ (`+inf`, steer away) and the untyped one as a
+        // defect that aborts the fit. Same verdict, two behaviours, chosen by which
+        // route the memory planner picked — this issue's genus one level up.
+        let (log_det, evidence_artifacts) = self
+            .streaming_exact_arrow_log_det_with_lane_and_system(
+                target,
+                rho,
+                registry,
+                Some(&mut rank_inputs),
+                lane,
+            )
+            .map_err(SaeCriterionError::from_arrow_refusal)?;
         // The returned row-factor cache and the external matrix-free log|S|
         // estimate are one evidence operator. Stamp the authoritative joint
         // value onto the cache so from-probes theta-adjoint consumers can verify
@@ -4110,10 +4227,24 @@ impl SaeManifoldTerm {
             // Cholesky-factoring the dense Schur. Peak memory is the per-row block
             // storage the inner PCG already holds, not the extra O(k²) dense S.
             //
+            // #2515 — the operator this factors is `a_sys`, the EXACT OBSERVED
+            // INFORMATION, whose sign is a modelling verdict and not a rounding
+            // artefact. `with_evidence_unit_deflation` deflates on `λ < floor` —
+            // one-sided — so it swallowed every negative direction of `A` however
+            // large and priced it as the ρ-independent null `log 1 = 0` with a `1/λ
+            // → 1` inverse, while the dense route classified the same direction as
+            // #2336 clamp-attributable curvature (priced at its basin) or as a
+            // genuine saddle (the typed `IndefiniteObservedInformation` refusal
+            // that makes the ρ infeasible). Measured on #2712's deflated anchor at
+            // `log λ_smooth = −1.05`: reduced-Schur eigenvalues `−7.997610e-3` and
+            // `−2.033493e-3`, five decades outside the `1e-8` band, both pinned to
+            // `+1`, and the two complete outer gradients `1.009` RELATIVE apart.
             let options = ArrowSolveOptions::direct()
                 .with_gpu_policy(self.gpu_policy)
                 .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-                .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+                .with_indefinite_refusing_evidence_unit_deflation(
+                    gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+                );
             // Assemble the WHOLE system once (a single "chunk" over all rows) so the
             // matrix-free reduced-Schur apply `v ↦ S·v` can iterate every row; the
             // per-row block storage is exactly what the inner solve already holds.
@@ -4213,10 +4344,16 @@ impl SaeManifoldTerm {
         };
         let mut schur_acc = Array2::<f64>::zeros((border_dim, border_dim));
         let mut log_det_tt = 0.0_f64;
+        // #2515 — same substitution as the matrix-free branch above, and for the
+        // same reason: every factorization below is of `exact_a_evidence_system`'s
+        // output, so a resolved negative direction is a saddle verdict rather than
+        // a numerical null, and unit-pinning it would price a saddle as `log 1 = 0`.
         let options = ArrowSolveOptions::direct()
             .with_gpu_policy(self.gpu_policy)
             .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+            .with_indefinite_refusing_evidence_unit_deflation(
+                gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+            );
         let mut start = 0usize;
         while start < n_total {
             let end = (start + chunk_size).min(n_total);

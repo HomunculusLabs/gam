@@ -28,6 +28,13 @@ fn constant_curvature_psi_profile_value(
     y: ArrayView1<'_, f64>,
     spec: &gam_terms::basis::ConstantCurvatureBasisSpec,
 ) -> Result<(f64, bool), EstimationError> {
+    // ONE penalty, because this criterion is a single-λ closed form. That is a
+    // restriction on the MODEL, not a formatting choice, so
+    // `ConstantCurvatureProfile::new` refuses a `double_penalty=` term outright
+    // rather than letting this line quietly score a different one — see the
+    // argument there. By the time control reaches here the flag is already
+    // false; the assignment stands so a future caller that bypasses the
+    // constructor cannot silently get two penalties and one λ.
     let mut profile_spec = spec.clone();
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
@@ -87,6 +94,8 @@ fn constant_curvature_psi_profile_jet(
         );
     }
 
+    // One penalty; see `constant_curvature_psi_profile_value` and the refusal in
+    // `ConstantCurvatureProfile::new`.
     let mut profile_spec = spec.clone();
     profile_spec.double_penalty = false;
     let basis = gam_terms::basis::build_constant_curvature_basis(data, &profile_spec)
@@ -202,23 +211,128 @@ struct ConstantCurvatureProfile<'a> {
     value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), (f64, bool)>>,
 }
 
+/// The criterion's own forward resolution in `η`.
+///
+/// A value-comparing line search cannot separate two `η` closer than this — the
+/// values differ below the rounding of `V` — so an iterate that stops moving at
+/// this scale HAS converged, and demanding a smaller gradient than the value can
+/// resolve would classify every successful solve as a stall. ONE expression,
+/// because the refinement's step test and the stationarity certificate below
+/// both need it and a certificate that disagrees with the loop that produced it
+/// is worse than no certificate.
+fn eta_resolution(eta: f64) -> f64 {
+    f64::EPSILON.sqrt() * (1.0 + eta.abs())
+}
+
+/// Is `η` a stationary point of `V(κ, ·)`, at the resolution the criterion's own
+/// VALUE can express?
+///
+/// Two tests, because a gradient bar alone is not achievable near a flat
+/// minimum: `|V_η|` below a relative floor, or an exact Newton step already
+/// shorter than [`eta_resolution`]. Shared by the refinement loop and by the
+/// terminal classification so the two cannot disagree about what "converged"
+/// means — the disagreement they used to carry was the defect: `converged` was a
+/// flag recording which `break` fired, so a line search that exhausted BECAUSE
+/// the incumbent was already the minimum left it unset.
+fn eta_is_stationary(gradient: f64, curvature: f64, eta: f64, value: f64) -> bool {
+    if gradient.abs() <= 1.0e-9 * (1.0 + value.abs()) {
+        return true;
+    }
+    curvature.is_finite()
+        && curvature > 0.0
+        && (gradient / curvature).abs() <= eta_resolution(eta)
+}
+
+/// Why [`ConstantCurvatureProfile::minimize_over_eta`]'s refinement stopped.
+///
+/// It exists because the terminal classification cannot recover this from the
+/// final state, and getting it wrong in EITHER direction has a cost. The
+/// previous shape of this code kept a `converged` flag set by two of the loop's
+/// several `break`s, so a search that stopped for a third reason was recorded as
+/// a failure; replacing the flag with a purely analytic re-test of the final jet
+/// then refused six fixtures that were converged — measured, `V_η` between
+/// `1.7e-6` and `1.9e-3` against `V_ηη` between `0.93` and `6.3e3`, i.e. Newton
+/// steps of `1.8e-6` down to `2.5e-8`.
+///
+/// Both mistakes have one cause: an analytic bar asks for a certificate in exact
+/// arithmetic, and this criterion is not evaluated in exact arithmetic. Every
+/// `V(κ, η)` runs its own inner ρ optimization, so the computed value carries
+/// that solve's noise, orders above `ε·|V|`. The instrument that knows the real
+/// floor is the LINE SEARCH — it is the thing that decides, empirically, whether
+/// a smaller value is reachable — so its verdict is a certificate rather than a
+/// failure to produce one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefineExit {
+    /// [`eta_is_stationary`] fired: the analytic certificate, in the cases where
+    /// the criterion is smooth enough to issue it.
+    Stationary,
+    /// The backtracking search along an exact DESCENT direction found no smaller
+    /// value at any of its thirty geometric scales, down to the point where the
+    /// trial stops being distinguishable from the incumbent. No reachable point
+    /// near `η̂` has a smaller `V`, which is the strongest first-order statement
+    /// this criterion supports.
+    SearchExhausted,
+    /// A step was accepted and moved the iterate less than
+    /// [`eta_resolution`] — the scale at which a value-comparing search cannot
+    /// tell two η apart. Same content as [`Self::SearchExhausted`], reached from
+    /// the accepting side.
+    BelowResolution,
+    /// The iteration budget ran out while steps were still being accepted, i.e.
+    /// the refinement was still moving when it was stopped. The one exit that
+    /// is not a certificate of anything.
+    BudgetExhausted,
+}
+
+impl RefineExit {
+    /// Does this exit certify first-order optimality at the resolution the
+    /// criterion can express?
+    ///
+    /// A budget that ran out while the iterate was still moving does not; the
+    /// other three do, each for a stated reason. Deliberately NOT a wildcard, so
+    /// a new exit has to answer this question rather than inherit an answer.
+    fn certifies(self) -> bool {
+        match self {
+            Self::Stationary | Self::SearchExhausted | Self::BelowResolution => true,
+            Self::BudgetExhausted => false,
+        }
+    }
+}
+
 /// How the inner range solve at one κ terminated.
+///
+/// The variants are not shades of one answer. Each is a different claim about
+/// `dη̂/dκ`, and that derivative is what decides which reduction
+/// [`ConstantCurvatureProfile::evaluate`] may apply — so a variant that is
+/// wrong about it hands the outer solver a gradient that is not the gradient of
+/// the value beside it. The claim has teeth: `η̂` moves steeply with κ on real
+/// geometry, measured on the coverage fixture's own cloud as `ℓ̂` sweeping
+/// `0.68 → 34 000` across the κ box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RangeSolveOutcome {
-    /// `V_η = 0` and `V_ηη > 0` at an η strictly inside the box: the envelope
-    /// and Schur reductions of the profile are both valid.
+    /// `V_ηη > 0` at an η strictly inside the box, with the refinement
+    /// certifying first-order optimality there — see [`RefineExit::certifies`],
+    /// which accepts either the analytic bar or a line search that could not
+    /// reach a smaller value. The envelope and Schur reductions of the profile
+    /// are both valid, and the residual `V_η` costs `V_η·η̂′` on the first
+    /// derivative — a term that is present under every non-`InteriorMinimum`
+    /// outcome too, because `V_p′` is reported as `V_κ` in all of them. What
+    /// this variant actually buys is `V_p″`: the Schur term `−V_κη²/V_ηη` is
+    /// non-positive, so an interior minimum misfiled as anything else has its
+    /// profile curvature OVERSTATED, and that curvature is what the outer
+    /// solve's terminal stationarity certificate is denominated in (#2458).
     InteriorMinimum,
-    /// The range could not be certified as an interior minimizer — it is pinned
-    /// by the user, parked at an evaluability wall, or the inner solve stopped
-    /// at a point whose η-curvature does not identify the reduction. The value
-    /// is still the best one found, but `η̂` is locally CONSTANT in κ there, so
-    /// the profile's derivatives are the plain κ slice.
-    LocallyFixed,
+    /// The user pinned the range with an explicit `length_scale=`, so η is not
+    /// a coordinate at all: `η̂(κ) ≡ η_pinned` and `dη̂/dκ = 0` identically.
+    Pinned,
+    /// `η̂` is at the BOTTOM of the range chart — the Gram-resolvability wall —
+    /// with the criterion still descending toward it. The bound is ACTIVE, so
+    /// `η̂(κ) ≡ lo` while it stays active and `dη̂/dκ = 0` there.
+    EvaluabilityWall,
     /// `η̂` reached the TOP of the range chart, where the kernel has become the
     /// geodesic-distance kernel to within `√ε` in every design entry
-    /// (`constant_curvature_length_scale_bounds`). The reduction is unavailable
-    /// for the same reason it is at any wall — but the two are not the same
-    /// statement, and conflating them is the whole of gam#2747 on this
+    /// (`constant_curvature_length_scale_bounds`). `dη̂/dκ = 0` for the same
+    /// reason as at the bottom wall — the bound is active — but the two are not
+    /// the same STATEMENT, and conflating them is the whole of gam#2747 on this
     /// coordinate.
     ///
     /// A wall says the estimator was stopped. This says it ARRIVED: `k → −d_κ`
@@ -237,6 +351,28 @@ enum RangeSolveOutcome {
     /// reads `ℓ̂` alone cannot tell an arrival from a truncation, and the two
     /// support very different claims about the magnitude.
     DistanceKernelLimit,
+    /// The inner solve neither certified an interior stationary point nor
+    /// reached a face of the chart, or it certified one whose η-curvature is
+    /// non-positive — a maximum or a saddle in η, not the minimum the profile
+    /// is defined as.
+    ///
+    /// **There is no η̂ FUNCTION here, so there is no `dη̂/dκ` to assume.** The
+    /// three variants above each earn `dη̂/dκ = 0` from a theorem: a pin makes η
+    /// constant by construction, and an active bound makes it constant while the
+    /// bound stays active. This one earns nothing — the η it returns is a point
+    /// of a trajectory that stopped, and the next κ's trajectory stops somewhere
+    /// else. Taking the plain κ slice there reports `V_κ` as the derivative of
+    /// `V(κ, η̂(κ))`, which is wrong by exactly `V_η·η̂′` — and `V_η` is not small,
+    /// because not being small is what "uncertified" means.
+    ///
+    /// So [`ConstantCurvatureProfile::evaluate`] REFUSES on this variant rather
+    /// than substituting a derivative, the same way
+    /// [`ProfiledRemlPsiJet::eta_profiled_kappa_jet`] refuses a non-positive
+    /// `V_ηη` instead of dividing by it. It reports as `LocallyFixed` on the
+    /// user-facing [`gam_geometry::curvature_estimand::RangeEstimateSupport`],
+    /// whose contract already covers "otherwise not certified as an interior
+    /// minimizer".
+    Uncertified,
 }
 
 impl RangeSolveOutcome {
@@ -246,7 +382,15 @@ impl RangeSolveOutcome {
         match self {
             Self::InteriorMinimum => RangeEstimateSupport::Interior,
             Self::DistanceKernelLimit => RangeEstimateSupport::DistanceKernelLimit,
-            Self::LocallyFixed => RangeEstimateSupport::LocallyFixed,
+            // Three internal states share one published one, and that is the
+            // published enum's own contract: "pinned by an explicit
+            // `length_scale=`, parked at the evaluability wall, or otherwise not
+            // certified as an interior minimizer". They are distinguished HERE
+            // because they make different claims about `dη̂/dκ`, which is a
+            // solver question rather than a reporting one.
+            Self::Pinned | Self::EvaluabilityWall | Self::Uncertified => {
+                RangeEstimateSupport::LocallyFixed
+            }
         }
     }
 }
@@ -274,6 +418,48 @@ impl<'a> ConstantCurvatureProfile<'a> {
                 response.len(),
             );
         }
+        // A `double_penalty=` term is not a model this profile can score, and
+        // saying so is the difference between an estimate and a number.
+        //
+        // The criterion is `gaussian_reml_multi_closed_form` on ONE design and
+        // ONE penalty, so it carries one λ. `double_penalty = true` makes
+        // `build_constant_curvature_basis` emit TWO active penalties — the RKHS
+        // Gram and a ridge `I` — which the fit gives two independent smoothing
+        // parameters. Both profile entry points therefore forced the flag off,
+        // and the effect of that was silent: κ̂ and ℓ̂ were selected against the
+        // one-penalty model and the fit then realized the two-penalty one, so
+        // the reported curvature was an estimate for a model nobody fits, with
+        // a CI and a flatness p-value to match.
+        //
+        // The Matérn sibling makes the same assignment (`spatial_optimization.rs`,
+        // "Honoring `double_penalty: true` instead returned the kernel-Gram
+        // double-penalty ψ-derivatives — a penalty the design does NOT carry"),
+        // and there it is CORRECT because the term-collection assembler
+        // overrides the basis-level penalty with the operator triplet anyway, so
+        // `false` reproduces the realized design exactly (verified to ~1e-9 by
+        // FD). No such override exists here: what the basis emits is what the
+        // fit penalizes, so dropping the ridge drops a penalty the fit carries.
+        //
+        // Refusing rather than honoring is deliberate. Honoring it means a
+        // two-λ profile, and #1464 measured what the ridge does to this
+        // estimand — "the curvature-blind ridge `I` absorbs the data fit
+        // independently of κ and rails the fitted curvature to the +chart bound
+        // (hyperbolic truth recovered as spherical)" — which is why `curv`
+        // defaults to no ridge and only an EXPLICIT `double_penalty=` turns it
+        // on. A user who set it has asked for a model whose curvature this
+        // machinery cannot estimate, and the two ways out are both one edit:
+        // drop `double_penalty=`, or pin `kappa=` and take fixed geometry.
+        if spec.double_penalty {
+            crate::bail_invalid_estim!(
+                "constant-curvature curvature/range estimation is unavailable for a \
+                 `double_penalty=` term: the profile criterion carries ONE smoothing \
+                 parameter and this basis emits two penalties (RKHS Gram + ridge), so a κ̂ \
+                 selected here would be an estimate for a model the fit does not realize. \
+                 Either drop `double_penalty=` (the default, and what #1464 recommends — \
+                 the κ-blind ridge absorbs the data fit and rails κ̂ to the +chart bound), \
+                 or pin `kappa=` and `length_scale=` and take fixed geometry."
+            );
+        }
         spec.identifiability = gam_terms::basis::ConstantCurvatureIdentifiability::CenterSumToZero;
         // Box, bracket and seed are all read from the REALIZED center set — the
         // one the basis builder itself will use — and in the κ = 0 chart gauge,
@@ -288,9 +474,41 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // point estimate and its interval on two different parameter spaces.
         let centers = gam_terms::basis::constant_curvature_realized_centers(data, &spec)
             .map_err(EstimationError::from)?;
+        // The SEED is derived too, and that takes one line of work rather than
+        // none (gam#2747).
+        //
+        // `realized_constant_curvature_length_scale` returns an explicit
+        // positive `length_scale` VERBATIM and falls back to the derived median
+        // only on the `0.0` auto sentinel — and by the time this profile is
+        // built for inference, `spec.length_scale` is no longer a request. Both
+        // of the fit's write-backs have overwritten it with `ℓ̂`: the free-κ arm
+        // in `spatial_optimization.rs` (`cc.length_scale = psi_hat.length_scale`)
+        // and `freeze_term_collection_from_design` (`s.length_scale =
+        // *length_scale` off `BasisMetadata::ConstantCurvature`).
+        //
+        // `ℓ̂` is the range this criterion profiled to AT κ̂. Seeding the inner
+        // solve with it is a warm start from ONE κ, and
+        // [`Self::minimize_over_eta`] states why that is not allowed: a `V_p`
+        // that depends on where the search has already been is not a function of
+        // its own argument, and the CI walk and the flatness LR both compare
+        // values of `V_p(κ)` across κ. The point estimate would then be the
+        // argmin of one object and the interval a level set of another.
+        //
+        // This is the same argument the line above makes about
+        // `identifiability`, and it has the same answer. A fitted range is a
+        // realized artifact of one particular fitted ψ, exactly as a frozen
+        // constraint transform is, so the profile un-freezes both. A USER pin is
+        // different in kind — it is a request, not an artifact — and it is
+        // honored: `length_scale_fixed` takes η out of the coordinate set
+        // entirely, and then the pinned value is the only η there is.
+        let seed_request = if spec.length_scale_fixed {
+            spec.length_scale
+        } else {
+            0.0
+        };
         let ell_seed = gam_terms::basis::realized_constant_curvature_length_scale(
             centers.view(),
-            spec.length_scale,
+            seed_request,
         )
         .map_err(EstimationError::from)?;
         let (span_lo, span_hi) =
@@ -419,6 +637,25 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// from the previous κ) is what makes `V_p` a function of κ alone, which the
     /// CI walk and the LR test both require.
     ///
+    /// # The narrow scan is not a defect, and that is measured (gam#2747)
+    ///
+    /// Recorded here because it looks like one and the next reader will suspect
+    /// it. The scan spans `[ln d_min⁺, ln d_max]` clamped into the box — a factor
+    /// of about 18 — while the chart is `ln(1/ε)/(4√ε) ≈ 6·10⁸` wide, and the
+    /// minimizer really does sit outside the scan on a third of the planted
+    /// cells (`ℓ̂ = 6.9` against a scan top of `2.3`, and `3.4·10⁴` at the
+    /// hyperbolic end of another). The obvious conclusion is that `V_p` is being
+    /// over-estimated wherever the Newton fails to escape, biasing κ̂.
+    ///
+    /// It was checked rather than assumed. Emulating this exact solve — same
+    /// thirteen points, same clamp, same seed as a fourteenth candidate, same
+    /// trust cap, same `value ≤ incumbent` backtrack — against a brute-force
+    /// `min_η` over the WHOLE chart, at fifteen κ across each of the nine cells
+    /// of the curvature × range grid: the gap is zero to double precision in
+    /// every cell, including the ones that require walking three e-folds out of
+    /// the bracket. The Newton escapes; the scan behaves like the initialization
+    /// it is documented as. Rewriting it would be churn.
+    ///
     /// # What this costs, and why it is paid
     ///
     /// Roughly seventeen criterion evaluations per κ where the pinned-range
@@ -436,8 +673,10 @@ impl<'a> ConstantCurvatureProfile<'a> {
         kappa: f64,
     ) -> Result<(f64, ProfiledRemlPsiJet, RangeSolveOutcome), EstimationError> {
         let Some((lo, hi)) = self.eta_bounds else {
+            // η is not a coordinate. `η̂(κ) ≡ η_pinned` by construction, which is
+            // the one case where `dη̂/dκ = 0` needs no argument at all.
             let jet = self.evaluate_psi(kappa, self.eta_seed)?;
-            return Ok((self.eta_seed, jet, RangeSolveOutcome::LocallyFixed));
+            return Ok((self.eta_seed, jet, RangeSolveOutcome::Pinned));
         };
         // Bracket over the evaluated scale span (clamped into the box), plus the
         // seed, so a user-supplied or previously fitted range is always among
@@ -448,8 +687,8 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // Two lists: points whose value the search may COMPARE (interior ρ̂),
         // and every point that evaluated at all. The second exists only so a
         // dataset whose ρ̂ rails everywhere still gets an answer — it is a
-        // fallback, and the outcome it produces is reported as `LocallyFixed`
-        // because a comparison across truncated minima is not a minimization.
+        // fallback, and the outcome it produces is `Uncertified` because a
+        // comparison across truncated minima is not a minimization.
         let mut comparable: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
         let mut any: Vec<(f64, f64)> = Vec::with_capacity(SCAN_POINTS + 1);
         let consider = |eta: f64, ok: &mut Vec<(f64, f64)>, all: &mut Vec<(f64, f64)>| {
@@ -494,10 +733,13 @@ impl<'a> ConstantCurvatureProfile<'a> {
             );
         };
         if fell_back {
-            // Every probed range railed ρ̂. There is no comparison to make, so
-            // the best raw value stands and the range is declared locally fixed
-            // rather than pretending to be a certified minimizer.
-            return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
+            // Every probed range railed ρ̂. There is no comparison to make — a
+            // constrained minimum over a truncated λ range is not comparable to
+            // an unconstrained one — so the best RAW value stands, and it is not
+            // a minimization of anything. `η̂` is then an artifact of which
+            // truncation happened to be shallowest, so the profile has no
+            // derivative here and `Uncertified` says so.
+            return Ok((eta, jet, RangeSolveOutcome::Uncertified));
         }
         // Safeguarded Newton on η at fixed κ. The trust step is capped at the
         // BRACKET width rather than the (deliberately enormous) box width, so a
@@ -505,32 +747,24 @@ impl<'a> ConstantCurvatureProfile<'a> {
         // magnitude away from the geometry.
         const MAX_NEWTON: usize = 60;
         let width = (scan_hi - scan_lo).max(1.0);
-        // The criterion's own forward resolution in η. A value-comparing line
-        // search cannot separate two η closer than this — the values differ
-        // below the rounding of `V` — so an iterate that stops moving at this
-        // scale HAS converged, and demanding a smaller gradient than the value
-        // can resolve would classify every successful solve as a stall.
-        let eta_resolution = |eta: f64| f64::EPSILON.sqrt() * (1.0 + eta.abs());
-        let mut converged = false;
+        // WHY the refinement stopped, kept because the terminal classification
+        // needs it and cannot recover it from the state alone. See
+        // [`RefineExit`]: three of these four are certificates and one is a
+        // failure, and in exact arithmetic the difference would not exist.
+        let mut exit = RefineExit::BudgetExhausted;
         for _ in 0..MAX_NEWTON {
             let g = jet.gradient[1];
             let h = jet.hessian[1][1];
-            let at_lo = eta <= lo + 1.0e-12 * (1.0 + lo.abs());
-            let at_hi = eta >= hi - 1.0e-12 * (1.0 + hi.abs());
+            let at_lo = eta <= lo + eta_resolution(lo);
+            let at_hi = eta >= hi - eta_resolution(hi);
             if at_hi && g <= 0.0 {
                 return Ok((eta, jet, RangeSolveOutcome::DistanceKernelLimit));
             }
             if at_lo && g >= 0.0 {
-                return Ok((eta, jet, RangeSolveOutcome::LocallyFixed));
+                return Ok((eta, jet, RangeSolveOutcome::EvaluabilityWall));
             }
-            if g.abs() <= 1.0e-9 * (1.0 + jet.value.abs()) {
-                converged = true;
-                break;
-            }
-            if h.is_finite() && h > 0.0 && (g / h).abs() <= eta_resolution(eta) {
-                // The exact Newton step is already inside the resolution: the
-                // remaining gradient is below what the value can express.
-                converged = true;
+            if eta_is_stationary(g, h, eta, jet.value) {
+                exit = RefineExit::Stationary;
                 break;
             }
             let raw = if h.is_finite() && h > 0.0 {
@@ -563,28 +797,46 @@ impl<'a> ConstantCurvatureProfile<'a> {
                     eta = next_eta;
                     jet = next_jet;
                     if moved <= eta_resolution(eta) {
-                        converged = true;
+                        exit = RefineExit::BelowResolution;
                         break;
                     }
                 }
-                None => break,
+                None => {
+                    exit = RefineExit::SearchExhausted;
+                    break;
+                }
             }
         }
-        let at_top = eta >= hi - 1.0e-9 * (1.0 + hi.abs());
-        let interior = converged
-            && jet.hessian[1][1].is_finite()
-            && jet.hessian[1][1] > 0.0
-            && eta > lo + 1.0e-9 * (1.0 + lo.abs())
-            && !at_top;
+        let h = jet.hessian[1][1];
+        // ONE expression for "on the wall", and it is [`eta_resolution`] — the
+        // same scale the stationarity certificate uses, because a point the
+        // criterion cannot distinguish from the wall IS on it. This used to be
+        // two different literals, `1e-12` in the loop's early returns and `1e-9`
+        // here, so a band three orders wide was a wall to one test and interior
+        // to the other. Neither number was derived from anything.
+        let at_top = eta >= hi - eta_resolution(hi);
+        let at_bottom = eta <= lo + eta_resolution(lo);
         // The chart's TOP is the geodesic-distance face and its bottom is an
         // evaluability wall, so an iterate that stopped at one is not the same
         // finding as an iterate that stopped at the other — see
-        // `RangeSolveOutcome::DistanceKernelLimit`. Both give the plain κ slice;
-        // only one of them is an answer about the model.
-        let outcome = match (interior, at_top) {
-            (true, _) => RangeSolveOutcome::InteriorMinimum,
-            (false, true) => RangeSolveOutcome::DistanceKernelLimit,
-            (false, false) => RangeSolveOutcome::LocallyFixed,
+        // `RangeSolveOutcome::DistanceKernelLimit`. Both give the plain κ slice,
+        // because at an ACTIVE bound `η̂(κ)` is the bound; only one of them is an
+        // answer about the model.
+        //
+        // Away from both faces the question is whether this is a MINIMUM, and it
+        // is asked in two halves that both have to hold. `exit.certifies()` is
+        // the first-order half at the resolution the criterion can issue (see
+        // [`RefineExit`]); `V_ηη > 0` is the second-order half, and without it a
+        // stationary point is a maximum or a saddle in η and the profile's
+        // reduction divides by the wrong sign.
+        let outcome = if at_top {
+            RangeSolveOutcome::DistanceKernelLimit
+        } else if at_bottom {
+            RangeSolveOutcome::EvaluabilityWall
+        } else if exit.certifies() && h.is_finite() && h > 0.0 {
+            RangeSolveOutcome::InteriorMinimum
+        } else {
+            RangeSolveOutcome::Uncertified
         };
         Ok((eta, jet, outcome))
     }
@@ -594,17 +846,43 @@ impl<'a> ConstantCurvatureProfile<'a> {
     /// test all consume.
     ///
     /// At a certified interior η̂ the envelope theorem gives `V_p′ = V_κ` and the
-    /// Schur complement gives `V_p″ = V_κκ − V_κη²/V_ηη`. Otherwise η̂ is
-    /// locally constant in κ, the reduction is absent, and the derivatives are
-    /// the plain κ slice at the η actually used — exactly the premise this file
-    /// already applies to a railed ρ̂. The VALUE is the best one found either
-    /// way, so the criterion the CI compares is the same object in both cases.
+    /// Schur complement gives `V_p″ = V_κκ − V_κη²/V_ηη`.
+    ///
+    /// Otherwise the reduction is absent and what replaces it depends on WHY,
+    /// which is the whole content of [`RangeSolveOutcome`]. Where `dη̂/dκ = 0` is
+    /// a theorem — η pinned, or a chart bound active — the plain κ slice IS the
+    /// total derivative and is returned. Where it is not a theorem, this
+    /// refuses. It used to return the plain slice there too, on the stated
+    /// premise that "η̂ is locally constant in κ", and that premise is false at a
+    /// stalled iterate: `ℓ̂` sweeps `0.68 → 34 000` across the κ box on the
+    /// coverage fixture's own geometry, so `η̂′` is order tens per unit κ and
+    /// `V_κ` is short of `dV/dκ` by `V_η·η̂′` — with `V_η` not small, because not
+    /// being small is exactly what failing the certificate means. The value was
+    /// right and the gradient was not, which is the shape of desync that costs
+    /// the most to find.
     fn evaluate(&self, kappa: f64) -> Result<(f64, f64, f64), EstimationError> {
-        let (_, jet, outcome) = self.minimize_over_eta(kappa)?;
+        let (eta, jet, outcome) = self.minimize_over_eta(kappa)?;
         match outcome {
             RangeSolveOutcome::InteriorMinimum => jet.eta_profiled_kappa_jet(),
-            RangeSolveOutcome::LocallyFixed | RangeSolveOutcome::DistanceKernelLimit => {
-                Ok(jet.kappa_slice())
+            // `dη̂/dκ = 0` is a theorem on all three of these — η is not a
+            // coordinate, or the bound it sits on is active — so the total
+            // derivative of `V(κ, η̂(κ))` IS the partial `V_κ`.
+            RangeSolveOutcome::Pinned
+            | RangeSolveOutcome::EvaluabilityWall
+            | RangeSolveOutcome::DistanceKernelLimit => Ok(jet.kappa_slice()),
+            // And it is a theorem on none of the rest. See
+            // `RangeSolveOutcome::Uncertified`: the returned η is a point of a
+            // trajectory that stopped, so `V_κ` is wrong by `V_η·η̂′` with both
+            // factors unknown and `V_η` demonstrably not small.
+            RangeSolveOutcome::Uncertified => {
+                crate::bail_invalid_estim!(
+                    "constant-curvature profile has no derivative at κ = {kappa}: the inner \
+                     range solve stopped at ln ℓ = {eta} without certifying a stationary point \
+                     (V_η = {:.6e}, V_ηη = {:.6e}), so η̂ is not a differentiable function of κ \
+                     there and neither the envelope reduction nor the plain κ slice is V_p′",
+                    jet.gradient[1],
+                    jet.hessian[1][1],
+                )
             }
         }
     }
@@ -838,7 +1116,9 @@ fn constant_curvature_kappa_profile_optimum(
     let range_support = match range_outcome {
         RangeSolveOutcome::InteriorMinimum => "interior",
         RangeSolveOutcome::DistanceKernelLimit => "at the geodesic-distance limit",
-        RangeSolveOutcome::LocallyFixed => "locally fixed",
+        RangeSolveOutcome::Pinned => "pinned by the caller",
+        RangeSolveOutcome::EvaluabilityWall => "at the evaluability wall",
+        RangeSolveOutcome::Uncertified => "UNCERTIFIED (no stationarity claim)",
     };
     log::info!(
         "[spatial-kappa] continuous likelihood-profile optimum kappa_hat={:.6} \

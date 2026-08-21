@@ -43,8 +43,8 @@
 //! statement is written down.
 
 use super::{
-    BasisOptions, Dense, KnotSource, TRANSFORMATION_MONOTONICITY_EPS, create_basis,
-    create_ispline_derivative_dense, initializewiggle_knots_from_seed,
+    ISplineBoundary, TRANSFORMATION_MONOTONICITY_EPS, initializewiggle_knots_from_seed,
+    ispline_modelling_interval, ispline_value_and_first_derivative,
 };
 use crate::inference::model::TransformationNormalParameterization;
 use ndarray::{Array1, Array2, ArrayView1};
@@ -337,57 +337,25 @@ pub fn ctn_floor_offsets(
     ))
 }
 
-/// The modelling interval `[t_q, t_{n_B}]` of the CTN response I-spline basis,
-/// where `q = degree + 1` is the degree of the B-splines the value basis
-/// integrates and `n_B = len(knots) − q − 1` is how many of them there are.
+/// Build the response-direction value and derivative bases `[1, I(y)·T]` and
+/// `[0, M(y)·T]` at arbitrary response values, on the frozen knots/degree.
 ///
-/// Read off the same index arithmetic the evaluator uses
-/// (`evaluate_ispline_scalarwith_scratch`) rather than as `knots.first()` /
-/// `knots.last()`: on the clamped vectors [`ctn_response_knots`] builds the two
-/// agree, but it is the evaluator's interval — not the knot vector's extent —
-/// that decides where the basis stops being a spline and starts being an
-/// extension, and the extension has to be anchored exactly where the spline ends.
-fn ctn_ispline_modelling_interval(
-    knots: ArrayView1<'_, f64>,
-    degree: usize,
-) -> Result<(f64, f64), String> {
-    let bs_degree = degree
-        .checked_add(1)
-        .ok_or_else(|| "CTN response I-spline degree overflow".to_string())?;
-    let num_bspline = knots
-        .len()
-        .checked_sub(bs_degree + 1)
-        .filter(|count| *count > bs_degree)
-        .ok_or_else(|| {
-            format!(
-                "CTN response knot vector needs more than {} knots for degree {degree}, got {}",
-                2 * bs_degree + 1,
-                knots.len()
-            )
-        })?;
-    let (left, right) = (knots[bs_degree], knots[num_bspline]);
-    if !(left.is_finite() && right.is_finite() && left < right) {
-        return Err(format!(
-            "CTN response I-spline modelling interval [{left}, {right}] is degenerate"
-        ));
-    }
-    Ok((left, right))
-}
-
-/// Continue the raw I-spline value/derivative bases **affinely** past the two
-/// boundary knots, at the basis's own one-sided boundary derivative.
+/// `transform = None` means the identity chart (`T = I`), which is what
+/// [`super::build_response_basis`] constructs and therefore what the fit uses;
+/// a persisted model passes its saved `T` so a prediction reproduces the fitted
+/// basis exactly. The two callers differing on how the location column is
+/// prepended is precisely the class of bug this function exists to remove.
 ///
 /// # Why the CTN transformation cannot saturate outside its knots
 ///
 /// A conditional transformation-normal model *is* the statement
 /// `F(y | x) = Φ(h(y | x))`, and gam#2600 removed the endpoint renormalizer that
 /// used to truncate it — so the fitted density `φ(h)·h'` is a density on the
-/// whole real line and `h` is its quantile map. The shared I-spline evaluator,
-/// however, holds `I_k` *constant* outside `[t_q, t_{n_B}]` (its own comment
-/// justifies that: a linear continuation would make an I-spline entry negative
-/// below the support and greater than one above it, which the `[0, 1]` basis
-/// contract forbids), and gam#2695 correctly made the M-spline derivative agree
-/// by zeroing the exterior. So outside the knots the CTN transform is
+/// whole real line and `h` is its quantile map. Under
+/// [`ISplineBoundary::Saturate`] — which is what the shared evaluator does by
+/// default, for the reasons its own module documents — `I_k` is constant and
+/// `M_k` is zero outside `[t_q, t_{n_B}]`, so the whole exterior of the fitted
+/// transform is
 ///
 /// ```text
 /// h(y) = h(y_b) + ε·(y − y_b),   ε = TRANSFORMATION_MONOTONICITY_EPS = 1e-8,
@@ -400,111 +368,29 @@ fn ctn_ispline_modelling_interval(
 /// from `Φ(U)` to `0.9999`, and two responses a factor `1.8` apart on the far
 /// side of the boundary receive PIT scores identical to seven digits.
 ///
-/// # What this does instead, and why it is not a new modelling choice
+/// [`ISplineBoundary::LinearTails`] is the classical answer — Royston-Parmar's
+/// linear tails, `mlt`'s `extrapolate` — and gives a `C¹`, strictly increasing
+/// `h` on all of `ℝ` with `h' ≥ ε` preserved (`M_k(y_b) ≥ 0`, `α ≥ 0` on the
+/// monotonicity cone), so `Φ(h)` is a proper CDF whose tails are the fitted
+/// transform's. Evaluation AT or INSIDE the knots is bit-identical, and
+/// `ctn_response_knots` guards the support by `0.1 %` of the response span so
+/// every training row is strictly inside — no fitted quantity moves.
 ///
-/// The classical transformation-model answer — Royston-Parmar's linear tails,
-/// `mlt`'s `extrapolate` — is to continue the transformation at its own boundary
-/// derivative, which is exactly what `apply_linear_extension_from_first_derivative`
-/// already does for every *clamped B-spline* value basis in this tree:
-///
-/// ```text
-/// y > right:  I_k(y) = I_k(right) + (y − right)·M_k(right⁻),  M_k(y) = M_k(right⁻)
-/// y < left :  I_k(y) = I_k(left)  + (y − left) ·M_k(left⁺),   M_k(y) = M_k(left⁺)
-/// ```
-///
-/// Consequences, all structural rather than tuned:
-/// * `h` is `C¹` and strictly increasing on all of `ℝ`, with `h' ≥ ε` outside
-///   preserved because `M_k(y_b) ≥ 0` and the monotonicity cone keeps `α ≥ 0`;
-/// * `Φ(h)` is a proper CDF whose tails are those of the fitted transform rather
-///   than of the floor, so a predictive quantile past the support is a finite
-///   arithmetic fact instead of a `1/ε` runaway a consumer must clamp away;
-/// * the value basis is **unchanged at and inside** `[left, right]`, so every
-///   fitted quantity is bit-identical — `ctn_response_knots` guards the support
-///   by `0.1 %` of the response span precisely so every training row is strictly
-///   inside, and the two branches agree at the endpoints by construction.
-///
-/// The exterior I-spline entries do leave `[0, 1]`, which is why this is done
-/// here and not in the shared basis: for the CTN the entries are coefficients of
-/// a transformation that must keep increasing, not weights that must stay in a
-/// simplex, and the survival link warp that shares the evaluator (gam#2695)
-/// genuinely wants the saturating convention.
+/// The exterior I-spline entries do leave `[0, 1]`, which is why the convention
+/// is a parameter of the shared evaluator rather than its default: for the CTN
+/// the entries are coefficients of a transformation that must keep increasing,
+/// not weights that must stay in a simplex, and the survival link warp that
+/// shares the evaluator (gam#2695) genuinely wants the saturating convention.
 ///
 /// This does mean the fitted CTN puts mass on the whole line, so a strictly
 /// positive response can be extrapolated below zero. That is a property of a
 /// Gaussian transformation model on the raw response scale — the same property
-/// the likelihood is already maximised under — and it is honest where the clamp
+/// the likelihood is already maximised under — and it is honest where a clamp
 /// was not; a model that must respect a bound belongs on the transformed scale
 /// (fit `log y`), exactly as `mlt`'s `log_first` does.
-fn ctn_extend_bases_affinely_past_the_knots(
-    response: ArrayView1<'_, f64>,
-    knots: ArrayView1<'_, f64>,
-    degree: usize,
-    value: &mut Array2<f64>,
-    derivative: &mut Array2<f64>,
-) -> Result<(), String> {
-    let (left, right) = ctn_ispline_modelling_interval(knots, degree)?;
-    // Strict inequalities: an evaluation AT a boundary knot is already the
-    // spline's own one-sided value/derivative there (the I-spline value
-    // saturates to `I_k(right)` and `create_ispline_derivative_dense`
-    // deliberately keeps the interior one-sided slope at the endpoints), which
-    // is what the extension is anchored at. `!(y >= left && y <= right)` is not
-    // used so that a non-finite `y` — refused upstream by every caller — falls
-    // through to the raw evaluation rather than silently acquiring a tail.
-    if !response.iter().any(|&y| y < left || y > right) {
-        return Ok(());
-    }
-    let boundary = Array1::from_vec(vec![left, right]);
-    let (boundary_value, _) = create_basis::<Dense>(
-        boundary.view(),
-        KnotSource::Provided(knots),
-        degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|error| format!("CTN boundary I-spline value basis failed: {error}"))?;
-    let boundary_value = boundary_value.as_ref();
-    let boundary_derivative =
-        create_ispline_derivative_dense(boundary.view(), &knots.to_owned(), degree, 1)
-            .map_err(|error| format!("CTN boundary M-spline derivative basis failed: {error}"))?;
-    let columns = value.ncols();
-    if boundary_value.ncols() != columns || boundary_derivative.ncols() != columns {
-        return Err(format!(
-            "CTN boundary bases are {}/{} columns wide but the response basis is {columns}",
-            boundary_value.ncols(),
-            boundary_derivative.ncols()
-        ));
-    }
-    for (row, &y) in response.iter().enumerate() {
-        let (end, anchor) = if y < left {
-            (0usize, left)
-        } else if y > right {
-            (1usize, right)
-        } else {
-            continue;
-        };
-        let step = y - anchor;
-        for column in 0..columns {
-            let slope = boundary_derivative[[end, column]];
-            value[[row, column]] = boundary_value[[end, column]] + step * slope;
-            derivative[[row, column]] = slope;
-        }
-    }
-    Ok(())
-}
-
-/// Build the response-direction value and derivative bases `[1, I(y)·T]` and
-/// `[0, M(y)·T]` at arbitrary response values, on the frozen knots/degree.
 ///
-/// `transform = None` means the identity chart (`T = I`), which is what
-/// [`super::build_response_basis`] constructs and therefore what the fit uses;
-/// a persisted model passes its saved `T` so a prediction reproduces the fitted
-/// basis exactly. The two callers differing on how the location column is
-/// prepended is precisely the class of bug this function exists to remove.
-///
-/// Outside the fitted knot range the bases are continued affinely at the
-/// boundary derivative — see [`ctn_extend_bases_affinely_past_the_knots`] for
-/// why a transformation model cannot let its transform saturate there. The
-/// continuation is applied to the RAW I-spline frame, before `T`; the chart is
-/// linear in the basis, so extending-then-transforming and
+/// The continuation is applied to the RAW I-spline frame, before `T`; the chart
+/// is linear in the basis, so extending-then-transforming and
 /// transforming-then-extending are the same matrix and the raw frame is where
 /// the boundary derivative is defined.
 pub fn ctn_response_bases_at(
@@ -513,32 +399,28 @@ pub fn ctn_response_bases_at(
     degree: usize,
     transform: Option<&Array2<f64>>,
 ) -> Result<(Array2<f64>, Array2<f64>), String> {
-    let response_owned = response.to_owned();
-    let (raw_value, _) = create_basis::<Dense>(
-        response_owned.view(),
-        KnotSource::Provided(knots),
-        degree,
-        BasisOptions::i_spline(),
-    )
-    .map_err(|error| format!("CTN response I-spline value basis failed: {error}"))?;
-    let mut raw_value = raw_value.as_ref().clone();
-    let mut raw_derivative =
-        create_ispline_derivative_dense(response_owned.view(), &knots.to_owned(), degree, 1)
-            .map_err(|error| format!("CTN response M-spline derivative basis failed: {error}"))?;
-    if raw_derivative.ncols() != raw_value.ncols() {
-        return Err(format!(
-            "CTN response derivative basis has {} columns but the value basis has {}",
-            raw_derivative.ncols(),
-            raw_value.ncols()
-        ));
-    }
-    ctn_extend_bases_affinely_past_the_knots(
-        response_owned.view(),
+    // The interval is read off the same index arithmetic the evaluator uses
+    // rather than as `knots.first()` / `knots.last()`: on the clamped vectors
+    // `ctn_response_knots` builds the two agree, but it is the EVALUATOR's
+    // interval that decides where the basis stops being a spline and starts
+    // being an extension. A degenerate one is refused here rather than silently
+    // producing a basis with no exterior.
+    ispline_modelling_interval(knots, degree)
+        .map_err(|error| format!("CTN response I-spline knot vector is unusable: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "CTN response I-spline modelling interval is degenerate for degree {degree} on \
+                 {} knot(s)",
+                knots.len()
+            )
+        })?;
+    let (raw_value, raw_derivative) = ispline_value_and_first_derivative(
+        response,
         knots,
         degree,
-        &mut raw_value,
-        &mut raw_derivative,
-    )?;
+        ISplineBoundary::LinearTails,
+    )
+    .map_err(|error| format!("CTN response I-spline value/derivative bases failed: {error}"))?;
 
     let (shape_value, shape_derivative) = match transform {
         Some(t) => {

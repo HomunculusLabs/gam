@@ -2847,6 +2847,10 @@ fn sae_residual_gauge_dict<'py>(
         format!("{:?}", report.metric_provenance),
     )?;
     d.set_item("pinning_rank", report.pinning_rank)?;
+    // #2757 — never ship the rank without its support: over the whole parameter
+    // space, or over the enumerated generator span when the curvature was
+    // streamed rather than materialized.
+    d.set_item("pinning_rank_support", report.pinning_rank_support.label())?;
     d.set_item("residual_gauge_dim", report.residual_gauge_dim)?;
     d.set_item("diffeomorphism_unpinned", report.diffeomorphism_unpinned)?;
     d.set_item(

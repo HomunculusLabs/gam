@@ -3961,7 +3961,10 @@ fn prepare_model_joint_audit_resolves_via_gauge_ownership() {
     let ls_spec = spec_from_dense_for_test("log_sigma", mk(&cube), 120);
 
     let specs = [t_spec, thr_spec, ls_spec];
-    let canon = canonicalize_for_identifiability(&specs)
+    let canon = canonicalize_for_identifiability(
+        &specs,
+        &vec![gam_problem::CoefficientCoordinate::Spanning; specs.len()],
+    )
         .expect("distinct gauge priorities must resolve the aliased joint (issue #366)");
     assert!(
         !canon.audit.fatal,

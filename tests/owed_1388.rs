@@ -56,6 +56,14 @@ use ndarray::{Array1, Array2};
 /// canonicaliser through the channel-aware survival/marginal-slope path.
 const K: usize = 3;
 
+/// Ordinary bases: no block in these fixtures carries a coordinate-local cone,
+/// so every coefficient coordinate is free to be reparameterised (#2748).
+fn spanning_coordinates(
+    specs: &[gam::families::custom_family::ParameterBlockSpec],
+) -> Vec<gam::families::custom_family::CoefficientCoordinate> {
+    vec![gam::families::custom_family::CoefficientCoordinate::Spanning; specs.len()]
+}
+
 fn channel_spec(
     name: &str,
     design: Array2<f64>,
@@ -140,7 +148,7 @@ fn assert_underdetermined_joint_canonicalizes(n: usize, n_levels: usize, stack_b
     let worker = std::thread::Builder::new()
         .name("owed-1388-canon".to_string())
         .stack_size(stack_bytes)
-        .spawn(move || canonicalize_for_identifiability(&specs))
+        .spawn(move || canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)))
         .expect("spawn bounded-stack canonicalisation worker");
 
     let result = worker
@@ -278,7 +286,7 @@ fn owed_1388_flat_underdetermined_joint_canonicalizes_min_target() {
     // Before the fix: Err(DimensionMismatch{reason: "...post-T rank invariant
     // violated..."}). After: Ok, because the reduced rank legitimately equals
     // min(rank(J_pre), p_total_red) = n on this under-determined joint.
-    let canon = match canonicalize_for_identifiability(&specs) {
+    let canon = match canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)) {
         Ok(c) => c,
         Err(e) => panic!(
             "under-determined flat joint (p_joint={p_joint} > n={n}) must canonicalise; \

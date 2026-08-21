@@ -4404,7 +4404,9 @@ fn psi_gram_tensor_lane_matches_streamed_reml_cost_and_gradient() {
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                build_cache.ensure_theta(&theta_probe)?;
+                build_cache
+                    .ensure_theta(&theta_probe)
+                    .map_err(|error| error.to_string())?;
                 Ok(build_cache.design().design.clone())
             },
             weights.view(),
@@ -4748,7 +4750,9 @@ fn psi_gram_tensor_e2e_kappa_optimum_matches_streamed() {
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                build_cache.ensure_theta(&theta_probe)?;
+                build_cache
+                    .ensure_theta(&theta_probe)
+                    .map_err(|error| error.to_string())?;
                 Ok(build_cache.design().design.clone())
             },
             weights.view(),

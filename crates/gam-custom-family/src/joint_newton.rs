@@ -2284,6 +2284,74 @@ pub(crate) fn joint_objective_roundoff_slack(
     }
 }
 
+/// The magnitude ONE evaluation of the inner objective ACCUMULATES, as opposed
+/// to the value it returns — and the largest rounding that magnitude can
+/// produce (gam#2748).
+///
+/// # Why the measurement needs a ceiling at all
+///
+/// [`ObjectiveResolutionWitness`] reads a backtracking ladder and concludes
+/// "one evaluation of `F` carries this much rounding" from a discrepancy that
+/// failed to shrink at the model remainder's rate. Its identity
+/// `actual − predicted = O(‖δ‖³)` is an ASYMPTOTIC statement, valid where the
+/// Taylor remainder governs the discrepancy. A ladder whose rungs are all far
+/// outside that regime — a near-singular Newton system proposing `‖δ‖∞ = 4.1e7`
+/// from `‖β‖∞ = 64` — has a discrepancy that is pure model error at every rung,
+/// and model error does not obey the remainder's rate either. The witness then
+/// reads its non-decay as arithmetic.
+///
+/// MEASURED on gam#2748's `papuan_oce4_matern_k6` `_flexible` cell: one cycle-0
+/// ladder rejected four steps (`Δobj = −2.06e11 … −3.22e9` against predictions
+/// of `+2.06e10 … +6.40e8`), and its fifth rung reported
+/// `MEASURED resolution = 9.658287e8` — for an objective whose value at the
+/// incumbent was `2.0e3`. That number then became the trust controller's noise
+/// floor on the SAME attempt, so an `actual_reduction` of `−8.049e8` (an
+/// INCREASE of eight hundred million) was `≤ floor` and accepted at `ρ := 1`.
+/// `β` moved to `‖β‖∞ = 1.592e5`, the binomial saturated, the gradient went to
+/// `1e-13` because saturated rows carry no curvature, and the solve certified
+/// the plateau. The measurement licensed its own acceptance.
+///
+/// # The ceiling, which is not a chosen constant
+///
+/// Rounding in a sum of `m` terms is bounded by `m·ε·Σ|terms|` — the textbook
+/// forward-error bound for the summation the evaluation performs. Both factors
+/// are facts about this evaluation: `m` is the number of rows it sums over, and
+/// `Σ|terms|` is bounded by the magnitudes the objective accumulates. So no
+/// rounding claim above `m·ε·Σ|terms|` can be true, whatever a ladder appears
+/// to show.
+///
+/// The accumulation is NOT `|F|`, which is the whole content of gam#2612: the
+/// penalty `½βᵀS_λβ` is evaluated as `β·(S_λβ)` with signed `S_ij`, so it
+/// accumulates at scale `max|S_λ|·‖β‖₁²` while returning `O(10)`. That term is
+/// carried explicitly here, which is what keeps the ceiling far above the
+/// resolutions gam#2612 was opened to measure (its banded witness measures
+/// `1.5e-10` against a ceiling of `O(1e-5)`) while refusing this one by nine
+/// orders.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ObjectiveAccumulation {
+    /// Number of terms the likelihood summation accumulates.
+    pub(crate) summed_terms: usize,
+    /// An upper bound on `Σ|terms|` over everything the evaluation accumulates:
+    /// the objective values themselves plus the penalty's own cancellation
+    /// scale.
+    pub(crate) magnitude: f64,
+}
+
+impl ObjectiveAccumulation {
+    /// `m·ε·(1 + Σ|terms|)` — the largest rounding one evaluation can carry.
+    ///
+    /// Non-finite or absurd inputs yield `f64::INFINITY`, i.e. no ceiling: this
+    /// guard exists to refuse an impossible measurement, never to suppress a
+    /// legitimate one it cannot size.
+    pub(crate) fn roundoff_ceiling(&self) -> f64 {
+        if !self.magnitude.is_finite() {
+            return f64::INFINITY;
+        }
+        let terms = (self.summed_terms.max(1) as f64).max(1.0);
+        terms * f64::EPSILON * (1.0 + self.magnitude.abs())
+    }
+}
+
 /// The inner objective's evaluation resolution, MEASURED from the trust
 /// region's own backtracking ladder rather than assumed from `|F|` (gam#2612).
 ///
@@ -2331,6 +2399,12 @@ pub(crate) struct ObjectiveResolutionWitness {
     /// makes its measurement in cycle 4 and every cycle after it has only two
     /// attempts at the radius floor — far too short a ladder to re-measure).
     measured: f64,
+    /// The largest `(claim, ceiling)` this solve REFUSED, so the refusal is
+    /// reportable rather than silent (gam#2748). A ladder whose non-decay
+    /// exceeds what the arithmetic can produce has measured model error, and
+    /// the reader needs to know that happened — it is the signature of steps
+    /// taken far outside the quadratic model's validity.
+    refused: Option<(f64, f64)>,
 }
 
 /// The step-norm span a ladder must cover before "the discrepancy did not
@@ -2349,7 +2423,18 @@ impl ObjectiveResolutionWitness {
     /// Record one trust-region attempt. `actual`/`predicted` are the same
     /// quantities the accept test compares; `step_norm` is the metric norm of
     /// the step they were measured across.
-    pub(crate) fn observe(&mut self, step_norm: f64, actual: f64, predicted: f64) {
+    /// Record one trust-region attempt. `actual`/`predicted` are the same
+    /// quantities the accept test compares; `step_norm` is the metric norm of
+    /// the step they were measured across; `accumulation` describes what ONE
+    /// evaluation of the objective at these points sums over, and bounds what
+    /// rounding it can possibly carry (gam#2748).
+    pub(crate) fn observe(
+        &mut self,
+        step_norm: f64,
+        actual: f64,
+        predicted: f64,
+        accumulation: ObjectiveAccumulation,
+    ) {
         if !(step_norm.is_finite() && step_norm > 0.0)
             || !actual.is_finite()
             || !predicted.is_finite()
@@ -2366,7 +2451,22 @@ impl ObjectiveResolutionWitness {
             self.finest_discrepancy = discrepancy;
         }
         if let Some(resolution) = self.ladder_verdict() {
-            self.measured = self.measured.max(resolution);
+            // A CLAIM ABOUT ROUNDING THAT THE ARITHMETIC CANNOT PRODUCE IS NOT
+            // A MEASUREMENT (gam#2748). See [`ObjectiveAccumulation`] for the
+            // bound and for the cell that made this necessary. Refusing is the
+            // conservative direction in both consumers: the trust controller
+            // keeps its own `ε|F|` floor and goes on shrinking, and the
+            // shrink-undo below never fires — which is exactly what a ladder
+            // whose rungs are outside the model's validity should get.
+            let ceiling = accumulation.roundoff_ceiling();
+            if resolution <= ceiling {
+                self.measured = self.measured.max(resolution);
+            } else {
+                let worst = self.refused.map_or(0.0, |(claim, _)| claim);
+                if resolution > worst {
+                    self.refused = Some((resolution, ceiling));
+                }
+            }
         }
     }
 
@@ -2385,6 +2485,12 @@ impl ObjectiveResolutionWitness {
     /// spanned enough to make the statement.
     pub(crate) fn measured(&self) -> f64 {
         self.measured
+    }
+
+    /// The largest `(claim, ceiling)` pair this solve refused as an impossible
+    /// statement about its own arithmetic, if any (gam#2748).
+    pub(crate) fn refused(&self) -> Option<(f64, f64)> {
+        self.refused
     }
 
     /// `Some(discrepancy at the finest step)` when this ladder spans at least
@@ -2961,6 +3067,26 @@ pub(crate) fn compute_joint_feasibility_alpha<F: CustomFamily + ?Sized>(
                 joint_alpha = alpha_max;
                 limiting_block = Some(block_idx);
             }
+        }
+    }
+    // The JOINT barrier, after the per-block ones and on the same footing
+    // (gam#2765). A domain whose argument reads more than one block cannot be
+    // stated per block: every block answers `None` — each is individually free
+    // — while the joint ray leaves the domain. `limiting_block` stays `None`
+    // when this is what binds, which is exactly the right thing downstream: a
+    // joint barrier has no single block's linear cone to project onto, so the
+    // `BlockedByActiveFace` handler falls through to shrink-and-retry rather
+    // than to a projection that does not exist.
+    if let Some(alpha_max) = family.max_feasible_joint_step_size(states, trial_delta)? {
+        if !alpha_max.is_finite() || !(0.0..=1.0).contains(&alpha_max) {
+            return Err(CustomFamilyError::trial_point(format!(
+                "joint Newton reported a JOINT feasible step fraction of {alpha_max:.6e}, \
+                 which is not a fraction in [0, 1]"
+            )));
+        }
+        if alpha_max < joint_alpha {
+            joint_alpha = alpha_max;
+            limiting_block = None;
         }
     }
     Ok((joint_alpha, limiting_block))

@@ -3846,6 +3846,17 @@ pub fn spatial_term_has_locked_kappa(spec: &TermCollectionSpec, term_idx: usize)
     explicitly_fixed && !spatial_term_uses_per_axis_psi(spec, term_idx)
 }
 
+/// Returns `true` when every spatial term in `spec` has a locked kernel scale
+/// (explicit `length_scale=X` without anisotropy) and therefore contributes no
+/// outer ψ/κ optimization axis. Empty term collections also return `true` —
+/// there are no kappas to optimize.
+///
+/// Used by family entry points that want to honor a user-supplied scalar length
+/// scale exactly: when all spatial terms are locked the n-block joint-spatial
+/// outer solver has nothing to optimize, and routing through it merely spends
+/// ~80 outer iters chasing a stalled ARC at the user's chosen ρ. Skipping
+/// straight to the rho-only path avoids that waste and respects the user's
+/// explicit kernel-scale input.
 pub fn all_spatial_terms_kappa_fixed(spec: &TermCollectionSpec) -> bool {
     spec.smooth_terms.iter().enumerate().all(|(idx, _)| {
         !spatial_term_supports_hyper_optimization(spec, idx)

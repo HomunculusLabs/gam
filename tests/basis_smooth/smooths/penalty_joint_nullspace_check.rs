@@ -223,7 +223,14 @@ fn canonicalize_clean_model_with_penalties_passes_map_check() {
         stacked_offset: None,
     };
 
-    let result = canonicalize_for_identifiability(&[spec_a, spec_b]);
+    let result = canonicalize_for_identifiability(
+        &[spec_a, spec_b],
+        // Both blocks are ordinary bases of their column spaces (#2748).
+        &[
+            gam::families::custom_family::CoefficientCoordinate::Spanning,
+            gam::families::custom_family::CoefficientCoordinate::Spanning,
+        ],
+    );
     assert!(
         result.is_ok(),
         "clean 2-block model with full-rank J and non-trivial penalties must pass \

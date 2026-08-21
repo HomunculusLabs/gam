@@ -1,5 +1,599 @@
 ## Unreleased
 
+- **The post-fit certification's surviving `param_dim`-square object is gone:
+  the certificate stopped asking for a full spectrum (#2757).** #2757 was filed
+  on a dense symmetric eigendecomposition of a `param_dim × param_dim` curvature
+  Gram in `fit_diagnostics_report` — 3160.5 s and 45.97 GiB at `p = 4096`, 60.5 %
+  of the whole fit. Two earlier rounds took most of it: `2af28dddb` held the
+  curvature in the block structure the decoder-frame parameterization gives it
+  (`p` blocks of `D × D`) on the branch a Euclidean metric takes, and
+  `b7e148809` rewrote the topology filtration that turned out to be the real wall
+  behind it (547.8 s → 52.0 s). What neither reached is the branch where the
+  per-row metric **couples output coordinates**: there `H = Σ_n J_nᵀ M_n J_n` is a
+  sum of `n · metric_rank` rank-one terms whose only exploitable structure — the
+  output-coordinate diagonality of `J_n` — is destroyed by `M_n`. `8adae9a67`
+  moved the `param_dim`-square object from a Gram to a triangular factor and its
+  own entry said outright that no storage change could fix it, naming the route
+  out. This is that route.
+
+  **The enumeration is the fix.** The certificate reads three things off `H`, and
+  only two enter a verdict:
+
+  | read | enters a verdict | streamable |
+  |---|---|---|
+  | `ξᵀHξ` per generator | yes — every verdict's numerator | **exactly**, one pass |
+  | `λ_max(H)` | yes — every verdict's denominator | to a certified relative residual |
+  | the pinning rank | **no** | not over the whole parameter space |
+
+  Confirmed by reading the call graph, not by grep: `pinning_rank` reaches the
+  summary string, the certificate evidence map and the Python dict, and no
+  verdict, no group signature, no `residual_gauge_dim`, and no `Sym(F)` check.
+  `CurvatureMeasurement` makes that enumeration structural — both routes produce
+  it and nothing downstream can tell which one ran, so a fourth consumer cannot
+  be added without deciding how it is streamed.
+
+  **`λ_max`** goes through the *existing* certified Krylov solver
+  (`symmetric_extreme_lanczos_eigenpairs`: full reorthogonalization, sharp
+  `β_k|e_kᵀy|` Ritz residual, refuses if it never certifies) rather than a new
+  one. Its step budget is `min(param_dim, root_rows)` — the exact Krylov
+  dimension bound for `H = RᵀR`, not a guess — and its breakdown threshold and
+  its acceptance check are both denominated in `tr(H)`, computed in the same
+  `diagonal()` pass. For a PSD operator the trace is a rigorous upper bound on
+  `λ_max` and vanishes only for `H = 0`, so an identically-flat curvature is
+  recognised **exactly, in one pass, with no iteration and no tolerance**, and a
+  Ritz value outside `[0, tr(H)]` is a disagreement between the operator's two
+  readings and is refused rather than reported. The relative-residual target is
+  `√ε ≈ 1.5e-8`: bracketed from below by the `≈ ε` a Ritz value of an operator of
+  norm `λ_max` can attain, and from above by the `1e-3` the verdict resolves.
+
+  **The energies** come from one pass that folds `RΞ` into a `G × G`
+  upper-triangular factor with the same Givens routine the stored accumulators
+  use. Its column norms ARE the energies (`ξ_jᵀHξ_j = Σ_a T[a,j]²`, exactly, since
+  `TᵀT = ΞᵀHΞ`) and its singular values above the shared
+  `curvature_rank_tolerance` are the generator-span pinning rank — so the rank
+  decision stays on `σ` rather than being squared into `λ`, which is the
+  discipline the rest of the module already insists on.
+
+  **What is not claimed, and is now declarable rather than inferable.** The rank
+  of `H` over the whole parameter space is a full-spectrum question and costs
+  `param_dim²` scalars from any side. `ResidualGaugeReport` carries
+  `pinning_rank_support: PinningRankSupport` — `ParameterSpace` or
+  `GeneratorSpan` — and the support rides with the number through the certificate
+  evidence map and the Python dict, so no consumer can compare two ranks that are
+  ranks of different things. `GeneratorSpan` is exact, and it is the comparison
+  the pinning rank was introduced for ("a smaller pinning rank than the generator
+  count").
+
+  **The A/B, on the identical phase** (release, 4-core, `n = 64`, `charts = 8`,
+  `metric rank = 9`, so `root_rows = 576` puts every cell on the branch under
+  test):
+
+  ```text
+       p  param_dim  mat scalars    mat gauge stream gauge    speedup   passes
+      16        128        16384       0.0079       0.0048       1.65       22
+      32        256        65536       0.0215       0.0074       2.90       22
+      48        384       147456       0.0500       0.0100       4.99       22
+      64        512       262144       0.0888       0.0159       5.58       32
+    fitted exponent d(log t)/d(log param_dim): materialized 1.75, streamed 0.82
+  ```
+
+  `mat scalars` is `param_dim²` in every cell and the streamed route's is **0**,
+  asserted rather than printed. 1.75 is not 3 yet — at `param_dim ≤ 512` the cubic
+  is not the dominant term, enumerating and embedding the generators is — which is
+  why the probe prints exponents rather than asserting a wall-clock bar. `passes`
+  is now a reported field: the Krylov solve reaches `√ε` in 22 passes over the
+  root, plus one for the diagonal and one for the projection. Extrapolated to the
+  #2731 production cell (`p = 2048`, `charts = 32`, `param_dim = 65 536`), the
+  materialized route is `2.8e14` flops to fold `480 000` rows into a 34 GiB factor
+  plus `2.8e14` to read its spectrum; the streamed route is `~3.5e11` for the
+  projection plus `~6e9` for the Krylov passes, against `O(param_dim)` of working
+  set.
+
+  The first version of that table read the streamed route as **10–50× slower**,
+  because it timed the whole `fit_diagnostics_report` against the materialized
+  route's curvature phase alone — it was timing the topology audit. Recorded
+  because the number was wrong and the correction is the finding.
+
+  **The one parallel region is over GENERATORS, and that is a correctness
+  decision.** Splitting the observations would need per-chunk partial triangular
+  factors combined pairwise, and Givens rotations do not commute — the certificate
+  would stop being bit-reproducible across runs, which is a property it is
+  asserted to have and which "two replicate fits are identified up to the same
+  group iff this signature is equal" depends on. A generator's column of `RΞ` is
+  computed from one observation's Jacobian and that generator alone and written to
+  its own slice, so there is no reduction and no summation order to depend on the
+  schedule; the serial and parallel passes are gated **bit for bit**. The
+  restructure also removed an object: accumulating `c_j[r] += U[n,i,r]·a`
+  incrementally makes the old `p × G` batch buffer unnecessary, so the pass
+  allocates nothing per observation and nothing per generator.
+
+  **Rejected.** Parallelising the cubic — it leaves `param_dim²` memory on the
+  trajectory to ~184 GiB at `p = 8192`, against SPEC.md, and #2724's own lesson is
+  that a byte-denominated admission cannot gate a cubic. A width threshold for
+  materializing — an arbitrary constant; the fork stays exactly where it already
+  was (`root_rows > param_dim` is where a materialized root stops being the
+  smaller object), so the block branch and the small-root branch are byte
+  unchanged. Making the report lazy — the other phases are already cheap and the
+  curvature is not the caller's to skip.
+
+  **Verification.** Fourteen new gates, taken against an *independently built*
+  root: `reference_dense_root` writes the `offset_k + i·d_k + a` arithmetic out
+  inline and never calls `fill_row_frame_jacobian`, so "the operator is the
+  curvature" is a checked claim rather than a shared bug. The operator's three
+  reads are that `R` and `RᵀR` entry by entry; `λ_max` is the dense spectrum's to
+  `1e-9` relative, inside the two-sided PSD bracket its own trace gives; the
+  generator-span rank is `root_spectral_rank` applied to the singular values of
+  the reference `RΞ`; the certificate is identical — every verdict, every energy
+  fraction to `1e-9`, the group signature, the residual gauge dimension, the
+  `Sym(F)` check — and stays identical at a factor scale that puts `H`'s entries
+  near `1e120`, where the fractions are exactly scale-invariant and a route that
+  squared a condition number somewhere would not reproduce them; production
+  streams exactly where a materialized root stops being smaller and nowhere else,
+  all three arms; the whole report decomposes nothing at the parameter dimension,
+  read off the process's own eigendecomposition census on a freshly spawned
+  thread; bit-for-bit reproducibility across runs and across the parallel/serial
+  fork; and four refusal gates (non-finite diagonal, negative diagonal, a matvec
+  inflated relative to its own diagonal, and a consistent hand-built operator that
+  still certifies).
+
+  Two findings from writing them, recorded rather than smoothed over. A
+  flat-curvature gate cannot use a constant decoder: zero tangents give zero
+  *frames*, so every generator is vetoed by the degenerate-tangent rule and the
+  gate measures nothing — the zero has to go in the metric. And the #998
+  exact-orbit verdicts carry `VerdictProvenance::CurvatureTest` but are not
+  decided by `H` at all; a gate that reads "no generator carries energy" off the
+  whole verdict list is reading their residual too.
+
+  Left standing, and named: once the curvature is streamed the largest object the
+  certificate holds is its own generator list — `D(D−1)/2` frame rotations plus
+  `K(K−1)/2` atom exchanges, each a `param_dim`-long vector, ~520 MiB at the
+  #2731 shape against ~16 MiB for the whole streamed working set. It is now one
+  copy rather than two (`EnumeratedGenerator` normalizes in place), which is what
+  it was before this work, but the `O(G · param_dim)` law is untouched and the
+  generators are structurally sparse — the per-atom families touch one atom's
+  block and the frame rotations are rank-two in `(i, c)`.
+
+- **A saved Royston-Parmar model's predicted survival surface depended on the
+  baseline time ANCHOR, which is a reparameterization and not a model
+  (#2705).** `center_survival_time_designs_at_anchor` subtracts the time-basis
+  row at the anchor from every entry and exit design row; its own documentation
+  calls that "an exact affine reparameterization of the baseline offset", and
+  the fit honours it — the same data fitted at five anchors spanning `1e-7 …
+  5.0` reaches the identical maximised log-likelihood to seven digits
+  (`-1.364394e3`). The PREDICTION did not:
+
+  ```text
+  eta(anchor=1e-7)   eta(anchor=1.19)      difference
+    -2.456651466        +0.403170376      +2.859821842
+    -1.813324553        +1.046497296      +2.859821849
+    -1.107764133        +1.752057720      +2.859821852
+    -0.880407739        +1.979414110      +2.859821849
+    -0.237080827        +2.622741029      +2.859821856
+    +0.468479594        +3.328301453      +2.859821859
+  ```
+
+  A constant to eight digits across three covariate values and three times —
+  `X(anchor)ᵀγ`, and a factor `e^2.86 = 17.5` on every reported cumulative
+  hazard.
+
+  **Root cause.** The fit centers unconditionally, for every likelihood mode, so
+  the saved coefficients are the CENTERED design's. `predict_survival` re-centered
+  only `LocationScale | MarginalSlope` plus bare `Weibull`, and that enumerated
+  list omitted `Transformation` — the Royston-Parmar default, and the default
+  survival likelihood. The competing-risks sibling gated the same step on
+  `weibull_baseline_in_beta` alone, so its per-cause Royston-Parmar baselines
+  were uncentered too. Both now center whenever the rebuilt time design has
+  columns at all, which is exactly when the fit centered; the mode list is
+  deleted rather than extended, because a list of modes is a second answer to a
+  question the fit already answers.
+
+  The omission was invisible on ordinary right-censored data: the default anchor
+  there is the earliest entry — the time origin — where `I_k(left) = 0` exactly,
+  so `X(anchor) = 0` and the missing subtraction subtracts nothing. It became a
+  `17.5x` error the moment the anchor moved: on every genuinely left-truncated
+  dataset, which takes the robust interior anchor by rule (#751/#1790/#2631),
+  and on every explicit `--survival-time-anchor`.
+
+  **This is what made delayed-entry survival fits degenerate.** The
+  independently-filed
+  `test_left_truncated_survival_is_nondegenerate_and_covariate_dependent`
+  (recorded red in `bench/gha_results/rust-test-suite/MASTER_FAILURES.md`) is
+  the user-facing face of it: a fit with a covariate hazard ratio of `4.2x`
+  returned survival curves that were collapsed and, at the reported precision,
+  identical across covariate values. The obvious reading — that the delayed-entry
+  factor `Λ(entry)` was wrong — is refuted by sweeping the shared entry time over
+  five decades on identical exit/event data: at `entry = 1e-6`, where the
+  truncation correction is `1e-5` relative, the fit is still off by `e^2.86`.
+  The trigger is not the size of `Λ(entry)`; it is the predicate
+  `survival_data_is_left_truncated`, which selects the interior anchor.
+
+  Gated by `transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705`
+  (two fits of one dataset differing only in `--survival-time-anchor`: the
+  surfaces must agree to `1e-4` AND the coefficient vectors must differ by more
+  than `1e-6`, so the agreement is a statement about the reparameterization and
+  not about two identical models) and by
+  `left_truncated_survival_is_nondegenerate_and_covariate_dependent_2705`, which
+  carries an `entry == 0` control arm so a failure separates the harness from
+  the delayed-entry path.
+
+- **The constant-curvature range solve claimed `dη̂/dκ = 0` on a state that had
+  not earned it, and the curvature acceptance measured one of its two signs
+  (#2747).** Two things, and the second is the reason the first went unseen.
+
+  `RangeSolveOutcome::LocallyFixed` named three different terminations — the
+  caller pinned `length_scale=`, the iterate parked at the chart's evaluability
+  wall, and the Newton stopped somewhere without a certificate — and
+  `ConstantCurvatureProfile::evaluate` treated all three alike, taking the plain
+  κ slice, i.e. reporting `V_κ` as the total derivative of `V(κ, η̂(κ))`. That is
+  a theorem for the first two (a pin makes η constant by construction; an ACTIVE
+  bound makes it constant while it stays active) and nothing at all for the
+  third. The error is `V_η·η̂′`, and neither factor is small: `V_η` not being
+  small is what failing the certificate means, and `η̂′` is order tens per unit κ
+  on real geometry — measured on the coverage fixture's own cloud, `ℓ̂` sweeps
+  `0.68 → 34 000` across the κ box.
+
+  The certificate is now a property of the STATE rather than of the exit branch.
+  `converged` was a flag set by two of the loop's several `break`s, so a line
+  search whose every trial is worse than an incumbent that is already the
+  minimum exhausted, left through `None => break`, and had a stationary point
+  classified as a stall. Emulating the shipped inner solve against a
+  brute-force `min_η` over the whole chart, the `2×`-range column reads
+
+  ```text
+  outcomes = ['at_hi', 'at_hi', 'converged', 'stalled', 'stalled', 'converged', …]
+  ℓ̂        = 7.7e7,   7.7e7,   4.9e7,       47.1,      17.3,      10.5, …
+  ```
+
+  and the brute force confirms `47.1` and `17.3` ARE the minimizers. Those cells
+  now reach `InteriorMinimum`, which restores the Schur term to `V_p″` and
+  publishes `RangeEstimateSupport::Interior` for a range that is one.
+  `LocallyFixed` splits into `Pinned`, `EvaluabilityWall`, `DistanceKernelLimit`
+  and `Uncertified`; the first three keep the plain slice on a stated argument,
+  and `Uncertified` REFUSES with `V_η` and `V_ηη` named — the discipline
+  `eta_profiled_kappa_jet` already applies to a non-positive `V_ηη` instead of
+  dividing by it. All four still report as `LocallyFixed` on the public
+  `RangeEstimateSupport`, whose contract already covers all of them.
+
+  Separately, `ConstantCurvatureProfile::new` derived its box and its bracket
+  from the realized center set and read its SEED from `spec.length_scale` —
+  which, by the time the CI and the flatness LR build their profile, is the
+  fit's own `ℓ̂`, written back by the free-κ enrollment and by
+  `freeze_term_collection_from_design`. Seeding the inner solve with it is a
+  warm start from one κ, which `minimize_over_eta`'s own doc forbids: *"a
+  profile likelihood that is not a function of its own argument cannot support
+  an interval"*. The seed is derived when the range is free and honoured
+  verbatim when the user pinned it — the same un-freezing the constructor
+  already did one field up for `identifiability`.
+
+  And the acceptance gained its missing half. `#2747`'s bar is *"an interior
+  optimum of `V_p(κ)` near the planted `κ⋆` … on both curvature signs"*, and the
+  tree measured the curvature × range grid only at `κ⋆ = +1` and `κ⋆ = 0`, with
+  the hyperbolic sign covered only at the auto `ℓ_ref` — the one column a
+  range-blind criterion already handled. `curved_coverage_arm(κ⋆, seed_base)`
+  parameterises the arm by sign; the spherical entry point keeps its seed base
+  so its nine datasets are unchanged. First run of the new arm:
+
+  ```text
+  [cov κ⋆=-1] covered 9 / missed 0 / unresolved 0 of 9   railed κ̂ 0/9
+              sign_correct 9/9   mean κ̂ = -0.947
+  ```
+
+  against the row this issue was filed over (`κ̂ = −1.410` railed at `0.5×`,
+  `−0.943` at `1×`, `−0.295` at `2×`). The spherical arm reads `covered 9/9,
+  railed 1/9, mean κ̂ = +1.070` against the body's `railed 9/9`.
+
+  How big the misfiling was is now measured rather than argued.
+  `the_profiled_second_derivative_is_the_derivative_of_the_profiled_first`
+  differences `V_p′(κ)` — nothing in the tree differenced the PROFILED value
+  before; the existing FD gates hold `V(κ, η)` at fixed `η` — and prints the
+  Schur term beside it:
+
+  ```text
+  κ=-1.1119  V_p″=+5.891e1 (fd +5.891e1, rel 5.3e-8)  schur=2.490e1  unreduced rel 4.16e-1
+  κ=-0.5559  V_p″=+5.553e1 (fd +5.553e1, rel 1.2e-6)  schur=4.320e1  unreduced rel 7.64e-1
+  κ=+0.8339  V_p″=+8.232e1 (fd +8.232e1, rel 2.0e-6)  schur=3.113e1  unreduced rel 3.74e-1
+  ```
+
+  The correction is 30–70% of the reported curvature, so an interior minimum
+  misfiled as "locally fixed" publishes a profile curvature **1.3× to 1.8× too
+  large** — matching the finite difference to `1e-6` when reduced and missing it
+  by `0.3–0.76` RELATIVE when not. The `κ̂` are untouched by all of this (the
+  outer search is gradient-only and both arms return `V_κ`), which is why it took
+  a second-derivative gate to see: all 27 coverage-arm estimates are bit-identical
+  before and after.
+
+  Two arbitrary constants go with it. "On the wall" was `1e-12·(1 + |η|)` in the
+  refinement's early returns and `1e-9·(1 + |η|)` in the terminal classification —
+  a band three orders wide that was a wall to one test and interior to the other,
+  with neither number derived from anything. Both are now `eta_resolution`, the
+  criterion's own forward resolution in `η` and the same scale the stationarity
+  certificate is denominated in: a point the criterion cannot distinguish from
+  the wall is on it.
+
+  Fixture set at the landing: `cargo test --release --test identifiability --
+  constant_curvature` 22 passed / 0 failed (28.2 s), and `cargo test --release -p
+  gam-models --lib -- constant_curvature` 9 passed / 0 failed, with the 3 × 3
+  criterion grid reporting `InteriorMinimum` in all nine cells and `ℓ̂` tracking
+  the planted range to 3%.
+
+- **The streaming lane declared a SADDLE to be a MODE, silently, and the memory
+  planner chose which (#2515).** `factor_evidence_unit_deflated_schur` decided a
+  direction was a numerical null with
+
+  ```rust
+  let deflated = raw_evals.iter().map(|&v| !v.is_finite() || v < deflate_floor)
+  ```
+
+  `v < deflate_floor` is ONE-SIDED: it admits every negative eigenvalue however
+  large, prices it as the ρ-independent `log 1 = 0`, and inverts it at `1`.
+  Measured on #2712's certified deflated anchor at `log λ_smooth = −1.05`, the
+  reduced Schur of the exact observed information carries
+
+  ```text
+  S_A dir 0: raw=-7.997610e-3  cond=+1.000000e0  relative=-1.414389e-3  (floor 1e-8)
+  S_A dir 1: raw=-2.033493e-3  cond=+1.000000e0  relative=-3.596263e-4  (floor 1e-8)
+  ```
+
+  five decades outside the band, both pinned to `+1`. The dense route classified
+  the same two directions as #2336 clamp-attributable negative curvature and
+  priced them at their basin, and the two complete outer gradients were then
+  `1.009` RELATIVE apart. No row block is resolved-negative there: all of `A`'s
+  negative inertia lands in `S_A`, exactly as Haynsworth's inertia additivity
+  predicts. Nothing downstream could tell — the conditioned factor is PD and its
+  log-determinant is finite — and the dense route's verdict on the same state is
+  the typed `IndefiniteObservedInformation` refusal that makes the ρ infeasible.
+
+  The band is now TWO-SIDED under an opt-in
+  `ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`: `|λ| ≤ floor·max|λ|` is
+  still the unit-pinned null on both sides of zero, and `λ < −floor·max|λ|`
+  refuses with the direction and its magnitude named. Both conditioning sites take
+  it — reduced Schur and per-row — because the inertia arrives through either. The
+  historical `UnitDeflation` is untouched and stays the majorizer's policy, where
+  it is correct: `B` is PSD by construction, so a negative eigenvalue there can
+  only be rounding on a direction that is null anyway.
+
+  The verdict also had to ARRIVE as the same thing. gam-solve's spine to gam-sae
+  is `Result<_, String>`, so a refusal routed through `Numerical` would make one
+  identical verdict an infeasible ρ on one route and a fatal
+  `RemlOptimizationFailed` on the other. Following #2598,
+  `ArrowSchurError::indefinite_evidence_marker()` is interpolated by both
+  producers and matched by its reader, and `SaeCriterionError::from_arrow_refusal`
+  maps it to `IndefiniteObservedInformation`.
+
+- **The streaming outer gradient did not exist on states the dense route
+  differentiates without complaint, because the gate freeze stopped one call too
+  early (#2515).** `converge_inner_for_undamped_logdet` freezes the
+  collapse-prevention gates, converges, and RESTORES the flag; the evidence
+  assembly that prices the criterion runs after that restore, so
+  `assemble_arrow_schur_scaled` re-refreshed all three gates from the moved state.
+  The factor cache then held entry-state gates and the system it is paired with
+  held post-convergence ones, and `validate_matrix_free_arrow_pair` refused the
+  pair:
+
+  ```text
+  smooth=-1.10  dense     cost=1.8195496423e1  ‖g‖∞=1.580471e1
+                streaming cost=1.8195496415e1  GRADIENT REFUSED: … stale matrix-free
+                          system/cache pair (row fingerprints DIFFER, manifold
+                          fingerprints EQUAL)
+  ```
+
+  `b5506eeaa` named this "Cause 2 (real, but not sufficient)" and landed the test
+  that attributes it; its Cause 1 was retracted in `60feddc2e`, which fixed the
+  fingerprint's IDENTITY but not the state the fingerprint correctly reports as
+  different. The freeze now spans the criterion evaluation, which is the scope its
+  own "ONE CRITERION EVALUATION = ONE OBJECTIVE" discipline names. The initial
+  fit stays outside it deliberately: the dense sibling runs the identical driver
+  outside its own freeze, and the two routes have to put the inner solve at the
+  SAME state or the criterion each prices is a different criterion — this issue's
+  own defect, in the one place it would be easiest to reintroduce while fixing it.
+
+  Measured on the same sweep, after: `‖g‖∞` is `1.580471e1`, `1.448392e1` and
+  `1.222628e1` at `smooth = −1.10, −1.20, −1.40` on BOTH routes, where the
+  streaming one previously had no gradient at all.
+
+  It also refreshes the #2343 amplitude-barrier gate, which it never did. The
+  assembler refreshes three gates when unfrozen and the freeze refreshed two, so
+  the amplitude gate was the one gate never refreshed at the entry state at all —
+  inside the frozen window the assembler skips it, and the freeze did not do it
+  either, leaving it carrying whatever the previous evaluation left behind. Both
+  producers now live in one function, `freeze_collapse_prevention_gates`.
+
+- **A deflating cache is no longer a reason to withhold the streaming outer
+  gradient (#2515).** `penalized_quasi_laplace_streaming_outer_evaluation` refused
+  every evaluation whose evidence factorization spectrally deflated a row. Its own
+  note named the lift condition — reconcile the dense route's ABSOLUTE spectral
+  floor with the arrow route's per-row relative one — and #2673 did exactly that
+  (`00c1fe139`, `758c9d336`) without anyone re-measuring this comparison against
+  it. Re-measured on the same anchor: `2.798722e-8` against `‖g‖∞ = 1.726754e1`,
+  `1.62e-9` relative, from `9.131537e0` against `5.004339e0`. Direction for
+  direction the classifications agree — the dense route pins nothing and prices no
+  clamp-attributable negative over the anchor's thirty coordinate directions.
+
+  One anchor is not a contract, and widening to a nine-rung ρ ladder is what found
+  the saddle defect above. The gates that replace the refusal are the ladder
+  (either both routes price a state and agree within `1e-6` relative, or both call
+  it a saddle — with the dense spectrum required to corroborate every refusal, so
+  an over-refusal goes red rather than passing as caution), the same parity through
+  `evaluate_outer_criterion_route` itself, and an attribution gate for the residual.
+
+  **That residual is `1.6e-9`, and it is attributed rather than absorbed into a
+  bar.** The dense route materializes `A` through `apply_cached_arrow_hessian`,
+  which applies `L Lᵀ` of the row's UNDAMPED FACTOR — the majorizer already
+  unit-pinned by its own factorization — so a `B`-deflated direction enters the
+  dense `A` as `1 + vᵀΔCv`; the arrow route folds `ΔC` into the untouched
+  majorizer blocks and unit-pins the result, so the same direction is exactly `1`.
+  Measured on all ten deflated directions of the anchor: `vᵀΔCv = −3.431291e-8`
+  against a dense `vᵀ(B̃+ΔC)v = 9.9999996569e-1`, which is `1 + vᵀΔCv` to every
+  digit. The gate is an IDENTITY — the two exact-`A` row blocks differ by the
+  majorizer's own conditioning increment and by nothing else, `3.552714e-15` over
+  a block scale of `2.513448e1` — so a second cause cannot hide inside the parity
+  bar next door.
+
+- **A Royston-Parmar fit published a FLAT cumulative hazard beside a NONZERO
+  hazard past its training support, and those two cannot both describe one
+  model (#2705).** `h = dΛ/dt`, so a flat `Λ` forces `h = 0`. Measured on the
+  #1564 heart-failure fixture, at every time from the largest observed exit out
+  to ten thousand times it:
+
+  ```text
+       m         t     cumulative_hazard      hazard      t · hazard
+   1.000001   285.0          5.055558    2.196795e-2       6.26088
+   1.5        427.5          5.055558    1.464532e-2       6.26088
+   10        2850.0          5.055558    2.196798e-3       6.26088
+   10000  2850000.0          5.055558    2.196798e-6       6.26088
+  ```
+
+  `Λ` is constant to eight digits and `t·h(t)` is constant, i.e. the DERIVATIVE
+  evaluation kept a log-log slope of `1.23842` that the VALUE evaluation does
+  not have. Every `model.predict(...).survival_at(grid)` call reaches it,
+  because `default_survival_time_grid`'s top node is already past `max_exit`.
+
+  **Root cause.** `build_survival_time_basis`'s `ISpline` arm hand-rolled the
+  baseline's `d(log Λ)/d(log t)` as a right-cumulative sum of a CLAMPED B-spline
+  first-derivative basis. A clamped B-spline's VALUE extends linearly, so that
+  sum returns the boundary slope outside the knot span — while the I-spline
+  value basis it claims to differentiate SATURATES.
+
+  That is the same disagreement `create_ispline_derivative_dense` was repaired
+  for in #2695, and the same one #1348 repaired for open-knot B-splines, and the
+  same one #2600 repaired a third time by hand inside the CTN chart. The
+  survival lane had its own copy of the cumulative sum and so never received
+  any of them. **Four repairs of one defect is a missing abstraction**, so the
+  repair is an abstraction: `ISplineBoundary::{Saturate, LinearTails}` and
+  `ispline_value_and_first_derivative`, which produce the value and the
+  derivative together under ONE declared convention. Producing the halves
+  separately and letting them disagree is no longer expressible.
+
+  **The convention is `LinearTails`, because that IS the Royston-Parmar model.**
+  A *restricted* spline is linear beyond its boundary knots by construction
+  (Royston & Parmar 2002), which is what gives the classical `Λ(t) ∝ t^c`
+  extrapolation used whenever a survival curve is projected past the observed
+  follow-up. Saturating asserts two things the data never said: that the hazard
+  drops to exactly zero at the last observed exit time, and — on the lower tail,
+  which the default grid reaches on its FIRST node — that `Λ(t) → Λ(t_min) > 0`
+  as `t → 0`, i.e. an atom of failures at the time origin and `S(0) < 1`.
+
+  Two places the fit could have moved, both closed rather than hoped:
+
+  * **Entry rows at the time origin.** `log_entry` for such a row is
+    `ln(SURVIVAL_TIME_FLOOR) = −20.7`, a numerical floor and not a datum. The
+    likelihood already knows these rows are not left-truncated
+    (`entry_active = age_entry > ENTRY_AT_ORIGIN_THRESHOLD`) and drops their
+    `S(entry)` factor outright, so they now evaluate at the first knot, where
+    `I_k(left) = 0` exactly — the same zero row that shipped, for the reason
+    that actually holds. A genuine delayed entry below the first knot still
+    receives the real extrapolation.
+  * **The anchor row.** `center_survival_time_designs_at_anchor` subtracts the
+    basis row at the anchor from every design row, and the default anchor for
+    ordinary right-censored data is the earliest entry — the time origin. Under
+    saturation that mapped to the zero row and centering was a no-op; under
+    tails it would re-center every column by a large constant read off `1e-9`,
+    which is exactly the #751 inflation the anchor rule exists to avoid. The
+    anchor is the ORIGIN of a reparameterization, so it is now clamped into the
+    modelling interval — numerically identical to what shipped for every anchor
+    at or below the first knot.
+
+  Every training EXIT row is inside the knot span those same rows induced, so
+  `x_exit_time`, `x_derivative_time`, `keep_cols` and the penalty are untouched.
+  Two fits do move, both deliberately and both toward the model: a cohort whose
+  rows share one strictly-positive entry time (the entry times are then dropped
+  from knot inference, so every entry row lands in the left exterior, and the
+  saturating basis was asserting that a subject accumulated the entire baseline
+  hazard up to the first observed exit time BEFORE entering), and the
+  interval-censored right endpoint `R` where `R > max(L)`.
+
+  The CTN chart's private copy of the affine continuation
+  (`ctn_extend_bases_affinely_past_the_knots`, `ctn_ispline_modelling_interval`,
+  152 lines landed for #2600) is deleted and routed through the shared
+  evaluator.
+
+  **The fixture assertion that pinned the defect is replaced, not relaxed.**
+  `royston_parmar_saved_predict_at_grid_top_does_not_fail` demanded
+  `zero_hazard_nodes > 0` — a BIT-EXACT zero hazard — which cannot hold on a
+  model with tails; its own doc taught the retired premise. That assertion was
+  never what kept #1564 covered: the `eta_t == 0` guard is pinned at the
+  function by `royston_parmar_hazard_accepts_zero_derivative_as_flat_boundary`
+  and `royston_parmar_hazard_zero_derivative_in_saturated_tail_is_zero_not_nan`,
+  untouched here. What replaces it is the invariant the defect violated — the
+  reported hazard IS the derivative of the reported cumulative hazard — on a
+  `t·(1 ± 1e-4)` stencil at five probe times from `0.25·max_exit` to
+  `4·max_exit`, plus `S(0) = 1`, plus a non-vacuity check that a probe past
+  `max_exit` carries a nonzero hazard, since a saturating baseline passes the
+  derivative check trivially.
+
+- **A follow-up-varying marginal slope carried its likelihood domain as an
+  error instead of as a feasible set, and the outer search halted against a wall
+  it could not see (#2765 / #2767).** The family is a transformation model,
+  `S(t|x,z) = Φ(−η(t))`, so its row log-density carries `log η′₁` and its domain
+  is
+
+  ```text
+    η′₁(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz > 0    at every EVENT row,
+    c = √(1 + bᵀΣb).
+  ```
+
+  With a time-CONSTANT slope the last two terms are identically zero and
+  `η′₁ = q′·c ≥ q′`, so the time block's own linear guard `q′ ≥ derivative_guard
+  > 0` IMPLIES the domain. That implication is why the solver's feasible set has
+  always been one polytope in one block, and why `CustomFamily::
+  max_feasible_step_size` — which is asked one block at a time — sufficed.
+
+  A follow-up-varying slope breaks it: `q·c′` and `b′ᵀz` carry no sign, and they
+  read the marginal and log-slope blocks as well as the time block. The extra
+  condition was placed in the likelihood DOMAIN (refuse outside) rather than in
+  the feasible set. Measured on the #2765 acceptance fixture that costs the fit
+  its convergence in two separate ways:
+
+  * the inner trust region walks trial coefficients out of the domain — the run
+    carries hundreds of `transformed time derivative must be positive at row
+    1531 ... got −8.99e-2` lines, one per step the limiter did not price;
+  * the outer search moves the baseline chart under a warm start, so a `β` that
+    was interior at the previous `θ` is exterior at the next one through no
+    property of `β` at all. The evaluation then refuses, and a refusal carries
+    no descent information: the BFGS halves its step six times, every probe
+    refuses, and the runner halts with
+
+    ```text
+      [OUTER] cost-stall halt (infeasible BFGS probes): 6 consecutive infeasible
+      probes after a finite seed/iterate; halting at best-so-far with residual
+      |g|=3.941e1 (value=2.137621e3)
+    ```
+
+    against its own `1.5e0` escape threshold. Fifty-six of that run's outer
+    evaluations end `outcome=recoverable`, each in `0.003 s` — before any inner
+    solve.
+
+  Two halves, one rule. `CustomFamily::max_feasible_joint_step_size` is the
+  missing coordinate: a JOINT fraction-to-boundary hook, defaulted to `None` so
+  every other family is byte-unchanged, mined in beside the per-block answers by
+  `compute_joint_feasibility_alpha`. And the log-slope warm start is retreated
+  toward its own origin until the domain holds — a PROVABLY interior endpoint,
+  because at `β_g = 0` the layout's exit-derivative design gives `ḃ ≡ 0` exactly
+  (it carries no offset), both follow-up terms vanish, and `η′₁ = q′·c ≥ q′ >
+  0`. That is what makes the bisection terminate rather than usually succeed, and
+  it is the log-slope half of a contract the time block already keeps: its own
+  warm start is projected onto `q′ ≥ guard` before use.
+
+  Both halves read `η′₁` through `rigid_row_admission_witnesses`, the same call
+  the row evaluator admits on, at primaries from the same
+  `rigid_row_kernel_primaries`. A limiter that computed `η′₁` its own way would
+  be a second copy of the model, and two copies eventually disagree about which
+  side of the boundary a coefficient is on.
+
+  **Rejected: a multiplicative safety fraction on the limiter.**
+  `apply_feasible_step_boundary_backoff` already records why a proportional
+  retreat is wrong here (#2695) — it is a proportionality the geometry does not
+  have. There is a second reason on this boundary: the limiter and the objective
+  are the same function at the same primaries, so the endpoint returned is
+  admitted bit for bit, and a step that lands legally but close is not a hazard
+  the limiter should price. `−log η′₁` there is finite and worse, and the trust
+  region rejects it on its own terms — which is the mechanism that is supposed
+  to decide step length.
+
+  Also: `[STAGE] outer eval end ... outcome=recoverable` now logs the trial `θ`
+  and the refusal REASON. A line search that halves forever is diagnosable only
+  if the log says which domain the trial point left.
+
 - **The SAE inner convergence gates removed a direction the fit was still
   sliding down, and could certify a state sitting on a slope of 7.2 as
   stationary (#2720).** `quotient_residual_norm_sq` projected a "chart-gauge

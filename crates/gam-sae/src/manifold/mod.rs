@@ -252,6 +252,7 @@ mod stagewise_seed;
 mod stall_polish_progress;
 mod steering;
 mod stratum_births;
+mod streamed_frame_curvature;
 mod streaming_plan;
 mod support_outer;
 mod support_seed;
@@ -363,6 +364,11 @@ mod tests_rank_charge_2101;
 
 #[cfg(test)]
 mod tests_frame_curvature_2757;
+
+/// #2757 — the streamed residual-gauge curvature: the same certificate on the
+/// branch where no materialized form of `H` is smaller than `param_dim²`.
+#[cfg(test)]
+mod tests_streamed_curvature_2757;
 
 /// #2757 — the rewritten Vietoris–Rips filtration engine against the one it
 /// replaces, bar for bar. Carries the pre-rewrite engine as its control.

@@ -256,6 +256,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // every cycle after it is two attempts at the radius floor. See
     // [`ObjectiveResolutionWitness`].
     let mut objective_resolution_witness = ObjectiveResolutionWitness::default();
+    // The penalty's own ACCUMULATION scale, which is not its value (gam#2612's
+    // central observation, gam#2748's ceiling). `block_quadratic_penalty`
+    // evaluates `½β·(S_λβ)` with signed `S_ij`, so one evaluation accumulates at
+    // scale `max|S_λ|·‖β‖₁²` while returning something that can be many orders
+    // smaller. `S_λ` is a function of ρ alone and ρ is fixed for this solve, so
+    // the matrix factor is read once here; the `‖β‖₁²` factor is per trial point.
+    let penalty_entry_magnitude: f64 = s_lambdas
+        .iter()
+        .flat_map(|s_lambda| s_lambda.iter())
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
     let mut cycles_since_residual_improved: usize = 0;
     // Number of consecutive non-improving cycles after which the
     // conditioning-based self-vanishing Levenberg–Marquardt damping is
@@ -2013,6 +2024,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         let step_inf = delta.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
 
         let old_beta: Vec<Array1<f64>> = states.iter().map(|s| s.beta.clone()).collect();
+        // `‖β‖₁` at the cycle's incumbent, for the penalty term's accumulation
+        // scale in the objective-resolution ceiling (gam#2748).
+        let old_beta_l1_norm: f64 = old_beta
+            .iter()
+            .flat_map(|beta| beta.iter())
+            .map(|value| value.abs())
+            .sum();
         // Firth value Φ at the OLD (start-of-cycle) β, folded under the SAME
         // skippable gate the trial uses below — so `actual_reduction =
         // old_objective − trialobjective` compares two points on one objective
@@ -2435,6 +2453,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // MEASURED survives across cycles; see its doc block.
         objective_resolution_witness.start_ladder();
         let resolution_before_this_ladder = objective_resolution_witness.measured();
+        let refused_resolution_before_this_ladder = objective_resolution_witness
+            .refused()
+            .map_or(0.0, |(claim, _)| claim);
         // Snapshot every mutable input to the trust-region attempt loop
         // before it can shrink a radius. A later fully-rejected cycle is an
         // exact fixed point only if this state and the realized first trial
@@ -3501,7 +3522,30 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // the ladder's shrink is rounding, not remainder — and the
             // controller must know that before it can tell a bad region from
             // an unreadable one.
-            objective_resolution_witness.observe(step_norm, actual_reduction, predicted_reduction);
+            let trial_beta_l1_norm: f64 = states
+                .iter()
+                .flat_map(|state| state.beta.iter())
+                .map(|value| value.abs())
+                .sum();
+            // What ONE evaluation at these two points actually SUMS OVER, which
+            // is what bounds the rounding it can carry (gam#2748). The objective
+            // magnitudes cover the likelihood accumulation; the penalty's
+            // cancellation scale is carried separately because it is precisely
+            // the term whose accumulation exceeds its value.
+            let accumulation = ObjectiveAccumulation {
+                summed_terms: total_joint_n,
+                magnitude: old_objective.abs()
+                    + trialobjective.abs()
+                    + penalty_entry_magnitude
+                        * (old_beta_l1_norm * old_beta_l1_norm
+                            + trial_beta_l1_norm * trial_beta_l1_norm),
+            };
+            objective_resolution_witness.observe(
+                step_norm,
+                actual_reduction,
+                predicted_reduction,
+                accumulation,
+            );
             let measured_objective_resolution = objective_resolution_witness.measured();
             let trust_update = update_joint_trust_region_radius(
                 joint_trust_radius,
@@ -3812,6 +3856,27 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // can now recognise its realized change as rounding and accept it.
         // Fires at most once per solve: `measured` is monotone, so a later
         // ladder that re-measures the SAME resolution does not restore again.
+        // A LADDER WHOSE NON-DECAY IS NOT ARITHMETIC SAYS SO (gam#2748). This is
+        // the counterpart of the undo below: the same ladder shape, refused
+        // because no evaluation of this objective can carry that much rounding.
+        // Reported at `warn`, not `info`: it is the signature of a Newton system
+        // proposing steps far outside its own model's validity, which is a fact
+        // about the fit and not a tuning detail. The shrinks the ladder took
+        // therefore STAND, which is the whole point.
+        if let Some((claim, ceiling)) = objective_resolution_witness.refused()
+            && claim > refused_resolution_before_this_ladder
+        {
+            log::warn!(
+                "[joint-newton objective-resolution gam#2748] cycle={cycle} REFUSED a \
+                 resolution claim of {claim:.6e} against an arithmetic ceiling of \
+                 {ceiling:.6e} (= m*eps*(1+sum|terms|) with m={total_joint_n}): the ladder's \
+                 discrepancy did not fall at the model remainder's rate, but no evaluation of \
+                 this objective can round by that much, so what failed to decay is MODEL \
+                 error from steps outside the quadratic model's validity. The {} shrink(s) \
+                 this ladder took STAND.",
+                line_search_attempts,
+            );
+        }
         if objective_resolution_witness.measured() > resolution_before_this_ladder {
             log::info!(
                 "[joint-newton objective-resolution gam#2612] cycle={} MEASURED resolution={:.6e} \

@@ -2062,13 +2062,35 @@ pub fn predict_survival(
     // only the wiggle deviation), so it is excluded.
     let weibull_baseline_in_beta = saved_likelihood_mode == SurvivalLikelihoodMode::Weibull
         && !model.has_baseline_time_wiggle();
+    // The FIT centers the time design at the anchor UNCONDITIONALLY — every
+    // front end routes through `center_survival_time_designs_at_anchor`
+    // immediately after building the basis, for every likelihood mode
+    // (`fit_orchestration::materialize::survival`, `gam-cli`'s survival path) —
+    // so the saved `beta_time` are the coefficients of the CENTERED design.
+    // Predict has to ask the same question, and it asks it of the same object:
+    // the anchor the fit used is saved on the model.
+    //
+    // This used to be gated on an enumerated mode list (`LocationScale |
+    // MarginalSlope`, plus bare Weibull), and the list silently omitted
+    // `Transformation` — the Royston-Parmar default. Evaluating centered
+    // coefficients against an uncentered basis shifts every reported
+    // `log Λ(t)` by the CONSTANT `X(anchor)ᵀγ`, which is why the defect is
+    // invisible on ordinary right-censored data: the anchor there is the
+    // earliest entry, i.e. the time origin, where `I_k(left) = 0` exactly and
+    // the shift is zero. It appears the moment the anchor moves — on any
+    // genuinely left-truncated dataset, which takes the robust interior anchor
+    // by rule (#751/#1790/#2631), and on any explicit `--survival-time-anchor`.
+    //
+    // Measured on a 1200-row `Surv(entry, exit, event) ~ s(x)` fit with hazard
+    // `0.4·exp(0.9x)` (gam#2705): the same data fitted at anchor `1e-7` and at
+    // anchor `1.19` reaches the SAME maximised log-likelihood to seven digits
+    // (`-1.364394e3`, so the fit is invariant exactly as the anchor rule
+    // documents), while the predicted `η` differs by `+2.859821842` at every
+    // one of six (time, covariate) pairs — a constant, to eight digits, and a
+    // factor `e^2.86 = 17.5` on the reported cumulative hazard.
     let mut time_anchor: Option<f64> = None;
     let mut time_anchor_row_cached: Option<Array1<f64>> = None;
-    if matches!(
-        saved_likelihood_mode,
-        SurvivalLikelihoodMode::LocationScale | SurvivalLikelihoodMode::MarginalSlope
-    ) || weibull_baseline_in_beta
-    {
+    if time_build.x_exit_time.ncols() > 0 {
         let anchor = model
             .survival_time_anchor
             .ok_or_else(|| "saved survival model missing survival_time_anchor".to_string())?;
@@ -2467,7 +2489,12 @@ pub fn predict_competing_risks_survival(
     // anchor row is all that needs threading through.
     let weibull_baseline_in_beta = saved_likelihood_mode == SurvivalLikelihoodMode::Weibull
         && !model.has_baseline_time_wiggle();
-    let cr_time_anchor_row: Option<Array1<f64>> = if weibull_baseline_in_beta {
+    // Unconditional, for the reason given at the single-cause site: the fit
+    // centers every time design at the anchor, so the saved coefficients are
+    // the centered ones and a per-cause Royston-Parmar baseline predicted
+    // against an uncentered basis carries the constant `X(anchor)ᵀγ` shift
+    // (gam#2705).
+    let cr_time_anchor_row: Option<Array1<f64>> = if time_build.x_exit_time.ncols() > 0 {
         let anchor = model
             .survival_time_anchor
             .ok_or_else(|| "saved survival model missing survival_time_anchor".to_string())?;

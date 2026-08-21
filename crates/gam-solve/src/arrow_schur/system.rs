@@ -1375,6 +1375,11 @@ pub struct StreamingArrowSchur {
     /// than for a Newton step. Defaults to `false` so direct chunk callers keep
     /// the full step-accuracy guard.
     pub(crate) evidence_factorization: bool,
+    /// #2515 — whether a RESOLVED negative direction of a streamed evidence row
+    /// is a typed refusal rather than a unit pin. Set from the same
+    /// `ArrowEvidencePolicy` as `evidence_factorization`, in the same place, so
+    /// the two halves of one policy cannot describe different policies.
+    pub(crate) refuse_resolved_indefinite: bool,
     /// SAE manifold evidence-path per-row gauge deflation, copied from the
     /// source [`ArrowSchurSystem::row_gauge_deflation`] (#1273/#1377). When
     /// present, the streaming per-row factor MUST apply the SAME spectral
@@ -1430,6 +1435,7 @@ impl StreamingArrowSchur {
             htbeta_transpose_matvec: None,
             htbeta_dense_supplement: false,
             evidence_factorization: false,
+            refuse_resolved_indefinite: false,
             row_gauge_deflation: None,
         }
     }
@@ -1525,6 +1531,7 @@ impl StreamingArrowSchur {
                 // supplied gauge list is empty/non-spanning — matching the
                 // `allow_spectral_deflation = true` the dense path passes.
                 true,
+                self.refuse_resolved_indefinite,
             )
             .map(|result| result.factor),
             None => factor_one_row(row, ridge_t, di, row_idx, self.evidence_factorization),
@@ -1763,6 +1770,7 @@ impl StreamingArrowSchur {
         options: &ArrowSolveOptions,
     ) -> Result<(f64, Array2<f64>), ArrowSchurError> {
         self.evidence_factorization = options.evidence_policy.factors_undamped_evidence();
+        self.refuse_resolved_indefinite = options.evidence_policy.refuses_resolved_indefinite();
         self.reset_accumulator(ridge_beta)?;
         let backend = CpuBatchedBlockSolver;
         let mut log_det_tt = 0.0_f64;
@@ -1828,6 +1836,7 @@ impl StreamingArrowSchur {
     ) -> Result<(Array1<f64>, Array1<f64>, Option<Array2<f64>>), ArrowSchurError> {
         // Newton streaming factors always retain the step-accuracy guard.
         self.evidence_factorization = false;
+        self.refuse_resolved_indefinite = false;
         self.reset_accumulator(ridge_beta)?;
         for start in (0..self.n_rows).step_by(self.chunk_size) {
             let end = (start + self.chunk_size).min(self.n_rows);

@@ -995,6 +995,21 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         Ok(None)
     }
 
+    /// The follow-up-varying likelihood domain `η′₁ > 0` (gam#2765 / gam#2767).
+    ///
+    /// It reads the time, marginal and log-slope blocks at once, so it cannot be
+    /// stated through `max_feasible_step_size`, which is asked one block at a
+    /// time: every block answers "unconstrained" while the joint step walks out
+    /// of the domain. `None` on the time-constant frame, where the time block's
+    /// linear guard already implies the condition.
+    fn max_feasible_joint_step_size(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+    ) -> Result<Option<f64>, String> {
+        self.max_feasible_follow_up_joint_step(block_states, delta)
+    }
+
     fn post_update_block_beta(
         &self,
         block_states: &[ParameterBlockState],

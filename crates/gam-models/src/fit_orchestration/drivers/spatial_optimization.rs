@@ -2128,7 +2128,7 @@ pub fn fixed_kappa_profiled_reml_score(
 /// majority of incumbents live well inside it. What makes it a prior rather
 /// than a wall is [`joint_rho_search_box`], which drops it per coordinate the
 /// moment the data falsifies it.
-const JOINT_RHO_BOUND: f64 = 12.0;
+pub(crate) const JOINT_RHO_BOUND: f64 = 12.0;
 
 /// The ρ box the joint `[ρ, ψ]` search is handed, given the scalar-ρ
 /// incumbent it will be GRADED against.
@@ -2191,7 +2191,7 @@ const JOINT_RHO_BOUND: f64 = 12.0;
 ///
 /// A non-finite incumbent (`λ̂ = 0` or `∞`, which `ln` maps to `∓∞`) carries no
 /// information about where to search, so it keeps the prior.
-fn joint_rho_search_box(
+pub(crate) fn joint_rho_search_box(
     rho_seed: ArrayView1<'_, f64>,
     rho_upper_bound: f64,
 ) -> (Array1<f64>, Array1<f64>) {

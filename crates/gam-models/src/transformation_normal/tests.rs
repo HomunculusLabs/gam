@@ -2722,9 +2722,13 @@ pub(crate) fn ctn_response_penalty_matches_direct_function_roughness_quadrature(
     let panels = 40_000usize; // even -> composite Simpson
     let step = (upper - lower) / panels as f64;
     let grid = Array1::from_iter((0..=panels).map(|i| lower + step * i as f64));
-    let deriv_basis =
-        create_ispline_derivative_dense(grid.view(), &knots, config.response_degree, order)
-            .expect("m-th derivative basis on quadrature grid");
+    let deriv_basis = gam_terms::basis::create_ispline_derivative_dense(
+        grid.view(),
+        &knots,
+        config.response_degree,
+        order,
+    )
+    .expect("m-th derivative basis on quadrature grid");
     assert_eq!(deriv_basis.dim(), (panels + 1, p_shape));
     let fm = deriv_basis.dot(&beta_shape);
     let mut integral = fm[0] * fm[0] + fm[panels] * fm[panels];

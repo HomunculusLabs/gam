@@ -1453,7 +1453,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 theta.len(),
             );
             let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
-            let blocks = build_blocks(
+            let mut blocks = build_blocks(
                 &rho,
                 &designs[0],
                 &designs[1],
@@ -1465,6 +1465,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 theta,
                 FlexActivation::On,
             )?;
+            // A warm start carried across an outer step can sit outside the
+            // follow-up-varying likelihood domain at the NEW baseline chart
+            // (gam#2765). Restore it here, the same way the time block's seed is
+            // projected onto its own guard inside `build_blocks`; no-op on the
+            // time-constant frame and no-op when the seed is already interior.
+            family.retreat_seed_into_follow_up_domain(&mut blocks)?;
+            let blocks = blocks;
             let fit = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => inner_fit(&family, &blocks, options)?,
                 SpatialFitProvenance::Certified { outer, mode } => {
@@ -1519,7 +1526,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 row_set_rows,
             );
             let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
-            let blocks = build_blocks(
+            let mut blocks = build_blocks(
                 &rho,
                 &designs[0],
                 &designs[1],
@@ -1557,6 +1564,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 theta,
                 FlexActivation::On,
             )?;
+            // Same contract as the inner-fit closure: an outer trial point must
+            // be graded from a coefficient the model admits, and restoring that
+            // is this evaluation's job. Without it the criterion refuses instead
+            // of returning a value, and a refusal carries no descent
+            // information for the outer line search (gam#2765).
+            family.retreat_seed_into_follow_up_domain(&mut blocks)?;
+            let blocks = blocks;
             let hyper_layout = get_hyper_layout(theta, specs, designs)?;
             let eval_id = outer_eval_counter.get();
             outer_eval_counter.set(eval_id.wrapping_add(1));

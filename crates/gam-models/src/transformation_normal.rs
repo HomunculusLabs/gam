@@ -68,8 +68,8 @@ pub(crate) use gam_problem::{
 };
 pub(crate) use gam_terms::basis::initializewiggle_knots_from_seed;
 pub(crate) use gam_terms::basis::{
-    BasisOptions, Dense, KnotSource, create_basis, create_ispline_derivative_dense,
-    ispline_function_penalties,
+    ISplineBoundary, ispline_function_penalties, ispline_modelling_interval,
+    ispline_value_and_first_derivative,
 };
 pub(crate) use gam_terms::smooth::{
     SpatialLengthScaleOptimizationOptions, SpatialLogKappaCoords, TermCollectionDesign,

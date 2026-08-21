@@ -1799,11 +1799,19 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 );
             }
             Err(err) if err.is_recoverable() => {
+                // The REASON is the whole content of an infeasible probe. A
+                // line search that halves its step forever is diagnosable only
+                // if the log says WHICH domain the trial point left; without it
+                // the trail reads "outcome=recoverable" a hundred times and
+                // names nothing. `ObjectiveEvalError: Display` already carries
+                // the originating error's own message, so this costs one field.
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=recoverable trial_rho_distance={:.3e} (first-order bridge, eval={})",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=recoverable trial_rho_distance={:.3e} (first-order bridge, eval={}) theta={} reason={}",
                     stage_start.elapsed().as_secs_f64(),
                     trial_rho_distance,
-                    self.first_order_evals
+                    self.first_order_evals,
+                    format_outer_theta(x),
+                    err,
                 );
                 if let Some(guard) = self.cost_stall.as_mut() {
                     match guard.observe_infeasible(x) {
