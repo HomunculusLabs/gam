@@ -211,6 +211,42 @@ struct ConstantCurvatureProfile<'a> {
     value_cache: std::cell::RefCell<std::collections::HashMap<(u64, u64), (f64, bool)>>,
 }
 
+/// Identity of the profile, WITHOUT the caller's data or the memo tables.
+///
+/// Written out rather than derived because the two things a derive would print
+/// are the two things a reader never wants: `data`/`response` are borrowed
+/// views of the caller's whole design and response — a `Result::expect_err` on
+/// a 120-row fixture would dump every row into the panic message — and the two
+/// memo tables are keyed by the bit patterns of `(κ, η)`, which say nothing
+/// about the object and everything about which points a search happened to
+/// visit. What identifies a profile is its SPEC and the η geometry derived from
+/// it, so that is what this prints; the views and the caches contribute their
+/// shapes only.
+impl std::fmt::Debug for ConstantCurvatureProfile<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `try_borrow`: a `Debug` reached from inside `evaluate` (a panic while
+        // the memo table is mutably borrowed, or a debugger) must not panic a
+        // second time on the borrow it cannot get. `None` then means "held", not
+        // "empty".
+        fn cached<V>(
+            c: &std::cell::RefCell<std::collections::HashMap<(u64, u64), V>>,
+        ) -> Option<usize> {
+            c.try_borrow().map(|t| t.len()).ok()
+        }
+        f.debug_struct("ConstantCurvatureProfile")
+            .field("rows", &self.data.nrows())
+            .field("cols", &self.data.ncols())
+            .field("response_len", &self.response.len())
+            .field("spec", &self.spec)
+            .field("eta_bounds", &self.eta_bounds)
+            .field("eta_bracket", &self.eta_bracket)
+            .field("eta_seed", &self.eta_seed)
+            .field("jet_cache_len", &cached(&self.cache))
+            .field("value_cache_len", &cached(&self.value_cache))
+            .finish()
+    }
+}
+
 /// The criterion's own forward resolution in `η`.
 ///
 /// A value-comparing line search cannot separate two `η` closer than this — the
