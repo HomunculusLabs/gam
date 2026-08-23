@@ -1,4 +1,173 @@
-## Unreleased
+## v0.3.152 — gam 0.3.152 / gamfit 0.1.262 (2026-08-23)
+
+The first release since `v0.3.151` (2026-07-26). Four weeks of root-cause work
+across the multinomial family, the smooth-term likelihood-ratio test,
+conditional transformation models, survival prediction, shape-constrained fits,
+the constant-curvature and Duchon smooths, the streaming/matrix-free lane and
+the SAE solver — 109 changelog entries, reproduced entry by entry in the
+section below. This summary names the changes a user can observe.
+
+### Fits that were wrong, and now are not
+
+- **A two-class multinomial with a smooth term published `β ≡ 0` (#2612).**
+  Every predicted probability was the uniform simplex at `edf_per_class = 4.09`,
+  because one stale routing predicate sent the fit onto a solver that certified
+  a rejected step. The whole multinomial campaign closed with it: the posterior
+  mean is computed by a method that approximates it, the published uncertainty
+  finally carries the covariance-mode axis every other family had, the
+  Firth/Jeffreys separation certificate is taken on `ker(S_λ)` and on the
+  curvature the fit HAS (`H + S_λ`), and the joint trust region stopped
+  measuring the step and the radius in two different norms. On the fixture the
+  issue was opened with, the posterior mean now beats `nnet`.
+- **A transformation model whose transformation saturates has no tails, only a
+  floor (#2600).** Every reported quantile was silently truncated at the
+  training range, the CTN likelihood renormalized each row by the normal mass
+  between two FITTED endpoints (which is what left the fit with no mode to
+  find), the held-out PIT was scored with a different model's CDF, and the band
+  ladder was the last place a reported quantile stopped being one. A reported
+  quantile is now a quantile.
+- **A saved Royston–Parmar model's predicted survival depended on the baseline
+  time ANCHOR (#2705).** The fit centers every time design at the anchor;
+  `predict` centered only an enumerated list of modes and the list omitted
+  Royston–Parmar. The same family also published a FLAT cumulative hazard beside
+  a NONZERO hazard past its training support — two statements that cannot
+  describe one model.
+- **A shape-constrained fit published two covariance matrices that were not
+  covariances (#2705 A).** The truncated covariance is now assembled as a sum of
+  Grams rather than as a subtraction, and a shipped constrained fit publishes
+  covariances that ARE covariances. Its inner mode also could not be certified,
+  for two reasons that were both units errors rather than convergence failures
+  (#2705 B), and the reported coefficient at a binding box is the truncated
+  posterior MEAN, matching its closed form to eight figures (#2705 C).
+- **The smooth-term likelihood-ratio p-value of a Gaussian fit was scored
+  against the reference for a KNOWN variance (#2672).** On a fit that estimates
+  its own scale the reference is not that law; measured size at nominal 0.05 was
+  0.0792. The estimated-scale channel is now published
+  (`reference_residual_df`, `reference_deterministic_offset`), the ratio's tail
+  is resolved as a signed weighted chi-square instead of a two-moment match, and
+  the `λ̂`-selection replay no longer runs on a grid 60× coarser than the
+  selection it replays — that replay was 23 % short exactly where `α = 0.05` is
+  read.
+- **The constant-curvature smooth stopped pinning its kernel range (#2747).**
+  `kappa_hat` was measuring the range error, not the curvature: the range solve
+  declared `dη̂/dκ = 0` on a state that had not earned it, the range coordinate
+  was confounded with `ρ` and fabricated past `ℓ ≈ 10⁶`, and a withheld deletion
+  had dropped the smooth-ownership orthogonalization with it, leaving the
+  hierarchy inert for every dependent smooth. A `double_penalty=` term is now
+  refused by name rather than scored as a different model.
+- **The streaming lane declared a SADDLE to be a MODE, silently, and the memory
+  planner chose which (#2515).** A resolved negative direction of the exact `A`
+  is a saddle verdict, not a numerical null; the streaming outer gradient now
+  exists on the states the dense route differentiates without complaint.
+- **Curvature refusals decided below the instrument's own resolution
+  (#2676, #2748).** A penalty map within `1.5e-8` of a linear dependency was
+  certified EXACTLY dependent because its rank was read off the SQUARE of the
+  defect; nine `matern` benchmark scenarios died of a gate refusing on numbers
+  smaller than its own measured error; and the `geo_disease_*_matern` /
+  `papuan_oce*_matern` cluster refused a fit on a curvature the criterion itself
+  measures with the OPPOSITE SIGN.
+- **The SAE inner solve had no mover for the block its own convergence measure
+  removes (#2762),** so it declared a fixed point while holding 559
+  stall-resolutions of objective decrease, and its convergence gates could
+  certify a state sitting on a slope of 7.2 as stationary (#2720).
+- **A follow-up-varying marginal slope carried its likelihood domain as an error
+  instead of as a feasible set (#2765 / #2767),** and `D_β H` pulled the row
+  Hessian back through ONE slope channel, making the outer criterion's whole
+  mode-response term the derivative of a different model. Such a slope can now
+  be saved, predicted from and leave-one-out replayed.
+
+### New surface
+
+- **A converged, certified fit now says whether the basis it converged on can
+  represent what it was asked to model (#2774).** A biobank-shaped 16-D Duchon
+  binomial fit could converge, report `certified = true`, and still return a
+  null exposure at `p = 6.2e-5`, with nothing in the engine saying a word: the
+  only adequacy evidence the fit path consulted (penalized EDF at its algebraic
+  ceiling) reads "not saturated" while λ is still binding, and an mgcv-style
+  nearest-neighbour k-index reads 0.928 at randomization `p = 0.43` on the same
+  residuals — measured, including against an ORACLE 1-D ordering that only
+  reaches 0.976.
+
+  What shipped is a penalized score (Rao) lack-of-fit test against a canonical
+  higher-resolution Duchon enrichment of each smooth's own covariates, with the
+  enrichment projected orthogonally in the fit's WEIGHT metric rather than
+  through the penalized `H⁻¹` — so the statistic is blind to "λ is large" and
+  sensitive only to structure the design cannot represent at all. It reads
+  `p = 9.5e-16` on the filed fit. Every fit measures it and raises a
+  `GamInferenceWarning` at a Bonferroni-corrected 0.1 %, chosen from measured
+  size and power (0 of 60 on a correctly specified fit, 18 of 20 on the
+  underfitted one at n = 3000). Surfaced as `Summary.basis_checks`, recomputable
+  with `Model.basis_check(data)`, and persisted on the model because the score
+  needs converged IRLS row state a saved model does not carry. Payloads written
+  before this release read as "not measured", which is what they are.
+
+- **`certified` now says what it does not cover (#2774).** It is a statement
+  about the optimizer — the inner P-IRLS solve and the outer smoothing-parameter
+  search reached a certified stationary point — and makes no claim about basis
+  adequacy, family choice, or whether a fitted adjustment removes the
+  confounding it was given. `certification_does_not_imply_basis_adequacy` makes
+  that executable rather than documentary.
+- **Duchon per-axis `η` is a real outer REML coordinate (#2735),** so the
+  optimizer finds the signal axis by itself instead of being handed an isotropic
+  metric frozen from the knot cloud: held-out `rel_l2` 0.3395 → 0.1042 on the
+  stress fixture. The isotropic route is now the all-ones contraction of the
+  per-axis derivative, not a parallel derivation.
+- **The Murphy–Topel correction exists for a `GlobalEmpirical` second-stage
+  latent measure (#2484),** and `Σ` in the marginal-slope identity is `Var(z|a)`,
+  consumed per row (#2766).
+
+### Performance
+
+- **Post-fit certification was 60.5 % of the fit at `p = 4096` (#2757).** The
+  last dense `param_dim`-square object is gone from the certificate: `ξᵀHξ`
+  streams exactly in one pass, `λ_max` goes through the existing certified
+  Krylov solver, and the pinning rank — which entered no verdict — is no longer
+  enumerated over the whole parameter space. The topology filtration behind it
+  is computed by cohomology: 547.8 s → 52.0 s.
+- **The barrier's Gauss-Newton curvature is FACTORED (#2731)** rather than
+  expanded into `ne` dense carriers.
+
+### Build, docs and release gates
+
+Four gates were red on `main` when this release was cut, and each one had been
+hiding a different thing:
+
+- **The workspace test archive had not compiled since 2026-08-18.** One
+  `expect_err` on a type without `Debug` failed `cargo nextest archive
+  --workspace`, so ~12,563 Rust tests never ran for five days and
+  `MASTER_FAILURES.md` reported `ARCHIVE_MISSING` instead of results. The type
+  now has a written-out `Debug` that prints the profile's identity rather than
+  the caller's whole design and response.
+- **`cargo check -p gam-pyffi` was red**, on a `SummaryPayload` constructor that
+  did not get the new `basis_checks` field. The published wheel is built behind
+  that gate and the workspace job excludes the crate, so this class of break is
+  invisible to `--workspace` and surfaces ~12 minutes into a release build.
+- **The #2774 adequacy report was inert on every reparameterized smooth.** It
+  read the design through `as_dense_ref`, which is `Some` only for a
+  materialized dense design; a reparameterized radial/Duchon term ships an
+  operator-backed one, so the check reported `design_not_materializable` for
+  exactly the fits it exists to diagnose — including the fixture the issue was
+  filed on. It now materializes by chunks under a stated byte budget, and its
+  four fixture arms (which were red on that reason, and then on three
+  assertions that named the wrong objects) pass against a measured `n`-sweep
+  recorded in the fixture.
+- **`mkdocs build --strict` had aborted since the changelog split**, on a
+  repo-root-relative link that is only correct for one of CHANGELOG.md's two
+  readers.
+
+The entry-by-entry record of everything in this release — every root cause, the
+measurement that separated it from its symptom, and what each fix does not reach
+— is the section immediately below.
+
+## v0.3.152 — entry-by-entry record
+
+Every entry in this release as it landed: the root cause, the measurement
+that separated it from its symptom, what was rejected on the way, and what
+each fix does not reach. The summary above is derived from these; this is the
+record. (Two headings, not one, because `.github/workflows/publish.yml`
+extracts the FIRST `## ` section as the GitHub release body, and the record
+below is four hundred kilobytes.)
+
 
 - **A converged, certified fit now says whether the basis it converged on can
   represent what it was asked to model (#2774).** The filed fixture is a
