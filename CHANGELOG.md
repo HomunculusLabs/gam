@@ -6651,4 +6651,16 @@
 ---
 
 Entries for already-released versions continue in
-[`CHANGELOG-ARCHIVE.md`](CHANGELOG-ARCHIVE.md).
+[`CHANGELOG-ARCHIVE.md`](https://github.com/SauersML/gam/blob/main/CHANGELOG-ARCHIVE.md),
+rendered in the docs site as *Changelog archive*.
+
+<!--
+The link above is an ABSOLUTE repo URL, not `CHANGELOG-ARCHIVE.md`. This file is
+read in two places and a root-relative target is only correct in one of them: on
+GitHub the sibling file resolves, but `docs/changelog.md` pulls this file in
+verbatim through pymdownx.snippets, and there the link is resolved against
+`docs/` — where the archive is `changelog-archive.md`, not `CHANGELOG-ARCHIVE.md`.
+`mkdocs build --strict` treated that as an unresolved link and aborted the docs
+build. An absolute URL resolves for both readers and mkdocs does not try to
+match it against a page.
+-->
