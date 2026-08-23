@@ -1650,10 +1650,11 @@ fn fit_materialized_once_with_notes(
     // move. `SmoothBasisSpec::structural_feature_cols` indexes THIS matrix, so
     // it is the only frame in which a smooth's covariates can be identified;
     // `fit_model` consumes the request and the fitted result does not carry it.
-    // `ArrayView2` is `Copy`, and its lifetime is the caller's dataset, not
-    // `mat` — so this costs nothing and outlives the move.
+    // Cloning the handle is `O(1)` by construction — a `Copy` view or an `Arc`
+    // bump, aliasing the same storage — and its lifetime is the caller's
+    // dataset, not `mat`, so it outlives the move.
     let standard_covariate_frame = match &mat.request {
-        FitRequest::Standard(request) => Some(request.data),
+        FitRequest::Standard(request) => Some(request.data.clone()),
         _ => None,
     };
     // Exact O(n) spline-scan fast path (#1030): when the materialized request
@@ -1742,7 +1743,7 @@ fn fit_materialized_once_with_notes(
 /// what this finds — the only thing that changes is what the caller is told.
 fn attach_basis_adequacy(
     result: FitResult,
-    covariate_frame: Option<ndarray::ArrayView2<'_, f64>>,
+    covariate_frame: Option<StandardFitData<'_>>,
     mut inference_notes: Vec<String>,
 ) -> FormulaFitResult {
     let FitResult::Standard(mut standard) = result else {
@@ -1753,7 +1754,7 @@ fn attach_basis_adequacy(
     };
     if let Some(data) = covariate_frame {
         standard.basis_adequacy = crate::fit_orchestration::drivers::basis_adequacy_report(
-            data,
+            data.view(),
             &standard.design,
             &standard.resolvedspec,
             &standard.fit,
