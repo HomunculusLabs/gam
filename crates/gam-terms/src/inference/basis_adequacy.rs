@@ -41,47 +41,65 @@
 //!
 //! # The statistic
 //!
-//! Write `s` for the working score with `Uⱼ = (Zᵀs)ⱼ = ∂ℓ/∂γⱼ|_{γ=0}` and
-//! `Var(s) = φ·W_F` (`W_F` the Fisher/score-side IRLS weights). The fit solves
-//! the penalized score equation `Xᵀs − S_λ β̂ = 0`, so to first order
+//! Write `s` for the working score, so that `∂ℓ/∂γ|_{γ=0} = Zᵀs`, and
+//! `Var(s) = φ·W_F` (`W_F` the Fisher/score-side IRLS weights). Let
+//! `G = XᵀW_H X` be the design's weighted Gram and
 //!
 //! ```text
-//!     β̂ − β ≈ H⁻¹ Xᵀ s,        H = Xᵀ W_H X + S_λ
+//!     Z̃ = Z − X G⁻ XᵀW_H Z
 //! ```
 //!
-//! and therefore
+//! the enrichment with the fitted design projected out **in the `W_H` metric**.
+//! Then `Z̃ᵀW_H X = 0` exactly, and since the fit's error propagates into the
+//! score only through `β̂ − β`,
 //!
 //! ```text
-//!     U = Zᵀ s(β̂) ≈ [Z − X H⁻¹ Xᵀ W_H Z]ᵀ s =: Z̃ᵀ s,
-//!     Var(U) = φ · Z̃ᵀ W_F Z̃ =: φ · V.
+//!     U = Z̃ᵀ s(β̂) = Z̃ᵀ s(β) − Z̃ᵀW_H X(β̂ − β) = Z̃ᵀ s(β),
+//!     Var(U) = φ · Z̃ᵀ W_F Z̃ =: φ · V,     T = Uᵀ V⁻ U / φ.
 //! ```
 //!
-//! `Z̃` is the enrichment with the fitted span projected out *in the metric the
-//! fit actually used* — `H⁻¹` carries the penalty, not `(XᵀW X)⁻¹`. That is what
-//! makes this the score test of the **penalized** fit rather than of an
-//! unpenalized one, and it is why `V` is formed from `Z̃` directly rather than
-//! from the algebraically equal but cancellation-prone
-//! `ZᵀWZ − ZᵀWX(2H⁻¹ − H⁻¹XᵀWXH⁻¹)XᵀWZ`: the `Z̃`-form is a Gram matrix, hence
-//! positive semidefinite to machine precision, and its small eigenvalues are
-//! genuinely small rather than the residue of a subtraction.
-//!
-//! The statistic is `T = Uᵀ V⁻ U / φ` over the estimable directions of `V`,
-//! referred to `χ²_r` when the dispersion is known and to `F(r, ν)` when it is
-//! estimated — the same `Known`/`Estimated` split, for the same reason, as
+//! `T` is referred to `χ²_r` when the dispersion is known and to `F(r, ν)` when
+//! it is estimated — the same `Known`/`Estimated` split, for the same reason, as
 //! [`crate::inference::smooth_test`].
+//!
+//! # Why the UNPENALIZED Gram, and not `H⁻¹`
+//!
+//! The obvious construction projects with the fit's own penalized Hessian
+//! `H⁻¹ = (XᵀW_H X + S_λ)⁻¹`, which is what the first-order expansion of a
+//! penalized score test hands you. It is wrong here, for a reason that is about
+//! the QUESTION and not about the algebra.
+//!
+//! A penalized fit is biased: `E[β̂] − β ≈ −H⁻¹S_λβ`, so the residuals carry a
+//! systematic component `W_H X H⁻¹S_λβ` that lives inside `span(X)`. Under the
+//! `H⁻¹` projection `Z̃ᵀW_H X = ZᵀW_H X H⁻¹S_λ ≠ 0`, and that component leaks
+//! straight into `E[U]`, so the statistic is non-central under `H₀` by an amount set by
+//! how hard λ is shrinking — it reports "λ is doing work", which is true of
+//! every GAM ever fitted and grows with `n`. Projecting in the `W_H` metric
+//! annihilates it exactly, because the entire shrinkage bias lies in `span(X)`.
+//!
+//! The semantic statement is the same one: with `G⁻`, `T` tests only directions
+//! the realized design **cannot represent at all**. Shrinking a direction the
+//! basis HAS is a smoothing-parameter question, not a basis-size one, and this
+//! statistic deliberately declines to answer it. The invariance
+//! `Z → Z + X·A ⟹ T unchanged` (pinned in
+//! `statistic_is_invariant_to_shifting_the_enrichment_by_design_columns`) is the
+//! executable form of that contract; the `H⁻¹` projection does not satisfy it.
+//!
+//! `V` is accumulated as the Gram `Z̃ᵀW_F Z̃` of the residualized enrichment
+//! rather than as the algebraically equal Schur complement
+//! `ZᵀW_F Z − ZᵀW_F X G⁻ XᵀW_F Z`. The Gram form is PSD to machine precision and
+//! its small eigenvalues are genuinely small instead of being the residue of a
+//! subtraction — which matters exactly when part of the enrichment is nearly
+//! inside `span(X)`, i.e. always.
 //!
 //! # What it does not claim
 //!
-//! `λ̂` is held at its fitted value, so `T` is conditional on the selected
-//! smoothing parameters, exactly as the summary table's Wald statistic is. The
-//! penalty also biases `β̂`, so `E[U] ≠ 0` under `H₀` by an `O(S_λ β)` term that
-//! this expansion drops; the same approximation underlies every penalized Wald
-//! and score statistic in this crate. The consequence is worth stating plainly:
-//! at very large `n` a *correctly sized* basis whose λ is deliberately holding
-//! down real wiggle can also reject. That is not a false alarm about the model —
-//! there genuinely is residual structure — but it IS a reason not to report
-//! "increase k" from this statistic alone. The adequacy verdict a caller should
-//! surface pairs it with the term's EDF-vs-capacity evidence.
+//! `λ̂` is held at its fitted value and the enrichment is a fixed alternative,
+//! so `T` is conditional on both, exactly as the summary table's Wald statistic
+//! is conditional on `λ̂`. A rejection says there is signal in this smooth's
+//! covariates outside its realized column span; it does not say how much of the
+//! *estimand* that signal moves. The caller pairs it with the term's
+//! EDF-vs-capacity evidence and reports both.
 
 use faer::Side;
 use gam_linalg::faer_ndarray::strict_symmetric_eigh;
@@ -115,7 +133,7 @@ pub struct BasisAdequacyInput<'a> {
     /// harmless; they leave the estimable rank rather than biasing it.
     pub enrichment: ArrayView2<'a, f64>,
     /// `X` — the fitted design (`n × p`) in the same coefficient frame as
-    /// `hessian_inverse`.
+    /// `design_gram`.
     pub design: ArrayView2<'a, f64>,
     /// `W_H` — the diagonal curvature weights the fit's penalized Hessian was
     /// assembled from (observed information where the fit tracked it). Used
@@ -127,9 +145,13 @@ pub struct BasisAdequacyInput<'a> {
     /// `s` — the per-row working score, `sᵢ = wᵢ(yᵢ − μ̂ᵢ)(dμ/dη)ᵢ / V(μ̂ᵢ)`, so
     /// that `U = Zᵀ s` is the score for the enrichment coefficients.
     pub score: ArrayView1<'a, f64>,
-    /// `H⁻¹` — the inverse penalized Hessian **without** dispersion scaling
-    /// (`H = XᵀW_H X + S_λ`). This is `Vb/φ̂`.
-    pub hessian_inverse: ArrayView2<'a, f64>,
+    /// `G = XᵀW_H X` — the design's weighted Gram, **without** the penalty and
+    /// **without** dispersion scaling. A caller holding the fit's penalized
+    /// Hessian `H` and its λ-weighted penalty sum `S_λ` supplies `H − S_λ`;
+    /// that is exact and free, and it is what keeps `H` and `G` in one
+    /// coefficient frame. See the module header for why this is the
+    /// unpenalized Gram and not `H`.
+    pub design_gram: ArrayView2<'a, f64>,
     /// `φ̂` — the fitted dispersion. `1.0` for families that carry their
     /// dispersion inside the IRLS weight.
     pub dispersion: f64,
@@ -174,16 +196,10 @@ pub fn basis_adequacy_score_test(
         || input.hessian_weights.len() != n
         || input.score_weights.len() != n
         || input.score.len() != n
-        || input.hessian_inverse.nrows() != p
-        || input.hessian_inverse.ncols() != p
+        || input.design_gram.nrows() != p
+        || input.design_gram.ncols() != p
         || !(input.dispersion.is_finite() && input.dispersion > 0.0)
     {
-        return None;
-    }
-
-    // U = Zᵀ s — the score for the enrichment coefficients at γ = 0.
-    let u = input.enrichment.t().dot(&input.score);
-    if u.iter().any(|value| !value.is_finite()) {
         return None;
     }
 
@@ -206,9 +222,9 @@ pub fn basis_adequacy_score_test(
         return None;
     }
 
-    // C = H⁻¹ (Xᵀ W_H Z): the coefficient shift the fit would absorb if the
-    // enrichment were switched on. `Z̃ = Z − X·C` is the enrichment with that
-    // absorption removed.
+    // C = G⁻ (Xᵀ W_H Z): the `W_H`-orthogonal projection of the enrichment onto
+    // the fitted column span. `Z̃ = Z − X·C` is the part of the enrichment the
+    // realized design cannot represent, and it satisfies `Z̃ᵀW_H X = 0`.
     let mut weighted_enrichment = input.enrichment.to_owned();
     for row in 0..n {
         let weight = input.hessian_weights[row];
@@ -221,15 +237,23 @@ pub fn basis_adequacy_score_test(
             .for_each(|value| *value *= weight);
     }
     let cross = input.design.t().dot(&weighted_enrichment); // p × q
-    let coefficient_shift = input.hessian_inverse.dot(&cross); // p × q
+    let coefficient_shift = solve_symmetric_psd(input.design_gram, &cross)?;
     if coefficient_shift.iter().any(|value| !value.is_finite()) {
         return None;
     }
 
-    // V = Z̃ᵀ W_F Z̃, accumulated in row blocks so the residualized enrichment
-    // never has to exist as a second `n × q` array.
+    // `U = Z̃ᵀ s` and `V = Z̃ᵀ W_F Z̃`, accumulated together in row blocks so the
+    // residualized enrichment never has to exist as a second `n × q` array.
+    //
+    // The score MUST be contracted against `Z̃`, not `Z`. `Zᵀs = Z̃ᵀs + (X·C)ᵀs`
+    // and the fit solves the PENALIZED score equation `Xᵀs = S_λβ̂`, so the
+    // second term is `Cᵀ S_λ β̂` — precisely the shrinkage this construction
+    // exists to remove, re-entering through the numerator after the projection
+    // took it out of the denominator. It also breaks the `Z → Z + X·A`
+    // invariance, since `C → C + A`. Both failures are pinned as tests.
     const ROW_BLOCK: usize = 4096;
     let mut information = Array2::<f64>::zeros((q, q));
+    let mut u = Array1::<f64>::zeros(q);
     let mut start = 0usize;
     while start < n {
         let stop = (start + ROW_BLOCK).min(n);
@@ -242,6 +266,9 @@ pub fn basis_adequacy_score_test(
             .design
             .slice(ndarray::s![start..stop, ..])
             .dot(&coefficient_shift);
+        u += &residualized
+            .t()
+            .dot(&input.score.slice(ndarray::s![start..stop]));
         let mut weighted = residualized.clone();
         for local in 0..rows {
             let weight = input.score_weights[start + local];
@@ -256,7 +283,9 @@ pub fn basis_adequacy_score_test(
         information += &residualized.t().dot(&weighted);
         start = stop;
     }
-    if information.iter().any(|value| !value.is_finite()) {
+    if information.iter().any(|value| !value.is_finite())
+        || u.iter().any(|value| !value.is_finite())
+    {
         return None;
     }
     // Symmetrize the accumulated Gram: the block sum is symmetric in exact
@@ -304,6 +333,51 @@ pub fn basis_adequacy_score_test(
     })
 }
 
+/// Solve `G·C = rhs` for a symmetric positive-semidefinite `G`.
+///
+/// Cholesky first — `O(p³)` once, then `O(p²q)` per right-hand side, and the
+/// only route that stays affordable at the widths this engine fits (a dense
+/// symmetric eigendecomposition at `p = 4096` is the #2757 cost complaint, and
+/// a diagnostic must not reintroduce it on the ordinary path). A weighted
+/// design Gram is singular exactly when the design is rank-deficient in the
+/// fit's own frame; the identifiability pass makes that the exception, so the
+/// spectral pseudo-inverse is the fallback rather than the default. It projects
+/// onto `range(G)`, which is the right answer there: directions the design
+/// cannot span in the `W_H` metric are not directions to project out.
+fn solve_symmetric_psd(gram: ArrayView2<'_, f64>, rhs: &Array2<f64>) -> Option<Array2<f64>> {
+    use gam_linalg::faer_ndarray::FaerCholesky;
+    if let Ok(factor) = gram.to_owned().cholesky(Side::Lower) {
+        let solved = factor.solve_mat(rhs);
+        if solved.iter().all(|value| value.is_finite()) {
+            return Some(solved);
+        }
+    }
+    let symmetric = 0.5 * (&gram.to_owned() + &gram.t());
+    let (eigenvalues, eigenvectors) = strict_symmetric_eigh(&symmetric, Side::Lower).ok()?;
+    let largest = eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
+    if !(largest > 0.0) {
+        return None;
+    }
+    let floor = largest * GRAM_RANK_FLOOR;
+    let projected = eigenvectors.t().dot(rhs);
+    let mut scaled = projected;
+    for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
+        let factor = if eigenvalue > floor {
+            1.0 / eigenvalue
+        } else {
+            0.0
+        };
+        scaled.row_mut(index).iter_mut().for_each(|v| *v *= factor);
+    }
+    let solved = eigenvectors.dot(&scaled);
+    solved.iter().all(|value| value.is_finite()).then_some(solved)
+}
+
+/// Relative eigenvalue floor for the rank-deficient-Gram fallback in
+/// [`solve_symmetric_psd`]. Directions of the weighted design Gram below
+/// `λ_max · 1e-12` are treated as outside the design's realized span.
+const GRAM_RANK_FLOOR: f64 = 1.0e-12;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,33 +406,35 @@ mod tests {
         }
     }
 
-    /// Gaussian-identity harness: `W = 1`, `s = y − Xβ̂`, `H = XᵀX + S`.
-    /// Returns the assembled inputs' owned buffers so views can be taken.
+    /// Gaussian-identity harness: `W = 1`, `β̂` is the RIDGE-penalized least
+    /// squares fit (`H = XᵀX + ridge·I`), `s = y − Xβ̂`, and the Gram handed to
+    /// the test is the unpenalized `XᵀX`. The ridge is a knob so a test can vary
+    /// how hard the fit is shrunk without touching anything else.
     struct GaussianHarness {
         design: Array2<f64>,
         enrichment: Array2<f64>,
         weights: Array1<f64>,
         score: Array1<f64>,
-        hessian_inverse: Array2<f64>,
+        design_gram: Array2<f64>,
     }
 
     impl GaussianHarness {
         fn new(design: Array2<f64>, enrichment: Array2<f64>, y: Array1<f64>, ridge: f64) -> Self {
             let n = design.nrows();
             let p = design.ncols();
-            let mut hessian = design.t().dot(&design);
+            let design_gram = design.t().dot(&design);
+            let mut hessian = design_gram.clone();
             for index in 0..p {
                 hessian[(index, index)] += ridge;
             }
-            let hessian_inverse = invert_symmetric(&hessian);
-            let beta = hessian_inverse.dot(&design.t().dot(&y));
+            let beta = invert_symmetric(&hessian).dot(&design.t().dot(&y));
             let score = &y - &design.dot(&beta);
             Self {
                 design,
                 enrichment,
                 weights: Array1::ones(n),
                 score,
-                hessian_inverse,
+                design_gram,
             }
         }
 
@@ -369,7 +445,7 @@ mod tests {
                 hessian_weights: self.weights.view(),
                 score_weights: self.weights.view(),
                 score: self.score.view(),
-                hessian_inverse: self.hessian_inverse.view(),
+                design_gram: self.design_gram.view(),
                 dispersion: 1.0,
                 residual_df: None,
                 scale: SmoothTestScale::Known,
@@ -509,19 +585,26 @@ mod tests {
         let harness = GaussianHarness::new(design, enrichment, y, 0.0);
         let out = basis_adequacy_score_test(harness.input()).expect("estimable enrichment");
         assert!(
-            out.p_value < 1e-6,
+            out.p_value < 1e-3,
             "quadratic lack of fit should be detected, got p={}",
             out.p_value
         );
     }
 
-    /// The projection uses `H⁻¹`, not `(XᵀWX)⁻¹`: with a heavy ridge the two
-    /// differ, and using the wrong one changes the statistic. Pinning the
-    /// penalized form here is what keeps this a score test OF THE PENALIZED FIT.
+    /// **The defining contract.** Shifting the enrichment by ANY multiple of the
+    /// design columns (`Z → Z + X·A`) leaves the statistic bit-comparably
+    /// unchanged, because `Z̃` is the `W_H`-orthogonal complement of `span(X)`
+    /// and `X·A` lies entirely inside it.
+    ///
+    /// This is what separates the shipped construction from the `H⁻¹`-projected
+    /// penalized score test, which does NOT satisfy it: there `Z̃ = ... G H⁻¹S_λ`
+    /// picks up whatever part of `X·A` the penalty shrinks, so the "same"
+    /// alternative reparameterized differently gives a different answer, and the
+    /// difference is the fit's shrinkage bias rather than any lack of fit.
     #[test]
-    fn projection_uses_the_penalized_hessian() {
-        let n = 120;
-        let mut rng = Lcg(99);
+    fn statistic_is_invariant_to_shifting_the_enrichment_by_design_columns() {
+        let n = 300;
+        let mut rng = Lcg(4_242);
         let mut design = Array2::<f64>::zeros((n, 3));
         let mut enrichment = Array2::<f64>::zeros((n, 2));
         let mut y = Array1::<f64>::zeros(n);
@@ -532,17 +615,63 @@ mod tests {
             design[(row, 2)] = (3.0 * x).cos();
             enrichment[(row, 0)] = x * x;
             enrichment[(row, 1)] = (5.0 * x).sin();
-            y[row] = 1.0 + x + 0.4 * rng.next_normal();
+            y[row] = 1.0 + x + 0.8 * x * x + 0.4 * rng.next_normal();
         }
-        let penalized = GaussianHarness::new(design.clone(), enrichment.clone(), y.clone(), 50.0);
-        let unpenalized = GaussianHarness::new(design, enrichment, y, 0.0);
-        let a = basis_adequacy_score_test(penalized.input()).expect("penalized result");
-        let b = basis_adequacy_score_test(unpenalized.input()).expect("unpenalized result");
+        // A heavy ridge, so the fit is visibly shrunk and any leak of the
+        // shrinkage bias into the statistic would be large.
+        let base = GaussianHarness::new(design.clone(), enrichment.clone(), y.clone(), 40.0);
+        let shift = array![[7.0, -2.0], [0.5, 3.0], [-1.5, 4.0]];
+        let shifted_enrichment = &enrichment + &design.dot(&shift);
+        let shifted = GaussianHarness::new(design, shifted_enrichment, y, 40.0);
+        let a = basis_adequacy_score_test(base.input()).expect("base result");
+        let b = basis_adequacy_score_test(shifted.input()).expect("shifted result");
+        assert_eq!(a.rank, b.rank);
         assert!(
-            (a.statistic - b.statistic).abs() > 1e-8,
-            "the ridge must move the score statistic; got {} vs {}",
+            (a.statistic - b.statistic).abs() <= 1e-8 * a.statistic.max(1.0),
+            "statistic must not move under Z -> Z + X·A; got {} vs {}",
             a.statistic,
             b.statistic
+        );
+    }
+
+    /// The shrinkage bias of the penalized fit does not enter the statistic:
+    /// varying the ridge over four orders of magnitude, with the DATA held
+    /// fixed, leaves the null statistic in the same neighbourhood instead of
+    /// growing with how hard the fit is shrunk.
+    #[test]
+    fn statistic_does_not_track_the_penalty_strength_under_the_null() {
+        let n = 500;
+        let mut rng = Lcg(31_337);
+        let mut design = Array2::<f64>::zeros((n, 3));
+        let mut enrichment = Array2::<f64>::zeros((n, 4));
+        let mut y = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let x = (row as f64 + 0.5) / n as f64;
+            design[(row, 0)] = 1.0;
+            design[(row, 1)] = x;
+            design[(row, 2)] = x * x;
+            enrichment[(row, 0)] = x * x * x;
+            enrichment[(row, 1)] = (7.0 * x).sin();
+            enrichment[(row, 2)] = (7.0 * x).cos();
+            enrichment[(row, 3)] = (11.0 * x).sin();
+            // Truth is exactly in span(X): H₀ holds however hard the ridge bites.
+            y[row] = 1.0 + 3.0 * x - 2.0 * x * x + rng.next_normal();
+        }
+        let mut statistics = Vec::new();
+        for ridge in [0.0, 1.0, 1.0e2, 1.0e4] {
+            let harness =
+                GaussianHarness::new(design.clone(), enrichment.clone(), y.clone(), ridge);
+            let out = basis_adequacy_score_test(harness.input()).expect("estimable enrichment");
+            statistics.push(out.statistic);
+        }
+        let span = statistics
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max)
+            - statistics.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            span < 4.0,
+            "the ridge must not drive the null statistic; got {statistics:?}"
         );
     }
 

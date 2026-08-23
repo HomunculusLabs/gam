@@ -1042,6 +1042,7 @@ fn deterministic_gaussian_standard_fit(
         fit,
         design,
         resolvedspec,
+        basis_adequacy: Vec::new(),
         adaptive_spatial_terms: adaptive_spatial_term_mask(&request.spec),
         adaptive_spatial_center_counts: adaptive_spatial_center_counts(&request.spec),
         adaptive_diagnostics: None,
@@ -1645,6 +1646,16 @@ fn fit_materialized_once_with_notes(
     mat: MaterializedModel<'_>,
 ) -> Result<FormulaFitResult, WorkflowError> {
     let inference_notes = mat.inference_notes;
+    // The materialized numeric covariate frame, kept across the `fit_model`
+    // move. `SmoothBasisSpec::structural_feature_cols` indexes THIS matrix, so
+    // it is the only frame in which a smooth's covariates can be identified;
+    // `fit_model` consumes the request and the fitted result does not carry it.
+    // `ArrayView2` is `Copy`, and its lifetime is the caller's dataset, not
+    // `mat` — so this costs nothing and outlives the move.
+    let standard_covariate_frame = match &mat.request {
+        FitRequest::Standard(request) => Some(request.data),
+        _ => None,
+    };
     // Exact O(n) spline-scan fast path (#1030): when the materialized request
     // is the single 1-D Gaussian-identity penalized-smooth shape the
     // state-space scan solves exactly, route through it and return the
@@ -1656,10 +1667,11 @@ fn fit_materialized_once_with_notes(
     // from this same `SplineScanFit`.
     if let FitRequest::Standard(request) = &mat.request {
         if let Some(result) = try_deterministic_gaussian_standard_fit(request)? {
-            return Ok(FormulaFitResult {
-                result: FitResult::Standard(result),
+            return Ok(attach_basis_adequacy(
+                FitResult::Standard(result),
+                standard_covariate_frame,
                 inference_notes,
-            });
+            ));
         }
         if let Some(inputs) = spline_scan_fast_path(request) {
             let scan = gam_solve::spline_scan::fit_spline_scan(
@@ -1707,10 +1719,53 @@ fn fit_materialized_once_with_notes(
     }
     // `fit_model` already returns `WorkflowError` end-to-end; propagate it
     // directly instead of stringifying then re-wrapping.
-    fit_model(mat.request).map(|result| FormulaFitResult {
+    let result = fit_model(mat.request)?;
+    Ok(attach_basis_adequacy(
         result,
+        standard_covariate_frame,
         inference_notes,
-    })
+    ))
+}
+
+/// Measure each smooth's basis adequacy (#2774) and fold the verdict into the
+/// fit result and its user-facing advisories.
+///
+/// This is the ONE seam where it happens, for the same reason the per-term
+/// summary walk lives in one place: the report needs the materialized covariate
+/// frame, the realized design and the converged fit at once, and exactly one
+/// function in the engine holds all three. `fit_model` holds the first two but
+/// not the frame's column meaning; the payload builders hold the last two but
+/// have already dropped the request.
+///
+/// A missing verdict is never an error. `basis_adequacy_report` returns a typed
+/// reason per term instead, and a fit is not refused, delayed, or altered by
+/// what this finds — the only thing that changes is what the caller is told.
+fn attach_basis_adequacy(
+    result: FitResult,
+    covariate_frame: Option<ndarray::ArrayView2<'_, f64>>,
+    mut inference_notes: Vec<String>,
+) -> FormulaFitResult {
+    let FitResult::Standard(mut standard) = result else {
+        return FormulaFitResult {
+            result,
+            inference_notes,
+        };
+    };
+    if let Some(data) = covariate_frame {
+        standard.basis_adequacy = crate::fit_orchestration::drivers::basis_adequacy_report(
+            data,
+            &standard.design,
+            &standard.resolvedspec,
+            &standard.fit,
+        );
+        inference_notes.extend(crate::fit_orchestration::drivers::basis_adequacy_notes(
+            &standard.basis_adequacy,
+        ));
+    }
+    FormulaFitResult {
+        result: FitResult::Standard(standard),
+        inference_notes,
+    }
 }
 
 /// THE single dispatch seam for the expectile (Newey–Powell LAWS) family.

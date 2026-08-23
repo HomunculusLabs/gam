@@ -374,6 +374,22 @@ pub struct FittedModelPayload {
     /// such field) deserializing cleanly as "no notes".
     #[serde(default)]
     pub inference_notes: Vec<String>,
+    /// Per-smooth basis-adequacy evidence measured at fit time (#2774): for each
+    /// smooth term, the residual lack-of-fit verdict against a higher-resolution
+    /// alternative over that term's own covariates, or a typed reason it could
+    /// not be measured.
+    ///
+    /// Persisted because it is EVIDENCE ABOUT THIS FIT, not a re-derivable
+    /// property of the saved model: it is computed from the converged IRLS row
+    /// state (weights, working response, linear predictor), and a saved model
+    /// carries none of those. `Model.basis_check(data)` recomputes it from the
+    /// training rows; this field is what `summary()` can report with no data at
+    /// all, which is the difference between a user seeing the warning and not.
+    ///
+    /// `#[serde(default)]` keeps payloads written before this field existed
+    /// deserializing as "not measured" — which is exactly what they are.
+    #[serde(default)]
+    pub basis_adequacy: Vec<crate::fit_orchestration::drivers::BasisAdequacyRow>,
     #[serde(default)]
     pub used_device: bool,
     #[serde(default)]
@@ -844,6 +860,7 @@ impl FittedModelPayload {
             family,
             estimator: FittedEstimator::Likelihood,
             inference_notes: Vec::new(),
+            basis_adequacy: Vec::new(),
             used_device: false,
             fit_result: None,
             unified: None,

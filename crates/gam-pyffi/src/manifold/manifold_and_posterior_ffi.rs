@@ -1557,6 +1557,28 @@ fn summary_convergence(fit: &gam::solver::estimate::UnifiedFitResult) -> Summary
     }
 }
 
+/// The #2774 basis-adequacy rows a fitted model carries, mapped onto the FFI
+/// summary shape. A pure read of persisted fit-time evidence — no refit, no
+/// recomputation, and no fabrication when the fit recorded none.
+fn summary_basis_checks(model: &FittedModel) -> Vec<SummaryBasisCheckRow> {
+    model
+        .payload()
+        .basis_adequacy
+        .iter()
+        .map(|row| SummaryBasisCheckRow {
+            name: row.name.clone(),
+            term_idx: row.term_idx,
+            basis_dim: row.basis_dim,
+            nullspace_dim: row.nullspace_dim,
+            enrichment_dim: row.enrichment_centers,
+            enrichment_rank: row.enrichment_rank,
+            statistic: row.statistic,
+            p_value: row.p_value,
+            provenance: row.provenance.label(),
+        })
+        .collect()
+}
+
 fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
     let model = load_model_impl(model_bytes)?;
     if let Some(scan) = scan_introspection(&model)? {
@@ -1629,6 +1651,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         coefficients,
         smooth_terms,
         curvature_estimands: summary_curvature_estimands(&model),
+        basis_checks: summary_basis_checks(&model),
         covariance_kind: covariance.as_ref().map(|(kind, _)| kind.clone()),
         covariance_n: covariance.as_ref().map(|(_, cov)| cov.nrows()),
         covariance_flat: covariance.map(|(_, cov)| cov.iter().copied().collect()),
