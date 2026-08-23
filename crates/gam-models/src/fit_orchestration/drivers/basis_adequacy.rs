@@ -185,20 +185,29 @@ fn enrichment_width(realized_width: usize, n_rows: usize) -> Option<usize> {
 /// which is `p ≈ 1e-40`.
 ///
 /// What the cap buys is a bound on cost that does not depend on `n`. Measured
-/// A/B on the filed fixture, same data and seed, wheels differing only in
-/// whether the check runs:
+/// A/B on the filed fixture, same data and seed, on an otherwise idle machine,
+/// wheels differing only in whether the check runs:
 ///
 /// ```text
-///   n =  50_000    16.11 s -> 16.89 s    (+0.78 s,  4.8%)
-///   n = 200_000    87.23 s -> 110.62 s   (+23.4 s, 26.8%)
+///   n           baseline   uncapped    capped
+///    50_000      16.11 s    16.89 s    17.48 s
+///   100_000      27.28 s    29.68 s    28.04 s
+///   200_000      87.23 s   110.62 s    87.50 s     (+26.8%  ->  +0.3%)
 /// ```
 ///
-/// The growth is worse than linear, and it is NOT in the parts this module
-/// budgets for — the enrichment kernel itself measures 0.94 s and the `O(m·q²)`
-/// Gram 0.15 s at `n = 200_000`. Rather than chase it through the radial
-/// builder, the cap makes it unreachable: past `REPORT_ROW_CAP` the report's
-/// work stops growing with `n` entirely. A diagnostic that runs on every fit,
-/// unasked, may not cost a quarter of that fit.
+/// The uncapped growth is worse than linear and it is NOT in the parts this
+/// module budgets for — at `n = 200_000` the enrichment kernel itself measures
+/// 0.94 s and the `O(m·q²)` Gram 0.15 s. It tracks a regime change the BASELINE
+/// shows too (37.8 s at `n = 140_000` to 87.2 s at `n = 200_000`, for a 1.43×
+/// row increase). Rather than chase it through the radial builder, the cap makes
+/// it unreachable: past `REPORT_ROW_CAP` the report's work stops growing with
+/// `n` entirely. A diagnostic that runs on every fit, unasked, may not cost a
+/// quarter of that fit.
+///
+/// The power it costs, on the same fixture at `n = 200_000`: the statistic goes
+/// from `T = 1473` to `T = 443` against `r = 75` — an excess of 368 against
+/// 1398, exactly the 1/4 row ratio the linear non-centrality predicts — and the
+/// p-value from `3e-258` to `1.4e-53`. That is the trade this constant makes.
 const REPORT_ROW_CAP: usize = 50_000;
 
 /// Byte budget for the one dense array this report materializes: the gathered
