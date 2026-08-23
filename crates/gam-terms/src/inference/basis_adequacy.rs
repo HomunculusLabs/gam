@@ -142,9 +142,14 @@ pub struct BasisAdequacyInput<'a> {
     /// the tested term's covariates. Columns already inside `span(X)` are
     /// harmless; they leave the estimable rank rather than biasing it.
     pub enrichment: ArrayView2<'a, f64>,
-    /// `X` — the fitted design (`n × p`) in the same coefficient frame as
-    /// `design_gram`.
-    pub design: ArrayView2<'a, f64>,
+    /// `X` — the fitted design, in the same coefficient frame as `design_gram`.
+    ///
+    /// Taken as the design ITSELF rather than as a materialized `n × p` array:
+    /// a spatial smooth's design is routinely operator-backed (`DenseDesignMatrix::Lazy`)
+    /// and exposes no dense view at all, and materializing one to run a
+    /// diagnostic would make the diagnostic the peak-memory term of the fit it
+    /// is diagnosing. Both passes below read it in row blocks.
+    pub design: &'a gam_linalg::matrix::DesignMatrix,
     /// `W_H` — the diagonal curvature weights the fit's penalized Hessian was
     /// assembled from (observed information where the fit tracked it). Used
     /// only to build the projection.
@@ -242,11 +247,8 @@ pub fn basis_adequacy_score_test(
                 target[column] = curvature * value;
             }
         }
-        cross += &input
-            .design
-            .slice(ndarray::s![start..stop, ..])
-            .t()
-            .dot(&hessian_weighted);
+        let design_block = input.design.try_row_chunk(start..stop).ok()?;
+        cross += &design_block.t().dot(&hessian_weighted);
         start = stop;
     }
     let energy_scale = energy.iter().cloned().fold(0.0_f64, f64::max);
@@ -281,10 +283,8 @@ pub fn basis_adequacy_score_test(
             .enrichment
             .slice(ndarray::s![start..stop, ..])
             .to_owned();
-        residualized -= &input
-            .design
-            .slice(ndarray::s![start..stop, ..])
-            .dot(&coefficient_shift);
+        let design_block = input.design.try_row_chunk(start..stop).ok()?;
+        residualized -= &design_block.dot(&coefficient_shift);
         u += &residualized
             .t()
             .dot(&input.score.slice(ndarray::s![start..stop]));
@@ -477,7 +477,7 @@ mod tests {
     /// the test is the unpenalized `XᵀX`. The ridge is a knob so a test can vary
     /// how hard the fit is shrunk without touching anything else.
     struct GaussianHarness {
-        design: Array2<f64>,
+        design: gam_linalg::matrix::DesignMatrix,
         enrichment: Array2<f64>,
         weights: Array1<f64>,
         score: Array1<f64>,
@@ -496,7 +496,9 @@ mod tests {
             let beta = invert_symmetric(&hessian).dot(&design.t().dot(&y));
             let score = &y - &design.dot(&beta);
             Self {
-                design,
+                design: gam_linalg::matrix::DesignMatrix::Dense(
+                    gam_linalg::matrix::DenseDesignMatrix::from(design),
+                ),
                 enrichment,
                 weights: Array1::ones(n),
                 score,
@@ -508,7 +510,7 @@ mod tests {
         fn input(&self) -> BasisAdequacyInput<'_> {
             BasisAdequacyInput {
                 enrichment: self.enrichment.view(),
-                design: self.design.view(),
+                design: &self.design,
                 hessian_weights: self.weights.view(),
                 score_weights: self.weights.view(),
                 score: self.score.view(),

@@ -86,7 +86,8 @@ Each row carries
 | Field | Meaning |
 | --- | --- |
 | `basis_dim` | The realized coefficient width `k'` of the term. |
-| `nullspace_dim` | The dimension of its joint penalty null space — never shrunk, so `basis_dim - nullspace_dim` is the *penalizable* capacity. |
+| `nullspace_dim` | The dimension of its **joint** penalty null space — the directions no penalty touches — so `basis_dim - nullspace_dim` is the penalizable capacity. `0` for every double-penalized smooth, which includes the whole radial family. |
+| `edf` | The term's effective degrees of freedom, carried here so it can be read against the two above. |
 | `enrichment_dim` / `enrichment_rank` | Width of the higher-resolution alternative the residuals were tested against, and how many of its directions survived projecting the fitted design out. The rank is the test's reference degrees of freedom. |
 | `statistic` / `p_value` | The penalized score (Rao) lack-of-fit test. A small `p_value` means the basis is too small. |
 | `provenance` | `"radial_enrichment"` when a test ran, else the NAME of the evidence that was missing. |
@@ -94,13 +95,17 @@ Each row carries
 `p_value` is present exactly when a test ran, so "adequate" and "not measured"
 are never confusable.
 
-!!! warning "`nullspace_dim` is why EDF-vs-`k'` misleads in high dimensions"
+!!! warning "EDF-vs-`k'` misleads on a radial smooth"
 
-    A `d`-dimensional radial smooth carries a `d + 1`-column *linear null space*
-    that is unpenalized and therefore always fully used. On a 16-D
-    `duchon(..., centers=24)` that is 17 of the 24 columns, so a total EDF of
-    20.9 out of 24 looks 87% "saturated" while the penalized part sits at 3.9
-    out of a capacity of 7. Read `basis_dim - nullspace_dim`, not `basis_dim`.
+    A `d`-dimensional radial smooth is *double penalized*: an RKHS curvature
+    penalty plus a complementary trend ridge on its `d + 1`-column polynomial
+    block. Nothing in it is completely unshrunk, so `nullspace_dim` is `0` — but
+    the polynomial block is only WEAKLY penalized, and on a 16-D
+    `duchon(..., centers=24)` those 17 of 23 columns carry most of the term's
+    effective dimension. The EDF column then reads near-saturated on a fit whose
+    problem is the *span* of its basis, not its rank. That is the reading
+    `p_value` exists to replace: it asks whether the residuals carry structure
+    the column space cannot reach, which no EDF number can answer.
 
 ### What the test is, and what it deliberately ignores
 

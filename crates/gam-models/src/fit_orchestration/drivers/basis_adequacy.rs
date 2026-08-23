@@ -41,9 +41,11 @@ pub enum BasisAdequacyProvenance {
     /// linear predictor) the score needs. Saved-model and warm-start replays
     /// can land here.
     NoIrlsRowState,
-    /// The design could not be materialized densely under the process memory
-    /// governor, and this diagnostic will not evict the fit to run.
-    DesignNotMaterializable,
+    /// The fitted design's weighted Gram `XᵀW_H X` could not be assembled or
+    /// factored — a rank-degenerate or non-finite design in the fit's own frame.
+    /// This is a statement about the design, not about storage: the design is
+    /// read in row chunks, so no representation or size makes the check skip.
+    DesignGramUnavailable,
     /// The test itself declined: no estimable enrichment direction survived the
     /// projection, or the assembled quadratic form was not finite.
     StatisticUnavailable,
@@ -59,7 +61,7 @@ impl BasisAdequacyProvenance {
             Self::EnrichmentBudgetBelowRealizedWidth => "enrichment_budget_below_realized_width",
             Self::EnrichmentBuildFailed => "enrichment_build_failed",
             Self::NoIrlsRowState => "no_irls_row_state",
-            Self::DesignNotMaterializable => "design_not_materializable",
+            Self::DesignGramUnavailable => "design_gram_unavailable",
             Self::StatisticUnavailable => "statistic_unavailable",
         }
     }
@@ -153,16 +155,6 @@ const ENRICHMENT_BYTE_BUDGET: f64 = 2.56e8;
 
 /// Rows per center: never ask for a kernel chart the data cannot condition.
 const ENRICHMENT_ROWS_PER_CENTER: usize = 8;
-
-/// Byte budget for materializing an operator-backed design `X` (`n × p`).
-///
-/// Same ceiling as [`ENRICHMENT_BYTE_BUDGET`] and for the same reason: this is
-/// the other `n`-tall matrix the report needs in one piece, and a diagnostic
-/// that runs on every fit may not be the term that decides that fit's peak
-/// residency. A design past the cap yields
-/// [`BasisAdequacyProvenance::DesignNotMaterializable`] — a stated absence of
-/// evidence, which is the contract this whole module is built on.
-const DESIGN_BYTE_BUDGET: usize = 268_435_456;
 
 /// The enrichment width for one term, or `None` when the budget cannot beat the
 /// realized width.
@@ -377,38 +369,22 @@ pub fn basis_adequacy_report(
             .map(|idx| undetermined(idx, BasisAdequacyProvenance::NoIrlsRowState))
             .collect();
     };
-    // `as_dense_ref` is `Some` ONLY for `Dense(Materialized)`. A reparameterized
-    // smooth ships `Dense(Lazy(op))` — `X·Qs` held as an operator — and that is
-    // what every radial/Duchon term the fit path reparameterizes becomes,
-    // INCLUDING the 16-D `duchon(pc1..pc16, centers=24)` fixture this issue was
-    // filed on. Taking `as_dense_ref` as the whole answer made the report return
-    // `design_not_materializable` for exactly the fits it exists to diagnose.
+    // The design is read in ROW CHUNKS, never materialized. `as_dense_ref` is
+    // `Some` only for `Dense(Materialized)`, and a reparameterized smooth ships
+    // `Dense(Lazy(op))` — `X·Qs` held as an operator — which is what every
+    // radial/Duchon term the fit path reparameterizes becomes, INCLUDING the
+    // 16-D `duchon(pc1..pc16, centers=24)` fixture this issue was filed on.
+    // Requiring a dense view made the report return "not materializable" for
+    // exactly the fits it exists to diagnose.
     //
-    // The chunked route is the one `radial_enrichment` already takes for the
-    // enrichment above, and `DesignNotMaterializable`'s own documentation
-    // already reads "could not be materialized densely under the process memory
-    // governor" — the budgeted call is what makes that sentence true rather than
-    // universal. This is an observability-only diagnostic on the ordinary fit
-    // path, so it refuses BEFORE allocating instead of becoming the peak
-    // residency term of somebody's fit.
-    let materialized_design;
-    let dense_design = match design.design.as_dense_ref() {
-        Some(matrix) => matrix,
-        None => match design
-            .design
-            .try_to_dense_by_chunks_budgeted("basis_adequacy design", DESIGN_BYTE_BUDGET)
-        {
-            Ok(matrix) => {
-                materialized_design = matrix;
-                &materialized_design
-            }
-            Err(_) => {
-                return (0..term_count)
-                    .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignNotMaterializable))
-                    .collect();
-            }
-        },
-    };
+    // Materializing under a byte budget would fix that, but it trades one
+    // silent skip for another: past the cap the check goes dark again, and
+    // under it a diagnostic that runs on every fit adds an `n × p` copy to that
+    // fit's peak residency. Neither is necessary. `basis_adequacy_score_test`
+    // already streams the enrichment in row blocks for its own `n × q` array,
+    // and `DesignMatrix::try_row_chunk` serves dense, lazy-operator and sparse
+    // backings alike — so the design streams through the same loop, the budget
+    // constant is gone, and there is no size at which the check stops running.
     // `G = XᵀW_H X`, factored ONCE for the whole model: the projection is applied
     // per smooth term but `G` is a property of the design and the weights, and
     // re-factoring it per term would charge `O(p³)` per smooth on a fit that
@@ -422,7 +398,7 @@ pub fn basis_adequacy_report(
             })
     else {
         return (0..term_count)
-            .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignNotMaterializable))
+            .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignGramUnavailable))
             .collect();
     };
     // The dispersion that scales the score's variance is the same multiplier the
@@ -463,7 +439,7 @@ pub fn basis_adequacy_report(
             let outcome = gam_terms::inference::basis_adequacy::basis_adequacy_score_test(
                 gam_terms::inference::basis_adequacy::BasisAdequacyInput {
                     enrichment: enrichment.view(),
-                    design: dense_design.view(),
+                    design: &design.design,
                     hessian_weights: rows_state.hessian_weights.view(),
                     score_weights: rows_state.score_weights.view(),
                     score: rows_state.score.view(),

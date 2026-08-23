@@ -212,11 +212,14 @@ struct SummaryBasisCheckRow {
     term_idx: usize,
     /// Realized coefficient width `k'` of the term.
     basis_dim: usize,
-    /// Dimension of the term's joint penalty null space. `basis_dim −
-    /// nullspace_dim` is the penalizable capacity, which is the quantity an
-    /// EDF-saturation reading is actually about — on a 16-D Duchon the null
-    /// space alone is 17 columns and always fully used, so comparing total EDF
-    /// against `basis_dim` reads as "saturated" when it is not (#2774).
+    /// Dimension of the term's JOINT penalty null space — the directions no
+    /// penalty on it touches — so `basis_dim − nullspace_dim` is the penalizable
+    /// capacity. `0` for every double-penalized smooth, the radial family
+    /// included: a Duchon term carries an RKHS curvature Gram AND a
+    /// complementary trend ridge on its polynomial block, so nothing in it is
+    /// completely unshrunk. That block is only WEAKLY penalized, though, so it
+    /// carries most of the term's EDF and makes an EDF-vs-`basis_dim` reading
+    /// look saturated on a fit whose problem is its basis's SPAN (#2774).
     nullspace_dim: usize,
     /// The term's effective degrees of freedom, carried BESIDE `basis_dim` and
     /// `nullspace_dim` because the three only mean anything together. The

@@ -20,9 +20,23 @@ assertion drifts:
 4. The same design with an ADEQUATE basis warns about nothing. Without this a
    diagnostic that fires unconditionally would pass every other check here.
 
-The fixture is a small-`n` version of the filed one: a null exposure correlated
-with 16 population PCs, adjusted by ``duchon(pc1..pc16, centers=24)`` whose
-17-column linear null space leaves seven nonlinear columns.
+The fixture is a reduced version of the filed one: a null exposure correlated
+with 16 population PCs, adjusted by ``duchon(pc1..pc16, centers=24)``.
+
+Two fixture choices are measured rather than assumed:
+
+* ``scale_dimensions=True``, matching the issue's own repeated-calibration
+  table. It is not cosmetic. The 16 PCs carry geometrically decreasing scales
+  (3.0 down to 0.45), so with scaling OFF an isotropic kernel concentrates its
+  resolution on the high-variance axes — exactly where the simulated effect
+  lives — and 24 centers get much closer to the surface. With it ON the kernel
+  spreads over 13 axes that carry nothing. One seed at ``n = 3000``: lack-of-fit
+  ``p = 0.43`` off against ``p = 6e-11`` on.
+* ``n = 12000``. The statistic's excess over its reference d.f. grows linearly
+  in ``n``; at ``n = 3000`` with scaling on it is already ~107 against ``r = 75``,
+  so 12000 puts the flagged arm orders of magnitude clear of the threshold
+  rather than a factor of a few, which is what an arm gated at ``p < 1e-3``
+  needs from a single seed.
 """
 
 from __future__ import annotations
@@ -38,7 +52,7 @@ gamfit = pytest.importorskip("gamfit")
 
 PC_DIMENSION = 16
 CENTERS = 24
-N_ROWS = 3000
+N_ROWS = 12000
 SEED = 20260820
 
 #: The engine's own fit-time note level, Bonferroni-corrected over the terms
@@ -93,11 +107,25 @@ def _formula() -> str:
     return f"y ~ dosage + duchon({covariates}, centers={CENTERS})"
 
 
-def _fit(effect: str):
+def _fit(effect: str, scale_dimensions: bool = True):
+    """Fit the fixture.
+
+    ``scale_dimensions`` is NOT cosmetic here, and it is measured rather than
+    assumed: the 16 PCs carry geometrically decreasing scales, so with scaling
+    OFF an isotropic kernel spends its resolution on the high-variance axes —
+    exactly where the simulated effect lives — and 24 centers reach the surface.
+    With it ON every axis is equalized, the kernel spreads over 13 axes that
+    carry nothing, and the basis genuinely cannot reach it. One seed at
+    ``n = 3000``: lack-of-fit ``p = 0.43`` off against ``p = 6e-11`` on. The
+    issue's repeated-calibration table is ``scale_dimensions=True``, which is
+    what these fixtures use.
+    """
     frame = _confounded_frame(effect)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = gamfit.fit(frame, _formula(), family="binomial", scale_dimensions=False)
+        model = gamfit.fit(
+            frame, _formula(), family="binomial", scale_dimensions=scale_dimensions
+        )
     return frame, model, caught
 
 
@@ -155,12 +183,15 @@ def test_summary_carries_the_evidence_without_data(underfitted):
     row = checks[0]
     assert row["provenance"] == "radial_enrichment"
     assert row["p_value"] < NOTE_LEVEL, row
-    # The null-space decomposition is what makes the summary's EDF column
-    # readable: 17 of the 24 columns are the linear null space and are always
-    # fully used, so total-EDF-vs-basis_dim reads "saturated" on a fit whose
-    # penalized part is nowhere near its ceiling.
-    assert row["nullspace_dim"] == PC_DIMENSION + 1, row
-    assert row["basis_dim"] >= row["nullspace_dim"], row
+    # ``nullspace_dim`` is the JOINT null space — the directions no penalty
+    # touches — and it is 0 here because a Duchon term is DOUBLE penalized (the
+    # RKHS curvature Gram plus a complementary trend ridge on the polynomial
+    # block). That is precisely why an EDF reading misleads on this term: the
+    # polynomial block is d+1 = 17 of the columns and is only WEAKLY penalized,
+    # so it carries most of the EDF and makes the fit look near-saturated while
+    # the lack-of-fit test says the span is the problem.
+    assert row["nullspace_dim"] == 0, row
+    assert 0.0 < row["edf"] <= row["basis_dim"] + 1e-6, row
     assert row["enrichment_rank"] > row["basis_dim"], (
         "the alternative must carry more resolution than the fitted basis",
         row,
@@ -183,6 +214,7 @@ def test_basis_check_recomputes_and_agrees(underfitted):
     assert row["provenance"] == persisted["provenance"] == "radial_enrichment"
     assert row["basis_dim"] == persisted["basis_dim"]
     assert row["nullspace_dim"] == persisted["nullspace_dim"]
+    assert row["edf"] == pytest.approx(persisted["edf"], rel=1e-6)
     assert row["p_value"] < NOTE_LEVEL, row
     # Same fit, same rows, same frozen spec: the statistic should land in the
     # same place rather than merely on the same side of the threshold.
