@@ -227,7 +227,7 @@ pub struct WorkingModelPirlsResult {
     pub max_abs_eta: f64,
     pub constraint_kkt: Option<ConstraintKktDiagnostics>,
     /// The KKT tolerance this solve's convergence certificate was actually
-    /// decided against — [`crate::pirls::convergence::effective_kkt_tolerance`],
+    /// decided against — `crate::pirls::convergence::effective_kkt_tolerance`,
     /// i.e. the ADAPTIVE value when the outer schedule supplied one and the
     /// configured tolerance otherwise.
     ///

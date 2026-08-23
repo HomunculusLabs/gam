@@ -1386,7 +1386,7 @@ pub fn outer_row_weights_by_index(
 /// iterates against. What lives here is the globalization policy layered on
 /// top: the boundary backoff, which keeps a clipped iterate off the face by
 /// enough that the next cycle's feasibility gate cannot reject a point round-off
-/// left balanced on it — see [`apply_feasible_step_boundary_backoff`] for why
+/// left balanced on it — see `apply_feasible_step_boundary_backoff` for why
 /// that retreat is ABSOLUTE and not a fraction of the step.
 ///
 /// Before gam#2719 this function carried a rule of its own, and the two halves

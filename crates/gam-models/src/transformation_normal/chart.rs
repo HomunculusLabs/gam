@@ -227,7 +227,7 @@ pub fn ctn_response_knot_count(
 /// every observation used to build them sits strictly inside the support.
 ///
 /// This is a function rather than an inline block in
-/// [`super::build_response_basis`] because the support it defines is a *shared*
+/// `super::build_response_basis` because the support it defines is a *shared*
 /// object whenever more than one CTN fit has to produce comparable scores. The
 /// cross-fit Stage-1 calibration is exactly that case: it refits the CTN on each
 /// fold complement and evaluates the score on the held-out rows, so a
@@ -272,7 +272,7 @@ pub fn ctn_response_knots(
 ///
 /// This is the single decision point for "whose response defines the certified
 /// support", which is why it is a named function rather than a branch inside
-/// [`super::build_response_basis`] — the cross-fit needs to make that decision
+/// `super::build_response_basis` — the cross-fit needs to make that decision
 /// and needs to be able to check it (gam#2680).
 pub fn ctn_resolved_response_knots(
     response: ArrayView1<'_, f64>,
@@ -341,7 +341,7 @@ pub fn ctn_floor_offsets(
 /// `[0, M(y)·T]` at arbitrary response values, on the frozen knots/degree.
 ///
 /// `transform = None` means the identity chart (`T = I`), which is what
-/// [`super::build_response_basis`] constructs and therefore what the fit uses;
+/// `super::build_response_basis` constructs and therefore what the fit uses;
 /// a persisted model passes its saved `T` so a prediction reproduces the fitted
 /// basis exactly. The two callers differing on how the location column is
 /// prepended is precisely the class of bug this function exists to remove.

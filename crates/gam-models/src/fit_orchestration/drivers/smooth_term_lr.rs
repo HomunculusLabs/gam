@@ -48,7 +48,7 @@ pub enum SmoothLrReferenceSource {
     /// The spectrum is assembled from `[H⁻¹]_jj` and the term's own λ-weighted
     /// penalty block through the symmetric similarity
     /// `w_j = 1 − eig(B^{1/2} S_jj B^{1/2})²` — see
-    /// [`lr_tested_block`] for why that is the same spectrum as
+    /// `lr_tested_block` for why that is the same spectrum as
     /// `eig(2·F_jj − F_jj²)` and why it is the better-conditioned way to reach
     /// it.
     NullSpectrum,
@@ -112,7 +112,7 @@ pub enum SmoothLrReferenceSource {
 /// Diagonalize the term's fitted penalty `S_jj` against the Schur-complemented
 /// information `Ĩ_jj` — the pair is symmetric-definite, so a single basis
 /// diagonalizes both, with generalized eigenvalues `ν_k = p_k/(1 − p_k)` read
-/// straight off the penalty shares [`lr_tested_block`] already computes. In
+/// straight off the penalty shares `lr_tested_block` already computes. In
 /// that basis the tested block is `q` independent standard normals `u_k`, and
 /// BOTH the statistic and the criterion that selects `λ` are closed forms in
 /// them and in the scale `t = λ/λ̂`:
@@ -1880,7 +1880,7 @@ pub struct SmoothLrReferenceDf {
 /// `A = X H⁻¹X'W` is symmetric in the whitened coordinates the weighted RSS is
 /// a sum of squares in (`X̃ = W^{1/2}X`, where `ε̃ = W^{1/2}ε` has covariance
 /// `σ²I` because `Var(y_i) = σ²/w_i`), with eigenvalues `f_i = 1 − p_i` — the
-/// `p_i` being the penalty shares [`lr_tested_block`] returns, which are
+/// `p_i` being the penalty shares `lr_tested_block` returns, which are
 /// unchanged by the whitening since `H⁻¹S` is — and `n − p` further zeros. The
 /// true mean is annihilated because it lies in the penalty's null space. So
 ///
@@ -2793,7 +2793,7 @@ fn profiled_residual_degrees_of_freedom(fit: &UnifiedFitResult, n: usize) -> Opt
 /// penalty shares — or `None` when the family does not profile a Gaussian scale
 /// out of a residual sum of squares.
 ///
-/// This is [`lr_tested_block`] over the full coefficient range rather than over
+/// This is `lr_tested_block` over the full coefficient range rather than over
 /// a term's: the same self-adjoint decomposition and the same `[0, 1]` shares,
 /// deliberately not a second route to the same object. See
 /// [`SmoothLrProfiledScale`] for why `V ~ Σ_i p_i²·χ²_1 + χ²_{n−p}`.
@@ -2868,7 +2868,7 @@ fn lawley_dispersion_for_family(
 /// that each rung is a strictly weaker instrument on the SAME quantity rather
 /// than a different claim:
 ///
-/// 1. **The spectrum** ([`lr_tested_block`]) — needs `[H⁻¹]_jj`
+/// 1. **The spectrum** (`lr_tested_block`) — needs `[H⁻¹]_jj`
 ///    and the term's λ-weighted penalty block. Exact.
 /// 2. **Its first two moments** ([`lr_null_spectral_moments`]) — needs only the
 ///    coefficient-influence block, because with `A = 2F − F²`

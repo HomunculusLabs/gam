@@ -93,7 +93,7 @@
 //! `param_dim²` is the price of asking for an exact full spectrum, not an
 //! artifact of how it is asked for. At production width that branch needs the
 //! certificate to stop asking, which is a change to what
-//! [`super::residual_gauge_inner`] reads rather than to how this module stores.
+//! `super::residual_gauge_inner` reads rather than to how this module stores.
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use gam_linalg::lanczos::{SymmetricExtremeLanczosOptions, symmetric_extreme_lanczos_eigenpairs};
@@ -390,7 +390,7 @@ impl OutputBlockRootAccumulator {
 ///
 /// The Gram is the wrong object on both counts the certificate cares about:
 ///
-/// * **Resolution.** [`gram_spectral_rank`](super::gram_spectral_rank) has to
+/// * **Resolution.** `gram_spectral_rank` has to
 ///   take the rank decision on `λ = σ²` against a threshold `τ²` that lands
 ///   below a symmetric eigensolver's own backward error, so it is floored at
 ///   `ε·param_dim·λ_max` and cannot resolve below it — at `param_dim = 65 536`

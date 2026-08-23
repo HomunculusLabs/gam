@@ -1,7 +1,7 @@
 //! The monotone I-spline **ramp** basis: one function on all of `ℝ`, for any
 //! knot vector, with every derivative order read off that same function.
 //!
-//! This is the evaluator a monotone *warp* needs. [`create_ispline_dense`] and
+//! This is the evaluator a monotone *warp* needs. `create_ispline_dense` and
 //! [`create_ispline_derivative_dense`] answer the same question on the interval
 //! where the degree-`bs` B-splines are a partition of unity, and impose `0` /
 //! `1` outside it by convention. On a CLAMPED knot vector that convention is
@@ -156,7 +156,7 @@ fn pad_knots(knot_vector: ArrayView1<'_, f64>, pad: usize) -> Result<Array1<f64>
 /// throughout, and as smooth as the underlying spline: `C^{bs-1-m}` at a knot of
 /// multiplicity `m`.
 ///
-/// The column count matches [`create_ispline_dense`] exactly
+/// The column count matches `create_ispline_dense` exactly
 /// (`knots.len() − bs − 2`), and on a clamped knot vector every entry matches it
 /// too — see `the_ramp_reproduces_the_clamped_convention` below.
 pub fn ispline_ramp_basis_dense(

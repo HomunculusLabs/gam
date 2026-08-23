@@ -4685,7 +4685,7 @@ pub struct MultinomialPredictionIntervals {
 /// # The band is built on the log-odds scale, not on the probability scale
 ///
 /// The endpoints are `expit(logit(m) ± z·sd/(m(1−m)))`, which is the
-/// [`gam_predict::MeanIntervalMethod::TransformEta`] construction this library
+/// `gam_predict::MeanIntervalMethod::TransformEta` construction this library
 /// already prefers for every nonlinear link: build the symmetric interval where
 /// the posterior is closest to Gaussian, then carry it through a MONOTONE map.
 ///

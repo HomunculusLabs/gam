@@ -1174,7 +1174,7 @@ pub struct MeasureJetRangeBracket {
 /// `ℓ = spacing/√(2√ε)`; past it `K_cc` is the all-ones matrix to working
 /// precision and the gauge annihilates exactly that (the affine span, constant
 /// included), so no distinct model survives. `√ε` is the chart's own bar — the
-/// same half-mantissa [`condition_representer_section`] spends, and for the same
+/// same half-mantissa `condition_representer_section` spends, and for the same
 /// reason: it is the point past which a direction cannot survive being squared
 /// into a Gram and inverted back out.
 ///
@@ -1245,7 +1245,7 @@ pub fn measure_jet_range_bracket(
 ///   in. Past it `K_cc` is the all-ones matrix to working precision, and the
 ///   gauge annihilates exactly that (the affine span, constant included), so
 ///   there is no distinct model left. `√ε` is the chart's own bar — the same
-///   half-mantissa [`condition_representer_section`] spends, and for the same
+///   half-mantissa `condition_representer_section` spends, and for the same
 ///   reason: it is the point past which a direction cannot survive being
 ///   squared into a Gram and inverted back out.
 ///
@@ -1256,7 +1256,7 @@ pub fn measure_jet_range_bracket(
 ///
 /// ## What this deliberately is NOT
 ///
-/// It is **not** [`MeasureJetRangeBracket::ceiling`], the node bounding-box
+/// It is **not** [`MeasureJetRangeBracket::node_diameter`], the node bounding-box
 /// diagonal. That is where the response SCREEN stops walking, which is a
 /// stopping rule for a search over nodes, not a wall in the model: measured on
 /// three fixtures (`measure_jet_formula_fit_robustness_sweep` seed 1,
