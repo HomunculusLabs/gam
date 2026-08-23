@@ -38,6 +38,44 @@ Wald test.
 ``Model.smooth_significance(data)`` -- the likelihood-ratio sibling -- finds
 ``s(x)`` in both spellings, so the loss is specific to the summary's Wald table.
 
+Root cause, and the discriminator that isolates it. ``summary_smooth_terms``
+(``crates/gam-pyffi/src/manifold/manifold_and_posterior_ffi.rs:1288``) rebuilds a
+representative design from the frozen spec and bails to an EMPTY table when that
+rebuild fails::
+
+    let factor_levels = frozen_factor_levels_by_col(spec);
+    let data = representative_data_from_ranges(ranges, &factor_levels);
+    let Ok(design) = gam::terms::smooth::build_term_collection_design(data.view(), spec)
+        else { return Vec::new(); };
+
+and ``frozen_factor_levels_by_col`` (~line 996) collects levels by walking ONLY
+``spec.smooth_terms``::
+
+    for term in &spec.smooth_terms {
+        walk(&term.basis, &mut record);
+    }
+
+so a categorical column that appears only as a MAIN EFFECT contributes no frozen
+levels, ``representative_data_from_ranges`` fills it with an axis midpoint
+instead of a level bit pattern, and the rebuild fails. The comment directly above
+that bail-out records the same class of bug being fixed once already, for factor
+smooths and factor ``by=`` (#1370): "that failure was being swallowed to an EMPTY
+table for the whole model, erasing co-fitted ``s(x)`` rows too".
+
+The discriminator, on one dataset with one factor ``b``:
+
+    y ~ s(x) + b                     smooth_terms = []
+    y ~ s(x, by=b) + b               smooth_terms = ['b', 's(x, by=b):by=b[b0]',
+                                                     's(x, by=b):by=b[b1]',
+                                                     's(x, by=b):by=b[b2]']
+    y ~ s(x) + s(x, by=b) + b        smooth_terms = ['b', 's(x)', ...4 more]
+    y ~ s(x) + s(b, x, bs='sz')      smooth_terms = ['s(x)', "s(b, x, bs='sz')"]
+    y ~ s(x) + s(x, b, bs='fs')      smooth_terms = ['s(x)', "s(x, b, bs='fs')"]
+
+Adding one ``by=b`` smooth restores the whole table -- INCLUDING the row for the
+very main effect that was erasing it -- because the ``by=`` envelope is what puts
+``b``'s frozen levels into the collector.
+
 Observed: ``summary().smooth_terms == []`` whenever a categorical main effect is
 in the formula.
 
@@ -123,6 +161,49 @@ def test_tensor_smooth_row_survives_a_categorical_main_effect() -> None:
     assert _row(summary, "te(x, z)") is not None, (
         "summary().smooth_terms has no row for te(x, z): "
         f"{summary.smooth_terms!r} (edf_total {summary.edf_total!r})"
+    )
+
+
+@pytest.mark.parametrize(
+    "restoring_term",
+    ["s(x, by=b)", "s(b, x, bs='sz')", "s(x, b, bs='fs')"],
+)
+def test_control_a_by_or_factor_smooth_restores_the_whole_table(restoring_term: str) -> None:
+    """Green today: the same factor, once it also appears inside a smooth, is fine.
+
+    This is the discriminator for the root cause -- the level collector walks
+    only ``spec.smooth_terms``, so a factor that reaches it through a ``by=`` /
+    ``sz`` / ``fs`` envelope rebuilds cleanly while a main-effect-only factor
+    does not.
+    """
+    rng = np.random.default_rng(31)
+    n = 500
+    x = rng.uniform(0.0, 1.0, n)
+    data = {
+        "x": x,
+        "b": np.array([f"b{i % 3}" for i in range(n)]),
+        "y": np.sin(2.0 * np.pi * x) + 0.3 * rng.standard_normal(n),
+    }
+    summary = gamfit.fit(data, f"y ~ s(x) + {restoring_term}", family="gaussian").summary()
+    assert summary.smooth_terms, f"y ~ s(x) + {restoring_term} lost the table too"
+
+
+def test_main_effect_only_factor_keeps_the_table() -> None:
+    """The same factor, present only as a main effect, erases every row."""
+    rng = np.random.default_rng(31)
+    n = 500
+    x = rng.uniform(0.0, 1.0, n)
+    data = {
+        "x": x,
+        "b": np.array([f"b{i % 3}" for i in range(n)]),
+        "y": np.sin(2.0 * np.pi * x) + 0.3 * rng.standard_normal(n),
+    }
+    plain = gamfit.fit(data, "y ~ s(x) + b", family="gaussian").summary()
+    withby = gamfit.fit(data, "y ~ s(x) + s(x, by=b) + b", family="gaussian").summary()
+    assert [t.get("name") for t in (withby.smooth_terms or [])].count("s(x)") == 1
+    assert plain.smooth_terms, (
+        "y ~ s(x) + b reports smooth_terms == [] while y ~ s(x) + s(x, by=b) + b "
+        "on the same data reports the s(x) row plus a row for b itself"
     )
 
 
