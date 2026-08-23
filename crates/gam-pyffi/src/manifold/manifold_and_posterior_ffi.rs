@@ -1339,12 +1339,8 @@ fn summary_smooth_terms(
     // that is the only thing handed over. Both reference-distribution inputs
     // (`wald_residual_degrees_of_freedom`, `wald_scale_is_estimated`) are read
     // off the fit inside that walk, which is where `fd998d957` put them.
-    let rows = gam::solver::estimate::smooth_term_summary_rows(
-        &design,
-        spec,
-        fit,
-        whitening_gram_full,
-    );
+    let rows =
+        gam::solver::estimate::smooth_term_summary_rows(&design, spec, fit, whitening_gram_full);
     rows.into_iter()
         .map(|row| SummarySmoothTermRow {
             name: row.name,
@@ -1485,6 +1481,13 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         model_class: prediction_model_class_label(model),
         group_metadata: model.payload().group_metadata.clone(),
         deployment_extensions: model.payload().deployment_extensions.clone(),
+        // Read from the payload rather than hardcoded empty (#2774). The O(n)
+        // scan route returns before the fit-time adequacy seam, so today this
+        // is empty — but "empty because the fit recorded none" and "empty
+        // because this constructor forgot" are different states, and only the
+        // first one keeps saying the truth if the scan route ever records a
+        // row.
+        basis_checks: summary_basis_checks(model),
         deviance: scan.deviance,
         // Scan-routed models do not retain the λ-comparable log-likelihood, so
         // leave `log_likelihood` unset.
@@ -1656,8 +1659,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         covariance_kind: covariance.as_ref().map(|(kind, _)| kind.clone()),
         covariance_n: covariance.as_ref().map(|(_, cov)| cov.nrows()),
         covariance_flat: covariance.map(|(_, cov)| cov.iter().copied().collect()),
-        coefficient_se_source: display_uncertainty
-            .map(|view| view.definition.as_str().to_string()),
+        coefficient_se_source: display_uncertainty.map(|view| view.definition.as_str().to_string()),
         convergence: Some(summary_convergence(&fit)),
     };
     serde_json::to_string(&payload).map_err(|err| format!("failed to serialize summary: {err}"))
