@@ -2148,6 +2148,9 @@ fn check_dataset_json_impl(model_bytes: &[u8], dataset: EncodedDataset) -> Resul
 /// ~`n` knot values are not a summary artifact.
 fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<String, String> {
     let report_input = ReportInput {
+        // The O(n) spline-scan route retains no IRLS row state, so it measures
+        // no basis adequacy and shows none rather than an empty verdict.
+        basis_checks: Vec::new(),
         model_path: "<in-memory>".to_string(),
         family_name: model.display_family_name(),
         model_class: prediction_model_class_label(model),
@@ -2185,6 +2188,27 @@ fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<Str
         )],
     };
     render_html(&report_input)
+}
+
+/// Map a fitted model's persisted #2774 basis-adequacy rows onto the renderer's
+/// plain row type. A pure read: the report shows what the FIT measured, and
+/// shows nothing when it measured nothing.
+fn report_basis_checks(model: &FittedModel) -> Vec<BasisCheckRow> {
+    model
+        .payload()
+        .basis_adequacy
+        .iter()
+        .map(|row| BasisCheckRow {
+            name: row.name.clone(),
+            basis_dim: row.basis_dim,
+            nullspace_dim: row.nullspace_dim,
+            edf: row.edf,
+            enrichment_rank: row.enrichment_rank,
+            statistic: row.statistic,
+            p_value: row.p_value,
+            provenance: row.provenance.label().to_string(),
+        })
+        .collect()
 }
 
 fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
@@ -2249,6 +2273,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         diagnostics: None,
         smooth_plots: Vec::new(),
         alo: None,
+        basis_checks: report_basis_checks(&model),
         notes: vec![
             "Python report currently omits data-dependent diagnostics and smooth plots."
                 .to_string(),

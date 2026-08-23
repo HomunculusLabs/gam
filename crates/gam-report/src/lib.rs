@@ -47,7 +47,31 @@ pub struct ReportInput {
     pub diagnostics: Option<DiagnosticsInput>,
     pub smooth_plots: Vec<SmoothPlotData>,
     pub alo: Option<AloData>,
+    /// Per-smooth basis-adequacy evidence (#2774). Plain renderer data, as with
+    /// every other row type here: the caller maps the model's own report into
+    /// it rather than the renderer reaching into gam types.
+    pub basis_checks: Vec<BasisCheckRow>,
     pub notes: Vec<String>,
+}
+
+/// One smooth term's basis-adequacy row (#2774).
+///
+/// `p_value` is `Some` exactly when a test ran; `provenance` names the reason
+/// otherwise. The renderer prints the reason rather than a blank cell, because
+/// "adequate" and "not measured" are different states and a report that showed
+/// them the same way would be worse than one that showed neither.
+pub struct BasisCheckRow {
+    pub name: String,
+    /// Realized coefficient width `k'`.
+    pub basis_dim: usize,
+    /// Dimension of the JOINT penalty null space — `0` for a double-penalized
+    /// smooth, which is the whole radial family.
+    pub nullspace_dim: usize,
+    pub edf: Option<f64>,
+    pub enrichment_rank: Option<usize>,
+    pub statistic: Option<f64>,
+    pub p_value: Option<f64>,
+    pub provenance: String,
 }
 
 pub struct EdfBlockRow {
@@ -931,6 +955,67 @@ pub fn render_html(input: &ReportInput) -> Result<String, String> {
         )
     };
 
+    // Basis-adequacy table (#2774), only when the fit measured one. This is the
+    // question `Convergence` does not answer: the certificate covers the
+    // optimizer, not whether the basis it converged on can represent what it was
+    // asked to model.
+    let basis_check_section = if input.basis_checks.is_empty() {
+        String::new()
+    } else {
+        let rows = input
+            .basis_checks
+            .iter()
+            .map(|row| {
+                let optional = |value: Option<f64>| {
+                    value.map_or_else(|| "&mdash;".to_string(), |v| format!("{v:.4}"))
+                };
+                let rank = row
+                    .enrichment_rank
+                    .map_or_else(|| "&mdash;".to_string(), |v| v.to_string());
+                // A failing term is marked, and the mark is the p-value cell
+                // rather than a separate verdict column: the number and the
+                // judgement should not be able to disagree.
+                let flagged = row.p_value.is_some_and(|p| p < 1.0e-3);
+                let p_cell = match row.p_value {
+                    Some(p) if flagged => format!("<strong>{p:.3e}</strong>"),
+                    Some(p) => format!("{p:.3e}"),
+                    None => "&mdash;".to_string(),
+                };
+                format!(
+                    "<tr><td class=\"mono\">{}</td><td class=\"num\">{}</td>\
+                     <td class=\"num\">{}</td><td class=\"num\">{}</td>\
+                     <td class=\"num\">{rank}</td><td class=\"num\">{}</td>\
+                     <td class=\"num\">{p_cell}</td><td class=\"mono\">{}</td></tr>",
+                    esc(&row.name),
+                    row.basis_dim,
+                    row.nullspace_dim,
+                    optional(row.edf),
+                    optional(row.statistic),
+                    esc(&row.provenance),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "<section class=\"card\" id=\"sec-basis-adequacy\">\n\
+             <h2>Basis Adequacy</h2>\n\
+             <p class=\"muted\">Do the fit&rsquo;s residuals still carry structure in each \
+             smooth&rsquo;s own covariates that its realized basis cannot represent? A small \
+             p-value means the basis is too small &mdash; not that the smoothing parameter is \
+             too large; the statistic is constructed to be blind to shrinkage. The convergence \
+             certificate above covers the optimizer only and makes no claim about this \
+             (gam#2774).</p>\n\
+             <p class=\"muted\">Read EDF against <em>k&prime; &minus; null</em>, not against \
+             <em>k&prime;</em>: a radial smooth&rsquo;s weakly-penalized polynomial block carries \
+             most of its effective dimension and makes an EDF reading look saturated on a fit \
+             whose problem is its basis&rsquo;s span.</p>\n\
+             <div class=\"table-wrap\"><table>\n\
+             <thead><tr><th>Term</th><th>k&prime;</th><th>null</th><th>EDF</th>\
+             <th>alt. d.f.</th><th>statistic</th><th>p-value</th><th>provenance</th></tr></thead>\n\
+             <tbody>{rows}</tbody>\n</table></div>\n</section>"
+        )
+    };
+
     // ALO diagnostics table (only if present)
     let alo_section = if let Some(alo) = &input.alo {
         if alo.coordinate_names.is_empty() {
@@ -1014,6 +1099,9 @@ pub fn render_html(input: &ReportInput) -> Result<String, String> {
     }
     if !input.smoothing_forensics.is_empty() {
         nav_items.push(("sec-smoothing-forensics", "Forensics"));
+    }
+    if !input.basis_checks.is_empty() {
+        nav_items.push(("sec-basis-adequacy", "Basis Adequacy"));
     }
     if input.diagnostics.is_some() {
         nav_items.push(("sec-diagnostics", "Diagnostics"));
@@ -1185,6 +1273,7 @@ details[open] .toggle::before {{ content:'\25BC\FE0E  '; }}
 {aniso_section}
 {measure_jet_section}
 {smoothing_forensics_section}
+{basis_check_section}
 {diagnostics_section}
 {smooth_section}
 {alo_section}
@@ -1208,6 +1297,7 @@ details[open] .toggle::before {{ content:'\25BC\FE0E  '; }}
         aniso_section = aniso_section,
         measure_jet_section = measure_jet_section,
         smoothing_forensics_section = smoothing_forensics_section,
+        basis_check_section = basis_check_section,
         diagnostics_section = diagnostics_section,
         smooth_section = smooth_section,
         alo_section = alo_section,

@@ -84,7 +84,9 @@ pub(crate) use gam::geometry::sinkhorn_barycenter::{
     sinkhorn_barycenter_vjp as sinkhorn_barycenter_vjp_impl,
 };
 
-pub(crate) use gam::report::{CoefficientRow, EdfBlockRow, ReportInput, render_html};
+pub(crate) use gam::report::{
+    BasisCheckRow, CoefficientRow, EdfBlockRow, ReportInput, render_html,
+};
 
 pub(crate) use gam::terms::smooth::{TermCollectionSpec, smooth_term_feature_cols};
 // #1521: relocated DOWN into gam_terms::smooth (was families::...::drivers).
