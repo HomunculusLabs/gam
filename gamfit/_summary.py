@@ -226,7 +226,7 @@ class Summary:
     basis_checks : list of dict
         Per-smooth basis-adequacy evidence (#2774) measured at fit time: one
         record per smooth term with ``name``, ``term_idx``, ``basis_dim`` (the
-        realized ``k'``), ``nullspace_dim``, ``enrichment_dim``,
+        realized ``k'``), ``nullspace_dim``, ``edf``, ``enrichment_dim``,
         ``enrichment_rank``, ``statistic``, ``p_value`` and ``provenance``. A
         small ``p_value`` says the fit's residuals still carry structure in that
         smooth's covariates which its realized basis cannot represent. See
@@ -294,8 +294,8 @@ class Summary:
     #: Per-smooth basis-adequacy evidence (#2774), measured at fit time and
     #: persisted with the model: one dict per smooth term with ``name``,
     #: ``term_idx``, ``basis_dim`` (the realized ``k'``), ``nullspace_dim``,
-    #: ``enrichment_dim`` / ``enrichment_rank``, ``statistic``, ``p_value`` and
-    #: ``provenance``.
+    #: ``edf``, ``enrichment_dim`` / ``enrichment_rank``, ``statistic``,
+    #: ``p_value`` and ``provenance``.
     #:
     #: A small ``p_value`` says the fit's residuals still carry structure in that
     #: smooth's covariates which its realized basis cannot represent — i.e. the

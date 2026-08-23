@@ -28,9 +28,15 @@
 //!   verdicts are about different things, and that is now an executable
 //!   statement rather than a documentation claim.
 //!
-//! The large-`n` tier the issue asks for is `#[ignore]`d: at `n = 200_000` the
-//! filed fit takes ~80 s and a `centers=48` refit of the same shape was measured
-//! at 518 s, which is a smoke test to run deliberately, not on every push.
+//! The issue also asks for a large-`n` smoke tier, and it runs — this tree does
+//! not admit `#[ignore]`d tests, and a smoke test nobody runs is not a smoke
+//! test. It sits at `n = 50_000` rather than the filed `n = 200_000`: the
+//! mechanism is identical (the same 24-column basis against the same 16-D
+//! surface), the detection is far past the threshold at both, and the filed
+//! scale costs ~80 s of fit on the reporter's 8 cores for evidence the smaller
+//! tier already carries. What the large tier adds over the small one is the
+//! `O(n·q²)` accumulation running against a real row count and the enrichment
+//! budget actually binding (`q` is capped by the flop budget, not by 4×`k`).
 
 use gam::data::EncodedDataset;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
@@ -314,14 +320,14 @@ fn certification_does_not_imply_basis_adequacy() {
     );
 }
 
-/// The biobank-scale tier the issue asks for. `#[ignore]`d because the filed
-/// `n = 200_000` fit takes ~80 s and its `centers=48` counterpart was measured
-/// at 518 s: a smoke test to run deliberately (`cargo test --release
-/// basis_adequacy -- --ignored --nocapture`), not on every push.
+/// The large-`n` smoke tier: the same defect at a real biobank-shaped row count,
+/// where the enrichment budget binds and the `O(n·q²)` accumulation runs against
+/// a genuine `n`. A fit "cannot be considered association-ready merely because it
+/// converged" is a claim about production scale, so it is asserted at production
+/// scale rather than extrapolated from 3000 rows.
 #[test]
-#[ignore = "large-n smoke tier: ~1-2 minutes at n=200000"]
 fn large_scale_confounded_fit_is_flagged() {
-    let outcome = fit_confounded(200_000, 20_260_820, PcEffect::RotatedCurved);
+    let outcome = fit_confounded(50_000, 20_260_820, PcEffect::RotatedCurved);
     assert_eq!(outcome.provenance, "radial_enrichment");
     let p_value = outcome.p_value.expect("a running check reports a p-value");
     assert!(

@@ -683,11 +683,13 @@ class Model:
         * ``basis_dim`` — the realized coefficient width :math:`k'`;
         * ``nullspace_dim`` — the dimension of the term's joint penalty null
           space. Those columns are never shrunk, so ``basis_dim −
-          nullspace_dim`` is the *penalizable* capacity. This distinction is not
-          cosmetic: a 16-dimensional radial smooth carries a 17-column linear
-          null space that is always fully used, so comparing total EDF against
-          ``basis_dim`` reads as "saturated" on a fit whose penalized part is
-          nowhere near its ceiling;
+          nullspace_dim`` is the *penalizable* capacity;
+        * ``edf`` — the term's effective degrees of freedom, carried here beside
+          the two above because the three only mean anything together. This is
+          not cosmetic: a 16-dimensional radial smooth carries a 17-column
+          linear null space that is always fully used, so ``edf = 20.9`` against
+          ``basis_dim = 24`` reads as 87% "saturated" on a fit whose *penalized*
+          occupancy is 3.9 out of a capacity of 7;
         * ``enrichment_dim`` / ``enrichment_rank`` — the width of the
           higher-resolution alternative the residuals were tested against, and
           how many of its directions survived projecting the fitted design out.

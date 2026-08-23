@@ -80,9 +80,26 @@ pub struct BasisAdequacyRow {
     /// never shrunk, so `basis_dim − nullspace_dim` is the penalizable capacity
     /// and the part of `k'` that EDF saturation is actually about.
     pub nullspace_dim: usize,
-    /// Number of centers the enrichment basis was built at.
+    /// The term's effective degrees of freedom — the influence-matrix trace over
+    /// its coefficient block, the same number `summary().smooth_terms` reports.
+    ///
+    /// Carried HERE, beside `basis_dim` and `nullspace_dim`, because the three
+    /// only mean anything together. The natural reading of a summary table is
+    /// `edf` against `basis_dim`, and on a 16-D radial smooth that reads 20.9 of
+    /// 24 — 87%, "saturated" — while the PENALIZED part is 3.9 of a capacity of
+    /// 7. The null space is `d + 1` columns that are unpenalized and therefore
+    /// always fully used; comparing against `basis_dim` counts them as evidence
+    /// of saturation when they are evidence of nothing (#2774).
+    ///
+    /// `None` when the term owns no penalty block whose EDF could be traced.
     #[serde(default)]
-    pub enrichment_centers: Option<usize>,
+    pub edf: Option<f64>,
+    /// Realized column width of the higher-resolution alternative the residuals
+    /// were tested against (equal to its center count — the spec-chart builder's
+    /// width is a function of the centers alone, so the reference d.f. of the
+    /// test cannot depend on which rows the basis was evaluated at).
+    #[serde(default)]
+    pub enrichment_dim: Option<usize>,
     /// Estimable enrichment directions left after the design was projected out
     /// — the reference d.f. of the test, and a direct measure of how much NEW
     /// resolution the alternative carried.
@@ -313,12 +330,29 @@ pub fn basis_adequacy_report(
         return Vec::new();
     }
 
+    // The term's EDF, read through the design's OWN penalty-range accessor
+    // rather than by re-deriving the flat-layout cursor walk. That walk has been
+    // a filed defect five times (#1219, #1277, #1360, #1368, #1372) and
+    // `smooth_term_penalty_range` exists so a consumer never has to redo it.
+    let per_term_edf = |idx: usize| -> Option<f64> {
+        let realized = design.smooth.terms.get(idx)?;
+        let penalty_range = design.smooth_term_penalty_range(idx).ok().flatten()?;
+        let smooth_start = design
+            .design
+            .ncols()
+            .saturating_sub(design.smooth.total_smooth_cols());
+        let global_range = (smooth_start + realized.coeff_range.start)
+            ..(smooth_start + realized.coeff_range.end);
+        let edf = fit.per_term_edf(global_range, penalty_range.start, penalty_range.len());
+        edf.is_finite().then_some(edf)
+    };
     let undetermined = |idx: usize, reason: BasisAdequacyProvenance| BasisAdequacyRow {
         name: design.smooth.terms[idx].name.clone(),
         term_idx: idx,
         basis_dim: design.smooth.terms[idx].coeff_range.len(),
         nullspace_dim: design.smooth.terms[idx].wald_unpenalized_dim(),
-        enrichment_centers: None,
+        edf: per_term_edf(idx),
+        enrichment_dim: None,
         enrichment_rank: None,
         statistic: None,
         p_value: None,
@@ -406,7 +440,8 @@ pub fn basis_adequacy_report(
                     term_idx: idx,
                     basis_dim: realized_width,
                     nullspace_dim: realized.wald_unpenalized_dim(),
-                    enrichment_centers: Some(enrichment.ncols()),
+                    edf: per_term_edf(idx),
+                    enrichment_dim: Some(enrichment.ncols()),
                     enrichment_rank: Some(result.rank),
                     statistic: Some(result.statistic),
                     p_value: Some(result.p_value),
@@ -449,13 +484,27 @@ pub fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
         .map(|row| {
             let p_value = row.p_value.unwrap_or(f64::NAN);
             let rank = row.enrichment_rank.unwrap_or(0);
+            // The penalized reading, stated rather than left to be derived: a
+            // reader who compares total EDF against the column count sees a
+            // 16-D radial smooth as 87% saturated at 65% of its real capacity,
+            // because `nullspace_dim` of those columns are unpenalized and are
+            // always fully used.
+            let capacity = row.basis_dim.saturating_sub(row.nullspace_dim);
+            let occupancy = match row.edf {
+                Some(edf) if capacity > 0 => format!(
+                    ", using {:.2} of its {capacity} penalizable dimensions",
+                    (edf - row.nullspace_dim as f64).clamp(0.0, capacity as f64)
+                ),
+                _ => String::new(),
+            };
             format!(
-                "basis adequacy: smooth '{}' has {} coefficient columns ({} unpenalized), and \
-                 the fit's residuals still carry structure in its covariates that this basis \
-                 cannot represent (lack-of-fit p = {p_value:.3e} against {rank} higher-resolution \
-                 directions). Refit with a larger basis for this term and compare; the reported \
-                 convergence certificate covers the optimizer only, not the adequacy of the basis \
-                 it converged on. See gam#2774.",
+                "basis adequacy: smooth '{}' has {} coefficient columns ({} of them the \
+                 unpenalized null space{occupancy}), and the fit's residuals still carry \
+                 structure in its covariates that this basis cannot represent (lack-of-fit \
+                 p = {p_value:.3e} against {rank} higher-resolution directions). Refit with a \
+                 larger basis for this term and compare; the reported convergence certificate \
+                 covers the optimizer only, not the adequacy of the basis it converged on. \
+                 See gam#2774.",
                 row.name, row.basis_dim, row.nullspace_dim,
             )
         })

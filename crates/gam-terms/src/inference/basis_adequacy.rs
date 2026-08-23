@@ -92,6 +92,17 @@
 //! subtraction — which matters exactly when part of the enrichment is nearly
 //! inside `span(X)`, i.e. always.
 //!
+//!
+//! # It does not assume the fit solved an unmodified score equation
+//!
+//! `U = Z̃ᵀ s(β̂) = Z̃ᵀ s(β) − Z̃ᵀ W_H X (β̂ − β)`, and the second term vanishes
+//! because `Z̃ᵀW_H X = 0` — for ANY `β̂`, not just the one a plain penalized
+//! IRLS produces. A Firth/Jeffreys-adjusted fit, which solves
+//! `Xᵀs − S_λβ̂ + ∂ log|I|/∂β = 0` rather than `Xᵀs = S_λβ̂`, is therefore
+//! handled with no special case: the adjustment moves `β̂`, and the projection
+//! removes whatever `β̂` does. The `H⁻¹`-projected variant has no such property,
+//! since its correction term is a specific function of the score equation it
+//! assumed.
 //! # What it does not claim
 //!
 //! `λ̂` is held at its fitted value and the enrichment is a fixed alternative,
@@ -200,40 +211,52 @@ pub fn basis_adequacy_score_test(
         return None;
     }
 
-    // The enrichment's own weighted energy scale, used for the estimability
-    // floor. Taken from the UNprojected Gram so that an enrichment largely
-    // absorbed by `X` keeps a meaningful reference scale.
-    let mut energy_scale = 0.0_f64;
-    for column in 0..q {
-        let mut diagonal = 0.0;
-        for row in 0..n {
-            let value = input.enrichment[(row, column)];
-            diagonal += input.score_weights[row] * value * value;
+    // Row-blocked first pass: `XᵀW_H Z` (the projection's right-hand side) and
+    // the enrichment's own `W_F`-weighted energy scale (the estimability floor's
+    // reference). Blocked for the same reason the second pass is — a second
+    // `n × q` array is 154 MB at `n = 200_000, q = 96`, and a diagnostic may not
+    // be the peak-memory term of the fit it is diagnosing.
+    //
+    // The energy scale is taken from the UNPROJECTED Gram so that an enrichment
+    // largely absorbed by `X` keeps a meaningful reference scale instead of
+    // having its floor collapse along with its spectrum.
+    const ROW_BLOCK: usize = 4096;
+    let mut cross = Array2::<f64>::zeros((p, q)); // XᵀW_H Z
+    let mut energy = Array1::<f64>::zeros(q);
+    let mut start = 0usize;
+    while start < n {
+        let stop = (start + ROW_BLOCK).min(n);
+        let block = input.enrichment.slice(ndarray::s![start..stop, ..]);
+        let mut hessian_weighted = block.to_owned();
+        for local in 0..(stop - start) {
+            let curvature = input.hessian_weights[start + local];
+            let fisher = input.score_weights[start + local];
+            if !curvature.is_finite() || !(fisher.is_finite() && fisher >= 0.0) {
+                return None;
+            }
+            let source = block.row(local);
+            let mut target = hessian_weighted.row_mut(local);
+            for column in 0..q {
+                let value = source[column];
+                energy[column] += fisher * value * value;
+                target[column] = curvature * value;
+            }
         }
-        if !diagonal.is_finite() {
-            return None;
-        }
-        energy_scale = energy_scale.max(diagonal);
+        cross += &input
+            .design
+            .slice(ndarray::s![start..stop, ..])
+            .t()
+            .dot(&hessian_weighted);
+        start = stop;
     }
-    if !(energy_scale > 0.0) {
+    let energy_scale = energy.iter().cloned().fold(0.0_f64, f64::max);
+    if !(energy_scale > 0.0) || cross.iter().any(|value| !value.is_finite()) {
         return None;
     }
 
     // C = G⁻ (Xᵀ W_H Z): the `W_H`-orthogonal projection of the enrichment onto
     // the fitted column span. `Z̃ = Z − X·C` is the part of the enrichment the
     // realized design cannot represent, and it satisfies `Z̃ᵀW_H X = 0`.
-    let mut weighted_enrichment = input.enrichment.to_owned();
-    for row in 0..n {
-        let weight = input.hessian_weights[row];
-        if !weight.is_finite() {
-            return None;
-        }
-        weighted_enrichment
-            .row_mut(row)
-            .iter_mut()
-            .for_each(|value| *value *= weight);
-    }
-    let cross = input.design.t().dot(&weighted_enrichment); // p × q
     let coefficient_shift = input.design_gram.solve(&cross)?;
     if coefficient_shift.iter().any(|value| !value.is_finite()) {
         return None;
@@ -248,7 +271,6 @@ pub fn basis_adequacy_score_test(
     // exists to remove, re-entering through the numerator after the projection
     // took it out of the denominator. It also breaks the `Z → Z + X·A`
     // invariance, since `C → C + A`. Both failures are pinned as tests.
-    const ROW_BLOCK: usize = 4096;
     let mut information = Array2::<f64>::zeros((q, q));
     let mut u = Array1::<f64>::zeros(q);
     let mut start = 0usize;

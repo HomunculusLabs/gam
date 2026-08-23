@@ -218,6 +218,14 @@ struct SummaryBasisCheckRow {
     /// space alone is 17 columns and always fully used, so comparing total EDF
     /// against `basis_dim` reads as "saturated" when it is not (#2774).
     nullspace_dim: usize,
+    /// The term's effective degrees of freedom, carried BESIDE `basis_dim` and
+    /// `nullspace_dim` because the three only mean anything together. The
+    /// penalized occupancy is `edf − nullspace_dim` out of a capacity of
+    /// `basis_dim − nullspace_dim`; the natural summary-table reading of `edf`
+    /// against `basis_dim` counts the always-full null space as evidence of
+    /// saturation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edf: Option<f64>,
     /// Width of the higher-resolution alternative the residuals were tested
     /// against.
     #[serde(skip_serializing_if = "Option::is_none")]
