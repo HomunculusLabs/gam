@@ -335,10 +335,19 @@ pub fn basis_adequacy_report(
             .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignNotMaterializable))
             .collect();
     };
-    let Ok(design_gram) = gam_linalg::matrix::LinearOperator::diag_xtw_x(
+    // `G = XᵀW_H X`, factored ONCE for the whole model: the projection is applied
+    // per smooth term but `G` is a property of the design and the weights, and
+    // re-factoring it per term would charge `O(p³)` per smooth on a fit that
+    // runs only a few dozen IRLS iterations in total.
+    let Some(design_gram) = gam_linalg::matrix::LinearOperator::diag_xtw_x(
         &design.design,
         &rows_state.hessian_weights,
-    ) else {
+    )
+    .ok()
+    .as_ref()
+    .and_then(|gram| {
+        gam_terms::inference::basis_adequacy::DesignGramFactor::new(gram.view())
+    }) else {
         return (0..term_count)
             .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignNotMaterializable))
             .collect();
@@ -385,7 +394,7 @@ pub fn basis_adequacy_report(
                     hessian_weights: rows_state.hessian_weights.view(),
                     score_weights: rows_state.score_weights.view(),
                     score: rows_state.score.view(),
-                    design_gram: design_gram.view(),
+                    design_gram: &design_gram,
                     dispersion,
                     residual_df,
                     scale,

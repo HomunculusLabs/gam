@@ -1,5 +1,86 @@
 ## Unreleased
 
+- **A converged, certified fit now says whether the basis it converged on can
+  represent what it was asked to model (#2774).** The filed fixture is a
+  biobank-shaped association model: a null exposure correlated with 16
+  population PCs, adjusted by one native `duchon(pc1..pc16, centers=24)` term.
+  It converges, reports `certified = true`, and returns the null exposure at
+  `p = 6.2e-5` at `n = 200 000`. Nothing in the engine said a word.
+
+  **The evidence the engine certified resolution on could not see this.**
+  `adaptive_spatial_candidates` is the only place `basis_is_saturated` is
+  consulted on the fit path, and that predicate asks whether the term's
+  *penalized* EDF has reached its algebraic ceiling `realized_width −
+  nullspace_dim`. On this fit the 16-D linear null space is 17 of the 24
+  columns, leaving a penalized capacity of ~6, and the fit sits at 3.91 — 65 %
+  of capacity, "not saturated" — because λ is still binding. Basis size and λ
+  both control smoothness and REML trades them off, so a basis can be far too
+  small while the saturation predicate reads clean. (Separately, the term never
+  reaches that loop at all: `adaptive_spatial_term_mask` admits only
+  `CenterStrategy::Auto`, and this user pinned `centers=24`.)
+
+  **The mgcv-style k-index could not see it either, and that was measured
+  before it was written.** Nearest-neighbour residual differencing on the
+  deviance residuals reads `k-index = 0.928` with a randomization `p = 0.43`
+  while the residuals demonstrably carry the confounder (`corr = 0.119` against
+  the true simulated PC effect). Two reasons, both measured: mgcv's raw
+  `mean(r²)` normaliser is biased by `mean(r)² = 0.0358` for binomial deviance
+  residuals, and in 16 dimensions nearest neighbours are not near — an ORACLE
+  1-D ordering, rows sorted by the true confounder, only reaches `0.976`. Local
+  differencing structurally loses the signal when the missing component is ~1.4 %
+  of a Bernoulli residual variance.
+
+  **What shipped is a penalized score (Rao) lack-of-fit test against a
+  higher-resolution alternative**, in `gam_terms::inference::basis_adequacy`.
+  `U = Z̃ᵀs`, `V = Z̃ᵀW_F Z̃`, `T = UᵀV⁻U/φ̂`, referred to `χ²_r` or `F(r, ν)`.
+  Measured on the same fit: `p = 9.5e-16`.
+
+  The construction that matters is the projection. `Z̃ = Z − X(XᵀW_H X)⁻XᵀW_H Z`
+  is orthogonal in the fit's own weight metric, **not** the penalized
+  `H⁻¹`-projection a first-order expansion hands you. A penalized fit is biased
+  — `E[β̂] − β ≈ −H⁻¹S_λβ` — and that bias lives entirely inside `span(X)`;
+  projecting orthogonally annihilates it, so the statistic is blind to "λ is
+  large" and sensitive only to structure the design **cannot represent at all**.
+  Shrinking a direction the basis HAS is a smoothing-parameter question, and
+  this statistic deliberately declines to answer it. The invariance
+  `Z → Z + X·A ⟹ T unchanged` is the executable form of that contract; the
+  `H⁻¹` projection does not satisfy it, and the test that pins it caught a real
+  defect on the way in (`U` contracted against the unprojected `Z` re-admits
+  `CᵀS_λβ̂` through the numerator: the null statistic ran 15.2 → 2.96e7 across
+  ridge 0 → 1e4 with the data fixed).
+
+  Measured size and power at `n = 3000`, 16-D Duchon `centers=24`, binomial:
+
+  | scenario | `p<0.05` | `p<0.001` | median p |
+  |---|---:|---:|---:|
+  | linear PC null — H₀ TRUE, 60 replicates | 0.02 | 0.00 | 5.7e-1 |
+  | rotated curved 2-D — the filed fixture, 20 replicates | 0.95 | 0.90 | 9.2e-6 |
+
+  Every fit now measures this for itself and raises a `GamInferenceWarning` at a
+  Bonferroni-corrected 0.1 % — chosen from those numbers, not from taste: 0 of 60
+  on the correctly specified fit, 18 of 20 on the underfitted one. The rows are
+  persisted on the model (the score needs converged IRLS row state a saved model
+  does not carry, so a data-free `summary()` could not otherwise report
+  anything) and surface as `Summary.basis_checks`; `Model.basis_check(data)`
+  recomputes them, refitting at the frozen spec exactly as
+  `Model.smooth_significance` does.
+
+  Cost is one `XᵀWX` and one `p³` Cholesky — factored ONCE per model, not per
+  term — plus an `O(n·q²)` Gram under an explicit flop and byte budget
+  (`q ≤ 100` at `n = 200 000`).
+
+  **`certified` now says what it does not cover.** It is a statement about the
+  optimizer: the inner P-IRLS solve and the outer smoothing-parameter search
+  reached a certified stationary point. It makes no claim about basis adequacy,
+  family choice, or whether a fitted adjustment removes the confounding it was
+  given. `certification_does_not_imply_basis_adequacy` makes that executable
+  rather than documentary.
+
+  Independent confirmation that the diagnostic's advice is the right advice: at
+  `n = 20 000`, `centers=24 → 48` on the same DGP moves the null exposure from a
+  false rejection to `p = 0.640`. It also moves the fit from 24 s to 518 s, which
+  is exactly why the caller has to be told rather than left to guess.
+
 - **The post-fit certification's surviving `param_dim`-square object is gone:
   the certificate stopped asking for a full spectrum (#2757).** #2757 was filed
   on a dense symmetric eigendecomposition of a `param_dim × param_dim` curvature

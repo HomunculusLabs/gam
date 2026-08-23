@@ -16,6 +16,7 @@ large. `Summary.reml_score_unavailable` then carries the explanation, and
 those ranking surfaces raise it instead of ranking a stand-in value. Compare
 such a model on predictive accuracy, or refit on data whose response is not
 an exact function of the design.
+| `basis_check(data)` | `list[dict]` | Per-smooth basis-adequacy report: is each smooth's basis rich enough for the function it was asked to represent? |
 | `diagnose(data)` | `Diagnostics` | Observed values, predicted columns, residuals, and aggregate metrics for models whose prediction output includes `"mean"`. |
 | `check(data)` | `SchemaCheck` | Schema validation result with structured issues. |
 | `plot(data, x=, kind=)` | `matplotlib.axes.Axes` | Prediction / residual / observed-vs-predicted plot. |
@@ -56,6 +57,77 @@ s.coefficients_frame()         # pandas.DataFrame; requires pandas
 `model.smoothing_parameters()` returns a `{penalty_index: lambda}` dict of
 the fitted smoothing/precision parameters by penalty index (via a dedicated
 FFI call), the same values surfaced under `summary()["lambdas"]`.
+
+## basis_check() — is the basis big enough?
+
+A converged, `certified` fit says nothing about whether the basis it was given
+can represent the function it was asked to model. Both a smooth whose basis
+spans the truth and a smooth that cannot reach it converge, certify, and report
+a per-term EDF that is some fraction of the term's column count. What separates
+them is whether the **residuals still carry structure in that smooth's own
+covariates**.
+
+That is what `basis_check` measures, and what every fit now measures for itself:
+
+```python
+model = gamfit.fit(data, "y ~ dosage + duchon(pc1, ..., pc16, centers=24)",
+                   family="binomial")
+# 1. the fit already told you, as a GamInferenceWarning:
+#    "basis adequacy: smooth 'duchon(...)' has 24 coefficient columns
+#     (17 unpenalized), and the fit's residuals still carry structure in its
+#     covariates that this basis cannot represent (lack-of-fit p = 9.0e-16 ...)"
+
+model.summary().basis_checks     # the same evidence, no data, no refit
+model.basis_check(data)          # recomputed from the training rows
+```
+
+Each row carries
+
+| Field | Meaning |
+| --- | --- |
+| `basis_dim` | The realized coefficient width `k'` of the term. |
+| `nullspace_dim` | The dimension of its joint penalty null space — never shrunk, so `basis_dim - nullspace_dim` is the *penalizable* capacity. |
+| `enrichment_dim` / `enrichment_rank` | Width of the higher-resolution alternative the residuals were tested against, and how many of its directions survived projecting the fitted design out. The rank is the test's reference degrees of freedom. |
+| `statistic` / `p_value` | The penalized score (Rao) lack-of-fit test. A small `p_value` means the basis is too small. |
+| `provenance` | `"radial_enrichment"` when a test ran, else the NAME of the evidence that was missing. |
+
+`p_value` is present exactly when a test ran, so "adequate" and "not measured"
+are never confusable.
+
+!!! warning "`nullspace_dim` is why EDF-vs-`k'` misleads in high dimensions"
+
+    A `d`-dimensional radial smooth carries a `d + 1`-column *linear null space*
+    that is unpenalized and therefore always fully used. On a 16-D
+    `duchon(..., centers=24)` that is 17 of the 24 columns, so a total EDF of
+    20.9 out of 24 looks 87% "saturated" while the penalized part sits at 3.9
+    out of a capacity of 7. Read `basis_dim - nullspace_dim`, not `basis_dim`.
+
+### What the test is, and what it deliberately ignores
+
+The alternative is a Duchon kernel at data-driven centers over the term's
+standardized covariates, orthogonalized against the fitted design **in the fit's
+own IRLS weight metric**. That projection is the whole design of the statistic:
+a penalized fit is biased, and its shrinkage bias lives entirely inside the span
+of the fitted design, so projecting it out makes the test blind to "λ is large"
+and sensitive only to structure the design *cannot represent at all*.
+
+Asking whether a direction the basis HAS is being over-smoothed is a
+smoothing-parameter question, and this report declines to answer it. It is also
+conditional on the fitted `λ̂` and on the alternative, exactly as the `summary()`
+Wald column is conditional on `λ̂`. A rejection says there is signal outside the
+term's column span; it does not say how much of *your* estimand that signal
+moves. **Refit with a larger basis for the flagged term and compare.**
+
+### `certified` is about the optimizer, not about the model
+
+`summary().convergence["certified"]` says the inner P-IRLS solve and the outer
+smoothing-parameter search reached a certified stationary point at the
+tolerances the mint gate applies. It makes **no** claim that the basis those
+iterations converged on is rich enough, that the family is right, or that a
+fitted adjustment removes the confounding it was given. A fit can be `certified`
+and inadequate at the same time, and on a high-dimensional confounder adjustment
+that combination produces a confidently significant false association. Read
+`basis_checks` alongside it.
 
 ## diagnose()
 

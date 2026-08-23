@@ -126,7 +126,6 @@ const ESTIMABLE_DIRECTION_FLOOR: f64 = 1.0e-9;
 /// Every matrix is in the fit's own coefficient/row layout. `design`,
 /// `hessian_weights`, `score_weights` and `score` share the fit's row order;
 /// `enrichment` must be evaluated at those same rows.
-#[derive(Debug, Clone)]
 pub struct BasisAdequacyInput<'a> {
     /// `Z` — the enrichment design (`n × q`): higher-resolution directions over
     /// the tested term's covariates. Columns already inside `span(X)` are
@@ -145,13 +144,12 @@ pub struct BasisAdequacyInput<'a> {
     /// `s` — the per-row working score, `sᵢ = wᵢ(yᵢ − μ̂ᵢ)(dμ/dη)ᵢ / V(μ̂ᵢ)`, so
     /// that `U = Zᵀ s` is the score for the enrichment coefficients.
     pub score: ArrayView1<'a, f64>,
-    /// `G = XᵀW_H X` — the design's weighted Gram, **without** the penalty and
-    /// **without** dispersion scaling. A caller holding the fit's penalized
-    /// Hessian `H` and its λ-weighted penalty sum `S_λ` supplies `H − S_λ`;
-    /// that is exact and free, and it is what keeps `H` and `G` in one
-    /// coefficient frame. See the module header for why this is the
-    /// unpenalized Gram and not `H`.
-    pub design_gram: ArrayView2<'a, f64>,
+    /// Factored `G = XᵀW_H X` — the design's weighted Gram, **without** the
+    /// penalty and **without** dispersion scaling. Factored once by the caller
+    /// and reused across the model's smooth terms; see [`DesignGramFactor`].
+    /// The module header explains why this is the unpenalized Gram and not the
+    /// penalized Hessian.
+    pub design_gram: &'a DesignGramFactor,
     /// `φ̂` — the fitted dispersion. `1.0` for families that carry their
     /// dispersion inside the IRLS weight.
     pub dispersion: f64,
@@ -196,8 +194,7 @@ pub fn basis_adequacy_score_test(
         || input.hessian_weights.len() != n
         || input.score_weights.len() != n
         || input.score.len() != n
-        || input.design_gram.nrows() != p
-        || input.design_gram.ncols() != p
+        || input.design_gram.dimension() != p
         || !(input.dispersion.is_finite() && input.dispersion > 0.0)
     {
         return None;
@@ -237,7 +234,7 @@ pub fn basis_adequacy_score_test(
             .for_each(|value| *value *= weight);
     }
     let cross = input.design.t().dot(&weighted_enrichment); // p × q
-    let coefficient_shift = solve_symmetric_psd(input.design_gram, &cross)?;
+    let coefficient_shift = input.design_gram.solve(&cross)?;
     if coefficient_shift.iter().any(|value| !value.is_finite()) {
         return None;
     }
@@ -333,44 +330,91 @@ pub fn basis_adequacy_score_test(
     })
 }
 
-/// Solve `G·C = rhs` for a symmetric positive-semidefinite `G`.
+/// A once-per-fit factorization of the weighted design Gram `G = XᵀW_H X`.
 ///
-/// Cholesky first — `O(p³)` once, then `O(p²q)` per right-hand side, and the
-/// only route that stays affordable at the widths this engine fits (a dense
-/// symmetric eigendecomposition at `p = 4096` is the #2757 cost complaint, and
-/// a diagnostic must not reintroduce it on the ordinary path). A weighted
-/// design Gram is singular exactly when the design is rank-deficient in the
-/// fit's own frame; the identifiability pass makes that the exception, so the
-/// spectral pseudo-inverse is the fallback rather than the default. It projects
-/// onto `range(G)`, which is the right answer there: directions the design
-/// cannot span in the `W_H` metric are not directions to project out.
-fn solve_symmetric_psd(gram: ArrayView2<'_, f64>, rhs: &Array2<f64>) -> Option<Array2<f64>> {
-    use gam_linalg::faer_ndarray::FaerCholesky;
-    if let Ok(factor) = gram.to_owned().cholesky(Side::Lower) {
-        let solved = factor.solve_mat(rhs);
-        if solved.iter().all(|value| value.is_finite()) {
-            return Some(solved);
+/// The projection `C = G⁻(XᵀW_H Z)` is applied once per SMOOTH TERM, but `G`
+/// depends only on the design and the weights. Factoring it inside the test
+/// would pay `O(p³)` per term — on a model with ten smooths that is ten extra
+/// IRLS-iteration-equivalents on a fit that runs a few dozen, which is a
+/// diagnostic charging a third of the fit. Building the factor is therefore the
+/// caller's job and it is a type, not a convention: the input struct cannot be
+/// constructed with a raw matrix that someone forgot to reuse.
+pub struct DesignGramFactor {
+    kind: DesignGramFactorKind,
+    dimension: usize,
+}
+
+enum DesignGramFactorKind {
+    /// The ordinary route. `O(p³)` once, then `O(p²q)` per solve.
+    Cholesky(gam_linalg::faer_ndarray::FaerCholeskyFactor),
+    /// Rank-deficient fallback: the spectral pseudo-inverse, held as
+    /// `U diag(1/λ) Uᵀ` over the directions above the rank floor. It projects
+    /// onto `range(G)`, which is the right answer for a design that is
+    /// rank-deficient in the fit's own frame — directions the design cannot
+    /// span in the `W_H` metric are not directions to project out. A dense
+    /// symmetric eigendecomposition is the expensive route (it is the #2757
+    /// cost complaint at `p = 4096`), so it is the exception rather than the
+    /// default.
+    SpectralPseudoInverse(Array2<f64>),
+}
+
+impl DesignGramFactor {
+    /// Factor `G`. `None` when the matrix is empty, non-square, non-finite, or
+    /// has no positive spectrum at all.
+    pub fn new(gram: ArrayView2<'_, f64>) -> Option<Self> {
+        use gam_linalg::faer_ndarray::FaerCholesky;
+        let dimension = gram.nrows();
+        if dimension == 0
+            || gram.ncols() != dimension
+            || gram.iter().any(|value| !value.is_finite())
+        {
+            return None;
         }
+        let owned = gram.to_owned();
+        if let Ok(factor) = owned.cholesky(Side::Lower) {
+            return Some(Self {
+                kind: DesignGramFactorKind::Cholesky(factor),
+                dimension,
+            });
+        }
+        let symmetric = 0.5 * (&owned + &owned.t());
+        let (eigenvalues, eigenvectors) = strict_symmetric_eigh(&symmetric, Side::Lower).ok()?;
+        let largest = eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
+        if !(largest > 0.0) {
+            return None;
+        }
+        let floor = largest * GRAM_RANK_FLOOR;
+        let mut scaled = eigenvectors.clone();
+        for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
+            let factor = if eigenvalue > floor {
+                1.0 / eigenvalue
+            } else {
+                0.0
+            };
+            scaled.column_mut(index).iter_mut().for_each(|v| *v *= factor);
+        }
+        let pseudo_inverse = scaled.dot(&eigenvectors.t());
+        pseudo_inverse
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(Self {
+                kind: DesignGramFactorKind::SpectralPseudoInverse(pseudo_inverse),
+                dimension,
+            })
     }
-    let symmetric = 0.5 * (&gram.to_owned() + &gram.t());
-    let (eigenvalues, eigenvectors) = strict_symmetric_eigh(&symmetric, Side::Lower).ok()?;
-    let largest = eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
-    if !(largest > 0.0) {
-        return None;
+
+    /// Side length of the factored Gram, i.e. the design's column count.
+    pub fn dimension(&self) -> usize {
+        self.dimension
     }
-    let floor = largest * GRAM_RANK_FLOOR;
-    let projected = eigenvectors.t().dot(rhs);
-    let mut scaled = projected;
-    for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
-        let factor = if eigenvalue > floor {
-            1.0 / eigenvalue
-        } else {
-            0.0
+
+    fn solve(&self, rhs: &Array2<f64>) -> Option<Array2<f64>> {
+        let solved = match &self.kind {
+            DesignGramFactorKind::Cholesky(factor) => factor.solve_mat(rhs),
+            DesignGramFactorKind::SpectralPseudoInverse(inverse) => inverse.dot(rhs),
         };
-        scaled.row_mut(index).iter_mut().for_each(|v| *v *= factor);
+        solved.iter().all(|value| value.is_finite()).then_some(solved)
     }
-    let solved = eigenvectors.dot(&scaled);
-    solved.iter().all(|value| value.is_finite()).then_some(solved)
 }
 
 /// Relative eigenvalue floor for the rank-deficient-Gram fallback in
@@ -415,15 +459,15 @@ mod tests {
         enrichment: Array2<f64>,
         weights: Array1<f64>,
         score: Array1<f64>,
-        design_gram: Array2<f64>,
+        design_gram: DesignGramFactor,
     }
 
     impl GaussianHarness {
         fn new(design: Array2<f64>, enrichment: Array2<f64>, y: Array1<f64>, ridge: f64) -> Self {
             let n = design.nrows();
             let p = design.ncols();
-            let design_gram = design.t().dot(&design);
-            let mut hessian = design_gram.clone();
+            let gram = design.t().dot(&design);
+            let mut hessian = gram.clone();
             for index in 0..p {
                 hessian[(index, index)] += ridge;
             }
@@ -434,7 +478,8 @@ mod tests {
                 enrichment,
                 weights: Array1::ones(n),
                 score,
-                design_gram,
+                design_gram: DesignGramFactor::new(gram.view())
+                    .expect("test harness Gram is factorable"),
             }
         }
 
@@ -445,7 +490,7 @@ mod tests {
                 hessian_weights: self.weights.view(),
                 score_weights: self.weights.view(),
                 score: self.score.view(),
-                design_gram: self.design_gram.view(),
+                design_gram: &self.design_gram,
                 dispersion: 1.0,
                 residual_df: None,
                 scale: SmoothTestScale::Known,
