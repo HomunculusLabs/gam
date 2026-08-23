@@ -93,6 +93,18 @@
 //! inside `span(X)`, i.e. always.
 //!
 //!
+//!
+//! # It is exact on a row subset, and that is a cost lever
+//!
+//! Everything the construction rests on — `Z̃ᵀW_H X_S = 0`, `Var(s_S) = φ·W_F,S`
+//! — is a property of the SELECTED sub-design, not of the whole sample. So a
+//! caller may compute the report on any fixed subset of rows and the reference
+//! law is unchanged; the only thing a subset costs is non-centrality, which
+//! grows linearly in the row count. That matters because this check runs on
+//! every fit: it lets a caller bound its cost by `m` instead of `n` without
+//! weakening or approximating anything, and
+//! `a_row_subset_gives_the_same_answer_as_the_subset_design` is the executable
+//! statement of it.
 //! # It does not assume the fit solved an unmodified score equation
 //!
 //! `U = Z̃ᵀ s(β̂) = Z̃ᵀ s(β) − Z̃ᵀ W_H X (β̂ − β)`, and the second term vanishes
@@ -138,21 +150,23 @@ const ESTIMABLE_DIRECTION_FLOOR: f64 = 1.0e-9;
 /// `hessian_weights`, `score_weights` and `score` share the fit's row order;
 /// `enrichment` must be evaluated at those same rows.
 pub struct BasisAdequacyInput<'a> {
-    /// `Z` — the enrichment design (`n × q`): higher-resolution directions over
+    /// `Z` — the enrichment design (`m × q`): higher-resolution directions over
     /// the tested term's covariates. Columns already inside `span(X)` are
     /// harmless; they leave the estimable rank rather than biasing it.
     pub enrichment: ArrayView2<'a, f64>,
-    /// `X` — the fitted design, in the same coefficient frame as `design_gram`.
+    /// `X_S` — the fitted design on the SAME `m` rows, in the same coefficient
+    /// frame as `design_gram`.
     ///
-    /// Taken as the design ITSELF rather than as a materialized `n × p` array:
-    /// a spatial smooth's design is routinely operator-backed (`DenseDesignMatrix::Lazy`)
-    /// and exposes no dense view at all, and materializing one to run a
-    /// diagnostic would make the diagnostic the peak-memory term of the fit it
-    /// is diagnosing. Both passes below read it in row blocks.
-    pub design: &'a gam_linalg::matrix::DesignMatrix,
+    /// Every array here is on the rows the test is computed on, which need not
+    /// be all of them. The statistic is EXACT on any fixed subset: the
+    /// identities it rests on — `Z̃ᵀW_H X_S = 0` and `Var(s_S) = φ·W_F,S` — are
+    /// properties of the selected sub-design, not of the whole sample. Choosing
+    /// the subset is the caller's job because only the caller knows what the
+    /// test is FOR and what it may cost.
+    pub design: ArrayView2<'a, f64>,
     /// `W_H` — the diagonal curvature weights the fit's penalized Hessian was
-    /// assembled from (observed information where the fit tracked it). Used
-    /// only to build the projection.
+    /// assembled from (observed information where the fit tracked it), on the
+    /// same `m` rows. Used only to build the projection.
     pub hessian_weights: ArrayView1<'a, f64>,
     /// `W_F` — the Fisher/score-side IRLS weights, i.e. `Var(s) = φ·W_F`.
     /// Equal to `hessian_weights` for a canonical link.
@@ -200,37 +214,37 @@ pub struct BasisAdequacyResult {
 pub fn basis_adequacy_score_test(
     input: BasisAdequacyInput<'_>,
 ) -> Option<BasisAdequacyResult> {
-    let n = input.design.nrows();
+    let m = input.design.nrows();
     let p = input.design.ncols();
     let q = input.enrichment.ncols();
-    if n == 0
+    if m == 0
         || p == 0
         || q == 0
-        || input.enrichment.nrows() != n
-        || input.hessian_weights.len() != n
-        || input.score_weights.len() != n
-        || input.score.len() != n
+        || input.enrichment.nrows() != m
+        || input.hessian_weights.len() != m
+        || input.score_weights.len() != m
+        || input.score.len() != m
         || input.design_gram.dimension() != p
         || !(input.dispersion.is_finite() && input.dispersion > 0.0)
     {
         return None;
     }
 
-    // Row-blocked first pass: `XᵀW_H Z` (the projection's right-hand side) and
+    // Row-blocked first pass: `X_SᵀW_H Z` (the projection's right-hand side) and
     // the enrichment's own `W_F`-weighted energy scale (the estimability floor's
     // reference). Blocked for the same reason the second pass is — a second
-    // `n × q` array is 154 MB at `n = 200_000, q = 96`, and a diagnostic may not
-    // be the peak-memory term of the fit it is diagnosing.
+    // `m × q` array is 37 MB at `m = 50_000, q = 92`, and a diagnostic may not be
+    // the peak-memory term of the fit it is diagnosing.
     //
     // The energy scale is taken from the UNPROJECTED Gram so that an enrichment
     // largely absorbed by `X` keeps a meaningful reference scale instead of
     // having its floor collapse along with its spectrum.
     const ROW_BLOCK: usize = 4096;
-    let mut cross = Array2::<f64>::zeros((p, q)); // XᵀW_H Z
+    let mut cross = Array2::<f64>::zeros((p, q));
     let mut energy = Array1::<f64>::zeros(q);
     let mut start = 0usize;
-    while start < n {
-        let stop = (start + ROW_BLOCK).min(n);
+    while start < m {
+        let stop = (start + ROW_BLOCK).min(m);
         let block = input.enrichment.slice(ndarray::s![start..stop, ..]);
         let mut hessian_weighted = block.to_owned();
         for local in 0..(stop - start) {
@@ -247,8 +261,11 @@ pub fn basis_adequacy_score_test(
                 target[column] = curvature * value;
             }
         }
-        let design_block = input.design.try_row_chunk(start..stop).ok()?;
-        cross += &design_block.t().dot(&hessian_weighted);
+        cross += &input
+            .design
+            .slice(ndarray::s![start..stop, ..])
+            .t()
+            .dot(&hessian_weighted);
         start = stop;
     }
     let energy_scale = energy.iter().cloned().fold(0.0_f64, f64::max);
@@ -256,16 +273,17 @@ pub fn basis_adequacy_score_test(
         return None;
     }
 
-    // C = G⁻ (Xᵀ W_H Z): the `W_H`-orthogonal projection of the enrichment onto
-    // the fitted column span. `Z̃ = Z − X·C` is the part of the enrichment the
-    // realized design cannot represent, and it satisfies `Z̃ᵀW_H X = 0`.
+    // C = G⁻ (X_SᵀW_H Z): the `W_H`-orthogonal projection of the enrichment onto
+    // the fitted column span over these rows. `Z̃ = Z − X_S·C` is the part of the
+    // enrichment the realized design cannot represent, and it satisfies
+    // `Z̃ᵀW_H X_S = 0`.
     let coefficient_shift = input.design_gram.solve(&cross)?;
     if coefficient_shift.iter().any(|value| !value.is_finite()) {
         return None;
     }
 
     // `U = Z̃ᵀ s` and `V = Z̃ᵀ W_F Z̃`, accumulated together in row blocks so the
-    // residualized enrichment never has to exist as a second `n × q` array.
+    // residualized enrichment never has to exist as a second `m × q` array.
     //
     // The score MUST be contracted against `Z̃`, not `Z`. `Zᵀs = Z̃ᵀs + (X·C)ᵀs`
     // and the fit solves the PENALIZED score equation `Xᵀs = S_λβ̂`, so the
@@ -276,15 +294,17 @@ pub fn basis_adequacy_score_test(
     let mut information = Array2::<f64>::zeros((q, q));
     let mut u = Array1::<f64>::zeros(q);
     let mut start = 0usize;
-    while start < n {
-        let stop = (start + ROW_BLOCK).min(n);
+    while start < m {
+        let stop = (start + ROW_BLOCK).min(m);
         let rows = stop - start;
         let mut residualized = input
             .enrichment
             .slice(ndarray::s![start..stop, ..])
             .to_owned();
-        let design_block = input.design.try_row_chunk(start..stop).ok()?;
-        residualized -= &design_block.dot(&coefficient_shift);
+        residualized -= &input
+            .design
+            .slice(ndarray::s![start..stop, ..])
+            .dot(&coefficient_shift);
         u += &residualized
             .t()
             .dot(&input.score.slice(ndarray::s![start..stop]));
@@ -350,6 +370,85 @@ pub fn basis_adequacy_score_test(
         rank,
         p_value,
     })
+}
+
+/// Gather the rows `rows` selects out of a design into a dense `m × p` array.
+///
+/// Streams the design in row blocks and keeps only the selected rows inside
+/// each. Two properties are load-bearing:
+///
+/// * it serves EVERY backing. `DesignMatrix::as_dense_ref` is `Some` only for
+///   `Dense(Materialized)`, and a reparameterized smooth ships `Dense(Lazy(op))`
+///   — `X·Qs` held as an operator — which is what every radial term the fit path
+///   reparameterizes becomes, the #2774 fixture included. A report that required
+///   a dense view went dark on exactly the fits it exists to diagnose.
+/// * it reads the design ONCE. A lazy backing can recompute per chunk, so a
+///   caller that streamed it again for each pass and each term would pay that
+///   recompute several times over. The gathered array is `m × p`, and `m` is the
+///   caller's cap, so this is the one place the design's size enters at all.
+pub fn gather_design_rows(
+    design: &gam_linalg::matrix::DesignMatrix,
+    rows: &[usize],
+) -> Option<Array2<f64>> {
+    const ROW_BLOCK: usize = 4096;
+    let n_total = design.nrows();
+    let p = design.ncols();
+    if p == 0
+        || rows.is_empty()
+        || rows.last().is_some_and(|last| *last >= n_total)
+        || rows.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+    let mut gathered = Array2::<f64>::zeros((rows.len(), p));
+    let mut selected = 0usize;
+    let mut start = 0usize;
+    while start < n_total && selected < rows.len() {
+        let stop = (start + ROW_BLOCK).min(n_total);
+        let first = selected;
+        while selected < rows.len() && rows[selected] < stop {
+            selected += 1;
+        }
+        if selected > first {
+            let block = design.try_row_chunk(start..stop).ok()?;
+            for (offset, &row) in rows[first..selected].iter().enumerate() {
+                gathered
+                    .row_mut(first + offset)
+                    .assign(&block.row(row - start));
+            }
+        }
+        start = stop;
+    }
+    gathered
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(gathered)
+}
+
+/// `Xᵀ diag(w) X` for an already-gathered design.
+///
+/// The projection in [`basis_adequacy_score_test`] must be orthogonal in the
+/// `W_H` metric ON THE ROWS THE TEST USES — `Z̃ᵀW_H X_S = 0` is what annihilates
+/// the penalized fit's shrinkage bias, and it is a property of the selected
+/// sub-design. A Gram formed over all `n` rows does not give it.
+pub fn weighted_gram(
+    design: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> Option<Array2<f64>> {
+    let m = design.nrows();
+    if m == 0 || design.ncols() == 0 || weights.len() != m {
+        return None;
+    }
+    let mut weighted = design.to_owned();
+    for row in 0..m {
+        let weight = weights[row];
+        if !weight.is_finite() {
+            return None;
+        }
+        weighted.row_mut(row).iter_mut().for_each(|v| *v *= weight);
+    }
+    let gram = design.t().dot(&weighted);
+    gram.iter().all(|value| value.is_finite()).then_some(gram)
 }
 
 /// A once-per-fit factorization of the weighted design Gram `G = XᵀW_H X`.
@@ -477,7 +576,7 @@ mod tests {
     /// the test is the unpenalized `XᵀX`. The ridge is a knob so a test can vary
     /// how hard the fit is shrunk without touching anything else.
     struct GaussianHarness {
-        design: gam_linalg::matrix::DesignMatrix,
+        design: Array2<f64>,
         enrichment: Array2<f64>,
         weights: Array1<f64>,
         score: Array1<f64>,
@@ -496,9 +595,7 @@ mod tests {
             let beta = invert_symmetric(&hessian).dot(&design.t().dot(&y));
             let score = &y - &design.dot(&beta);
             Self {
-                design: gam_linalg::matrix::DesignMatrix::Dense(
-                    gam_linalg::matrix::DenseDesignMatrix::from(design),
-                ),
+                design,
                 enrichment,
                 weights: Array1::ones(n),
                 score,
@@ -510,7 +607,7 @@ mod tests {
         fn input(&self) -> BasisAdequacyInput<'_> {
             BasisAdequacyInput {
                 enrichment: self.enrichment.view(),
-                design: &self.design,
+                design: self.design.view(),
                 hessian_weights: self.weights.view(),
                 score_weights: self.weights.view(),
                 score: self.score.view(),
@@ -742,6 +839,142 @@ mod tests {
             span < 4.0,
             "the ridge must not drive the null statistic; got {statistics:?}"
         );
+    }
+
+    /// Gathering serves an operator-backed design, which is what a
+    /// reparameterized smooth ships and what a dense-view requirement went dark
+    /// on. Round-trips the exact rows requested, in the order requested.
+    #[test]
+    fn gathering_selects_the_requested_rows_from_any_backing() {
+        let mut source = Array2::<f64>::zeros((10, 3));
+        for row in 0..10 {
+            for column in 0..3 {
+                source[(row, column)] = (row * 3 + column) as f64;
+            }
+        }
+        let design = gam_linalg::matrix::DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(source.clone()),
+        );
+        let rows = [0usize, 4, 5, 9];
+        let gathered = gather_design_rows(&design, &rows).expect("rows are in range and sorted");
+        assert_eq!(gathered.dim(), (4, 3));
+        for (local, &row) in rows.iter().enumerate() {
+            assert_eq!(gathered.row(local), source.row(row));
+        }
+        // Out of range, unsorted and empty selections refuse rather than
+        // silently returning a shorter or misaligned block.
+        assert!(gather_design_rows(&design, &[0, 10]).is_none());
+        assert!(gather_design_rows(&design, &[4, 4]).is_none());
+        assert!(gather_design_rows(&design, &[4, 1]).is_none());
+        assert!(gather_design_rows(&design, &[]).is_none());
+    }
+
+    /// **The subsetting contract.** Running the test on a subset of rows gives
+    /// exactly the same answer as building the subset design directly — the
+    /// statistic has no dependence on rows it was not handed.
+    ///
+    /// This is what makes a caller's row cap a POWER decision and nothing else.
+    /// If the identities held only on the full sample, a capped report would be
+    /// measuring a different hypothesis than the uncapped one and the two could
+    /// not be compared.
+    #[test]
+    fn a_row_subset_gives_the_same_answer_as_the_subset_design() {
+        let n = 600;
+        let mut rng = Lcg(5_150);
+        let mut design = Array2::<f64>::zeros((n, 3));
+        let mut enrichment = Array2::<f64>::zeros((n, 3));
+        let mut y = Array1::<f64>::zeros(n);
+        for row in 0..n {
+            let x = (row as f64 + 0.5) / n as f64;
+            design[(row, 0)] = 1.0;
+            design[(row, 1)] = x;
+            design[(row, 2)] = (2.0 * x).cos();
+            enrichment[(row, 0)] = x * x;
+            enrichment[(row, 1)] = (9.0 * x).sin();
+            enrichment[(row, 2)] = x * x * x;
+            y[row] = 0.4 + 1.3 * x + 0.9 * x * x + 0.3 * rng.next_normal();
+        }
+        // Fit ONCE on all rows, then evaluate the report on every third row.
+        let full = GaussianHarness::new(design.clone(), enrichment.clone(), y, 2.0);
+        let rows: Vec<usize> = (0..n).step_by(3).collect();
+        let sub_design = select(&design, &rows);
+        let sub_enrichment = select(&enrichment, &rows);
+        let sub_weights = Array1::<f64>::ones(rows.len());
+        let sub_score = Array1::from_iter(rows.iter().map(|&row| full.score[row]));
+        let sub_gram = weighted_gram(sub_design.view(), sub_weights.view())
+            .and_then(|gram| DesignGramFactor::new(gram.view()))
+            .expect("the subset Gram factors");
+        let subset = basis_adequacy_score_test(BasisAdequacyInput {
+            enrichment: sub_enrichment.view(),
+            design: sub_design.view(),
+            hessian_weights: sub_weights.view(),
+            score_weights: sub_weights.view(),
+            score: sub_score.view(),
+            design_gram: &sub_gram,
+            dispersion: 1.0,
+            residual_df: None,
+            scale: SmoothTestScale::Known,
+        })
+        .expect("the subset carries estimable directions");
+        // Gathering the same rows out of a `DesignMatrix` must reproduce it bit
+        // for bit — the two routes into the statistic cannot disagree.
+        let backing = gam_linalg::matrix::DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(design),
+        );
+        let gathered = gather_design_rows(&backing, &rows).expect("gather");
+        let gathered_gram = weighted_gram(gathered.view(), sub_weights.view())
+            .and_then(|gram| DesignGramFactor::new(gram.view()))
+            .expect("the gathered Gram factors");
+        let via_gather = basis_adequacy_score_test(BasisAdequacyInput {
+            enrichment: sub_enrichment.view(),
+            design: gathered.view(),
+            hessian_weights: sub_weights.view(),
+            score_weights: sub_weights.view(),
+            score: sub_score.view(),
+            design_gram: &gathered_gram,
+            dispersion: 1.0,
+            residual_df: None,
+            scale: SmoothTestScale::Known,
+        })
+        .expect("the gathered subset carries estimable directions");
+        assert_eq!(subset, via_gather);
+        // And a subset genuinely tests less than the whole: its reference d.f.
+        // is the same but its statistic is not the full-sample one, so a caller
+        // reading a capped report is reading a real, weaker measurement rather
+        // than a rescaled copy of the full one.
+        let full_result = basis_adequacy_score_test(full.input()).expect("full result");
+        assert_eq!(full_result.rank, subset.rank);
+        assert!(full_result.statistic > subset.statistic);
+    }
+
+    /// Row-selected `XᵀWX` matches the direct product, including the weights.
+    #[test]
+    fn weighted_gram_matches_the_direct_product() {
+        let design = array![[1.0, 0.5], [1.0, -2.0], [1.0, 3.0], [1.0, 0.0]];
+        let weights = array![0.25, 2.0, 1.5, 0.0];
+        let gram = weighted_gram(design.view(), weights.view()).expect("finite inputs");
+        let mut expected = Array2::<f64>::zeros((2, 2));
+        for row in 0..4 {
+            for i in 0..2 {
+                for j in 0..2 {
+                    expected[(i, j)] += weights[row] * design[(row, i)] * design[(row, j)];
+                }
+            }
+        }
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((gram[(i, j)] - expected[(i, j)]).abs() < 1e-12);
+            }
+        }
+        assert!(weighted_gram(design.view(), array![1.0, 2.0].view()).is_none());
+    }
+
+    fn select(matrix: &Array2<f64>, rows: &[usize]) -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((rows.len(), matrix.ncols()));
+        for (local, &row) in rows.iter().enumerate() {
+            out.row_mut(local).assign(&matrix.row(row));
+        }
+        out
     }
 
     /// Shape and finiteness guards refuse rather than returning a stand-in.

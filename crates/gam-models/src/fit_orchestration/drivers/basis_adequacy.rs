@@ -174,6 +174,89 @@ fn enrichment_width(realized_width: usize, n_rows: usize) -> Option<usize> {
     (width > realized_width).then_some(width)
 }
 
+/// Cap on the number of rows the report is computed on.
+///
+/// The statistic is EXACT on any fixed subset of rows: `Z̃ᵀW_H X_S = 0` and
+/// `Var(s_S) = φ·W_F,S` are properties of the selected sub-design, not of the
+/// whole sample. So the only thing a cap costs is POWER, and power is the one
+/// resource this test has in surplus — its non-centrality grows linearly in the
+/// row count, and on the filed fixture at `n = 200_000` the excess over the
+/// reference d.f. is `1473 − 75 = 1398`. A quarter of the rows leaves ~350,
+/// which is `p ≈ 1e-40`.
+///
+/// What the cap buys is a bound on cost that does not depend on `n`. Measured
+/// A/B on the filed fixture, same data and seed, wheels differing only in
+/// whether the check runs:
+///
+/// ```text
+///   n =  50_000    16.11 s -> 16.89 s    (+0.78 s,  4.8%)
+///   n = 200_000    87.23 s -> 110.62 s   (+23.4 s, 26.8%)
+/// ```
+///
+/// The growth is worse than linear, and it is NOT in the parts this module
+/// budgets for — the enrichment kernel itself measures 0.94 s and the `O(m·q²)`
+/// Gram 0.15 s at `n = 200_000`. Rather than chase it through the radial
+/// builder, the cap makes it unreachable: past `REPORT_ROW_CAP` the report's
+/// work stops growing with `n` entirely. A diagnostic that runs on every fit,
+/// unasked, may not cost a quarter of that fit.
+const REPORT_ROW_CAP: usize = 50_000;
+
+/// Byte budget for the one dense array this report materializes: the gathered
+/// `m × p` design.
+///
+/// The design has to be read ONCE rather than streamed per pass and per term,
+/// because a lazy/operator backing can recompute on every chunk fetch. `m` is
+/// therefore additionally capped so that array stays bounded: a wide model
+/// lowers the row count instead of the check going dark, which keeps "not
+/// measured" a statement about the fit rather than about its width. Same 256 MiB
+/// ceiling as [`ENRICHMENT_BYTE_BUDGET`], and for the same reason.
+const GATHERED_DESIGN_BYTE_BUDGET: f64 = 2.56e8;
+
+/// Multiplier of the golden-ratio odd constant used to walk the LCG state for
+/// the within-stratum offsets. Any odd multiplier gives full period on
+/// `u64`; this one is the standard 64-bit Weyl increment.
+const ROW_SELECTION_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Strictly increasing rows the report is computed on.
+///
+/// STRATIFIED, not simple random: the sample space is split into `m` contiguous
+/// strata of equal width and one row is drawn from each. That guarantees
+/// coverage across the row ORDER, which matters because a caller's rows are
+/// routinely sorted by something — a time index, a subject id, a cohort — and a
+/// simple random draw would occasionally miss a whole region of it. It is also
+/// `O(m)` in time and memory with no set and no `n`-length permutation, and it
+/// produces the indices already sorted, which is what the streaming reader
+/// wants.
+///
+/// Deterministic by construction: the offsets come from a fixed-seed Weyl
+/// sequence, so the same fit reports the same verdict on every machine and every
+/// rerun. A diagnostic whose answer moved between runs would be unusable as a
+/// gate.
+fn report_rows(n_rows: usize, design_width: usize) -> Vec<usize> {
+    let byte_cap = (GATHERED_DESIGN_BYTE_BUDGET / (8.0 * design_width.max(1) as f64)) as usize;
+    let cap = REPORT_ROW_CAP.min(byte_cap).max(1);
+    if n_rows <= cap {
+        return (0..n_rows).collect();
+    }
+    let mut state: u64 = 0x2774_2774_2774_2774;
+    let mut rows = Vec::with_capacity(cap);
+    for stratum in 0..cap {
+        let lo = (stratum as u128 * n_rows as u128 / cap as u128) as usize;
+        let hi = ((stratum as u128 + 1) * n_rows as u128 / cap as u128) as usize;
+        let width = hi.saturating_sub(lo).max(1);
+        state = state.wrapping_add(ROW_SELECTION_STRIDE);
+        let mixed = state ^ (state >> 31);
+        rows.push((lo + (mixed % width as u64) as usize).min(n_rows - 1));
+    }
+    rows.dedup();
+    rows
+}
+
+/// Gather a full-length row vector down to the selected rows.
+fn select_rows(values: ArrayView1<'_, f64>, rows: &[usize]) -> Array1<f64> {
+    Array1::from_iter(rows.iter().map(|&row| values[row]))
+}
+
 /// Standardized copy of the term's structural covariate columns.
 ///
 /// Per-axis standardization is what makes ONE isotropic radial enrichment a
@@ -185,8 +268,9 @@ fn enrichment_width(realized_width: usize, n_rows: usize) -> Option<usize> {
 fn standardized_covariates(
     data: ArrayView2<'_, f64>,
     feature_cols: &[usize],
+    rows: &[usize],
 ) -> Option<Array2<f64>> {
-    let n = data.nrows();
+    let n = rows.len();
     if n == 0 {
         return None;
     }
@@ -196,11 +280,19 @@ fn standardized_covariates(
             return None;
         }
         let column = data.column(col);
-        if column.iter().any(|value| !value.is_finite()) {
-            return None;
+        let mut values = Array1::<f64>::zeros(n);
+        for (local, &row) in rows.iter().enumerate() {
+            let value = *column.get(row)?;
+            if !value.is_finite() {
+                return None;
+            }
+            values[local] = value;
         }
-        let mean = column.sum() / n as f64;
-        let variance = column
+        // Standardized on the SELECTED rows, so the enrichment's geometry is a
+        // property of the sample the test is computed on rather than of rows it
+        // never sees.
+        let mean = values.sum() / n as f64;
+        let variance = values
             .iter()
             .map(|value| (value - mean).powi(2))
             .sum::<f64>()
@@ -209,7 +301,10 @@ fn standardized_covariates(
         if !(sd.is_finite() && sd > 0.0) {
             continue;
         }
-        kept.push(column.mapv(|value| (value - mean) / sd));
+        values
+            .iter_mut()
+            .for_each(|value| *value = (*value - mean) / sd);
+        kept.push(values);
     }
     if kept.is_empty() {
         return None;
@@ -369,33 +464,42 @@ pub fn basis_adequacy_report(
             .map(|idx| undetermined(idx, BasisAdequacyProvenance::NoIrlsRowState))
             .collect();
     };
-    // The design is read in ROW CHUNKS, never materialized. `as_dense_ref` is
-    // `Some` only for `Dense(Materialized)`, and a reparameterized smooth ships
+    // Everything below is computed on ONE selected row sample, chosen once so
+    // every term is tested against the same rows and the model-wide Gram matches
+    // them.
+    let report_rows = report_rows(n_rows, design.design.ncols());
+    // The design is gathered ONCE, for those rows, and reused by every pass and
+    // every term. Two things force that shape. `as_dense_ref` is `Some` only for
+    // `Dense(Materialized)`, and a reparameterized smooth ships
     // `Dense(Lazy(op))` — `X·Qs` held as an operator — which is what every
-    // radial/Duchon term the fit path reparameterizes becomes, INCLUDING the
-    // 16-D `duchon(pc1..pc16, centers=24)` fixture this issue was filed on.
-    // Requiring a dense view made the report return "not materializable" for
-    // exactly the fits it exists to diagnose.
-    //
-    // Materializing under a byte budget would fix that, but it trades one
-    // silent skip for another: past the cap the check goes dark again, and
-    // under it a diagnostic that runs on every fit adds an `n × p` copy to that
-    // fit's peak residency. Neither is necessary. `basis_adequacy_score_test`
-    // already streams the enrichment in row blocks for its own `n × q` array,
-    // and `DesignMatrix::try_row_chunk` serves dense, lazy-operator and sparse
-    // backings alike — so the design streams through the same loop, the budget
-    // constant is gone, and there is no size at which the check stops running.
-    // `G = XᵀW_H X`, factored ONCE for the whole model: the projection is applied
-    // per smooth term but `G` is a property of the design and the weights, and
-    // re-factoring it per term would charge `O(p³)` per smooth on a fit that
-    // runs only a few dozen IRLS iterations in total.
-    let Some(design_gram) =
-        gam_linalg::matrix::LinearOperator::diag_xtw_x(&design.design, &rows_state.hessian_weights)
-            .ok()
-            .as_ref()
-            .and_then(|gram| {
-                gam_terms::inference::basis_adequacy::DesignGramFactor::new(gram.view())
-            })
+    // radial term the fit path reparameterizes becomes, INCLUDING the 16-D
+    // `duchon(pc1..pc16, centers=24)` fixture this issue was filed on; requiring
+    // a dense view made the report go dark on exactly the fits it exists to
+    // diagnose. And a lazy backing can RECOMPUTE per chunk, so streaming it
+    // again per pass and per term would pay that recompute several times over.
+    let Some(gathered_design) =
+        gam_terms::inference::basis_adequacy::gather_design_rows(&design.design, &report_rows)
+    else {
+        return (0..term_count)
+            .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignGramUnavailable))
+            .collect();
+    };
+    let selected_hessian_weights = select_rows(rows_state.hessian_weights.view(), &report_rows);
+    let selected_score_weights = select_rows(rows_state.score_weights.view(), &report_rows);
+    let selected_score = select_rows(rows_state.score.view(), &report_rows);
+    // `G = X_SᵀW_H X_S` over exactly those rows, factored ONCE for the whole
+    // model. It has to be the SELECTED-row Gram: `Z̃ᵀW_H X_S = 0` is what
+    // annihilates the penalized fit's shrinkage bias, and that orthogonality is
+    // a property of the sub-design the test actually uses. Factoring is once
+    // rather than per term because `G` depends only on the design and the
+    // weights, and re-factoring it per term would charge `O(p³)` per smooth on a
+    // fit that runs only a few dozen IRLS iterations in total.
+    let Some(design_gram) = gam_terms::inference::basis_adequacy::weighted_gram(
+        gathered_design.view(),
+        selected_hessian_weights.view(),
+    )
+    .as_ref()
+    .and_then(|gram| gam_terms::inference::basis_adequacy::DesignGramFactor::new(gram.view()))
     else {
         return (0..term_count)
             .map(|idx| undetermined(idx, BasisAdequacyProvenance::DesignGramUnavailable))
@@ -424,10 +528,11 @@ pub fn basis_adequacy_report(
             if feature_cols.is_empty() {
                 return undetermined(idx, BasisAdequacyProvenance::NoContinuousCovariates);
             }
-            let Some(covariates) = standardized_covariates(data, &feature_cols) else {
+            let Some(covariates) = standardized_covariates(data, &feature_cols, &report_rows)
+            else {
                 return undetermined(idx, BasisAdequacyProvenance::DegenerateCovariates);
             };
-            let Some(centers) = enrichment_width(realized_width, n_rows) else {
+            let Some(centers) = enrichment_width(realized_width, report_rows.len()) else {
                 return undetermined(
                     idx,
                     BasisAdequacyProvenance::EnrichmentBudgetBelowRealizedWidth,
@@ -439,10 +544,10 @@ pub fn basis_adequacy_report(
             let outcome = gam_terms::inference::basis_adequacy::basis_adequacy_score_test(
                 gam_terms::inference::basis_adequacy::BasisAdequacyInput {
                     enrichment: enrichment.view(),
-                    design: &design.design,
-                    hessian_weights: rows_state.hessian_weights.view(),
-                    score_weights: rows_state.score_weights.view(),
-                    score: rows_state.score.view(),
+                    design: gathered_design.view(),
+                    hessian_weights: selected_hessian_weights.view(),
+                    score_weights: selected_score_weights.view(),
+                    score: selected_score.view(),
                     design_gram: &design_gram,
                     dispersion,
                     residual_df,
