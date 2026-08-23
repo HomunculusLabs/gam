@@ -2017,6 +2017,113 @@ fn smooth_term_lr_inference_dataset_json_impl(
         .map_err(|err| format!("failed to serialize smooth-term LR inference: {err}"))
 }
 
+/// One term's #2774 basis-adequacy row, JSON-serialized for the on-demand
+/// (data-carrying) report.
+#[derive(Serialize)]
+struct BasisAdequacyRowPayload {
+    name: String,
+    term_idx: usize,
+    basis_dim: usize,
+    nullspace_dim: usize,
+    enrichment_dim: Option<usize>,
+    enrichment_rank: Option<usize>,
+    statistic: Option<f64>,
+    p_value: Option<f64>,
+    provenance: &'static str,
+}
+
+#[derive(Serialize)]
+struct BasisAdequacyPayload {
+    /// Per-term family-wise level the `inadequate` flags below were taken at:
+    /// the engine's own fit-time note level, Bonferroni-corrected over the terms
+    /// that produced a verdict. Published so a caller reading `p_value` can see
+    /// which threshold the flag used instead of guessing.
+    level: f64,
+    basis_checks: Vec<BasisAdequacyRowPayload>,
+}
+
+/// #2774 on-demand basis-adequacy report for a saved model, recomputed from the
+/// training rows.
+///
+/// `summary()` reports what the fit MEASURED and persisted; this entry
+/// recomputes it. The two differ in exactly one way, and it is not cosmetic: the
+/// residual lack-of-fit score is a function of the converged IRLS row state
+/// (weights, working response, linear predictor), which a saved model does not
+/// carry, so recomputing means REFITTING at the model's frozen spec first —
+/// the same constrained-refit shape as `smooth_term_lr_inference_json`. Callers
+/// who only want to read the verdict should read `summary().basis_checks`; this
+/// entry exists for models saved before the check existed, and for a caller who
+/// wants the check against rows other than the ones a summary happens to carry.
+fn basis_adequacy_dataset_json_impl(
+    model_bytes: &[u8],
+    dataset: EncodedDataset,
+) -> Result<String, String> {
+    let model = load_model_impl(model_bytes)?;
+    let formula = model.payload().formula.clone();
+    let spec = model
+        .payload()
+        .resolved_termspec
+        .as_ref()
+        .ok_or_else(|| "basis_adequacy requires the saved resolved_termspec; refit".to_string())?
+        .clone();
+    if spec.smooth_terms.is_empty() {
+        return serde_json::to_string(&BasisAdequacyPayload {
+            level: gam::families::fit_orchestration::drivers::BASIS_ADEQUACY_NOTE_LEVEL,
+            basis_checks: Vec::new(),
+        })
+        .map_err(|err| format!("failed to serialize basis adequacy: {err}"));
+    }
+
+    let fit_config = postfit_standard_materialization_config(&model)?;
+    let materialized = materialize(&formula, &dataset, &fit_config)?;
+    let standard = match materialized.request {
+        FitRequest::Standard(request) => request,
+        _ => {
+            return Err(
+                "basis_adequacy: only standard (non marginal-slope / non survival) models carry                  a per-smooth residual lack-of-fit report; this model uses a specialized fit                  request"
+                    .to_string(),
+            );
+        }
+    };
+    let family = model.likelihood();
+    let fitted = gam::families::fit_orchestration::drivers::fit_term_collection_forspec(
+        standard.data.view(),
+        standard.y.view(),
+        standard.weights.view(),
+        standard.offset.view(),
+        &spec,
+        family,
+        &standard.options,
+    )
+    .map_err(|err| format!("basis_adequacy refit at the frozen spec: {err}"))?;
+
+    let rows = gam::families::fit_orchestration::drivers::basis_adequacy_report(
+        standard.data.view(),
+        &fitted.design,
+        &spec,
+        &fitted.fit,
+    );
+    let payload = BasisAdequacyPayload {
+        level: gam::families::fit_orchestration::drivers::BASIS_ADEQUACY_NOTE_LEVEL,
+        basis_checks: rows
+            .into_iter()
+            .map(|row| BasisAdequacyRowPayload {
+                name: row.name,
+                term_idx: row.term_idx,
+                basis_dim: row.basis_dim,
+                nullspace_dim: row.nullspace_dim,
+                enrichment_dim: row.enrichment_centers,
+                enrichment_rank: row.enrichment_rank,
+                statistic: row.statistic,
+                p_value: row.p_value,
+                provenance: row.provenance.label(),
+            })
+            .collect(),
+    };
+    serde_json::to_string(&payload)
+        .map_err(|err| format!("failed to serialize basis adequacy: {err}"))
+}
+
 fn postfit_standard_materialization_config(model: &FittedModel) -> Result<FitConfig, String> {
     let mut fit_config = parse_fit_config(None)?;
     fit_config.weight_column = model.weight_column.clone();

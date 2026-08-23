@@ -3518,6 +3518,29 @@ fn smooth_term_lr_inference_json(
     })
 }
 
+/// #2774 on-demand per-smooth basis-adequacy report: `basis_dim`,
+/// `nullspace_dim`, `enrichment_dim`, `enrichment_rank`, `statistic`,
+/// `p_value`, `provenance`.
+///
+/// Unlike `summary_json` (a pure read of what the FIT measured and persisted),
+/// this recomputes the report, which means refitting at the model's frozen spec
+/// — the residual lack-of-fit score is a function of converged IRLS row state a
+/// saved model does not carry. Same data requirement, and for the same reason,
+/// as `smooth_term_lr_inference_json`.
+#[pyfunction]
+fn basis_adequacy_json(
+    py: Python<'_>,
+    model_bytes: Vec<u8>,
+    headers: Vec<String>,
+    rows: PyRef<'_, PyEncodedTable>,
+) -> PyResult<String> {
+    rows.require_headers(&headers).map_err(py_value_error)?;
+    let dataset = rows.dataset.clone();
+    detach_py_result(py, "basis_adequacy_json", move || {
+        basis_adequacy_dataset_json_impl(&model_bytes, dataset)
+    })
+}
+
 /// #1055 Riesz-representer debiased / Neyman-orthogonal estimate of a smooth
 /// functional of a fitted standard GAM model. Requires training `data` to
 /// compute per-row score contributions; eligible for Gaussian-identity and any
