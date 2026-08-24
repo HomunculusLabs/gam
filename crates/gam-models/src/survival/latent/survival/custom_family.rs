@@ -159,7 +159,7 @@ impl CustomFamily for LatentSurvivalFamily {
     /// rows were silent about it.
     ///
     /// It now evaluates the SAME row expression through
-    /// [`latent_survival_row_primary_value`] and sums it through the SAME
+    /// `latent_survival_row_primary_value` and sums it through the SAME
     /// deterministic reduction, so the two scalars are bit-identical rather than
     /// merely close, and `b ≡ 0`. It is not slower for it: the value backend
     /// builds the one kernel bundle the gradient hook builds and then evaluates a

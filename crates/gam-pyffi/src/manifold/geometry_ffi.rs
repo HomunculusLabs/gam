@@ -5179,6 +5179,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(summary_json, module)?)?;
     module.add_function(wrap_pyfunction!(curvature_inference_json, module)?)?;
     module.add_function(wrap_pyfunction!(smooth_term_lr_inference_json, module)?)?;
+    module.add_function(wrap_pyfunction!(basis_adequacy_json, module)?)?;
     module.add_function(wrap_pyfunction!(model_debiased_functional_json, module)?)?;
     module.add_function(wrap_pyfunction!(summary_payload_from_model, module)?)?;
     module.add_function(wrap_pyfunction!(smoothing_parameters_from_model, module)?)?;

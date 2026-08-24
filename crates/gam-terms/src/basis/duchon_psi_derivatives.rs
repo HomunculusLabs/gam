@@ -182,7 +182,7 @@ pub(crate) fn scaled_log_kappa_derivatives(
 /// convention, it is an identity, and it is what
 /// [`duchon_axis_log_kappa_derivatives`] reproduces by construction:
 /// summing its first derivative over `a`, and its second over `(a, b)`, gives
-/// [`scaled_log_kappa_derivatives`] exactly. The isotropic route is therefore a
+/// `scaled_log_kappa_derivatives` exactly. The isotropic route is therefore a
 /// contraction of the anisotropic one rather than a parallel derivation that
 /// could drift from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,7 +212,7 @@ pub enum DuchonPsiDirection {
 ///     ∂²F/∂ψ_a∂ψ_b   = B σ_a σ_b + c A (σ_a + σ_b) + 2 A σ_a δ_ab + c² F
 /// ```
 ///
-/// `A` and `B` are exactly the two combinations [`scaled_log_kappa_derivatives`]
+/// `A` and `B` are exactly the two combinations `scaled_log_kappa_derivatives`
 /// already forms, so the per-axis jet needs no radial quantity the isotropic
 /// jet does not, and — crucially — it is finite at collision: `σ` is bounded by
 /// 1 and both `A` and `B` vanish with `r`, so no `1/r` ever appears.
@@ -557,7 +557,7 @@ pub(crate) fn duchon_radial_jets(
 ///
 /// so every radial scalar this file forms is `κ^E G(κ r)` for some exponent
 /// `E`: `φ` at `δ`, `q = φ_r/r` and `Δφ` at `δ + 2`, `t = q_r/r` at `δ + 4`.
-/// [`scaled_log_kappa_derivatives`] contracts that along the isotropic
+/// `scaled_log_kappa_derivatives` contracts that along the isotropic
 /// direction; [`duchon_axis_log_kappa_derivatives`] contracts it per axis, and
 /// summing the latter reproduces the former exactly. Splitting the value jet
 /// from the contraction makes the DIRECTION the only thing that differs

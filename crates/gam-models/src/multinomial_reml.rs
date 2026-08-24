@@ -1213,7 +1213,7 @@ impl MultinomialFamily {
     ///
     /// The caller is promising the basis is orthonormal, is expressed in the raw
     /// joint coefficient order, and does not change for the lifetime of the fit.
-    /// See [`Self::joint_jeffreys_span`] and `CustomFamily::jeffreys_span_basis`.
+    /// See `Self::joint_jeffreys_span` and `CustomFamily::jeffreys_span_basis`.
     pub fn with_joint_jeffreys_span(mut self, span: Option<Arc<Array2<f64>>>) -> Self {
         self.joint_jeffreys_span = span;
         self

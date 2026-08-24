@@ -1127,7 +1127,7 @@ pub struct CollectionGaugedTerm {
 /// This is the whole per-term tail of `apply_global_smooth_identifiability`,
 /// available to a caller that holds ONE term rather than a collection: the
 /// design through [`realize_smooth_collection_gauge`], the penalties through
-/// [`penalty_candidates_under_collection_gauge`], the local inequality rows
+/// `penalty_candidates_under_collection_gauge`, the local inequality rows
 /// through the same congruence, and the coefficient transform composed into the
 /// basis metadata so a later freeze carries it.
 ///

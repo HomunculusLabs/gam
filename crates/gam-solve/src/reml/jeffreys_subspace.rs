@@ -1498,7 +1498,7 @@ impl JointJeffreysPlan {
     ///
     /// The two differ, and the difference is the whole width of the transition
     /// band. `is_active` is `gate_weight != 0`, so its boundary is the ramp's
-    /// FAR knot [`CONDITIONING_GATE_ABSOLUTE_CLEAR`] (`16` observation-
+    /// FAR knot `CONDITIONING_GATE_ABSOLUTE_CLEAR` (`16` observation-
     /// equivalents). That knot exists so `Φ(ρ)` stays C¹ as `β̂(ρ)` carries the
     /// spectrum across the boundary — a binary gate makes the outer objective
     /// jump, which is the #787 "outer smoothing did not converge" regression —
@@ -1508,11 +1508,11 @@ impl JointJeffreysPlan {
     ///
     /// This predicate is the gate's derived statement instead: the reduced
     /// information is under-identified exactly when it is
-    /// [`CONDITIONING_GATE_ABSOLUTE`]-poor (below **one** observation-
+    /// `CONDITIONING_GATE_ABSOLUTE`-poor (below **one** observation-
     /// equivalent, the scale at which "a direction carrying less than a single
     /// observation's worth of information is, by construction, not identified
     /// by the data and is the regime Firth exists to stabilise") or
-    /// [`CONDITIONING_GATE_RELATIVE`]-poor. It is expressed as
+    /// `CONDITIONING_GATE_RELATIVE`-poor. It is expressed as
     /// `conditioning_gate_weight == 1` so that one arithmetic authority decides
     /// both the weight and the verdict; the ramp's lower branch returns exactly
     /// `1.0` by early return, so the comparison is exact rather than

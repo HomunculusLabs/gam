@@ -2570,7 +2570,7 @@ impl<'a> AffineRemlProfile<'a> {
     ///
     /// # Two enclosures, intersected: the natural extension and the centred form
     ///
-    /// [`Self::enclose_direct`] below is the NATURAL interval extension — each
+    /// `Self::enclose_direct` below is the NATURAL interval extension — each
     /// mode kernel evaluated on the interval lambda and summed. It is rigorous,
     /// and on the derivative and curvature it is also tight, because there the
     /// exact quantities are `O(1)` sums.

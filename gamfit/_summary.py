@@ -39,6 +39,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "coefficients",
     "smooth_terms",
     "curvature_estimands",
+    "basis_checks",
     "covariance_kind",
     "covariance_n",
     "covariance_flat",
@@ -222,9 +223,29 @@ class Summary:
         Saved group-level metadata for grouped fits.
     deployment_extensions : list of dict
         Post-fit deployment extensions attached via :meth:`Model.extend_with_group`.
+    basis_checks : list of dict
+        Per-smooth basis-adequacy evidence (#2774) measured at fit time: one
+        record per smooth term with ``name``, ``term_idx``, ``basis_dim`` (the
+        realized ``k'``), ``nullspace_dim``, ``edf``, ``enrichment_dim``,
+        ``enrichment_rank``, ``statistic``, ``p_value`` and ``provenance``. A
+        small ``p_value`` says the fit's residuals still carry structure in that
+        smooth's covariates which its realized basis cannot represent. See
+        :meth:`gamfit.Model.basis_check` for the construction and its limits.
+        Empty when the fit recorded none.
     convergence : dict or None
         How the optimization that produced this fit terminated, read from the
-        certificate the fit carries rather than recomputed. ``certified`` is the
+        certificate the fit carries rather than recomputed.
+
+        **``certified`` is a statement about the OPTIMIZER, not about the
+        model.** It says the inner P-IRLS solve and the outer smoothing-parameter
+        search reached a certified stationary point at the tolerances the mint
+        gate applies. It makes no claim that the basis those iterations
+        converged on is rich enough to represent the function it was asked to
+        model, that the family is right, or that the fitted adjustment removes
+        the confounding it was given (#2774). :attr:`basis_checks` answers the
+        first of those; nothing here answers any of them.
+
+        ``certified`` is the
         verdict the mint gate used; ``inner_status`` is the terminal P-IRLS
         status; ``outer_iterations`` is the iteration count the proof covers;
         ``outer`` is ``None`` when no smoothing coordinate was optimized (there
@@ -270,6 +291,25 @@ class Summary:
     #: ``kappa_hat``, and a sign-of-κ̂ ``geometry`` tag. The profile CI and the
     #: κ = 0 flatness p-value (which need a refit) come from ``Model.curvature``.
     curvature_estimands: list[dict[str, Any]] = field(default_factory=list)
+    #: Per-smooth basis-adequacy evidence (#2774), measured at fit time and
+    #: persisted with the model: one dict per smooth term with ``name``,
+    #: ``term_idx``, ``basis_dim`` (the realized ``k'``), ``nullspace_dim``,
+    #: ``edf``, ``enrichment_dim`` / ``enrichment_rank``, ``statistic``,
+    #: ``p_value`` and ``provenance``.
+    #:
+    #: A small ``p_value`` says the fit's residuals still carry structure in that
+    #: smooth's covariates which its realized basis cannot represent — i.e. the
+    #: basis is too small, not that the smoothing parameter is too large (the
+    #: statistic is constructed to be blind to shrinkage; see
+    #: :meth:`Model.basis_check`). ``p_value`` is present exactly when
+    #: ``provenance == "radial_enrichment"``; every other provenance value names
+    #: the evidence that was missing, so "adequate" and "not measured" are never
+    #: confusable. Empty for models saved before the check existed.
+    #:
+    #: This is a DIFFERENT question from :attr:`convergence`: ``certified`` is a
+    #: statement about the optimizer, and says nothing about whether the basis it
+    #: converged on was rich enough.
+    basis_checks: list[dict[str, Any]] = field(default_factory=list)
     covariance_kind: str | None = None
     covariance_n: int | None = None
     covariance_flat: list[float] | None = None

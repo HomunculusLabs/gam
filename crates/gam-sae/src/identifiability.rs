@@ -1568,7 +1568,7 @@ pub fn frame_inner_rotation_dim(ranks: &[usize]) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinningRankSupport {
     /// `rank(H)` over the whole parameter space, at the rank tolerance
-    /// [`curvature_rank_tolerance`] sets: the number of independent directions
+    /// `curvature_rank_tolerance` sets: the number of independent directions
     /// the fit's curvature resolves, out of `param_dim`. Its deficiency
     /// `param_dim − rank` is the dimension of `ker H`, i.e. of the exactly-flat
     /// directions INCLUDING the ones no enumerated generator points along.
@@ -3296,7 +3296,7 @@ fn measure_reduced(
 /// the rest of this module insists on — on singular values rather than on their
 /// squares. Its column norms are the energies (`ξ_jᵀHξ_j = Σ_a T[a,j]²`,
 /// exactly, because `TᵀT = ΞᵀHΞ`), and its singular values above the shared
-/// [`curvature_rank_tolerance`] are the generator-span pinning rank.
+/// `curvature_rank_tolerance` are the generator-span pinning rank.
 fn measure_streamed(
     operator: &dyn StreamedFrameCurvature,
     gens: &[EnumeratedGenerator],

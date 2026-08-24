@@ -25,7 +25,7 @@
 //! That identity is the definition and NOT the algorithm. It carries the
 //! defect `||sum_i w_i A_i||_F` squared, so asking an `f64` eigensolver for
 //! `null(G)` decides at `sqrt(eps)`: every map within `1.5e-8` of dependent
-//! reads as exactly dependent. [`DoubleDouble`] carries the measurement that
+//! reads as exactly dependent. `DoubleDouble` carries the measurement that
 //! makes this concrete and the arithmetic that removes it.
 //!
 //! # Why the certificate has to know
@@ -45,8 +45,8 @@
 //!
 //! whose magnitude is bounded by `sum_k |(g_rho)_k| t_k^2` — which is
 //! *verbatim* the per-direction gradient floor
-//! [`crate::estimate::smoothing_correction::invert_identified_rho_hessian`]
-//! and the `H + diag(|g|)` test in [`crate::rho_optimizer::run`] compare
+//! `crate::estimate::smoothing_correction::invert_identified_rho_hessian`
+//! and the `H + diag(|g|)` test in `crate::rho_optimizer::run` compare
 //! against. A direction of this subspace does not sit NEAR the decision
 //! boundary of those gates; it sits ON it, by identity, and which side it
 //! lands on is decided by the disagreement between the gradient evaluation and
@@ -245,7 +245,7 @@ impl DoubleDouble {
 /// Built from the canonical penalties alone. No tolerance is chosen: the rank
 /// boundary is decided in the DEFECT's own units — the norm of what is left of
 /// an operator after projecting onto the ones already accepted — against the
-/// construction error operators of that size carry. See [`DoubleDouble`] for
+/// construction error operators of that size carry. See `DoubleDouble` for
 /// why the Gram's eigenvalues cannot answer this and what it cost when they
 /// were asked to (#2676).
 #[derive(Debug, Clone)]
@@ -392,7 +392,7 @@ impl PenaltyMapInvariance {
         // addition is exact to the second word, so a Gram entry of size `O(1)`
         // carries `O(m * eps^2)` of error rather than `O(eps)`. That is what
         // makes the rank boundary below a statement about the OPERATORS rather
-        // than about `sqrt(eps)`; see [`DoubleDouble`] for the measurement that
+        // than about `sqrt(eps)`; see `DoubleDouble` for the measurement that
         // forced it.
         let mut gram = vec![DoubleDouble::ZERO; k * k];
         for i in 0..k {
@@ -634,7 +634,7 @@ impl PenaltyMapInvariance {
 /// The drop tolerance is the classical loss-of-orthogonality scale
 /// `64 * n * EPSILON` relative to the incoming column norm — the same
 /// arithmetic-floor coefficient the sibling
-/// [`crate::estimate::smoothing_correction::eigenpair_backward_error_bound`]
+/// `crate::estimate::smoothing_correction::eigenpair_backward_error_bound`
 /// uses, kept identical so the two places that decide "this is round-off" agree.
 /// A column whose residual against the accepted basis has fallen that far is
 /// numerically dependent, and keeping it would admit a direction determined

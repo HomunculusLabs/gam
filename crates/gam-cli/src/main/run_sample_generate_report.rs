@@ -1,5 +1,27 @@
 use super::*;
 
+
+/// Map a fitted model's persisted #2774 basis-adequacy rows onto the renderer's
+/// plain row type. A pure read: the report shows what the FIT measured, and
+/// shows nothing when it measured nothing.
+fn report_basis_checks(model: &SavedModel) -> Vec<report::BasisCheckRow> {
+    model
+        .payload()
+        .basis_adequacy
+        .iter()
+        .map(|row| report::BasisCheckRow {
+            name: row.name.clone(),
+            basis_dim: row.basis_dim,
+            nullspace_dim: row.nullspace_dim,
+            edf: row.edf,
+            enrichment_rank: row.enrichment_rank,
+            statistic: row.statistic,
+            p_value: row.p_value,
+            provenance: row.provenance.label().to_string(),
+        })
+        .collect()
+}
+
 fn saved_alo_report_data(
     alo: gam_predict::SavedModelAloDiagnostics,
 ) -> Result<report::AloData, String> {
@@ -451,6 +473,7 @@ pub(crate) fn run_report_spline_scan(
         diagnostics: None,
         smooth_plots: Vec::new(),
         alo: None,
+        basis_checks: report_basis_checks(model),
         notes,
     };
     let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
@@ -540,6 +563,7 @@ pub(crate) fn run_report_residual_cascade(
         diagnostics: None,
         smooth_plots: Vec::new(),
         alo: None,
+        basis_checks: report_basis_checks(model),
         notes,
     };
     let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
@@ -1071,6 +1095,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         diagnostics,
         smooth_plots,
         alo: alo_data,
+        basis_checks: report_basis_checks(&model),
         notes,
     };
     let out = report::write_report(&input, args.out.as_deref(), &args.model)?;

@@ -213,6 +213,13 @@ pub struct StandardFitResult {
     pub fit: UnifiedFitResult,
     pub design: TermCollectionDesign,
     pub resolvedspec: TermCollectionSpec,
+    /// Per-smooth basis-adequacy evidence (#2774): the residual lack-of-fit
+    /// verdict for each smooth term, or a typed reason it could not be
+    /// measured. Empty for a result assembled before the report ran — the
+    /// report is attached by the single formula-fit seam that owns the
+    /// materialized covariate frame it needs, not by `fit_model`, which does
+    /// not know which numeric columns a smooth's covariates are.
+    pub basis_adequacy: Vec<crate::fit_orchestration::drivers::BasisAdequacyRow>,
     /// Which resolved smooth positions originated from an auto-sized radial
     /// spatial basis. Freeze replaces center strategies with explicit center
     /// matrices, so this provenance must travel beside the result for the

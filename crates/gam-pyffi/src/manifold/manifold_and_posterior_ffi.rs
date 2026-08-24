@@ -1339,12 +1339,8 @@ fn summary_smooth_terms(
     // that is the only thing handed over. Both reference-distribution inputs
     // (`wald_residual_degrees_of_freedom`, `wald_scale_is_estimated`) are read
     // off the fit inside that walk, which is where `fd998d957` put them.
-    let rows = gam::solver::estimate::smooth_term_summary_rows(
-        &design,
-        spec,
-        fit,
-        whitening_gram_full,
-    );
+    let rows =
+        gam::solver::estimate::smooth_term_summary_rows(&design, spec, fit, whitening_gram_full);
     rows.into_iter()
         .map(|row| SummarySmoothTermRow {
             name: row.name,
@@ -1485,6 +1481,13 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         model_class: prediction_model_class_label(model),
         group_metadata: model.payload().group_metadata.clone(),
         deployment_extensions: model.payload().deployment_extensions.clone(),
+        // Read from the payload rather than hardcoded empty (#2774). The O(n)
+        // scan route returns before the fit-time adequacy seam, so today this
+        // is empty — but "empty because the fit recorded none" and "empty
+        // because this constructor forgot" are different states, and only the
+        // first one keeps saying the truth if the scan route ever records a
+        // row.
+        basis_checks: summary_basis_checks(model),
         deviance: scan.deviance,
         // Scan-routed models do not retain the λ-comparable log-likelihood, so
         // leave `log_likelihood` unset.
@@ -1555,6 +1558,29 @@ fn summary_convergence(fit: &gam::solver::estimate::UnifiedFitResult) -> Summary
         outer_iterations: evidence.outer_iterations(),
         outer,
     }
+}
+
+/// The #2774 basis-adequacy rows a fitted model carries, mapped onto the FFI
+/// summary shape. A pure read of persisted fit-time evidence — no refit, no
+/// recomputation, and no fabrication when the fit recorded none.
+fn summary_basis_checks(model: &FittedModel) -> Vec<SummaryBasisCheckRow> {
+    model
+        .payload()
+        .basis_adequacy
+        .iter()
+        .map(|row| SummaryBasisCheckRow {
+            name: row.name.clone(),
+            term_idx: row.term_idx,
+            basis_dim: row.basis_dim,
+            nullspace_dim: row.nullspace_dim,
+            edf: row.edf,
+            enrichment_dim: row.enrichment_dim,
+            enrichment_rank: row.enrichment_rank,
+            statistic: row.statistic,
+            p_value: row.p_value,
+            provenance: row.provenance.label(),
+        })
+        .collect()
 }
 
 fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
@@ -1629,11 +1655,11 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         coefficients,
         smooth_terms,
         curvature_estimands: summary_curvature_estimands(&model),
+        basis_checks: summary_basis_checks(&model),
         covariance_kind: covariance.as_ref().map(|(kind, _)| kind.clone()),
         covariance_n: covariance.as_ref().map(|(_, cov)| cov.nrows()),
         covariance_flat: covariance.map(|(_, cov)| cov.iter().copied().collect()),
-        coefficient_se_source: display_uncertainty
-            .map(|view| view.definition.as_str().to_string()),
+        coefficient_se_source: display_uncertainty.map(|view| view.definition.as_str().to_string()),
         convergence: Some(summary_convergence(&fit)),
     };
     serde_json::to_string(&payload).map_err(|err| format!("failed to serialize summary: {err}"))
@@ -1994,6 +2020,115 @@ fn smooth_term_lr_inference_dataset_json_impl(
         .map_err(|err| format!("failed to serialize smooth-term LR inference: {err}"))
 }
 
+/// One term's #2774 basis-adequacy row, JSON-serialized for the on-demand
+/// (data-carrying) report.
+#[derive(Serialize)]
+struct BasisAdequacyRowPayload {
+    name: String,
+    term_idx: usize,
+    basis_dim: usize,
+    nullspace_dim: usize,
+    edf: Option<f64>,
+    enrichment_dim: Option<usize>,
+    enrichment_rank: Option<usize>,
+    statistic: Option<f64>,
+    p_value: Option<f64>,
+    provenance: &'static str,
+}
+
+#[derive(Serialize)]
+struct BasisAdequacyPayload {
+    /// Per-term family-wise level the `inadequate` flags below were taken at:
+    /// the engine's own fit-time note level, Bonferroni-corrected over the terms
+    /// that produced a verdict. Published so a caller reading `p_value` can see
+    /// which threshold the flag used instead of guessing.
+    level: f64,
+    basis_checks: Vec<BasisAdequacyRowPayload>,
+}
+
+/// #2774 on-demand basis-adequacy report for a saved model, recomputed from the
+/// training rows.
+///
+/// `summary()` reports what the fit MEASURED and persisted; this entry
+/// recomputes it. The two differ in exactly one way, and it is not cosmetic: the
+/// residual lack-of-fit score is a function of the converged IRLS row state
+/// (weights, working response, linear predictor), which a saved model does not
+/// carry, so recomputing means REFITTING at the model's frozen spec first —
+/// the same constrained-refit shape as `smooth_term_lr_inference_json`. Callers
+/// who only want to read the verdict should read `summary().basis_checks`; this
+/// entry exists for models saved before the check existed, and for a caller who
+/// wants the check against rows other than the ones a summary happens to carry.
+fn basis_adequacy_dataset_json_impl(
+    model_bytes: &[u8],
+    dataset: EncodedDataset,
+) -> Result<String, String> {
+    let model = load_model_impl(model_bytes)?;
+    let formula = model.payload().formula.clone();
+    let spec = model
+        .payload()
+        .resolved_termspec
+        .as_ref()
+        .ok_or_else(|| "basis_adequacy requires the saved resolved_termspec; refit".to_string())?
+        .clone();
+    if spec.smooth_terms.is_empty() {
+        return serde_json::to_string(&BasisAdequacyPayload {
+            level: gam::families::fit_orchestration::drivers::BASIS_ADEQUACY_NOTE_LEVEL,
+            basis_checks: Vec::new(),
+        })
+        .map_err(|err| format!("failed to serialize basis adequacy: {err}"));
+    }
+
+    let fit_config = postfit_standard_materialization_config(&model)?;
+    let materialized = materialize(&formula, &dataset, &fit_config)?;
+    let standard = match materialized.request {
+        FitRequest::Standard(request) => request,
+        _ => {
+            return Err(
+                "basis_adequacy: only standard (non marginal-slope / non survival) models carry                  a per-smooth residual lack-of-fit report; this model uses a specialized fit                  request"
+                    .to_string(),
+            );
+        }
+    };
+    let family = model.likelihood();
+    let fitted = gam::families::fit_orchestration::drivers::fit_term_collection_forspec(
+        standard.data.view(),
+        standard.y.view(),
+        standard.weights.view(),
+        standard.offset.view(),
+        &spec,
+        family,
+        &standard.options,
+    )
+    .map_err(|err| format!("basis_adequacy refit at the frozen spec: {err}"))?;
+
+    let rows = gam::families::fit_orchestration::drivers::basis_adequacy_report(
+        standard.data.view(),
+        &fitted.design,
+        &spec,
+        &fitted.fit,
+    );
+    let payload = BasisAdequacyPayload {
+        level: gam::families::fit_orchestration::drivers::BASIS_ADEQUACY_NOTE_LEVEL,
+        basis_checks: rows
+            .into_iter()
+            .map(|row| BasisAdequacyRowPayload {
+                name: row.name,
+                term_idx: row.term_idx,
+                basis_dim: row.basis_dim,
+                nullspace_dim: row.nullspace_dim,
+                edf: row.edf,
+                enrichment_dim: row.enrichment_dim,
+                enrichment_rank: row.enrichment_rank,
+                statistic: row.statistic,
+                p_value: row.p_value,
+                provenance: row.provenance.label(),
+            })
+            .collect(),
+    };
+    serde_json::to_string(&payload)
+        .map_err(|err| format!("failed to serialize basis adequacy: {err}"))
+}
+
 fn postfit_standard_materialization_config(model: &FittedModel) -> Result<FitConfig, String> {
     let mut fit_config = parse_fit_config(None)?;
     fit_config.weight_column = model.weight_column.clone();
@@ -2013,6 +2148,9 @@ fn check_dataset_json_impl(model_bytes: &[u8], dataset: EncodedDataset) -> Resul
 /// ~`n` knot values are not a summary artifact.
 fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<String, String> {
     let report_input = ReportInput {
+        // The O(n) spline-scan route retains no IRLS row state, so it measures
+        // no basis adequacy and shows none rather than an empty verdict.
+        basis_checks: Vec::new(),
         model_path: "<in-memory>".to_string(),
         family_name: model.display_family_name(),
         model_class: prediction_model_class_label(model),
@@ -2050,6 +2188,27 @@ fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<Str
         )],
     };
     render_html(&report_input)
+}
+
+/// Map a fitted model's persisted #2774 basis-adequacy rows onto the renderer's
+/// plain row type. A pure read: the report shows what the FIT measured, and
+/// shows nothing when it measured nothing.
+fn report_basis_checks(model: &FittedModel) -> Vec<BasisCheckRow> {
+    model
+        .payload()
+        .basis_adequacy
+        .iter()
+        .map(|row| BasisCheckRow {
+            name: row.name.clone(),
+            basis_dim: row.basis_dim,
+            nullspace_dim: row.nullspace_dim,
+            edf: row.edf,
+            enrichment_rank: row.enrichment_rank,
+            statistic: row.statistic,
+            p_value: row.p_value,
+            provenance: row.provenance.label().to_string(),
+        })
+        .collect()
 }
 
 fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
@@ -2114,6 +2273,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         diagnostics: None,
         smooth_plots: Vec::new(),
         alo: None,
+        basis_checks: report_basis_checks(&model),
         notes: vec![
             "Python report currently omits data-dependent diagnostics and smooth plots."
                 .to_string(),
