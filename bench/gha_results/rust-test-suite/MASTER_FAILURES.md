@@ -96,22 +96,22 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/bug_hunt_posterior_method_label_says_nuts_for_every_standard_fit_test` :: `test_bernoulli_logit_standard_fit_is_not_badged_nuts`
 - **FAIL** `python::tests/bug_hunt_transformation_normal_generate_draws_on_latent_scale_wrong_direction_test` :: `test_ctm_generate_conditional_mean_increases_with_covariate`
 - **FAIL** `python::tests/bug_hunt_posterior_method_label_says_nuts_for_every_standard_fit_test` :: `test_three_distinct_standard_samplers_do_not_share_one_badge`
-- **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_cloglog_positive_control_fits`
 - **FAIL** `python::tests/bug_hunt_univariate_matern_gp_smooth_degenerate_range_penalty_test` :: `test_univariate_matern_smooth_fits_ordinary_1d_data`
+- **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_cloglog_positive_control_fits`
 - **FAIL** `python::tests/bug_hunt_flexible_loglog_cauchit_link_accepted_then_crashes_test` :: `test_flexible_advertised_link_is_handled_gracefully[flexible(cauchit)]`
 - **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_gamma_dispersion_location_scale_is_predictable`
 - **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_negbin_dispersion_location_scale_is_predictable`
-- **FAIL** `python::tests/bug_hunt_posterior_method_label_says_nuts_for_every_standard_fit_test` :: `test_hardcoded_laplace_diagnostics_are_not_presented_as_mcmc`
 - **FAIL** `python::tests/bug_hunt_univariate_matern_gp_smooth_degenerate_range_penalty_test` :: `test_univariate_gp_basis_alias_fits_ordinary_1d_data`
+- **FAIL** `python::tests/bug_hunt_posterior_method_label_says_nuts_for_every_standard_fit_test` :: `test_hardcoded_laplace_diagnostics_are_not_presented_as_mcmc`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_fit_ignores_missing_values_in_unreferenced_columns[numeric_nan-nan-float]`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_fit_ignores_missing_values_in_unreferenced_columns[numeric_inf-inf-float]`
-- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_nonnegative_coefficient_bound`
-- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_two_sided_linear_coefficient_bounds`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_fit_ignores_missing_values_in_unreferenced_columns[categorical_empty--object]`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_fit_ignores_missing_values_in_unreferenced_columns[categorical_none-None-object]`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_predict_ignores_missing_values_in_unreferenced_columns`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_check_accepts_a_frame_whose_unreferenced_column_has_a_gap`
 - **FAIL** `python::tests/bug_hunt_unreferenced_column_missing_value_blocks_fit_test` :: `test_validate_formula_ignores_missing_values_in_unreferenced_columns`
+- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_nonnegative_coefficient_bound`
+- **FAIL** `python::tests/bug_hunt_posterior_sampling_ignores_box_coefficient_constraints_test` :: `test_posterior_respects_two_sided_linear_coefficient_bounds`
 - **FAIL** `python::tests/bug_hunt_predict_mean_is_not_inverse_link_of_linear_predictor_test` :: `test_mean_is_the_inverse_link_of_the_reported_linear_predictor[100-binomial-logit]`
 - **FAIL** `python::tests/bug_hunt_predict_mean_is_not_inverse_link_of_linear_predictor_test` :: `test_mean_is_the_inverse_link_of_the_reported_linear_predictor[100-poisson]`
 - **FAIL** `python::tests/bug_hunt_predict_mean_is_not_inverse_link_of_linear_predictor_test` :: `test_mean_is_the_inverse_link_of_the_reported_linear_predictor[100-gamma]`
@@ -125,11 +125,11 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/bug_hunt_rail_certified_fit_refuses_every_default_uncertainty_surface_test` :: `test_diagnose_works_at_its_own_default`
 - **FAIL** `python::tests/test_bug_hunt_marginal_slope_predict_interval` :: `test_marginal_slope_posterior_predict_draws_matrix_shape`
 - **FAIL** `python::tests/bug_hunt_sae_manifold_fit_tiny_ordered_beta_bernoulli_circle_process_kill_2089_test` :: `test_tiny_ordered_beta_bernoulli_circle_fit_does_not_kill_the_process`
-- **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_tweedie_dispersion_location_scale_is_predictable`
 - **FAIL** `python::tests/test_binomial_posterior_mean_uncertainty` :: `test_rare_event_observation_band_is_informative`
+- **FAIL** `python::tests/bug_hunt_gamma_dispersion_location_scale_unpredictable_test` :: `test_tweedie_dispersion_location_scale_is_predictable`
+- **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data`
 - **FAIL** `python::tests/bug_hunt_laplace_posterior_spread_ignores_smoothing_correction_test` :: `test_smooth_posterior_spread_matches_reported_standard_errors`
 - **FAIL** `python::tests/bug_hunt_laplace_posterior_spread_ignores_smoothing_correction_test` :: `test_posterior_band_matches_default_prediction_band`
-- **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data`
 - **FAIL** `python::tests/test_bug_hunt_cyclic_smooth_overfits_null_space_signal` :: `test_cyclic_pspline_collapses_to_constant_on_flat_data`
 - **FAIL** `python::tests/test_bug_hunt_dispersion_location_scale_observation_interval_symmetric` :: `test_dispersion_location_scale_observation_band_is_skewed_not_symmetric`
 - **FAIL** `python::tests/test_bug_hunt_dispersion_location_scale_observation_interval_symmetric` :: `test_location_scale_band_matches_standard_path_skew_on_identical_data`
@@ -144,10 +144,10 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/bug_hunt_shape_constrained_fit_refuses_default_prediction_intervals_test` :: `test_shape_constrained_observation_interval[monotone-decreasing]`
 - **FAIL** `python::tests/bug_hunt_shape_constrained_fit_refuses_default_prediction_intervals_test` :: `test_shape_constrained_split_conformal[monotone-increasing]`
 - **FAIL** `python::tests/bug_hunt_shape_constrained_fit_refuses_default_prediction_intervals_test` :: `test_shape_constrained_split_conformal[monotone-decreasing]`
-- **FAIL** `python::tests/test_issue_247_latent_duchon_jet_mismatch` :: `test_gaussian_reml_fit_latent_duchon_d1_default_repro`
-- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_optimizer_recovers_coordinate_from_random_init`
 - **FAIL** `python::tests/bug_hunt_shape_constrained_fit_refuses_default_prediction_intervals_test` :: `test_shape_constrained_diagnose_at_its_default[monotone-increasing]`
 - **FAIL** `python::tests/bug_hunt_shape_constrained_fit_refuses_default_prediction_intervals_test` :: `test_shape_constrained_diagnose_at_its_default[monotone-decreasing]`
+- **FAIL** `python::tests/test_issue_247_latent_duchon_jet_mismatch` :: `test_gaussian_reml_fit_latent_duchon_d1_default_repro`
+- **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_optimizer_recovers_coordinate_from_random_init`
 - **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_recovery_is_initialization_independent`
 - **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_recovered_latent_is_returned_with_shape`
 - **FAIL** `python::tests/test_issue_627_latent_coordinate_optimization` :: `test_caller_init_is_a_pure_local_solve`
@@ -184,15 +184,15 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_detach_is_explicit_not_attach_none`
 - **FAIL** `python::tests/bug_hunt_smooth_significance_ref_df_tracks_edf_not_basis_dim_test` :: `test_nonconverged_flat_fit_is_not_flagged_significant`
 - **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_estimated_power_strictly_beats_pinned_1p5_in_low_mean_stratum`
+- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_model_predicts_and_summarizes[quintic-order3]`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_gaussian`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_binomial`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_linear_min_max_active_lower_bound`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonpositive_active_bound`
 - **FAIL** `python::tests/test_posterior_monotone_shape_constraint` :: `test_convex_posterior_curves_are_convex`
-- **FAIL** `python::tests/test_pyffi_bug_hunt4` :: `test_bug_custom_family_coefficient_group_labels_are_stably_routed`
-- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_model_predicts_and_summarizes[quintic-order3]`
 - **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predict_point_and_interval_still_work`
 - **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predictions_intervals_and_summary_replay_exactly_after_save_load`
+- **FAIL** `python::tests/test_pyffi_bug_hunt4` :: `test_bug_custom_family_coefficient_group_labels_are_stably_routed`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ factor(g) + s(x)]`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ g + s(x)]`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ s(x) + factor(g)]`
@@ -200,6 +200,8 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_tensor_smooth_row_survives_a_categorical_main_effect`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_main_effect_only_factor_keeps_the_table`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_terms_frame_has_the_documented_columns`
+- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_recovers_spherical_sign`
+- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_does_not_reject_flat_truth`
 - **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_report_and_gated_angle_reader`
 - **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_round_trips_through_dict`
 - **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_manifoldsae_has_hybrid_split_field_defaulting_none`
@@ -246,23 +248,21 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_fit_oos_quality_matches_training_on_planted_oracle_distribution`
 - **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[1]`
 - **FAIL** `python::tests/test_sae_manifold_shape_band_save_load` :: `test_restored_covariance_reproduces_analytic_band`
+- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_isometry_on_circle_recovers_planted_geometry_normalized_reference`
 - **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_evaluate_more_centers_than_rows_numpy`
 - **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_basis_size_then_evaluate_consistent`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_structure_certificate_matches_independent_e_bh`
-- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_isometry_on_circle_recovers_planted_geometry_normalized_reference`
 - **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[2]`
+- **FAIL** `python::tests/test_survival_api_regressions` :: `test_joint_competing_risks_survival_is_reachable_from_fit`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_stricter_alpha_never_grows_confirmed_set`
-- **FAIL** `python::tests/test_survival_marginal_slope_clustered_pc_808` :: `test_survival_marginal_slope_clustered_pc_converges_808`
 - **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_payload_is_one_unprojected_model`
-- **FAIL** `python::tests/test_validate_formula_operator_family_issue_219` :: `test_identity_wrapper_pass_through`
+- **FAIL** `python::tests/test_survival_marginal_slope_clustered_pc_808` :: `test_survival_marginal_slope_clustered_pc_converges_808`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_contested_entries_are_the_unconfirmed_complement`
+- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_certificate_round_trips_through_native_payload`
 - **FAIL** `python::tests/test_survival_nonlinear_baseline_fits_issue_392_369` :: `test_weibull_survival_with_timewiggle_fits`
 - **FAIL** `python::tests/test_survival_save_load_roundtrip` :: `test_survival_marginal_slope_save_load_predict_roundtrips`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_certificate_round_trips_through_native_payload`
-- **FAIL** `python::tests/test_survival_api_regressions` :: `test_joint_competing_risks_survival_is_reachable_from_fit`
+- **FAIL** `python::tests/test_validate_formula_operator_family_issue_219` :: `test_identity_wrapper_pass_through`
 - **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_marginal_slope_fit_returns`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_recovers_spherical_sign`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_does_not_reject_flat_truth`
 
 ## Forbidden runtime-error signatures
 
