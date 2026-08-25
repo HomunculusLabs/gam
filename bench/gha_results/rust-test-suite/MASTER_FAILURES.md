@@ -184,15 +184,15 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/test_manifold_sae_pyclass_steer_equiv` :: `test_detach_is_explicit_not_attach_none`
 - **FAIL** `python::tests/bug_hunt_smooth_significance_ref_df_tracks_edf_not_basis_dim_test` :: `test_nonconverged_flat_fit_is_not_flagged_significant`
 - **FAIL** `python::tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage` :: `test_estimated_power_strictly_beats_pinned_1p5_in_low_mean_stratum`
-- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_model_predicts_and_summarizes[quintic-order3]`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_gaussian`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonnegative_active_bound_binomial`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_linear_min_max_active_lower_bound`
 - **FAIL** `python::tests/test_posterior_box_coefficient_constraints` :: `test_nonpositive_active_bound`
+- **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_model_predicts_and_summarizes[quintic-order3]`
 - **FAIL** `python::tests/test_posterior_monotone_shape_constraint` :: `test_convex_posterior_curves_are_convex`
+- **FAIL** `python::tests/test_pyffi_bug_hunt4` :: `test_bug_custom_family_coefficient_group_labels_are_stably_routed`
 - **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predict_point_and_interval_still_work`
 - **FAIL** `python::tests/bug_hunt_spline_scan_model_summary_unavailable_test` :: `test_scan_predictions_intervals_and_summary_replay_exactly_after_save_load`
-- **FAIL** `python::tests/test_pyffi_bug_hunt4` :: `test_bug_custom_family_coefficient_group_labels_are_stably_routed`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ factor(g) + s(x)]`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ g + s(x)]`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_row_survives_a_categorical_main_effect[y ~ s(x) + factor(g)]`
@@ -200,8 +200,6 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_tensor_smooth_row_survives_a_categorical_main_effect`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_main_effect_only_factor_keeps_the_table`
 - **FAIL** `python::tests/bug_hunt_summary_smooth_terms_empty_when_a_categorical_factor_is_present_test` :: `test_smooth_terms_frame_has_the_documented_columns`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_recovers_spherical_sign`
-- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_does_not_reject_flat_truth`
 - **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_report_and_gated_angle_reader`
 - **FAIL** `python::tests/test_sae_coordinate_fidelity_public_api_2081` :: `test_coordinate_fidelity_round_trips_through_dict`
 - **FAIL** `python::tests/test_sae_hybrid_split_public_field_1204` :: `test_manifoldsae_has_hybrid_split_field_defaulting_none`
@@ -248,21 +246,23 @@ _Lower bound: 220 recorded before the run stopped. Unmeasured: Python population
 - **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_fit_oos_quality_matches_training_on_planted_oracle_distribution`
 - **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[1]`
 - **FAIL** `python::tests/test_sae_manifold_shape_band_save_load` :: `test_restored_covariance_reproduces_analytic_band`
-- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_isometry_on_circle_recovers_planted_geometry_normalized_reference`
 - **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_evaluate_more_centers_than_rows_numpy`
 - **FAIL** `python::tests/test_sphere_descriptor_issue_224` :: `test_sphere_basis_size_then_evaluate_consistent`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_structure_certificate_matches_independent_e_bh`
+- **FAIL** `python::tests/test_sae_manifold_synthetic_quality_ground_truth` :: `test_isometry_on_circle_recovers_planted_geometry_normalized_reference`
 - **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_fit_uses_exact_fixed_support[2]`
-- **FAIL** `python::tests/test_survival_api_regressions` :: `test_joint_competing_risks_survival_is_reachable_from_fit`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_stricter_alpha_never_grows_confirmed_set`
-- **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_payload_is_one_unprojected_model`
 - **FAIL** `python::tests/test_survival_marginal_slope_clustered_pc_808` :: `test_survival_marginal_slope_clustered_pc_converges_808`
+- **FAIL** `python::tests/test_sae_manifold_top_k_issue` :: `test_topk_payload_is_one_unprojected_model`
+- **FAIL** `python::tests/test_validate_formula_operator_family_issue_219` :: `test_identity_wrapper_pass_through`
 - **FAIL** `python::tests/test_structure_certificate_1058` :: `test_contested_entries_are_the_unconfirmed_complement`
-- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_certificate_round_trips_through_native_payload`
 - **FAIL** `python::tests/test_survival_nonlinear_baseline_fits_issue_392_369` :: `test_weibull_survival_with_timewiggle_fits`
 - **FAIL** `python::tests/test_survival_save_load_roundtrip` :: `test_survival_marginal_slope_save_load_predict_roundtrips`
-- **FAIL** `python::tests/test_validate_formula_operator_family_issue_219` :: `test_identity_wrapper_pass_through`
+- **FAIL** `python::tests/test_structure_certificate_1058` :: `test_certificate_round_trips_through_native_payload`
+- **FAIL** `python::tests/test_survival_api_regressions` :: `test_joint_competing_risks_survival_is_reachable_from_fit`
 - **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_marginal_slope_fit_returns`
+- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_recovers_spherical_sign`
+- **FAIL** `python::tests/test_response_geometry_constant_curvature_e2e` :: `test_constant_curvature_response_does_not_reject_flat_truth`
 
 ## Forbidden runtime-error signatures
 
