@@ -1655,6 +1655,141 @@ fn parse_tensor_identifiability(
     }
 }
 
+/// Parse the `identifiability=` option for every 1-D B-spline family arm —
+/// `s()` / `bs='ps'|'bspline'|'cr'|'cs'` and the cyclic `cc`/`cp`/`periodic`
+/// selector.
+///
+/// Returns `Ok(None)` when the option is absent so each arm can keep applying
+/// its own *structural* default: an anchored endpoint is already the model's
+/// level gauge and therefore defaults to [`BSplineIdentifiability::None`],
+/// while every other 1-D smooth defaults to sum-to-zero centering. An explicit
+/// token always wins over the default, and an unrecognised one is refused
+/// rather than silently discarded (#2783).
+///
+/// The vocabulary deliberately mirrors [`parse_tensor_identifiability`],
+/// [`parse_matern_identifiability`] and [`parse_spatial_identifiability`] so a
+/// token means the same thing on every smooth kind: `none` keeps the
+/// unconstrained basis columns, the `sum_tozero` family centers, and `linear`
+/// removes the constant *and* linear directions (the 1-D Greville-geometry
+/// analogue of the Matérn `CenterLinearOrthogonal` policy).
+///
+/// [`BSplineIdentifiability::OrthogonalToDesignColumns`] and
+/// [`BSplineIdentifiability::FrozenTransform`] are engine-internal: the first
+/// needs a design-column block no formula can name, the second is minted by
+/// design freezing at fit time. Both are refused with a message that says so,
+/// exactly as `parse_spatial_identifiability` refuses `frozen`.
+fn parse_bspline_identifiability(
+    options: &BTreeMap<String, String>,
+) -> Result<Option<BSplineIdentifiability>, String> {
+    let Some(raw) = options.get("identifiability").map(String::as_str) else {
+        return Ok(None);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(Some(BSplineIdentifiability::None)),
+        "sum_tozero" | "sum-to-zero" | "center_sum_tozero" | "center-sum-to-zero" | "centered"
+        | "sumtozero" => Ok(Some(BSplineIdentifiability::WeightedSumToZero {
+            weights: None,
+        })),
+        "linear" | "remove_linear_trend" | "remove-linear-trend" | "removelineartrend"
+        | "center_linear_orthogonal" | "center-linear-orthogonal" => {
+            Ok(Some(BSplineIdentifiability::RemoveLinearTrend))
+        }
+        "frozen" | "frozen_transform" | "orthogonal" | "orthogonal_to_design_columns" => {
+            Err(TermBuilderError::unsupported_feature(format!(
+                "B-spline identifiability '{}' is internal-only (it is minted by design freezing \
+                 or needs an explicit design-column block); use one of: none, sum_tozero, linear",
+                raw.trim()
+            ))
+            .to_string())
+        }
+        other => Err(TermBuilderError::unsupported_feature(format!(
+            "invalid B-spline identifiability '{other}'; expected one of: none, sum_tozero, linear"
+        ))
+        .to_string()),
+    }
+}
+
+/// The structural facts about a 1-D B-spline arm that decide which
+/// identifiability policies are simultaneously satisfiable with the basis the
+/// arm is about to build.
+#[derive(Debug, Clone, Copy, Default)]
+struct BSplineIdentifiabilityContext {
+    /// An endpoint is pinned to a value, so the smooth already carries its own
+    /// level gauge and the global intercept is suppressed.
+    has_anchor: bool,
+    /// The basis wraps, so no aperiodic (constant + linear) chart applies.
+    periodic: bool,
+    /// The basis is a natural cubic regression spline indexed by value-at-knot
+    /// (`bs="cr"`/`"cs"`), which carries no B-spline knot/degree geometry for a
+    /// Greville-abscissae chart to be built from.
+    natural_cubic_regression: bool,
+}
+
+/// Resolve the 1-D B-spline identifiability policy from the caller's
+/// `identifiability=` token (if any) and the structural default the arm would
+/// otherwise apply, refusing the combinations that are not simultaneously
+/// satisfiable.
+///
+/// Three refusals, each of which would otherwise be a silent mis-fit rather
+/// than a mere style violation:
+///
+/// * **anchored endpoint + a centering policy.** An anchored endpoint pins the
+///   function's absolute level and suppresses the global intercept, so the
+///   *fitted function* — not a centered deviation — obeys the pin. Layering
+///   sum-to-zero on top demands the same function additionally have sample mean
+///   zero, which excludes every non-zero-mean anchored curve from the model
+///   space before REML is even evaluated (#1867, #2297). The implicit default
+///   already resolves this by choosing `None`; an explicit request for the
+///   incompatible policy is refused rather than quietly overridden.
+/// * **periodic basis + `linear`.** [`BSplineIdentifiability::RemoveLinearTrend`]
+///   builds its transform from the Greville abscissae of an *open* knot vector
+///   and removes the constant and linear directions. A linear trend is not a
+///   periodic function, so it is not in the span of a cyclic basis at all: the
+///   constraint is ill-posed there, and the transform would in any case be
+///   derived from the wrong knot geometry.
+/// * **`bs="cr"`/`"cs"` + `linear`.** The natural cubic regression basis is
+///   parameterized by function values at its knots, so a Greville-based linear
+///   removal would be applied to the wrong coordinates.
+///   [`crate::basis::build_cubic_regression_basis_1d`] refuses this too; doing
+///   it here turns a fit-time basis error into a formula-time configuration
+///   error naming the option the user actually wrote.
+fn resolve_bspline_identifiability(
+    options: &BTreeMap<String, String>,
+    structural_default: BSplineIdentifiability,
+    context: BSplineIdentifiabilityContext,
+) -> Result<BSplineIdentifiability, String> {
+    let Some(explicit) = parse_bspline_identifiability(options)? else {
+        return Ok(structural_default);
+    };
+    if context.has_anchor && !matches!(explicit, BSplineIdentifiability::None) {
+        return Err(TermBuilderError::incompatible_config(
+            "an anchored endpoint already fixes the smooth's level (the global intercept is \
+             suppressed), so it cannot also carry a centering identifiability constraint; \
+             drop the anchor or use identifiability='none'",
+        )
+        .to_string());
+    }
+    if matches!(explicit, BSplineIdentifiability::RemoveLinearTrend) {
+        if context.periodic {
+            return Err(TermBuilderError::incompatible_config(
+                "identifiability='linear' removes the constant and linear directions using \
+                 open-knot Greville geometry, which a periodic basis does not span; use 'none' \
+                 or 'sum_tozero' on a periodic smooth",
+            )
+            .to_string());
+        }
+        if context.natural_cubic_regression {
+            return Err(TermBuilderError::incompatible_config(
+                "identifiability='linear' needs B-spline knot/degree geometry, which the natural \
+                 cubic regression basis (bs='cr'/'cs') does not carry; use 'none' or 'sum_tozero', \
+                 or switch to bs='ps'",
+            )
+            .to_string());
+        }
+    }
+    Ok(explicit)
+}
+
 fn bspline_boundary_declares_periodic_axis(options: &BTreeMap<String, String>) -> bool {
     options
         .get("boundary")
@@ -2332,6 +2467,20 @@ pub fn build_smooth_basis(
                 }
                 (origins[0].unwrap_or(minv), span)
             };
+            // This arm is periodic by construction, so its structural default is
+            // the ordinary sum-to-zero centering (the cyclic penalty leaves the
+            // constant direction unpenalized). An explicit `identifiability=`
+            // token overrides it; before #2783 the option was whitelisted here
+            // and then hardcoded away, so `cyclic(x, identifiability='none')`
+            // was bit-identical to the centered default.
+            let identifiability = resolve_bspline_identifiability(
+                options,
+                BSplineIdentifiability::default(),
+                BSplineIdentifiabilityContext {
+                    periodic: true,
+                    ..Default::default()
+                },
+            )?;
             Ok(SmoothBasisSpec::BSpline1D {
                 feature_col: c,
                 spec: BSplineBasisSpec {
@@ -2343,7 +2492,7 @@ pub fn build_smooth_basis(
                         num_basis,
                     },
                     double_penalty: smooth_double_penalty,
-                    identifiability: BSplineIdentifiability::default(),
+                    identifiability,
                     boundary_conditions: Default::default(),
                     boundary: OneDimensionalBoundary::Cyclic {
                         start: domain_start,
@@ -2474,11 +2623,26 @@ pub fn build_smooth_basis(
             // anchored bump mathematically unrecoverable before REML was even
             // evaluated; for a two-sided anchor it additionally strips the
             // interior level the two pins bracket (#2297).
-            let identifiability = if boundary_conditions.has_anchor() {
+            let structural_identifiability = if boundary_conditions.has_anchor() {
                 BSplineIdentifiability::None
             } else {
                 BSplineIdentifiability::default()
             };
+            // An explicit `identifiability=` token overrides that structural
+            // default, and an unrecognised one is refused. Before #2783 the
+            // option was whitelisted by `validate_known_options` above and then
+            // never read, so every value — including nonsense — was accepted
+            // and inert on this arm alone.
+            let identifiability = resolve_bspline_identifiability(
+                options,
+                structural_identifiability,
+                BSplineIdentifiabilityContext {
+                    has_anchor: boundary_conditions.has_anchor(),
+                    periodic: periodic_axes[0],
+                    natural_cubic_regression: !periodic_axes[0]
+                        && (type_opt == "cr" || type_opt == "cs"),
+                },
+            )?;
             let periods = parse_periods(options, &periodic_axes).map_err(|e| e.to_string())?;
             let origins =
                 parse_period_origins(options, &periodic_axes).map_err(|e| e.to_string())?;
