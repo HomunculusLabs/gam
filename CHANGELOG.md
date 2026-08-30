@@ -61,8 +61,37 @@ is the only disallowed outcome. It fingerprints the built design rather than the
 spec — which is precisely what #2782 needed, since `degree=` *was* stored on the
 spec and then ignored by the builder — and it pins its own coverage so a future
 parse error cannot turn the sweep into a vacuous error-path test. Run with
-teeth, it found 33 more options of the same shape, each now listed with its
-reason and its own two-way ratchet.
+teeth, it found 33 more options of the same shape — and the ratchet is now
+EMPTY, because all 33 were carried to a resolution in the same pass:
+
+- **Wired up.** `s(x, boundary=...)`, a whitelisted third spelling of `bc=` that
+  the endpoint parser never read. `duchon(p=...)` and `duchon(nullspace_order=...)`,
+  whitelisted aliases of `power=`/`order=` that neither parser read. And
+  `duchon(order=...)` itself, which the arm discarded whenever no `power=`
+  accompanied it — it resolved the pair as
+  `CubicStructuralDefault => duchon_cubic_default(d)`, taking the null-space
+  ORDER from the default too, contradicting that module's own contract that
+  "an explicit `order=0` still selects the constant-only space". The default now
+  supplies only the spectral power. `order=1` *is* the default null space, so
+  every shipped `duchon(..., order=1)` formula is bit-identical across the change.
+- **Refused, with the reason.** `side=`, which says which endpoint a boundary
+  condition applies to, and the seven anchor-value spellings, which say what an
+  anchored endpoint is pinned to — each meaningless without the condition it
+  qualifies, each previously parsed and dropped, so `s(x, bc_left=anchored,
+  anchor=2.5)` pinned at 2.5 while `s(x, anchor=2.5)` pinned nothing. And
+  `thinplate(include_intercept=...)`, which appends a constant column to a kernel
+  basis that has no polynomial null space of its own — which is what the Matérn
+  basis is and what a thin-plate basis is not, since a TPS ships its polynomial
+  null space by construction, so the appended column would be exactly collinear.
+- **Exempted, each with what makes it structurally inert.** `matern`'s
+  `double_penalty`, resolved by the fit-time bootstrap-κ spectral test rather
+  than the cold build (gam#787/#860); `curv`'s, whose RKHS Gram is full-rank PD
+  so the ridge is identically zero in both directions (#1464) — which is exactly
+  why that arm defaults it off; `thinplate`'s `scale_dims`, documented as a
+  derivative-PLANNING hint for that family and not an anisotropy knob; `mjs`'s
+  `tau` and `learn_length_scale`, Ψ-learning switches read during the fit; and
+  `cyclic`'s `double_penalty`, which has no second penalty to switch off once the
+  periodic sum-to-zero chart has removed the only null direction (#874).
 
 ### The basis-adequacy check now runs on every smooth it claims to (#2788, #2789)
 
