@@ -1,6 +1,6 @@
 [package]
 name = "gam-sae"
-version = "0.3.152"
+version = "0.3.153"
 edition = "2024"
 description = "Sparse-autoencoder latent-manifold terms for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"
@@ -17,8 +17,8 @@ gam-math = { path = "../gam-math", version = "=0.3.152" }
 opt.workspace = true
 gam-problem = { path = "../gam-problem", version = "=0.3.152" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.152" }
-gam-solve = { path = "../gam-solve", version = "=0.3.152" }
-gam-terms = { path = "../gam-terms", version = "=0.3.152" }
+gam-solve = { path = "../gam-solve", version = "=0.3.153" }
+gam-terms = { path = "../gam-terms", version = "=0.3.153" }
 log = "0.4.29"
 memmap2 = "0.9.10"
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
