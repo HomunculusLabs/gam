@@ -2395,7 +2395,11 @@ pub fn build_smooth_basis(
     let type_opt = resolve_smooth_type_name(kind, cols.len(), options);
 
     if matches!(type_opt.as_str(), "fs" | "sz" | "re") {
-        validate_known_options(type_opt.as_str(), options, SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS)?;
+        if type_opt == "re" {
+            validate_random_effect_smooth_options(options)?;
+        } else {
+            validate_known_options(type_opt.as_str(), options, FACTOR_SMOOTH_OPTION_KEYS)?;
+        }
         if cols.len() != 2 {
             return Err(format!(
                 "{} factor-smooth currently expects exactly two variables (one numeric, one categorical)",
@@ -5010,7 +5014,13 @@ fn resolve_nonperiodic_bspline_knotspec(
 // answers the different question these three lists silently got wrong in
 // #2781/#2782/#2783 — "does this key do anything?".
 // ---------------------------------------------------------------------------
-pub(crate) const SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS: &[&str] = &[
+/// Options of the PENALIZED factor smooths, `bs='fs'` and `bs='sz'`: a shared
+/// B-spline marginal replicated once per level of the grouping factor. Every
+/// key here shapes that marginal, so every key here reaches the built design.
+///
+/// `bs='re'` used to share this list even though it builds no spline at all;
+/// see [`RANDOM_EFFECT_SMOOTH_OPTION_KEYS`] and #2791.
+pub(crate) const FACTOR_SMOOTH_OPTION_KEYS: &[&str] = &[
     "type",
     "bs",
     "k",
@@ -5027,6 +5037,56 @@ pub(crate) const SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS: &[&str] = &[
     "double_penalty",
     "ordered",
 ];
+
+/// Options of `bs='re'`, the PARAMETRIC random intercept + slope.
+///
+/// `s(x, g, bs='re')` is mgcv's `(1 + x | g)`: the per-level design is the raw
+/// line `[1, x − c]` and the penalty is an identity ridge per parametric
+/// coordinate. There is no spline marginal, no knot vector and no difference
+/// penalty, so none of the basis-shaping keys of
+/// [`FACTOR_SMOOTH_OPTION_KEYS`] can be honoured — and until #2791 all ten of
+/// them were accepted and silently discarded.
+pub(crate) const RANDOM_EFFECT_SMOOTH_OPTION_KEYS: &[&str] = &["type", "bs", "ordered"];
+
+/// The keys `bs='re'` refuses with a reason rather than a bare "unknown
+/// option": they are all spelled correctly and all valid on `bs='fs'`, so the
+/// user's mistake is the flavour, not the spelling.
+const RANDOM_EFFECT_UNSHAPEABLE_OPTION_KEYS: &[&str] = &[
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "knot_placement",
+    "knot-placement",
+    "knotplacement",
+    "degree",
+    "penalty_order",
+    "m",
+    "double_penalty",
+];
+
+/// Validate the option map of a `bs='re'` term.
+///
+/// Refuses the basis-shaping keys with a message that names the flavour that
+/// does honour them, then falls through to the ordinary spelling check.
+fn validate_random_effect_smooth_options(
+    options: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    if let Some(key) = RANDOM_EFFECT_UNSHAPEABLE_OPTION_KEYS
+        .iter()
+        .find(|key| options.contains_key(**key))
+    {
+        return Err(TermBuilderError::incompatible_config(format!(
+            "bs='re' is a parametric random intercept + slope — the per-level line \
+             [1, x] under an i.i.d. ridge — not a spline, so it has no basis to shape \
+             and `{key}=` cannot be honoured. Use bs='fs' for a penalized random \
+             smooth of x within each level (it accepts {key}=), or drop the option."
+        ))
+        .to_string());
+    }
+    validate_known_options("re", options, RANDOM_EFFECT_SMOOTH_OPTION_KEYS)
+}
 
 pub(crate) const CYCLIC_SMOOTH_OPTION_KEYS: &[&str] = &[
     "type",
@@ -8332,9 +8392,15 @@ mod tests {
             ("curvature", "curv(x, zbig", CURVATURE_SMOOTH_OPTION_KEYS),
             ("measurejet", "mjs(x, zbig", MEASURE_JET_SMOOTH_OPTION_KEYS),
             ("tensor", "te(x, z", TENSOR_SMOOTH_OPTION_KEYS),
-            ("fs", "s(x, g, bs='fs'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
-            ("sz", "s(x, g, bs='sz'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
-            ("re", "s(x, g, bs='re'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
+            ("fs", "s(x, g, bs='fs'", FACTOR_SMOOTH_OPTION_KEYS),
+            ("sz", "s(x, g, bs='sz'", FACTOR_SMOOTH_OPTION_KEYS),
+            // `re` is swept against the SUPERSET on purpose: its own whitelist
+            // (`RANDOM_EFFECT_SMOOTH_OPTION_KEYS`) is three structurally-inert
+            // selectors, so sweeping it would probe nothing. Driving the
+            // penalized flavours' list through the `re` arm is what pins the
+            // #2791 property — every basis-shaping key is REFUSED there, which
+            // this guard counts as a pass, rather than silently dropped.
+            ("re", "s(x, g, bs='re'", FACTOR_SMOOTH_OPTION_KEYS),
         ];
         // `pca(...)` is the one arm not swept here: half its options name an
         // on-disk basis file (`path`, `pca_basis_path`, `lazy_path`), so probing
@@ -8370,51 +8436,6 @@ mod tests {
                 "y ~ s(x, g, bs='sz', m=3)",
                 "#2791: `Sz` carries no `m` field at all, so the key is dropped on the \
                  floor; `penalty_order=` on the same term genuinely moves the penalty set.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', k=9)",
-                "#2791: `bs='re'` is a PARAMETRIC random intercept+slope. The built \
-                 marginal design is discarded and replaced by `[1, x - c]`, so no \
-                 basis-shaping option can reach the model.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', basis_dim=9)",
-                "#2791: `k` alias; see the `k=9` row.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', basisdim=9)",
-                "#2791: `k` alias; see the `k=9` row.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', knots=5)",
-                "#2791: the `re` marginal has zero internal knots by construction.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', knot_placement=quantile)",
-                "#2791: no internal knots to place.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', knotplacement=quantile)",
-                "#2791: `knot_placement` alias; see the previous row.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', degree=1)",
-                "#2791: the arm forces `degree = 1` and the build then discards the \
-                 B-spline design entirely.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', penalty_order=3)",
-                "#2791: the marginal wiggliness penalty is replaced by one identity ridge \
-                 per parametric coordinate, so no difference order survives.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', m=3)",
-                "#2791: `penalty_order` alias; see the previous row.",
-            ),
-            (
-                "y ~ s(x, g, bs='re', double_penalty=true)",
-                "#2791: the `re` ridge is unconditional and already covers every \
-                 coordinate, so there is no null space left for a second penalty.",
             ),
         ];
 
@@ -8823,6 +8844,83 @@ mod tests {
                 ColumnKindTag::Categorical,
             ],
         }
+    }
+
+    /// #2791: `bs='re'` is the PARAMETRIC random intercept + slope. It builds
+    /// no spline, so the basis-shaping options must be refused with a reason
+    /// rather than accepted and dropped — the whole `re` column of the arm's
+    /// shared whitelist used to be silently inert.
+    ///
+    /// This approaches the property from the opposite side of the
+    /// `no_whitelisted_smooth_option_is_accepted_and_inert` sweep: that guard
+    /// asks "did the design move?", this one asks "did the user get told?", and
+    /// pins the paired positive — the same key on the same data, on `bs='fs'`,
+    /// still builds and still moves the design.
+    #[test]
+    fn random_effect_flavour_refuses_the_basis_options_it_cannot_honour_2791() {
+        let ds = factor_dataset_l3();
+        let col_map = ds.column_map();
+        let policy = ResourcePolicy::default_library();
+        let build = |formula: &str| -> Result<(), String> {
+            let parsed = parse_formula(formula)?;
+            let mut notes = Vec::new();
+            build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        };
+
+        build("y ~ s(x, g, bs='re')").expect("the bare random slope must still build");
+
+        for (key, value) in [
+            ("k", "9"),
+            ("basis_dim", "9"),
+            ("basisdim", "9"),
+            ("knots", "5"),
+            ("knot_placement", "quantile"),
+            ("knotplacement", "quantile"),
+            ("degree", "2"),
+            ("penalty_order", "1"),
+            ("m", "1"),
+            ("double_penalty", "false"),
+        ] {
+            let err = build(&format!("y ~ s(x, g, bs='re', {key}={value})")).expect_err(
+                "a basis-shaping option on bs='re' must be refused, not silently dropped",
+            );
+            assert!(
+                err.contains(key) && err.contains("bs='fs'"),
+                "the refusal must name the offending key and the flavour that DOES \
+                 honour it, got: {err}"
+            );
+        }
+
+        // The hyphenated aliases `basis-dim`/`knot-placement` are in the
+        // whitelist but are not reachable through the formula grammar (a bare
+        // `-` inside an option name does not lex), so they are not probed here.
+        //
+        // The paired positive: `bs='fs'` is a real penalized smooth, so the same
+        // keys build there. `knot_placement` is spelled three ways and `k` four;
+        // one representative of each family is enough to prove the refusal above
+        // is about the flavour, not the spelling.
+        for formula in [
+            "y ~ s(x, g, bs='fs', k=9)",
+            "y ~ s(x, g, bs='fs', knots=5)",
+            "y ~ s(x, g, bs='fs', knot_placement=quantile)",
+            "y ~ s(x, g, bs='fs', degree=2)",
+            "y ~ s(x, g, bs='fs', penalty_order=1)",
+            "y ~ s(x, g, bs='fs', m=1)",
+            "y ~ s(x, g, bs='fs', double_penalty=false)",
+        ] {
+            build(formula).unwrap_or_else(|err| panic!("`{formula}` must build, got: {err}"));
+        }
+
+        // A misspelling still gets the ordinary spelling error, so the new
+        // refusal has not swallowed the typo path.
+        let typo = build("y ~ s(x, g, bs='re', kk=9)")
+            .expect_err("an unknown option must still be refused");
+        assert!(
+            typo.contains("does not accept option `kk`"),
+            "an unknown key must keep the spelling-check error, got: {typo}"
+        );
     }
 
     #[test]
