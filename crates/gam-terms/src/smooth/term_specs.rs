@@ -708,7 +708,17 @@ pub struct FactorSmoothSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorSmoothFlavour {
-    Fs { m_null_penalty_orders: Vec<usize> },
+    /// Random factor smooth (`bs='fs'`).
+    ///
+    /// Written as an EMPTY STRUCT variant rather than a unit variant on
+    /// purpose: it used to carry `m_null_penalty_orders: Vec<usize>` (#2791
+    /// retired it — `m` is the marginal penalty order, and the null-penalty
+    /// path is gated by `marginal.double_penalty`), and serde deserializes the
+    /// old `{"Fs":{"m_null_penalty_orders":[2]}}` payload into an empty struct
+    /// variant by ignoring the now-unknown field, whereas a unit variant would
+    /// demand the bare string `"Fs"` and reject every model saved before that
+    /// change.
+    Fs {},
     Sz,
     Re,
 }
@@ -8378,28 +8388,30 @@ pub fn build_factor_smooth(
         );
     }
 
-    // `Fs` (order ≥ 1, the default) is the random-effect flavour: it penalizes
-    // each null-space dimension of the marginal wiggliness penalty separately
-    // below (mgcv's `bs="fs"` construction). That replaces the marginal's single
-    // *combined* double penalty, so disable the latter here to avoid penalizing
-    // the null space twice (once combined, once per dimension). The explicit
-    // `m=0` opt-out keeps the legacy combined double penalty and adds no
-    // per-dimension penalties.
-    let use_per_dim_null = matches!(
-        &spec.flavour,
-        FactorSmoothFlavour::Fs { m_null_penalty_orders }
-            if m_null_penalty_orders.iter().copied().max().unwrap_or(0) >= 1
-    );
+    // `Fs` is the random-effect flavour: it penalizes each null-space dimension
+    // of the marginal wiggliness penalty separately below (mgcv's `bs="fs"`
+    // construction), which REPLACES the marginal's single *combined* double
+    // penalty. `spec.marginal.double_penalty` — the DSL `double_penalty=` — is
+    // the one switch for "is the null space penalized at all" (#2791). The
+    // combined spelling of that same penalty is not separately reachable,
+    // because the per-dimension form strictly generalizes it (equal λ’s recover
+    // it) and REML picks; it used to be reachable as `m=0`, which cost `m` its
+    // meaning as the marginal penalty order.
+    let use_per_dim_null =
+        matches!(&spec.flavour, FactorSmoothFlavour::Fs { .. }) && spec.marginal.double_penalty;
 
     // Build the shared marginal design + penalties from the 1-D B-spline.
     // `Re` forces a degree-1 marginal (linear span) and replaces the marginal
     // wiggliness with an identity ridge below; `Fs` keeps the user's marginal
     // (cubic by default) and, under the per-dimension null path, gets its null
     // space penalized one dimension at a time after replication.
+    // The marginal is always built WITHOUT its combined null ridge on this path.
+    // Under `Fs` the per-dimension null penalties below supply the null-space
+    // shrinkage when it is switched on (building both would penalize the null
+    // space twice); under `Re` the whole marginal penalty set is discarded and
+    // replaced by one identity ridge per parametric coordinate.
     let mut marginal_spec = factor_smooth_marginal_for_replay(&spec.marginal);
-    if use_per_dim_null {
-        marginal_spec.double_penalty = false;
-    }
+    marginal_spec.double_penalty = false;
     let inner_term = SmoothTermSpec {
             frozen_parametric_residualization: None,
         name: format!("{term_name}::marginal"),
@@ -8548,9 +8560,8 @@ pub fn build_factor_smooth(
     // dimension. With linear data REML drives the curvature λ up and degrades
     // `fs` to a linear random slope (edf → ≈2/group); with genuine curvature the
     // wiggliness λ stays small and the wiggle survives (data-adaptive, not a
-    // cap). Gated by `m_null_penalty_orders`: order ≥ 1 (default) enables the
-    // per-dimension null penalties; `m=0` keeps the legacy combined double
-    // penalty and adds nothing here.
+    // cap). Gated by `marginal.double_penalty` (the DSL `double_penalty=`),
+    // which on this flavour means exactly "penalize the null space too".
     if use_per_dim_null
         && let Some(Some(z)) = inner
             .active_penalties
@@ -9958,9 +9969,7 @@ mod factor_smooth_heldout_group_tests {
     fn fs_heldout_group_stays_strict() {
         let data = array![[0.1, 0.0], [0.5, 1.0], [0.9, 7.0]];
         let term = factor_smooth_term(
-            FactorSmoothFlavour::Fs {
-                m_null_penalty_orders: vec![1],
-            },
+            FactorSmoothFlavour::Fs {},
             Some(frozen_bits()),
         );
         let mut workspace = BasisWorkspace::default();
