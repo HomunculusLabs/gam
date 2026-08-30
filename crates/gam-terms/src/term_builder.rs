@@ -2309,27 +2309,7 @@ pub fn build_smooth_basis(
     let type_opt = resolve_smooth_type_name(kind, cols.len(), options);
 
     if matches!(type_opt.as_str(), "fs" | "sz" | "re") {
-        validate_known_options(
-            type_opt.as_str(),
-            options,
-            &[
-                "type",
-                "bs",
-                "k",
-                "basis_dim",
-                "basis-dim",
-                "basisdim",
-                "knots",
-                "knot_placement",
-                "knot-placement",
-                "knotplacement",
-                "degree",
-                "penalty_order",
-                "m",
-                "double_penalty",
-                "ordered",
-            ],
-        )?;
+        validate_known_options(type_opt.as_str(), options, SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS)?;
         if cols.len() != 2 {
             return Err(format!(
                 "{} factor-smooth currently expects exactly two variables (one numeric, one categorical)",
@@ -2535,36 +2515,7 @@ pub fn build_smooth_basis(
         // Route it through the cyclic arm so the formula path agrees with the
         // rest of the codebase instead of rejecting it as an unsupported type.
         "cyclic" | "cc" | "cp" | "cyclic-ps" | "periodic" => {
-            validate_known_options(
-                "cyclic",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "degree",
-                    "penalty_order",
-                    "period",
-                    "periods",
-                    "period_start",
-                    "period_end",
-                    "start",
-                    "end",
-                    "origin",
-                    "origins",
-                    "period_origin",
-                    "period-origin",
-                    "domain_origin",
-                    "double_penalty",
-                    "id",
-                    "__by_col",
-                    "identifiability",
-                ],
-            )?;
+            validate_known_options("cyclic", options, CYCLIC_SMOOTH_OPTION_KEYS)?;
             if cols.len() != 1 {
                 return Err(format!(
                     "periodic smooth expects one variable, got {}",
@@ -2701,54 +2652,7 @@ pub fn build_smooth_basis(
                 "cs" => "cs",
                 _ => "bspline",
             };
-            validate_known_options(
-                validation_name,
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "knot_placement",
-                    "knot-placement",
-                    "knotplacement",
-                    "degree",
-                    "penalty_order",
-                    "boundary",
-                    "bc",
-                    "boundary_conditions",
-                    "bc_left",
-                    "bc_right",
-                    "left_bc",
-                    "right_bc",
-                    "start_bc",
-                    "end_bc",
-                    "side",
-                    "anchor",
-                    "anchor_value",
-                    "value",
-                    "anchor_left",
-                    "left_anchor",
-                    "anchor_right",
-                    "right_anchor",
-                    "periodic",
-                    "period",
-                    "periods",
-                    "period_start",
-                    "period_end",
-                    "origin",
-                    "double_penalty",
-                    "by",
-                    "id",
-                    "__by_col",
-                    "identifiability",
-                    "by",
-                ],
-            )?;
+            validate_known_options(validation_name, options, BSPLINE_SMOOTH_OPTION_KEYS)?;
             if cols.len() != 1 {
                 return Err(TermBuilderError::incompatible_config(format!(
                     "bspline smooth expects one variable, got {}",
@@ -2928,36 +2832,7 @@ pub fn build_smooth_basis(
             })
         }
         "tps" | "thinplate" | "thin-plate" => {
-            validate_known_options(
-                "thinplate",
-                options,
-                &[
-                    SECONDARY_CENTER_CAP_OPTION,
-                    "type",
-                    "bs",
-                    "by",
-                    "length_scale",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "include_intercept",
-                    "double_penalty",
-                    "by",
-                    "id",
-                    "__by_col",
-                    "identifiability",
-                    "by",
-                    "periodic",
-                    "cyclic",
-                    "period",
-                    "period_start",
-                    "period_end",
-                    "scale_dims",
-                ],
-            )?;
+            validate_known_options("thinplate", options, THINPLATE_SMOOTH_OPTION_KEYS)?;
             let plan = plan_spatial_basis(
                 sizing_rows,
                 cols.len(),
@@ -3009,37 +2884,7 @@ pub fn build_smooth_basis(
             })
         }
         "sphere" | "s2" | "sos" => {
-            validate_known_options(
-                "sphere",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "penalty_order",
-                    "m",
-                    "double_penalty",
-                    "id",
-                    "__by_col",
-                    "kernel",
-                    "method",
-                    "radians",
-                    "units",
-                    "degree",
-                    "l",
-                    "max_degree",
-                    "max-degree",
-                    "lmax",
-                    "l_max",
-                    "l-max",
-                ],
-            )?;
+            validate_known_options("sphere", options, SPHERE_SMOOTH_OPTION_KEYS)?;
             if cols.len() != 2 {
                 return Err(format!(
                     "sphere smooth expects exactly two variables (lat, lon), got {}",
@@ -3191,26 +3036,7 @@ pub fn build_smooth_basis(
             // (`Sᵈ` for κ>0, `ℝᵈ` for κ=0, `Hᵈ` for κ<0) and is honoured verbatim
             // by the fit; OMITTING `kappa=` leaves κ free for the #944/#1464
             // outer ψ-coordinate estimation, seeded at the flat default 0.
-            validate_known_options(
-                "curvature",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "kappa",
-                    "length_scale",
-                    "double_penalty",
-                    "id",
-                    "__by_col",
-                ],
-            )?;
+            validate_known_options("curvature", options, CURVATURE_SMOOTH_OPTION_KEYS)?;
             // `kappa=` follows the mgcv-`sp=` convention: an EXPLICIT value pins
             // the sectional curvature (fixed geometry, honoured verbatim by the
             // fit — gam#2152); an OMITTED `kappa=` leaves κ free for the
@@ -3275,31 +3101,7 @@ pub fn build_smooth_basis(
             // of data concentrated near an unknown low-dimensional set; the
             // geometry (centers, masses, scale band) is read off the measure
             // at build time — magic by default, every option optional.
-            validate_known_options(
-                "measurejet",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "s",
-                    "alpha",
-                    "tau",
-                    "scales",
-                    "length_scale",
-                    "double_penalty",
-                    "multiscale",
-                    "learn_length_scale",
-                    "id",
-                    "__by_col",
-                ],
-            )?;
+            validate_known_options("measurejet", options, MEASURE_JET_SMOOTH_OPTION_KEYS)?;
             let order_s = option_f64(options, "s").unwrap_or(0.0);
             // 0.0 = auto sentinel; explicit values must sit inside the
             // admissible order interval of the affine-jet (r = 2) energy.
@@ -3388,37 +3190,7 @@ pub fn build_smooth_basis(
             // they get silently ignored and the user wonders why their
             // option had no effect. The matern() term accepts exactly
             // these options.
-            validate_known_options(
-                "matern",
-                options,
-                &[
-                    SECONDARY_CENTER_CAP_OPTION,
-                    "type",
-                    "bs",
-                    "by",
-                    "nu",
-                    "length_scale",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "include_intercept",
-                    "double_penalty",
-                    "by",
-                    "id",
-                    "__by_col",
-                    "identifiability",
-                    "by",
-                    "periodic",
-                    "cyclic",
-                    "period",
-                    "period_start",
-                    "period_end",
-                    "scale_dims",
-                ],
-            )?;
+            validate_known_options("matern", options, MATERN_SMOOTH_OPTION_KEYS)?;
             let plan = plan_spatial_basis(
                 sizing_rows,
                 cols.len(),
@@ -3513,40 +3285,7 @@ pub fn build_smooth_basis(
             })
         }
         "duchon" | "ds" => {
-            validate_known_options(
-                "duchon",
-                options,
-                &[
-                    SECONDARY_CENTER_CAP_OPTION,
-                    "type",
-                    "bs",
-                    "by",
-                    "length_scale",
-                    "centers",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knots",
-                    "rank",
-                    "power",
-                    "p",
-                    "nullspace_order",
-                    "order",
-                    "identifiability",
-                    "by",
-                    "periodic",
-                    "cyclic",
-                    "period",
-                    "period_start",
-                    "period_end",
-                    "scale_dims",
-                    "double_penalty",
-                    "by",
-                    "id",
-                    "__by_col",
-                ],
-            )?;
+            validate_known_options("duchon", options, DUCHON_SMOOTH_OPTION_KEYS)?;
             if options.contains_key("double_penalty") {
                 return Err(TermBuilderError::incompatible_config(format!(
                     "Duchon smooth '{}' does not support double_penalty; the Duchon smoother already ships its native reproducing-norm penalty plus a null-space shrinkage ridge.",
@@ -3810,41 +3549,7 @@ pub fn build_smooth_basis(
             })
         }
         "tensor" | "te" | "ti" | "t2" => {
-            validate_known_options(
-                "tensor",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "knot_placement",
-                    "knot-placement",
-                    "knotplacement",
-                    "degree",
-                    "penalty_order",
-                    "double_penalty",
-                    "periodic",
-                    "cyclic",
-                    "period",
-                    "periods",
-                    "period_start",
-                    "period_end",
-                    "origin",
-                    "origins",
-                    "period_origin",
-                    "period-origin",
-                    "domain_origin",
-                    "boundary",
-                    "bc",
-                    "identifiability",
-                    "id",
-                    "__by_col",
-                ],
-            )?;
+            validate_known_options("tensor", options, TENSOR_SMOOTH_OPTION_KEYS)?;
             if cols.len() < 2 {
                 return Err(TermBuilderError::incompatible_config(format!(
                     "tensor smooth expects at least 2 variables, got {}",
@@ -4249,28 +3954,7 @@ pub fn build_smooth_basis(
             })
         }
         "pca" => {
-            validate_known_options(
-                "pca",
-                options,
-                &[
-                    "type",
-                    "bs",
-                    "by",
-                    "k",
-                    "basis_dim",
-                    "basis-dim",
-                    "basisdim",
-                    "lazy_path",
-                    "path",
-                    "pca_basis_path",
-                    "chunk_size",
-                    "smooth_penalty",
-                    "centered",
-                    "double_penalty",
-                    "id",
-                    "__by_col",
-                ],
-            )?;
+            validate_known_options("pca", options, PCA_SMOOTH_OPTION_KEYS)?;
             let path = options
                 .get("lazy_path")
                 .or_else(|| options.get("pca_basis_path"))
@@ -5131,6 +4815,299 @@ fn resolve_nonperiodic_bspline_knotspec(
 /// Without this, typos like `lengt_scale=0.1` or `nyu=5/2` are silently
 /// dropped, the term uses the default, and the user has no idea why their
 /// option had no effect.
+
+// ---------------------------------------------------------------------------
+// Per-smooth-kind option whitelists
+//
+// Hoisted out of the `validate_known_options` call sites so the guard test
+// `no_whitelisted_smooth_option_is_accepted_and_inert` can enumerate them.
+// `validate_known_options` answers "is this key spelled right?"; that guard
+// answers the different question these three lists silently got wrong in
+// #2781/#2782/#2783 — "does this key do anything?".
+// ---------------------------------------------------------------------------
+pub(crate) const SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "knot_placement",
+    "knot-placement",
+    "knotplacement",
+    "degree",
+    "penalty_order",
+    "m",
+    "double_penalty",
+    "ordered",
+];
+
+pub(crate) const CYCLIC_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "degree",
+    "penalty_order",
+    "period",
+    "periods",
+    "period_start",
+    "period_end",
+    "start",
+    "end",
+    "origin",
+    "origins",
+    "period_origin",
+    "period-origin",
+    "domain_origin",
+    "double_penalty",
+    "id",
+    "__by_col",
+    "identifiability",
+];
+
+pub(crate) const BSPLINE_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "knot_placement",
+    "knot-placement",
+    "knotplacement",
+    "degree",
+    "penalty_order",
+    "boundary",
+    "bc",
+    "boundary_conditions",
+    "bc_left",
+    "bc_right",
+    "left_bc",
+    "right_bc",
+    "start_bc",
+    "end_bc",
+    "side",
+    "anchor",
+    "anchor_value",
+    "value",
+    "anchor_left",
+    "left_anchor",
+    "anchor_right",
+    "right_anchor",
+    "periodic",
+    "period",
+    "periods",
+    "period_start",
+    "period_end",
+    "origin",
+    "double_penalty",
+    "id",
+    "__by_col",
+    "identifiability",
+];
+
+pub(crate) const THINPLATE_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "length_scale",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "include_intercept",
+    "double_penalty",
+    "id",
+    "__by_col",
+    "identifiability",
+    "periodic",
+    "cyclic",
+    "period",
+    "period_start",
+    "period_end",
+    "scale_dims",
+];
+
+pub(crate) const SPHERE_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "penalty_order",
+    "m",
+    "double_penalty",
+    "id",
+    "__by_col",
+    "kernel",
+    "method",
+    "radians",
+    "units",
+    "degree",
+    "l",
+    "max_degree",
+    "max-degree",
+    "lmax",
+    "l_max",
+    "l-max",
+];
+
+pub(crate) const CURVATURE_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "kappa",
+    "length_scale",
+    "double_penalty",
+    "id",
+    "__by_col",
+];
+
+pub(crate) const MEASURE_JET_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "s",
+    "alpha",
+    "tau",
+    "scales",
+    "length_scale",
+    "double_penalty",
+    "multiscale",
+    "learn_length_scale",
+    "id",
+    "__by_col",
+];
+
+pub(crate) const MATERN_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "nu",
+    "length_scale",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "include_intercept",
+    "double_penalty",
+    "id",
+    "__by_col",
+    "identifiability",
+    "periodic",
+    "cyclic",
+    "period",
+    "period_start",
+    "period_end",
+    "scale_dims",
+];
+
+pub(crate) const DUCHON_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "length_scale",
+    "centers",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knots",
+    "rank",
+    "power",
+    "p",
+    "nullspace_order",
+    "order",
+    "identifiability",
+    "periodic",
+    "cyclic",
+    "period",
+    "period_start",
+    "period_end",
+    "scale_dims",
+    "double_penalty",
+    "id",
+    "__by_col",
+];
+
+pub(crate) const TENSOR_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "knot_placement",
+    "knot-placement",
+    "knotplacement",
+    "degree",
+    "penalty_order",
+    "double_penalty",
+    "periodic",
+    "cyclic",
+    "period",
+    "periods",
+    "period_start",
+    "period_end",
+    "origin",
+    "origins",
+    "period_origin",
+    "period-origin",
+    "domain_origin",
+    "boundary",
+    "bc",
+    "identifiability",
+    "id",
+    "__by_col",
+];
+
+pub(crate) const PCA_SMOOTH_OPTION_KEYS: &[&str] = &[
+    "type",
+    "bs",
+    "by",
+    "k",
+    "basis_dim",
+    "basis-dim",
+    "basisdim",
+    "lazy_path",
+    "path",
+    "pca_basis_path",
+    "chunk_size",
+    "smooth_penalty",
+    "centered",
+    "double_penalty",
+    "id",
+    "__by_col",
+];
+
 pub fn validate_known_options(
     term_name: &str,
     options: &BTreeMap<String, String>,
