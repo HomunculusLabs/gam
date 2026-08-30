@@ -1042,8 +1042,20 @@ fn parse_periodic_axes_option(
     options: &BTreeMap<String, String>,
     dim: usize,
 ) -> Result<Option<Vec<Option<f64>>>, String> {
-    let Some(raw_axes) = options.get("periodic") else {
-        return Ok(None);
+    // `cyclic=` is whitelisted as the alias of `periodic=` on every radial arm,
+    // so read it here too; it was previously accepted and dropped (#2781).
+    let Some(raw_axes) = options.get("periodic").or_else(|| options.get("cyclic")) else {
+        // No periodicity FLAG — but a declared period is itself the declaration.
+        // A period is not a property an aperiodic basis has, so an axis that
+        // carries one is periodic, exactly as on the 1-D B-spline and tensor
+        // paths (`axes_with_declared_period`). Before #2781 this early return
+        // dropped `matern(x, z, period=[2*pi, None])` on the floor: the option
+        // was validated by the arm's whitelist and then never read.
+        let declared = parse_periods_option(options, dim)?;
+        return Ok(match declared {
+            Some(periods) if periods.iter().any(Option::is_some) => Some(periods),
+            _ => None,
+        });
     };
     let mut periods = parse_periods_option(options, dim)?.unwrap_or_else(|| vec![None; dim]);
     // Scalar boolean form (`periodic=true` / `false`, `yes` / `no`) applies to
@@ -1303,6 +1315,80 @@ fn reject_unconsumable_period_declaration(
         .to_string());
     }
     Ok(())
+}
+
+/// The radial (`thinplate` / `matern` / `duchon`) counterpart of
+/// [`reject_unconsumable_period_declaration`] (#2781).
+///
+/// [`parse_periodic_axes_option`] returns the per-axis period vector these arms
+/// actually consume, and an axis wraps only when that vector carries a finite
+/// period for it — with the one exception that a ONE-dimensional radial smooth
+/// derives its period from the closed center lattice, which tiles a full period
+/// exactly (gam#580), unlike the sample-dependent data-range derive the B-spline
+/// path refuses (#1771). Every other spelling used to be validated by the arm's
+/// whitelist and then dropped: `matern(x, z, period=0.7)` and
+/// `matern(x, z, periodic=true)` were each bit-identical to the plain aperiodic
+/// fit, with no error and no warning.
+///
+/// Two refusals:
+///
+/// * a periodicity or period declaration that leaves no axis periodic — which
+///   on a multi-dimensional radial smooth is exactly what `periodic=true` alone
+///   does, since there is no per-axis span to derive from;
+/// * `period_start=` / `period_end=` on a multi-dimensional radial smooth.
+///   Those name ONE axis's domain and are read by `parse_cyclic_boundary`,
+///   which these arms consult only when `d == 1`.
+fn reject_unconsumable_radial_period_declaration(
+    term_name: &str,
+    options: &BTreeMap<String, String>,
+    dim: usize,
+    periodic: Option<&[Option<f64>]>,
+    boundary_is_cyclic: bool,
+) -> Result<(), String> {
+    if dim > 1
+        && let Some(key) = PERIOD_ENDPOINT_OPTION_KEYS
+            .iter()
+            .find(|key| options.contains_key(**key))
+    {
+        return Err(TermBuilderError::invalid_option(format!(
+            "{term_name}(): `{key}=` names one axis's periodic domain and is only read on a \
+             one-dimensional radial smooth; this one has {dim} covariates, so give the wrap as \
+             period=[…] with one entry per axis"
+        ))
+        .to_string());
+    }
+    let any_axis_wraps = boundary_is_cyclic
+        || periodic.is_some_and(|axes| {
+            (dim == 1 && !axes.is_empty()) || axes.iter().any(Option::is_some)
+        });
+    if any_axis_wraps {
+        return Ok(());
+    }
+    let declared = ["periodic", "cyclic"]
+        .iter()
+        .chain(PERIOD_LENGTH_OPTION_KEYS.iter())
+        .chain(PERIOD_ENDPOINT_OPTION_KEYS.iter())
+        .find(|key| options.contains_key(**key));
+    let Some(key) = declared else {
+        return Ok(());
+    };
+    // `periodic=false` is a denial, not a declaration: it legitimately leaves
+    // every axis open.
+    if matches!(*key, "periodic" | "cyclic")
+        && options
+            .get(*key)
+            .map(|raw| raw.trim().to_ascii_lowercase())
+            .is_some_and(|raw| matches!(raw.as_str(), "false" | "no" | "n"))
+    {
+        return Ok(());
+    }
+    Err(TermBuilderError::invalid_option(format!(
+        "{term_name}(): `{key}=` declares periodicity, but no axis of this smooth ends up \
+         periodic. A radial smooth derives its wrap from the center lattice only in one \
+         dimension (this one has {dim}), so name the period per axis: \
+         period=[<value>, None, …]"
+    ))
+    .to_string())
 }
 
 fn parse_periodic_axes(
@@ -2862,11 +2948,19 @@ pub fn build_smooth_basis(
             } else {
                 auto_spatial_center_strategy(centers, cols.len())
             };
+            let periodic = parse_periodic_axes_option(options, cols.len())?;
+            reject_unconsumable_radial_period_declaration(
+                "thinplate",
+                options,
+                cols.len(),
+                periodic.as_deref(),
+                false,
+            )?;
             Ok(SmoothBasisSpec::ThinPlate {
                 feature_cols: cols.to_vec(),
                 spec: ThinPlateBasisSpec {
                     center_strategy,
-                    periodic: parse_periodic_axes_option(options, cols.len())?,
+                    periodic,
                     // Sentinel: leave at 0.0 when the user didn't pass an
                     // explicit length_scale so `auto_init_length_scale_in_place`
                     // can replace it with a data-derived initialization. The
@@ -3247,11 +3341,19 @@ pub fn build_smooth_basis(
             } else {
                 None
             };
+            let periodic = parse_periodic_axes_option(options, cols.len())?;
+            reject_unconsumable_radial_period_declaration(
+                "matern",
+                options,
+                cols.len(),
+                periodic.as_deref(),
+                false,
+            )?;
             Ok(SmoothBasisSpec::Matern {
                 feature_cols: cols.to_vec(),
                 spec: MaternBasisSpec {
                     center_strategy,
-                    periodic: parse_periodic_axes_option(options, cols.len())?,
+                    periodic,
                     // Preserve whether the user supplied `length_scale` as typed
                     // provenance. The planner resolves `Auto` to the same
                     // data-derived wiggly-side initialization the thin-plate path
@@ -3489,6 +3591,13 @@ pub fn build_smooth_basis(
                 .as_ref()
                 .is_some_and(|axes| axes.iter().any(Option::is_some))
                 || matches!(boundary, OneDimensionalBoundary::Cyclic { .. });
+            reject_unconsumable_radial_period_declaration(
+                "duchon",
+                options,
+                cols.len(),
+                periodic.as_deref(),
+                matches!(boundary, OneDimensionalBoundary::Cyclic { .. }),
+            )?;
             if spectral_rank.is_some() && is_periodic {
                 return Err(TermBuilderError::incompatible_config(
                     "Duchon spectral rank is defined for the scale-free open-domain kernel, \
@@ -8111,49 +8220,12 @@ mod tests {
                 "parsed into the spec, but the built radial design is unchanged",
             ),
             (
-                "y ~ thinplate(x, zbig, periodic=true)",
-                "the radial arms read periodicity only in the per-axis LIST form;                  the scalar flag is dropped (#2781's family on the radial path)",
-            ),
-            (
-                "y ~ thinplate(x, zbig, cyclic=true)",
-                "as `periodic=true` above",
-            ),
-            (
-                "y ~ thinplate(x, zbig, period=0.7)",
-                "a scalar period on a radial smooth is dropped (#2781's family)",
-            ),
-            (
-                "y ~ thinplate(x, zbig, period_start=0.05)",
-                "the radial arms never read the endpoint spelling at all",
-            ),
-            (
-                "y ~ thinplate(x, zbig, period_end=0.7)",
-                "the radial arms never read the endpoint spelling at all",
-            ),
-            (
                 "y ~ thinplate(x, zbig, scale_dims=true)",
                 "parsed into the spec, but the built design is unchanged even on                  axes 500x apart in scale",
             ),
             (
                 "y ~ matern(x, zbig, double_penalty=false)",
                 "the flag does not change the shipped penalty set",
-            ),
-            (
-                "y ~ matern(x, zbig, periodic=true)",
-                "as thinplate: scalar periodicity flag dropped",
-            ),
-            ("y ~ matern(x, zbig, cyclic=true)", "as `periodic=true` above"),
-            (
-                "y ~ matern(x, zbig, period=0.7)",
-                "a scalar period on a radial smooth is dropped (#2781's family)",
-            ),
-            (
-                "y ~ matern(x, zbig, period_start=0.05)",
-                "the radial arms never read the endpoint spelling at all",
-            ),
-            (
-                "y ~ matern(x, zbig, period_end=0.7)",
-                "the radial arms never read the endpoint spelling at all",
             ),
             (
                 "y ~ duchon(x, zbig, p=1.5)",
@@ -8166,19 +8238,6 @@ mod tests {
             (
                 "y ~ duchon(x, zbig, order=3)",
                 "read, but a degree-3 null space does not change the built basis",
-            ),
-            ("y ~ duchon(x, zbig, cyclic=true)", "scalar periodicity flag dropped"),
-            (
-                "y ~ duchon(x, zbig, period=0.7)",
-                "a scalar period on a radial smooth is dropped (#2781's family)",
-            ),
-            (
-                "y ~ duchon(x, zbig, period_start=0.05)",
-                "the radial arms never read the endpoint spelling at all",
-            ),
-            (
-                "y ~ duchon(x, zbig, period_end=0.7)",
-                "the radial arms never read the endpoint spelling at all",
             ),
             (
                 "y ~ curv(x, zbig, double_penalty=false)",
