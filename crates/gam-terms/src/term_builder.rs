@@ -7678,6 +7678,223 @@ mod tests {
         }
     }
 
+    /// #2781: a declared period makes its axis periodic on both resolvers, and
+    /// a declaration that names no axis is refused instead of dropped.
+    #[test]
+    fn a_declared_period_makes_its_axis_periodic() {
+        let opts = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+
+        // 1-D: the scalar period, and the half-open endpoint form, each declare
+        // periodicity on their own.
+        assert_eq!(
+            parse_periodic_axes(&opts(&[("period", "24")]), 1).expect("period=24"),
+            vec![true]
+        );
+        assert_eq!(
+            parse_periodic_axes(&opts(&[("periods", "24")]), 1).expect("periods=24"),
+            vec![true]
+        );
+        assert_eq!(
+            parse_periodic_axes(&opts(&[("period_start", "0"), ("period_end", "24")]), 1)
+                .expect("endpoint form"),
+            vec![true]
+        );
+        // ...and no declaration still means aperiodic.
+        assert_eq!(
+            parse_periodic_axes(&opts(&[("k", "8")]), 1).expect("no declaration"),
+            vec![false]
+        );
+
+        // Tensor: a per-margin list names exactly the margins that wrap.
+        assert_eq!(
+            parse_tensor_periodic_axes(&opts(&[("periods", "[2*pi, None]")]), 2)
+                .expect("per-margin periods"),
+            vec![true, false]
+        );
+        assert_eq!(
+            parse_tensor_periodic_axes(&opts(&[("period", "[None, 24]")]), 2)
+                .expect("per-margin period"),
+            vec![false, true]
+        );
+        // A bare scalar on a multi-margin tensor names no margin, so it does not
+        // flip one on; the arm-level guard below is what refuses it.
+        assert_eq!(
+            parse_tensor_periodic_axes(&opts(&[("period", "24")]), 2).expect("scalar on 2-D"),
+            vec![false, false]
+        );
+        // A scalar boundary token broadcasts to every margin.
+        assert_eq!(
+            parse_tensor_periodic_axes(&opts(&[("bc", "periodic")]), 2).expect("scalar bc"),
+            vec![true, true]
+        );
+
+        // `periodic=false` contradicts a period declaration rather than
+        // outranking it silently.
+        let err = parse_periodic_axes(&opts(&[("periodic", "false"), ("period", "24")]), 1)
+            .expect_err("periodic=false + period= is a contradiction");
+        assert!(err.contains("denies the periodicity"), "got: {err}");
+
+        // Declarations that name no axis are refused, each by name.
+        let err = reject_unconsumable_period_declaration(
+            "tensor",
+            &opts(&[("period", "24")]),
+            &[false, false],
+        )
+        .expect_err("a scalar period on a 2-margin tensor names no margin");
+        assert!(err.contains("does not say which"), "got: {err}");
+        let err = reject_unconsumable_period_declaration(
+            "bspline",
+            &opts(&[("origin", "0")]),
+            &[false],
+        )
+        .expect_err("an origin with no period is unconsumable");
+        assert!(err.contains("declares no period"), "got: {err}");
+        // ...and a genuine periodic axis consumes them.
+        reject_unconsumable_period_declaration(
+            "bspline",
+            &opts(&[("period", "24"), ("origin", "0")]),
+            &[true],
+        )
+        .expect("a periodic axis consumes its own declaration");
+    }
+
+    /// #2782: per-margin `degree=`/`penalty_order=` parse in both the scalar and
+    /// the list form, and an explicit `knot_placement` is distinguishable from
+    /// an unset one.
+    #[test]
+    fn tensor_per_axis_integer_options_parse_scalar_and_list_forms() {
+        let mut options = BTreeMap::new();
+        assert_eq!(
+            parse_tensor_per_axis_usize(&options, "degree", 2).expect("absent"),
+            vec![None, None]
+        );
+
+        options.insert("degree".to_string(), "2".to_string());
+        assert_eq!(
+            parse_tensor_per_axis_usize(&options, "degree", 3).expect("scalar broadcasts"),
+            vec![Some(2), Some(2), Some(2)]
+        );
+
+        for spelling in ["[1, 3]", "c(1, 3)", "(1,3)"] {
+            options.insert("degree".to_string(), spelling.to_string());
+            assert_eq!(
+                parse_tensor_per_axis_usize(&options, "degree", 2)
+                    .unwrap_or_else(|e| panic!("{spelling}: {e}")),
+                vec![Some(1), Some(3)],
+                "spelling {spelling} should parse per margin"
+            );
+        }
+
+        options.insert("degree".to_string(), "[1, none]".to_string());
+        assert_eq!(
+            parse_tensor_per_axis_usize(&options, "degree", 2).expect("none keeps the default"),
+            vec![Some(1), None]
+        );
+
+        options.insert("degree".to_string(), "[1, 2, 3]".to_string());
+        let err = parse_tensor_per_axis_usize(&options, "degree", 2)
+            .expect_err("a length mismatch must be refused");
+        assert!(err.contains("3 entries") && err.contains("2 margins"), "got: {err}");
+
+        options.insert("degree".to_string(), "[1, banana]".to_string());
+        let err = parse_tensor_per_axis_usize(&options, "degree", 2)
+            .expect_err("a non-integer entry must be refused");
+        assert!(err.contains("banana"), "got: {err}");
+
+        let mut placement = BTreeMap::new();
+        assert!(
+            explicit_knot_placement(&placement)
+                .expect("absent")
+                .is_none()
+        );
+        placement.insert("knot_placement".to_string(), "uniform".to_string());
+        assert_eq!(
+            explicit_knot_placement(&placement).expect("explicit uniform"),
+            Some(crate::basis::BSplineKnotPlacement::Uniform)
+        );
+    }
+
+    /// #2782, end to end: the cr margin survives exactly when the caller asked
+    /// for what a cr margin IS, and moves to the B-spline branch otherwise.
+    #[test]
+    fn tensor_margin_leaves_cr_only_when_the_request_needs_a_bspline() {
+        let ds = continuous_dataset(
+            &["y", "x", "z"],
+            (0..200)
+                .map(|i| {
+                    let x = (i % 20) as f64 / 19.0;
+                    let z = (i / 20) as f64 / 9.0;
+                    vec![x + z, x, z]
+                })
+                .collect(),
+        );
+        let col_map = ds.column_map();
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let margins = |formula: &str| -> Vec<BSplineKnotSpec> {
+            let parsed = parse_formula(formula).expect("parse");
+            let mut notes = Vec::new();
+            let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+                .unwrap_or_else(|e| panic!("{formula} should build: {e}"));
+            let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
+                panic!("expected a tensor spec for {formula}");
+            };
+            spec.marginalspecs
+                .iter()
+                .map(|m| m.knotspec.clone())
+                .collect()
+        };
+        let is_cr = |k: &BSplineKnotSpec| {
+            matches!(k, BSplineKnotSpec::NaturalCubicRegression { .. })
+        };
+
+        // Default and default-valued requests keep the cr margin, so naming an
+        // option never changes a fit by itself.
+        for formula in [
+            "y ~ te(x, z, k=5)",
+            "y ~ te(x, z, k=5, degree=3)",
+            "y ~ te(x, z, k=5, penalty_order=2)",
+            "y ~ te(x, z, k=5, degree=3, penalty_order=2)",
+        ] {
+            assert!(
+                margins(formula).iter().all(is_cr),
+                "{formula} must keep both cr margins"
+            );
+        }
+
+        // A request the cr basis cannot carry moves that margin off it.
+        for formula in [
+            "y ~ te(x, z, k=5, degree=1)",
+            "y ~ te(x, z, k=5, degree=4)",
+            "y ~ te(x, z, k=5, penalty_order=1)",
+            "y ~ te(x, z, k=5, penalty_order=3)",
+            "y ~ te(x, z, k=5, knot_placement='uniform')",
+            "y ~ te(x, z, k=5, knot_placement='quantile')",
+        ] {
+            assert!(
+                margins(formula).iter().all(|k| !is_cr(k)),
+                "{formula} must move both margins off the cr basis"
+            );
+        }
+
+        // A per-margin list moves only the margin it names.
+        let per_margin = margins("y ~ te(x, z, k=5, degree=[1, 3])");
+        assert!(!is_cr(&per_margin[0]), "the degree=1 margin must be a B-spline");
+        assert!(is_cr(&per_margin[1]), "the degree=3 margin must stay cr");
+
+        // #2781 on the same arm: a declared period makes the margin cyclic.
+        let periodic = margins("y ~ te(x, z, k=5, periods=[1, None])");
+        assert!(matches!(
+            periodic[0],
+            BSplineKnotSpec::PeriodicUniform { .. }
+        ));
+        assert!(is_cr(&periodic[1]));
+    }
+
     #[test]
     fn sz_factor_smooth_low_cardinality_uses_bspline_marginal() {
         // #1605: the `sz` factor-smooth marginal is the SAME penalized B-spline
