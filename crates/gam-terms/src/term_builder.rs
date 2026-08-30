@@ -1556,7 +1556,13 @@ fn parse_tensor_periodic_axes(
     }
     if let Some(raw) = options.get("boundary").or_else(|| options.get("bc")) {
         let boundary = parse_option_list(raw);
-        if boundary.len() == dim {
+        // A scalar token applies to every margin; `validate_tensor_boundary_tokens`
+        // has already refused any other length (#2782).
+        if boundary.len() == 1 {
+            if matches!(boundary[0].as_str(), "periodic" | "cyclic" | "cc") {
+                axes.fill(true);
+            }
+        } else if boundary.len() == dim {
             for (axis, value) in boundary.iter().enumerate() {
                 if matches!(value.as_str(), "periodic" | "cyclic" | "cc") {
                     axes[axis] = true;
@@ -1628,6 +1634,19 @@ fn validate_tensor_boundary_tokens(
         return Ok(());
     };
     let entries = parse_option_list(raw);
+    // A scalar token applies to every margin (the same broadcast `k=`, `bs=` and
+    // `degree=` use); any other length names margins that do not exist. Both were
+    // previously accepted and then dropped by the `len() == dim` guard in
+    // `parse_tensor_periodic_axes`, so `te(x, z, bc='periodic')` silently built
+    // an aperiodic tensor (#2782).
+    if entries.len() != 1 && entries.len() != dim {
+        return Err(TermBuilderError::invalid_option(format!(
+            "tensor smooth bc/boundary={raw:?} has {} entries but the smooth has {dim} margins; \
+             pass one token per margin or a single token for all of them",
+            entries.len()
+        ))
+        .to_string());
+    }
     for (axis, value) in entries.iter().enumerate() {
         let inert = matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -3879,6 +3898,10 @@ pub fn build_smooth_basis(
                     }
                 }
             }
+            // Validate the boundary tokens BEFORE the axis resolver reads them,
+            // so a malformed list is refused by name rather than silently
+            // failing the resolver's length guard.
+            validate_tensor_boundary_tokens(options, dim)?;
             let periodic_axes = parse_tensor_periodic_axes(options, dim)?;
             reject_unconsumable_period_declaration("tensor", options, &periodic_axes)?;
             // The half-open endpoint spelling names a single axis's domain and
@@ -3895,16 +3918,26 @@ pub fn build_smooth_basis(
                 ))
                 .to_string());
             }
-            validate_tensor_boundary_tokens(options, dim)?;
             let periods_opt = parse_periods(options, &periodic_axes)?;
             let origins_opt = parse_period_origins(options, &periodic_axes)?;
-            let degree = option_usize(options, "degree").unwrap_or(DEFAULT_BSPLINE_DEGREE);
-            let penalty_order =
-                option_usize(options, "penalty_order").unwrap_or(if degree > 1 { 2 } else { 1 });
+            // Per-margin `degree=` / `penalty_order=`. Both keep the caller's
+            // request as `Option` rather than collapsing it onto the default
+            // immediately: the cr-margin routing below has to know whether the
+            // default was ASKED FOR or merely not overridden (#2782).
+            let requested_degrees = parse_tensor_per_axis_usize(options, "degree", dim)?;
+            let requested_penalty_orders =
+                parse_tensor_per_axis_usize(options, "penalty_order", dim)?;
+            let axis_degree = |axis: usize| -> usize {
+                requested_degrees[axis].unwrap_or(DEFAULT_BSPLINE_DEGREE)
+            };
+            let axis_penalty_order = |axis: usize| -> usize {
+                requested_penalty_orders[axis]
+                    .unwrap_or(if axis_degree(axis) > 1 { 2 } else { 1 })
+            };
             let (mut k_list, k_inferred) = parse_tensor_k_list(options, cols, ds)?;
             if ds.values.nrows() <= 32 && smooth_coordinate_count >= 5 {
-                for k in &mut k_list {
-                    *k = (*k).min(degree + 2);
+                for (axis, k) in k_list.iter_mut().enumerate() {
+                    *k = (*k).min(axis_degree(axis) + 2);
                 }
             }
             if k_inferred {
@@ -3957,7 +3990,7 @@ pub fn build_smooth_basis(
                     None | Some("cr") | Some("cs") | Some("tp") | Some("tps")
                 )
             };
-            let requested_knot_placement = parse_knot_placement(options)?;
+            let requested_knot_placement = explicit_knot_placement(options)?;
             let mut margins: Vec<BSplineBasisSpec> = Vec::with_capacity(dim);
             let mut emitted_periods: Vec<Option<f64>> = Vec::with_capacity(dim);
             for axis in 0..dim {
@@ -4009,6 +4042,8 @@ pub fn build_smooth_basis(
                     ))
                     .to_string());
                 }
+                let degree = axis_degree(axis);
+                let penalty_order = axis_penalty_order(axis);
                 let effective_degree = degree.min(k_axis - 1).max(1);
                 let effective_penalty_order = penalty_order.min(effective_degree);
                 // A `cc`/`cp`/`cyclic` per-margin basis declares periodicity
@@ -4073,7 +4108,10 @@ pub fn build_smooth_basis(
                         Some(period_value),
                     )
                 } else if margin_wants_cr(&per_axis_bs[axis])
-                    && requested_knot_placement != crate::basis::BSplineKnotPlacement::Quantile
+                    && requested_knot_placement.is_none()
+                    && requested_degrees[axis].is_none_or(|d| d == CR_MARGIN_DEGREE)
+                    && requested_penalty_orders[axis]
+                        .is_none_or(|m| m == CR_MARGIN_PENALTY_ORDER)
                     && k_axis >= 3
                 {
                     // mgcv `te()`/`ti()` default cr margin: place exactly
@@ -4108,7 +4146,9 @@ pub fn build_smooth_basis(
                     } else {
                         k_axis.saturating_sub(degree + 1).max(1)
                     };
-                    let knotspec = match requested_knot_placement {
+                    let knotspec = match requested_knot_placement
+                        .unwrap_or(crate::basis::BSplineKnotPlacement::Uniform)
+                    {
                         crate::basis::BSplineKnotPlacement::Uniform => BSplineKnotSpec::Generate {
                             data_range: (data_min, data_max),
                             num_internal_knots,
@@ -4926,6 +4966,68 @@ fn parse_explicit_internal_knots(
 /// and `"quantile"` (interior knots at empirical data quantiles, better for
 /// skewed covariates). Unknown values are rejected so typos do not silently
 /// fall back to uniform.
+/// Parse a per-margin unsigned-integer tensor option (`degree=`,
+/// `penalty_order=`).
+///
+/// Accepts the scalar form (`degree=2`), which broadcasts to every margin as
+/// `docs/formulas.md` promises ("Margins requested as a single value are
+/// broadcast across all margins"), and the per-margin list form
+/// (`degree=[1, 3]`, `degree=c(1, 3)`), with `none` selecting the default on
+/// that margin. Returns `None` per axis when the caller said nothing, so the
+/// margin loop can tell "asked for the default" apart from "asked for a value
+/// that happens to equal the default" — a distinction the cr-margin routing
+/// below depends on.
+///
+/// Before #2782 both options were read with `option_usize`, which parses only a
+/// bare integer: a list form silently fell back to the default, so
+/// `te(x, z, degree=[1,3])` was bit-identical to `te(x, z)`.
+fn parse_tensor_per_axis_usize(
+    options: &BTreeMap<String, String>,
+    key: &str,
+    dim: usize,
+) -> Result<Vec<Option<usize>>, String> {
+    let Some(raw) = options.get(key) else {
+        return Ok(vec![None; dim]);
+    };
+    let values = split_list_option(raw);
+    let parse_one = |value: &str| -> Result<Option<usize>, String> {
+        let trimmed = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            return Ok(None);
+        }
+        trimmed.parse::<usize>().map(Some).map_err(|err| {
+            TermBuilderError::invalid_option(format!(
+                "tensor smooth `{key}={raw}`: '{trimmed}' is not a non-negative integer ({err})"
+            ))
+            .to_string()
+        })
+    };
+    if values.len() == 1 {
+        let shared = parse_one(&values[0])?;
+        return Ok(vec![shared; dim]);
+    }
+    if values.len() != dim {
+        return Err(TermBuilderError::invalid_option(format!(
+            "tensor smooth `{key}={raw}` has {} entries but the smooth has {dim} margins; pass one \
+             value per margin or a single value for all of them",
+            values.len()
+        ))
+        .to_string());
+    }
+    values.iter().map(|value| parse_one(value)).collect()
+}
+
+/// The polynomial degree of the natural cubic regression margin. It is not a
+/// parameter of that basis — a "cubic regression spline" IS cubic — so a margin
+/// that asks for any other degree cannot be realized as one.
+const CR_MARGIN_DEGREE: usize = 3;
+
+/// The derivative order the natural cubic regression penalty integrates. Like
+/// [`CR_MARGIN_DEGREE`], this is definitional rather than adjustable: the cr
+/// penalty is the exact integrated squared SECOND derivative of the
+/// interpolating cubic.
+const CR_MARGIN_PENALTY_ORDER: usize = 2;
+
 fn parse_knot_placement(
     options: &BTreeMap<String, String>,
 ) -> Result<crate::basis::BSplineKnotPlacement, String> {
@@ -4951,6 +5053,27 @@ fn parse_knot_placement(
             .to_string()),
         },
     }
+}
+
+/// Like [`parse_knot_placement`] but distinguishes "unset" from an explicit
+/// `knot_placement=uniform`.
+///
+/// The two are not the same request on a tensor margin: unset means "give me
+/// mgcv's default margin", which is a natural cubic regression spline on
+/// QUANTILE value-knots, while an explicit `uniform` asks for evenly spaced
+/// knots — something the cr margin cannot do. Collapsing them made
+/// `te(x, z, knot_placement='uniform')` a silent no-op that returned
+/// quantile-placed knots (#2782).
+fn explicit_knot_placement(
+    options: &BTreeMap<String, String>,
+) -> Result<Option<crate::basis::BSplineKnotPlacement>, String> {
+    let declared = ["knot_placement", "knot-placement", "knotplacement"]
+        .iter()
+        .any(|key| options.contains_key(*key));
+    if !declared {
+        return Ok(None);
+    }
+    parse_knot_placement(options).map(Some)
 }
 
 /// Build the non-periodic 1D B-spline knot spec for the `ps`/`bspline` and
