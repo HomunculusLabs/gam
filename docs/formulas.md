@@ -155,6 +155,23 @@ Boundary conditions are available for 1-D P-spline smooths. They are useful for 
 The 1-D B-spline path accepts these options plus `periodic`, `period`,
 `periods`, `period_start`, `period_end`, `origin`, `identifiability`.
 
+`identifiability=` selects the smooth's own gauge, with the same vocabulary
+every other smooth kind uses:
+
+| Value | Meaning |
+| --- | --- |
+| `sum_tozero` (aliases `centered`, `sum-to-zero`) | Default. Center the smooth so it cannot compete with the global intercept. |
+| `none` | Keep the unconstrained basis columns. The smooth then spans the constant, which is aliased with the intercept; the double penalty's null-function ridge is what keeps the fit identified, so `double_penalty` must stay on. |
+| `linear` (alias `remove_linear_trend`) | Remove the constant *and* linear directions, so the smooth carries only curvature and a separate parametric `x` term is free to take the slope. |
+
+Three combinations are refused rather than silently resolved: an anchored
+endpoint already fixes the smooth's level, so it cannot also be centered
+(use `identifiability='none'`, which is what an anchored smooth defaults to);
+and `linear` needs open-knot B-spline geometry, so it is not available on a
+periodic basis (a linear trend is not periodic) or on `bs='cr'`/`'cs'`
+(a natural cubic regression basis is indexed by values at knots, not by a
+B-spline coefficient chart).
+
 `cyclic(x, ...)` (aliases `cc`, `cp`) is shorthand for a periodic 1-D
 B-spline. It accepts the same period declaration two equivalent ways: a
 period length via `period=` (with an optional `origin=` for the domain
