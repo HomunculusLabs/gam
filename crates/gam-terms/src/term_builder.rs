@@ -3395,7 +3395,7 @@ pub fn build_smooth_basis(
                 ))
                 .to_string());
             }
-            let requested_nullspace_order = parse_duchon_order(options)?;
+            let requested_nullspace_order = parse_duchon_order_opt(options)?;
             let length_scale = option_f64_strict(options, "length_scale")?;
             // Resolve `(nullspace_order, power)`. The default (magic) path is a
             // structural amplitude/slope/curvature smoother: an affine (`Linear`)
@@ -3420,7 +3420,10 @@ pub fn build_smooth_basis(
                         ))
                         .to_string());
                     }
-                    (requested_nullspace_order, req_power)
+                    (
+                        requested_nullspace_order.unwrap_or(DuchonNullspaceOrder::Linear),
+                        req_power,
+                    )
                 }
                 DuchonPowerPolicy::CubicStructuralDefault => {
                     // Magic cubic rule (REQUEST-LAYER default): no explicit power ⇒
@@ -3429,8 +3432,20 @@ pub fn build_smooth_basis(
                     // `power=0` is handled above and is honored as the s=0 Duchon
                     // kernel (r²·log r ≡ the thin-plate kernel in even d) — the magic
                     // default lives here, not in the basis builder.
+                    // An explicit `order=` names the polynomial null space; the
+                    // structural default then supplies only the spectral power.
+                    // Taking the whole PAIR from the default discarded a
+                    // caller's `order=` whenever no `power=` accompanied it, so
+                    // `duchon(x, z, order=0)` and `order=2` were parsed,
+                    // validated, and thrown away (#2781's family). `order=1` is
+                    // the default null space, so every shipped
+                    // `duchon(..., order=1)` formula is unaffected.
                     match length_scale {
-                        None => crate::basis::duchon_cubic_default(cols.len()),
+                        None => {
+                            let (default_order, s) =
+                                crate::basis::duchon_cubic_default(cols.len());
+                            (requested_nullspace_order.unwrap_or(default_order), s)
+                        }
                         Some(_) => {
                             // The hybrid Matérn-blended kernel (`length_scale=Some`)
                             // requires an INTEGER spectral power `s` (the partial-
@@ -3457,8 +3472,12 @@ pub fn build_smooth_basis(
                             // Flooring here at the request layer avoids the
                             // `power_as_usize` truncation-to-zero on the fractional
                             // half-integer.
-                            let (ns, s_frac) = crate::basis::duchon_cubic_default(cols.len());
-                            (ns, s_frac.floor())
+                            let (default_order, s_frac) =
+                                crate::basis::duchon_cubic_default(cols.len());
+                            (
+                                requested_nullspace_order.unwrap_or(default_order),
+                                s_frac.floor(),
+                            )
                         }
                     }
                 }
@@ -5586,7 +5605,10 @@ pub fn parse_duchon_power_policy(
         ))
         .to_string());
     }
-    match options.get("power") {
+    // `p` is the Duchon whitelist's alias of `power` and was read nowhere, so
+    // `duchon(x, z, p=2)` was accepted and silently used the structural default
+    // (#2781's family).
+    match options.get("power").or_else(|| options.get("p")) {
         Some(raw) => {
             let value = raw.parse::<f64>().map_err(|err| {
                 TermBuilderError::invalid_option(format!(
@@ -5620,10 +5642,29 @@ pub fn parse_duchon_power(options: &BTreeMap<String, String>) -> Result<f64, Str
     }
 }
 
+/// Like [`parse_duchon_order`] but reports ABSENCE, so a caller whose default
+/// happens to equal `Linear` can still tell "the user named the affine null
+/// space" apart from "the user named nothing". The `duchon` arm needs that
+/// distinction: its structural cubic default supplies a jointly chosen
+/// `(order, power)` PAIR, and it used to take the order from that pair even
+/// when the caller had named one (#2781's family) — contradicting this module's
+/// own contract that "an explicit `order=0` still selects the constant-only
+/// space".
+pub fn parse_duchon_order_opt(
+    options: &BTreeMap<String, String>,
+) -> Result<Option<DuchonNullspaceOrder>, String> {
+    if !options.contains_key("order") && !options.contains_key("nullspace_order") {
+        return Ok(None);
+    }
+    parse_duchon_order(options).map(Some)
+}
+
 pub fn parse_duchon_order(
     options: &BTreeMap<String, String>,
 ) -> Result<DuchonNullspaceOrder, String> {
-    match options.get("order") {
+    // `nullspace_order` is the whitelist's alias of `order` and was read
+    // nowhere (#2781's family).
+    match options.get("order").or_else(|| options.get("nullspace_order")) {
         // Structural cubic Duchon is affine-by-default: an unspecified order is
         // the `Linear` (constant + linear) null space, matching the magic
         // default. An explicit `order=0` still selects the constant-only space.
@@ -8234,18 +8275,6 @@ mod tests {
             (
                 "y ~ matern(x, zbig, double_penalty=false)",
                 "the flag does not change the shipped penalty set",
-            ),
-            (
-                "y ~ duchon(x, zbig, p=1.5)",
-                "`p` is whitelisted as an alias of `power`, but parse_duchon_power                  reads only `power`",
-            ),
-            (
-                "y ~ duchon(x, zbig, nullspace_order=3)",
-                "whitelisted as an alias of `order`, but parse_duchon_order reads                  only `order`",
-            ),
-            (
-                "y ~ duchon(x, zbig, order=3)",
-                "read, but a degree-3 null space does not change the built basis",
             ),
             (
                 "y ~ curv(x, zbig, double_penalty=false)",
