@@ -2948,6 +2948,21 @@ pub fn build_smooth_basis(
             } else {
                 auto_spatial_center_strategy(centers, cols.len())
             };
+            // `include_intercept` appends a constant column to a KERNEL basis
+            // that has no polynomial null space of its own — which is exactly
+            // what the Matérn basis is, and exactly what the thin-plate basis is
+            // not: a TPS ships its polynomial null space (constant and linear)
+            // by construction, sized by
+            // `thin_plate_polynomial_basis_dimension`. An appended constant
+            // would therefore be exactly collinear with a column already in the
+            // span. The option was whitelisted here anyway and read by nothing,
+            // so it was accepted and silently discarded (#2781's family).
+            if options.contains_key("include_intercept") {
+                return Err(TermBuilderError::unsupported_feature(
+                    "thinplate() does not support include_intercept: the thin-plate basis already                      spans its polynomial null space (the constant and linear terms), so an                      appended constant column would be exactly collinear with it. matern() takes                      the option because its kernel basis carries no polynomial null space.",
+                )
+                .to_string());
+            }
             let periodic = parse_periodic_axes_option(options, cols.len())?;
             reject_unconsumable_radial_period_declaration(
                 "thinplate",
@@ -8115,6 +8130,41 @@ mod tests {
                 ("cyclic", "double_penalty") => {
                     Some("no null space survives the periodic sum-to-zero chart (#874)")
                 }
+                // The Matérn cold build ships the ridge candidate unconditionally
+                // and lets the bootstrap-κ spectral test decide at FIT time
+                // whether it survives, pinning the outcome into the frozen
+                // transform (gam#787/#860). The design this guard fingerprints is
+                // the cold one, so the flag is invisible here by construction.
+                ("matern", "double_penalty") => {
+                    Some("resolved by the fit-time bootstrap-κ spectral test, not the cold build")
+                }
+                // The constant-curvature RKHS Gram is full-rank positive
+                // definite (#1464), so it has no null space for a shrinkage
+                // ridge to act on: the candidate is built, comes out identically
+                // zero, and `filter_penalty_candidates` drops it as
+                // `ZeroMatrix`. The flag is therefore inert in BOTH directions
+                // here — which is exactly why the arm defaults it off.
+                ("curvature", "double_penalty") => {
+                    Some("the curvature Gram is full-rank PD, so the ridge is identically zero")
+                }
+                // Documented as a derivative-PLANNING hint for this family
+                // (docs/formulas.md: "Thin-plate: inputs are automatically
+                // standardized; scale_dims is not a learned anisotropy knob for
+                // this family"). It reaches `plan_spatial_basis`, where it only
+                // widens the dense-byte estimate that can trim the default center
+                // count under a memory budget — so it is genuinely modelling-inert
+                // by design, unlike the Matérn/Duchon anisotropy it shares a name
+                // with.
+                ("thinplate", "scale_dims") => {
+                    Some("a derivative-planning hint for TPS, not an anisotropy knob")
+                }
+                // Measure-jet Ψ (hyperparameter) switches: the representer
+                // length-scale and the τ₀ multiscale threshold are read by the Ψ
+                // learner during the fit, not by the design built at the spec's
+                // own initial values.
+                ("measurejet", "tau" | "learn_length_scale") => {
+                    Some("a Psi-learning switch read during the fit, not at design build")
+                }
                 _ => None,
             }
         };
@@ -8161,6 +8211,9 @@ mod tests {
                 (_, "length_scale") => "0.4",
                 (_, "chunk_size") => "64",
                 // Flags and selectors.
+                // The curvature smooth defaults to NO ridge (#1464), so `false`
+                // there would probe the default.
+                ("curvature", "double_penalty") => "true",
                 (_, "double_penalty") => "false",
                 (_, "identifiability") => "none",
                 (_, "include_intercept") => "true",
@@ -8264,28 +8317,12 @@ mod tests {
         // DSL validates and then throws away — found by this guard the first
         // time it ran with teeth. The reason strings ARE the bug reports; run
         // this test with an entry deleted to reproduce any one of them.
-        let known_inert: &[(&str, &str)] = &[            (
-                "y ~ thinplate(x, zbig, include_intercept=true)",
-                "parsed into the spec, but the built radial design is unchanged",
-            ),
-            (
-                "y ~ thinplate(x, zbig, scale_dims=true)",
-                "parsed into the spec, but the built design is unchanged even on                  axes 500x apart in scale",
-            ),
-            (
-                "y ~ matern(x, zbig, double_penalty=false)",
-                "the flag does not change the shipped penalty set",
-            ),
-            (
-                "y ~ curv(x, zbig, double_penalty=false)",
-                "the flag does not change the shipped penalty set",
-            ),
-            ("y ~ mjs(x, zbig, tau=0.5)", "parsed, but the built design is unchanged"),
-            (
-                "y ~ mjs(x, zbig, learn_length_scale=false)",
-                "parsed, but the built design is unchanged",
-            ),
-        ];
+        // The ratchet is EMPTY: every option this guard found accepted-and-inert
+        // when it first ran with teeth has since been wired up, refused, or
+        // exempted in `structurally_inert` with a reason. Keep it that way —
+        // an entry added here is a defect being deferred, and needs a reason
+        // saying what is actually wrong.
+        let known_inert: &[(&str, &str)] = &[];
 
         let mut inert = Vec::<String>::new();
         let mut honoured = 0usize;

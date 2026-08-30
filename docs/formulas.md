@@ -233,8 +233,12 @@ Radial-basis surface smooth with thin-plate kernel.
 | `length_scale` | `1.0` | Global length-scale init. |
 | `double_penalty` | `true` | Ridge + main penalty. |
 | `scale_dims` | `false` | Derivative-planning hint; inputs are automatically standardized. |
-| `include_intercept` | `false` | Append a constant column. |
 | `by`, `identifiability` | — | `identifiability` takes `none` or `orthogonal_to_parametric`; see [univariate smooths](#univariate-smooths). |
+
+`include_intercept` is a Matérn option and is rejected here: the thin-plate
+basis already spans its polynomial null space (the constant and linear terms),
+so an appended constant column would be exactly collinear with one already in
+the span.
 
 ### Matérn (`matern`)
 
