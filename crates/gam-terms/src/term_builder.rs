@@ -8070,7 +8070,8 @@ mod tests {
         // still refusing any NEW one: this list may only shrink. Every entry is
         // a real defect of the same shape as #2781/#2782/#2783 — an option the
         // DSL validates and then throws away — found by this guard the first
-        // time it ran with teeth, and tracked in #2789.
+        // time it ran with teeth. The reason strings ARE the bug reports; run
+        // this test with an entry deleted to reproduce any one of them.
         let known_inert: &[(&str, &str)] = &[
             (
                 "y ~ s(x, boundary=clamped)",
