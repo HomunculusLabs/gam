@@ -7872,6 +7872,395 @@ mod tests {
         assert!(is_cr(&periodic[1]));
     }
 
+    /// #2781/#2782/#2783 guard: no whitelisted smooth option may be accepted
+    /// and inert.
+    ///
+    /// [`validate_known_options`] answers "is this key spelled right?". All
+    /// three of those bugs lived in the gap between that question and the
+    /// different one, "does this key do anything?": the option was listed in an
+    /// arm's whitelist — which is precisely what stopped the unknown-option
+    /// refusal from firing — and then never read by that arm. The fit came back
+    /// bit-identical and nothing was reported.
+    ///
+    /// This closes the gap mechanically instead of one option at a time. For
+    /// every smooth kind, each of that kind's whitelisted options is set to a
+    /// probe value and the built [`SmoothBasisSpec`] must CHANGE, or the formula
+    /// must be REFUSED. Silence is the one outcome that is not allowed.
+    ///
+    /// A key that genuinely cannot change the spec belongs in
+    /// `structurally_inert` below WITH ITS REASON, so every exemption is a
+    /// reviewed statement rather than an oversight. Adding an option to a
+    /// whitelist without wiring it up now fails here.
+    #[test]
+    fn no_whitelisted_smooth_option_is_accepted_and_inert() {
+        // Options that are real, but are consumed OUTSIDE the per-kind arm this
+        // test drives, so probing them here would prove nothing about the arm.
+        let structurally_inert = |kind: &str, key: &str| -> Option<&'static str> {
+            match (kind, key) {
+                // `type`/`bs` select which arm runs at all; changing them builds
+                // a different smooth kind, which is what every other arm's row
+                // in this table already covers.
+                (_, "type" | "bs") => Some("selects the arm; covered by the other rows"),
+                // `by=` is consumed by the `BySmooth` wrapper before the arm
+                // dispatch (and `__by_col` is the engine-injected column index
+                // that wrapper writes), so it never reaches the arm's options.
+                (_, "by" | "__by_col") => Some("consumed by the BySmooth wrapper, not the arm"),
+                // `ordered=` qualifies a FACTOR `by=` variable, so it is read by
+                // the same wrapper.
+                (_, "ordered") => Some("qualifies a factor by=, read by the BySmooth wrapper"),
+                // `id=` is the smoothing-parameter-sharing tag: it groups terms
+                // in the solver's rho vector and deliberately leaves each term's
+                // basis untouched.
+                (_, "id") => Some("shares a smoothing parameter; does not touch the basis"),
+                // A centered cyclic basis has no free null space for the
+                // double-penalty ridge to shrink: the cyclic wiggliness
+                // penalty's only null direction is the constant, the periodic
+                // sum-to-zero chart removes exactly that, and the ridge is
+                // dropped as an identically zero block (#874). So there is no
+                // second penalty for the flag to switch off. It becomes live
+                // again under `identifiability='none'`, which is a different
+                // baseline and is covered by the cyclic ridge tests.
+                ("cyclic", "double_penalty") => {
+                    Some("no null space survives the periodic sum-to-zero chart (#874)")
+                }
+                _ => None,
+            }
+        };
+
+        // A probe value per key, chosen far from that key's default so a fit
+        // that reads it cannot coincidentally match the baseline.
+        let probe = |kind: &str, key: &str| -> &'static str {
+            match (kind, key) {
+                // Periodicity: the tensor arm takes per-margin lists; the 1-D
+                // arms take a scalar.
+                ("tensor", "period" | "periods") => "[1.0, None]",
+                ("tensor", "origin" | "origins" | "period_origin" | "period-origin"
+                | "domain_origin") => "[0.0, None]",
+                ("tensor", "periodic" | "cyclic") => "[0]",
+                ("tensor", "boundary" | "bc") => "['periodic', 'natural']",
+                (_, "periodic" | "cyclic") => "true",
+                (_, "period" | "periods") => "0.7",
+                (_, "period_start" | "start") => "0.05",
+                (_, "period_end" | "end") => "0.7",
+                (_, "origin" | "origins" | "period_origin" | "period-origin"
+                | "domain_origin") => "0.1",
+                (_, "boundary" | "bc" | "boundary_conditions") => "clamped",
+                (_, "bc_left" | "left_bc" | "start_bc" | "bc_right" | "right_bc"
+                | "end_bc") => "clamped",
+                (_, "side") => "left",
+                (_, "anchor" | "anchor_value" | "value" | "anchor_left"
+                | "left_anchor" | "anchor_right" | "right_anchor") => "0.0",
+                // Sizes and orders.
+                (_, "k" | "basis_dim" | "basis-dim" | "basisdim") => "6",
+                (_, "centers") => "6",
+                (_, "knots") => "13",
+                (_, "knot_placement" | "knot-placement" | "knotplacement") => "quantile",
+                (_, "degree") => "2",
+                (_, "penalty_order" | "m") => "1",
+                (_, "l" | "l_max" | "l-max" | "lmax" | "max_degree" | "max-degree") => "2",
+                (_, "rank") => "5",
+                (_, "order" | "nullspace_order") => "3",
+                (_, "p" | "power") => "1.5",
+                (_, "nu") => "1.5",
+                (_, "kappa") => "0.5",
+                (_, "alpha") => "0.5",
+                (_, "tau") => "0.5",
+                (_, "s" | "scales") => "3",
+                (_, "length_scale") => "0.4",
+                (_, "chunk_size") => "64",
+                // Flags and selectors.
+                (_, "double_penalty") => "false",
+                (_, "identifiability") => "none",
+                (_, "include_intercept") => "true",
+                (_, "scale_dims") => "true",
+                (_, "multiscale") => "true",
+                (_, "learn_length_scale") => "false",
+                (_, "centered") => "false",
+                (_, "smooth_penalty") => "false",
+                (_, "lazy_path") => "true",
+                (_, "radians") => "true",
+                (_, "units") => "radians",
+                (_, "kernel") => "pseudo",
+                (_, "method") => "harmonic",
+                (_, "path" | "pca_basis_path") => "'/nonexistent/pca.npy'",
+                other => panic!(
+                    "no probe value for {other:?}; add one (or an exemption with a \
+                     reason) so the guard stays exhaustive"
+                ),
+            }
+        };
+
+        // `zbig` spans a very different range from `x` on purpose, so an
+        // anisotropy option such as `scale_dims=` has something to change on the
+        // radial arms; on two identically-scaled axes it is a true no-op and the
+        // probe would prove nothing.
+        let ds = continuous_dataset(
+            &["y", "x", "z", "zbig", "lat", "lon"],
+            (0..240)
+                .map(|i| {
+                    let t = i as f64;
+                    let x = (i % 24) as f64 / 23.0;
+                    let z = (i / 24) as f64 / 9.0;
+                    vec![
+                        (t * 0.13).sin() + x + z,
+                        x,
+                        z,
+                        500.0 * z + 3.0,
+                        -80.0 + 160.0 * x,
+                        -170.0 + 340.0 * z,
+                    ]
+                })
+                .collect(),
+        );
+        let col_map = ds.column_map();
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let build = |formula: &str| -> Result<String, String> {
+            let parsed = parse_formula(formula)?;
+            let mut notes = Vec::new();
+            let spec = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+                .map_err(|err| err.to_string())?;
+            // Fingerprint the BUILT DESIGN, not the spec. #2782 is exactly the
+            // case a spec comparison misses: `degree=` was stored on the pushed
+            // margin spec and then ignored by the cr basis builder, so the spec
+            // differed while the model did not. It also has to skip
+            // `SmoothTermSpec::name`, which is the term's source text and
+            // therefore always differs once a probe option is appended — an
+            // earlier draft compared whole specs and was vacuously green until
+            // the reintroduce-the-bugs experiment caught it.
+            let design = crate::smooth::build_term_collection_design(ds.values.view(), &spec)
+                .map_err(|err| err.to_string())?;
+            let dense = design.design.to_dense();
+            let mut fingerprint = format!("design {}x{}", dense.nrows(), dense.ncols());
+            for column in dense.columns() {
+                let sum: f64 = column.iter().sum();
+                let energy: f64 = column.iter().map(|v| v * v).sum();
+                fingerprint.push_str(&format!(" |{sum:.10e},{energy:.10e}"));
+            }
+            for penalty in &design.smooth.penalties {
+                let block = &penalty.local;
+                let trace: f64 = (0..block.nrows()).map(|i| block[[i, i]]).sum();
+                let energy: f64 = block.iter().map(|v| v * v).sum();
+                fingerprint.push_str(&format!(
+                    " S[{}..{}]{}x{}:{trace:.10e},{energy:.10e}",
+                    penalty.col_range.start,
+                    penalty.col_range.end,
+                    block.nrows(),
+                    block.ncols()
+                ));
+            }
+            Ok(fingerprint)
+        };
+
+        // (kind label, a term that reaches that arm, its whitelist). The term is
+        // written so the probe below can be appended as one more option.
+        let kinds: &[(&str, &str, &[&str])] = &[
+            ("bspline", "s(x", BSPLINE_SMOOTH_OPTION_KEYS),
+            ("cyclic", "cyclic(x", CYCLIC_SMOOTH_OPTION_KEYS),
+            ("thinplate", "thinplate(x, zbig", THINPLATE_SMOOTH_OPTION_KEYS),
+            ("matern", "matern(x, zbig", MATERN_SMOOTH_OPTION_KEYS),
+            ("duchon", "duchon(x, zbig", DUCHON_SMOOTH_OPTION_KEYS),
+            ("sphere", "sphere(lat, lon", SPHERE_SMOOTH_OPTION_KEYS),
+            ("curvature", "curv(x, zbig", CURVATURE_SMOOTH_OPTION_KEYS),
+            ("measurejet", "mjs(x, zbig", MEASURE_JET_SMOOTH_OPTION_KEYS),
+            ("tensor", "te(x, z", TENSOR_SMOOTH_OPTION_KEYS),
+        ];
+
+        // Options that are accepted and inert TODAY, each with what is actually
+        // wrong. They are expected failures, so the guard stays green while
+        // still refusing any NEW one: this list may only shrink. Every entry is
+        // a real defect of the same shape as #2781/#2782/#2783 — an option the
+        // DSL validates and then throws away — found by this guard the first
+        // time it ran with teeth, and tracked in #2789.
+        let known_inert: &[(&str, &str)] = &[
+            (
+                "y ~ s(x, boundary=clamped)",
+                "`boundary` is whitelisted as an alias of `bc`, but                  parse_bspline_boundary_conditions reads only `bc`/`bc_left`/…",
+            ),
+            (
+                "y ~ s(x, side=left)",
+                "`side` says WHICH endpoint a boundary condition applies to and                  does nothing without one; should be refused",
+            ),
+            (
+                "y ~ s(x, anchor=0.0)",
+                "an anchor value with no `anchored` endpoint to attach it to;                  should be refused",
+            ),
+            (
+                "y ~ s(x, anchor_value=0.0)",
+                "same as `anchor=` with no anchored endpoint",
+            ),
+            ("y ~ s(x, value=0.0)", "same as `anchor=` with no anchored endpoint"),
+            (
+                "y ~ s(x, anchor_left=0.0)",
+                "same as `anchor=` with no anchored endpoint",
+            ),
+            (
+                "y ~ s(x, left_anchor=0.0)",
+                "same as `anchor=` with no anchored endpoint",
+            ),
+            (
+                "y ~ s(x, anchor_right=0.0)",
+                "same as `anchor=` with no anchored endpoint",
+            ),
+            (
+                "y ~ s(x, right_anchor=0.0)",
+                "same as `anchor=` with no anchored endpoint",
+            ),
+            (
+                "y ~ thinplate(x, zbig, include_intercept=true)",
+                "parsed into the spec, but the built radial design is unchanged",
+            ),
+            (
+                "y ~ thinplate(x, zbig, periodic=true)",
+                "the radial arms read periodicity only in the per-axis LIST form;                  the scalar flag is dropped (#2781's family on the radial path)",
+            ),
+            (
+                "y ~ thinplate(x, zbig, cyclic=true)",
+                "as `periodic=true` above",
+            ),
+            (
+                "y ~ thinplate(x, zbig, period=0.7)",
+                "a scalar period on a radial smooth is dropped (#2781's family)",
+            ),
+            (
+                "y ~ thinplate(x, zbig, period_start=0.05)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ thinplate(x, zbig, period_end=0.7)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ thinplate(x, zbig, scale_dims=true)",
+                "parsed into the spec, but the built design is unchanged even on                  axes 500x apart in scale",
+            ),
+            (
+                "y ~ matern(x, zbig, double_penalty=false)",
+                "the flag does not change the shipped penalty set",
+            ),
+            (
+                "y ~ matern(x, zbig, periodic=true)",
+                "as thinplate: scalar periodicity flag dropped",
+            ),
+            ("y ~ matern(x, zbig, cyclic=true)", "as `periodic=true` above"),
+            (
+                "y ~ matern(x, zbig, period=0.7)",
+                "a scalar period on a radial smooth is dropped (#2781's family)",
+            ),
+            (
+                "y ~ matern(x, zbig, period_start=0.05)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ matern(x, zbig, period_end=0.7)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ duchon(x, zbig, p=1.5)",
+                "`p` is whitelisted as an alias of `power`, but parse_duchon_power                  reads only `power`",
+            ),
+            (
+                "y ~ duchon(x, zbig, nullspace_order=3)",
+                "whitelisted as an alias of `order`, but parse_duchon_order reads                  only `order`",
+            ),
+            (
+                "y ~ duchon(x, zbig, order=3)",
+                "read, but a degree-3 null space does not change the built basis",
+            ),
+            ("y ~ duchon(x, zbig, cyclic=true)", "scalar periodicity flag dropped"),
+            (
+                "y ~ duchon(x, zbig, period=0.7)",
+                "a scalar period on a radial smooth is dropped (#2781's family)",
+            ),
+            (
+                "y ~ duchon(x, zbig, period_start=0.05)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ duchon(x, zbig, period_end=0.7)",
+                "the radial arms never read the endpoint spelling at all",
+            ),
+            (
+                "y ~ curv(x, zbig, double_penalty=false)",
+                "the flag does not change the shipped penalty set",
+            ),
+            ("y ~ mjs(x, zbig, tau=0.5)", "parsed, but the built design is unchanged"),
+            (
+                "y ~ mjs(x, zbig, learn_length_scale=false)",
+                "parsed, but the built design is unchanged",
+            ),
+        ];
+
+        let mut inert = Vec::<String>::new();
+        let mut honoured = 0usize;
+        let mut refused = 0usize;
+        for (kind, term, keys) in kinds {
+            let baseline = match build(&format!("y ~ {term})")) {
+                Ok(spec) => spec,
+                Err(err) => panic!("baseline `y ~ {term})` must build, got: {err}"),
+            };
+            for key in *keys {
+                if structurally_inert(kind, key).is_some() {
+                    continue;
+                }
+                let formula = format!("y ~ {term}, {key}={})", probe(kind, key));
+                match build(&formula) {
+                    // Refused is a fine outcome: the option is not silently
+                    // dropped, which is the whole property under test.
+                    Err(_) => refused += 1,
+                    Ok(spec) if spec != baseline => honoured += 1,
+                    Ok(_) => inert.push(formula),
+                }
+            }
+        }
+
+        // A guard whose probes all bounce off a parse error would pass while
+        // proving nothing, so pin the shape of the sweep itself: most probes
+        // must reach the builder and CHANGE the spec.
+        let probed = honoured + refused + inert.len();
+        assert!(
+            probed >= 150,
+            "the sweep should cover the whole option surface, only reached {probed} probes"
+        );
+        assert!(
+            honoured * 2 > probed,
+            "most probes should be HONOURED rather than refused, otherwise this \
+             guard is testing error paths instead of option wiring \
+             (honoured={honoured}, refused={refused}, inert={})",
+            inert.len()
+        );
+
+        // The ratchet turns both ways: a NEW inert option fails here, and a
+        // known one that has since been wired up must be deleted from the list
+        // rather than left to rot into a lie about the engine.
+        let fixed: Vec<&str> = known_inert
+            .iter()
+            .map(|(formula, _)| *formula)
+            .filter(|formula| !inert.iter().any(|found| found == formula))
+            .collect();
+        assert!(
+            fixed.is_empty(),
+            "these options are listed in `known_inert` but are no longer inert — \
+             delete their entries so the list keeps telling the truth:\n  {}",
+            fixed.join("\n  ")
+        );
+        inert.retain(|formula| {
+            !known_inert
+                .iter()
+                .any(|(known, _)| known == formula)
+        });
+
+        assert!(
+            inert.is_empty(),
+            "these formula options were accepted and produced a bit-identical \
+             smooth design — each is either unwired (wire it), unsatisfiable in \
+             this configuration (refuse it), or genuinely inert (exempt it in \
+             `structurally_inert` with a reason). If it is a defect you are not \
+             fixing right now, add it to `known_inert` WITH ITS REASON so the \
+             ratchet still holds:\n  {}",
+            inert.join("\n  ")
+        );
+    }
+
     #[test]
     fn sz_factor_smooth_low_cardinality_uses_bspline_marginal() {
         // #1605: the `sz` factor-smooth marginal is the SAME penalized B-spline
