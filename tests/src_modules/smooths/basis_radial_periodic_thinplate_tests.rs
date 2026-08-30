@@ -1984,13 +1984,21 @@ fn double_penalty_suppressed_on_non_free_boundary_is_single_penalty() {
     );
 }
 
-/// #1476/#1477: a cyclic/periodic basis is also non-free for the null-space
-/// purpose — the constrained chart's wiggliness penalty has no isolated
-/// unpenalized polynomial trend to shrink — so even with `double_penalty: true`
-/// the rebuild helper introduces no ridge. Assert a single primary penalty and
-/// that the design still closes the seam (period boundary continuity).
+/// #1476/#1477/#874: in the CENTERED cyclic chart — the one every `cyclic(...)`
+/// / `bs="cc"` term the formula DSL builds actually ships — the constrained
+/// wiggliness penalty has no isolated unpenalized trend left to shrink, so even
+/// with `double_penalty: true` the rebuild helper introduces no ridge. Assert a
+/// single primary penalty and that the design still closes the seam (period
+/// boundary continuity).
+///
+/// The fixture pins `WeightedSumToZero` deliberately. This test previously
+/// asserted the same single-penalty property from an `identifiability: None`
+/// fixture, where the stated reason does not hold: with no constraint the
+/// constant direction survives in the design and IS an isolated unpenalized
+/// trend. The uncentered chart's behaviour is pinned by its own test below
+/// (#2783).
 #[test]
-fn double_penalty_on_cyclic_basis_is_single_penalty_no_spurious_ridge() {
+fn double_penalty_on_centered_cyclic_basis_is_single_penalty_no_spurious_ridge() {
     let x = Array1::from_vec(vec![0.0, 0.25, 0.5, 0.75, 1.0]);
     let spec = BSplineBasisSpec {
         degree: 3,
@@ -2000,7 +2008,7 @@ fn double_penalty_on_cyclic_basis_is_single_penalty_no_spurious_ridge() {
             num_internal_knots: 8,
         },
         double_penalty: true,
-        identifiability: BSplineIdentifiability::None,
+        identifiability: BSplineIdentifiability::WeightedSumToZero { weights: None },
         boundary: OneDimensionalBoundary::Cyclic {
             start: 0.0,
             end: 1.0,
@@ -2036,6 +2044,76 @@ fn double_penalty_on_cyclic_basis_is_single_penalty_no_spurious_ridge() {
             "cyclic seam must close in column {j}"
         );
     }
+}
+
+/// #2783: the UNCENTERED cyclic chart is the other half of the same rule. With
+/// `identifiability: None` no constraint removes the cyclic penalty's lone null
+/// direction (the constant), so under `double_penalty` the null-function ridge
+/// is a genuine, identified second REML coordinate and must be shipped.
+///
+/// This is not cosmetic. The constant direction of an uncentered cyclic basis is
+/// exactly aliased with the model's global intercept; with no ridge on it the
+/// pre-fit rank audit refuses the whole model ("rank 1 < 2 unpenalized
+/// columns"), which is how `cyclic(x, identifiability='none')` was unfittable.
+/// Together with the centered test above, the two fixtures pin the actual rule:
+/// the ridge is decided by whether the CHART leaves a null direction, not by the
+/// basis being cyclic.
+#[test]
+fn double_penalty_on_uncentered_cyclic_basis_ships_the_null_function_ridge() {
+    let x = Array1::from_vec(vec![0.0, 0.125, 0.25, 0.5, 0.75, 1.0]);
+    let spec = BSplineBasisSpec {
+        degree: 3,
+        penalty_order: 2,
+        knotspec: BSplineKnotSpec::Generate {
+            data_range: (0.0, 1.0),
+            num_internal_knots: 8,
+        },
+        double_penalty: true,
+        identifiability: BSplineIdentifiability::None,
+        boundary: OneDimensionalBoundary::Cyclic {
+            start: 0.0,
+            end: 1.0,
+        },
+        boundary_conditions: BSplineBoundaryConditions::default(),
+    };
+    let result = build_bspline_basis_1d(x.view(), &spec)
+        .unwrap_or_else(|e| panic!("uncentered cyclic double-penalty build failed: {e:?}"));
+    assert_eq!(
+        result.active_penalties.len(),
+        2,
+        "an uncentered cyclic basis keeps its constant direction, so the null-function \
+         ridge is identified and must ship alongside the wiggliness penalty"
+    );
+    let ridge = result
+        .active_penalties
+        .iter()
+        .find(|active| matches!(active.info.source, PenaltySource::DoublePenaltyNullspace))
+        .expect("uncentered cyclic basis must ship a DoublePenaltyNullspace ridge");
+    // The cyclic derivative penalty's null space is one-dimensional (the
+    // constant), so the ridge that shrinks it is exactly rank one.
+    assert_eq!(
+        ridge.info.effective_rank, 1,
+        "the cyclic null-function ridge shrinks exactly the constant direction"
+    );
+    // And it really is the constant it shrinks: a constant coefficient vector
+    // carries strictly positive ridge energy, while the wiggliness penalty is
+    // blind to it.
+    let ones = Array1::<f64>::ones(ridge.matrix.nrows());
+    let ridge_energy = ones.dot(&ridge.matrix.dot(&ones));
+    assert!(
+        ridge_energy > 1e-8,
+        "ridge must penalize the constant direction, got energy {ridge_energy}"
+    );
+    let primary = result
+        .active_penalties
+        .iter()
+        .find(|active| matches!(active.info.source, PenaltySource::Primary))
+        .expect("uncentered cyclic basis must still ship its wiggliness penalty");
+    let primary_energy = ones.dot(&primary.matrix.dot(&ones));
+    assert!(
+        primary_energy.abs() < 1e-8,
+        "the cyclic wiggliness penalty must remain blind to the constant, got {primary_energy}"
+    );
 }
 
 // Boundary-condition emission moved from the basis builder to the

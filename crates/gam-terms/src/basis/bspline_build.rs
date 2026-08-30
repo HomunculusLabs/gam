@@ -184,22 +184,36 @@ pub fn build_bspline_basis_1d(
             "cyclic B-spline roughness",
         )?;
         // A cyclic derivative penalty has a single null direction — the constant
-        // vector — and that direction is removed wholesale by the periodic
-        // sum-to-zero identifiability constraint applied below
-        // (`apply_bspline_identifiability_policy` / streaming equivalent). The
-        // null-space-shrinkage ("double") penalty is, by construction, the
-        // projector `z·zᵀ` onto exactly that constant eigenvector, so after the
-        // constraint transform `T` (whose columns span the sum-to-zero subspace,
-        // orthogonal to the constant) it becomes `Tᵀ(z·zᵀ)T = 0` — an identically
-        // zero penalty carrying its own smoothing parameter. A zero penalty block
-        // contributes nothing to the REML cost or penalty log-determinant, so its
-        // log-λ coordinate is completely unidentified: the outer REML objective is
-        // flat along it and the outer Hessian is singular. The outer optimizer
-        // then cannot certify a step in that direction and the loop fails to
-        // terminate at the (otherwise converged) optimum (#874). mgcv's `bs="cc"`
-        // is likewise a SINGLE-penalty smooth for the same reason. Emit only the
-        // wiggliness penalty for the cyclic basis regardless of `double_penalty`:
-        // there is no free polynomial null space left to shrink.
+        // vector. Under the periodic sum-to-zero identifiability constraint (the
+        // default) that direction is removed wholesale, so the
+        // null-space-shrinkage ("double") ridge — by construction the projector
+        // onto exactly that constant eigenvector — becomes `Tᵀ(z·zᵀ)T = 0` in
+        // the constrained chart: an identically zero penalty block carrying its
+        // own smoothing parameter. A zero block contributes nothing to the REML
+        // cost or penalty log-determinant, so its log-λ coordinate is completely
+        // unidentified, the outer Hessian is singular along it, and the outer
+        // loop cannot certify a step (#874). mgcv's `bs="cc"` is a SINGLE-penalty
+        // smooth for the same reason.
+        //
+        // That argument is a statement about the *constrained* chart, not about
+        // the cyclic basis, so it is enforced where it is true rather than by
+        // suppressing the ridge unconditionally: the candidate set is assembled
+        // exactly like every other 1-D basis, and
+        // `rebuild_double_penalty_nullspace_in_constrained_chart` collapses the
+        // ridge to `ConstructiveQuadratic::zero` whenever the constrained
+        // primary has no null space left, after which `filter_penalty_candidates`
+        // drops it as `PenaltyDropReason::ZeroMatrix`. Under sum-to-zero the
+        // cyclic smooth therefore still ships exactly one penalty and one λ, as
+        // #874 requires.
+        //
+        // The unconditional suppression was not merely redundant, it was wrong
+        // for `identifiability='none'`: there the constant direction SURVIVES
+        // into the design, is exactly aliased with the global intercept, and —
+        // with no ridge to penalize it — the pre-fit rank audit refused the model
+        // ("rank 1 < 2 unpenalized columns"). With the ridge restored the
+        // constant is a penalized direction, the unpenalized block is the
+        // intercept alone, and an uncentered cyclic smooth fits the same way an
+        // uncentered open one does (#2783).
         //
         // Frobenius-normalize the cyclic wiggliness penalty (recording the norm
         // in `normalization_scale`) so its smoothing parameter `λ` is on the same
@@ -209,7 +223,7 @@ pub fn build_bspline_basis_1d(
         // λ-search heuristics under-smoothed exactly as for the open ps single
         // penalty. Fit-invariant at the REML optimum (only `λ̂` rescales by `c`).
         let (_, s_bend_scale) = normalize_penalty(s_bend_raw.dense());
-        let penalties_raw = vec![PenaltyCandidate {
+        let mut penalties_raw = vec![PenaltyCandidate {
             matrix: s_bend_raw
                 .scaled(1.0 / s_bend_scale, "normalized cyclic B-spline roughness")?,
             source: PenaltySource::Primary,
@@ -217,6 +231,28 @@ pub fn build_bspline_basis_1d(
             kronecker_factors: None,
             op: None,
         }];
+        if spec.double_penalty {
+            // Same function-space ridge the open path builds (SPEC rule 5): the
+            // metric is the exact L² Gram of the *periodic* cardinal basis over
+            // one period, so the penalized quantity is `∫(null component of f)²`
+            // and is invariant to how the cyclic basis happens to be scaled.
+            let gram = periodic_bspline_function_gram(start, end, spec.degree, num_basis)?;
+            if let Some(shrinkage) =
+                function_space_nullspace_shrinkage(s_bend_raw.dense(), &gram)?
+            {
+                let (ridge_norm, ridge_scale) = normalize_penalty(&shrinkage);
+                penalties_raw.push(PenaltyCandidate {
+                    matrix: ConstructiveQuadratic::try_from_dense_psd(
+                        ridge_norm,
+                        "cyclic B-spline null-function ridge",
+                    )?,
+                    source: PenaltySource::DoublePenaltyNullspace,
+                    normalization_scale: ridge_scale,
+                    kronecker_factors: None,
+                    op: None,
+                });
+            }
+        }
         let penalties_raw_mats = penalties_raw
             .iter()
             .map(|candidate| candidate.matrix.dense().clone())

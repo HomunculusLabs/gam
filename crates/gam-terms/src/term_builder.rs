@@ -7148,6 +7148,231 @@ mod tests {
         );
     }
 
+    /// #2783: `identifiability=` is parsed on the 1-D B-spline path, not
+    /// whitelisted-and-discarded. Walk the whole accepted vocabulary and the
+    /// three refusals in one place, so a future arm that forgets to call the
+    /// resolver cannot quietly reintroduce the inert option.
+    #[test]
+    fn one_dimensional_identifiability_option_is_parsed_and_validated() {
+        let mut options = BTreeMap::new();
+
+        // Absent: the caller's structural default is returned untouched.
+        assert!(matches!(
+            parse_bspline_identifiability(&options).expect("absent option parses"),
+            None
+        ));
+        assert!(matches!(
+            resolve_bspline_identifiability(
+                &options,
+                BSplineIdentifiability::None,
+                BSplineIdentifiabilityContext::default(),
+            )
+            .expect("absent option keeps the structural default"),
+            BSplineIdentifiability::None
+        ));
+
+        for token in ["none", "None", " NONE "] {
+            options.insert("identifiability".to_string(), token.to_string());
+            assert!(
+                matches!(
+                    parse_bspline_identifiability(&options).expect("none parses"),
+                    Some(BSplineIdentifiability::None)
+                ),
+                "token {token:?} should select the unconstrained policy"
+            );
+        }
+        for token in [
+            "sum_tozero",
+            "sum-to-zero",
+            "sumtozero",
+            "centered",
+            "center_sum_tozero",
+            "center-sum-to-zero",
+        ] {
+            options.insert("identifiability".to_string(), token.to_string());
+            assert!(
+                matches!(
+                    parse_bspline_identifiability(&options).expect("sum-to-zero parses"),
+                    Some(BSplineIdentifiability::WeightedSumToZero { weights: None })
+                ),
+                "token {token:?} should select sum-to-zero centering"
+            );
+        }
+        for token in [
+            "linear",
+            "remove_linear_trend",
+            "remove-linear-trend",
+            "center_linear_orthogonal",
+        ] {
+            options.insert("identifiability".to_string(), token.to_string());
+            assert!(
+                matches!(
+                    parse_bspline_identifiability(&options).expect("linear parses"),
+                    Some(BSplineIdentifiability::RemoveLinearTrend)
+                ),
+                "token {token:?} should select the constant+linear removal"
+            );
+        }
+
+        // An explicit token overrides the structural default in both directions.
+        options.insert("identifiability".to_string(), "none".to_string());
+        assert!(matches!(
+            resolve_bspline_identifiability(
+                &options,
+                BSplineIdentifiability::default(),
+                BSplineIdentifiabilityContext::default(),
+            )
+            .expect("explicit none overrides the centering default"),
+            BSplineIdentifiability::None
+        ));
+        options.insert("identifiability".to_string(), "sum_tozero".to_string());
+        assert!(matches!(
+            resolve_bspline_identifiability(
+                &options,
+                BSplineIdentifiability::None,
+                BSplineIdentifiabilityContext::default(),
+            )
+            .expect("explicit sum_tozero overrides an unconstrained default"),
+            BSplineIdentifiability::WeightedSumToZero { weights: None }
+        ));
+
+        // Internal-only variants say so rather than pretending to be unknown.
+        for token in ["frozen", "orthogonal"] {
+            options.insert("identifiability".to_string(), token.to_string());
+            let err = parse_bspline_identifiability(&options)
+                .expect_err("internal-only policy must be refused");
+            assert!(
+                err.contains("internal-only"),
+                "token {token:?} should be refused as internal-only, got: {err}"
+            );
+        }
+
+        // An unknown token is refused, naming the option and the alternatives —
+        // the behaviour every sibling smooth kind already had.
+        options.insert("identifiability".to_string(), "totally_bogus".to_string());
+        let err = parse_bspline_identifiability(&options)
+            .expect_err("an unknown identifiability token must be refused");
+        assert!(
+            err.contains("totally_bogus") && err.contains("none, sum_tozero, linear"),
+            "unknown-token error should name the token and the vocabulary, got: {err}"
+        );
+
+        // Refusal 1: an anchored endpoint already fixes the level.
+        options.insert("identifiability".to_string(), "sum_tozero".to_string());
+        let err = resolve_bspline_identifiability(
+            &options,
+            BSplineIdentifiability::None,
+            BSplineIdentifiabilityContext {
+                has_anchor: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("anchor + centering is over-constrained");
+        assert!(
+            err.contains("anchored endpoint"),
+            "anchor conflict should explain itself, got: {err}"
+        );
+        // ...but agreeing with the structural default is fine.
+        options.insert("identifiability".to_string(), "none".to_string());
+        assert!(matches!(
+            resolve_bspline_identifiability(
+                &options,
+                BSplineIdentifiability::None,
+                BSplineIdentifiabilityContext {
+                    has_anchor: true,
+                    ..Default::default()
+                },
+            )
+            .expect("anchor + none agrees with the structural default"),
+            BSplineIdentifiability::None
+        ));
+
+        // Refusal 2 and 3: `linear` needs open-knot B-spline geometry.
+        options.insert("identifiability".to_string(), "linear".to_string());
+        let err = resolve_bspline_identifiability(
+            &options,
+            BSplineIdentifiability::default(),
+            BSplineIdentifiabilityContext {
+                periodic: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("a linear trend is not in the span of a cyclic basis");
+        assert!(err.contains("periodic"), "got: {err}");
+        let err = resolve_bspline_identifiability(
+            &options,
+            BSplineIdentifiability::default(),
+            BSplineIdentifiabilityContext {
+                natural_cubic_regression: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("cr carries no Greville chart");
+        assert!(err.contains("cr"), "got: {err}");
+    }
+
+    /// #2783: the option survives the whole formula → spec path, on both the
+    /// open and the cyclic 1-D arm — the two places that used to decide the
+    /// policy without reading it.
+    #[test]
+    fn one_dimensional_identifiability_option_reaches_the_built_spec() {
+        let ds = continuous_dataset(
+            &["y", "x"],
+            (0..120)
+                .map(|i| {
+                    let x = i as f64 / 119.0;
+                    vec![x.sin(), x]
+                })
+                .collect(),
+        );
+        let col_map = ds.column_map();
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+
+        let built = |formula: &str| -> BSplineIdentifiability {
+            let parsed = parse_formula(formula).expect("parse");
+            let mut notes = Vec::new();
+            let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+                .unwrap_or_else(|e| panic!("{formula} should build: {e}"));
+            let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
+                panic!("expected BSpline1D for {formula}");
+            };
+            spec.identifiability.clone()
+        };
+
+        assert!(matches!(
+            built("y ~ s(x, k=8)"),
+            BSplineIdentifiability::WeightedSumToZero { .. }
+        ));
+        assert!(matches!(
+            built("y ~ s(x, k=8, identifiability='none')"),
+            BSplineIdentifiability::None
+        ));
+        assert!(matches!(
+            built("y ~ s(x, k=8, identifiability='linear')"),
+            BSplineIdentifiability::RemoveLinearTrend
+        ));
+        assert!(matches!(
+            built("y ~ cyclic(x, k=8, period=1)"),
+            BSplineIdentifiability::WeightedSumToZero { .. }
+        ));
+        assert!(matches!(
+            built("y ~ cyclic(x, k=8, period=1, identifiability='none')"),
+            BSplineIdentifiability::None
+        ));
+
+        for formula in [
+            "y ~ s(x, k=8, identifiability='totally_bogus')",
+            "y ~ cyclic(x, k=8, period=1, identifiability='totally_bogus')",
+            "y ~ cyclic(x, k=8, period=1, identifiability='linear')",
+            "y ~ s(x, k=8, bc_left=anchored, anchor_left=0, identifiability='sum_tozero')",
+        ] {
+            let parsed = parse_formula(formula).expect("parse");
+            let mut notes = Vec::new();
+            build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+                .expect_err(&format!("{formula} must be refused, not silently accepted"));
+        }
+    }
+
     #[test]
     fn sz_factor_smooth_low_cardinality_uses_bspline_marginal() {
         // #1605: the `sz` factor-smooth marginal is the SAME penalized B-spline
