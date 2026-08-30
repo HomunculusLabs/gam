@@ -208,8 +208,14 @@ y ~ s(x, bc_left=anchored, anchor_left=0)  # endpoint value 0 and slope 0
 y ~ s(x, start_bc=clamped, end_bc=anchored, anchor_right=0)
 ```
 
-Use `s(x, bc=clamped)` for the boundary-conditioned form. Per-side
+Use `s(x, bc=clamped)` for the boundary-conditioned form (`boundary=` and
+`boundary_conditions=` are accepted spellings of the same option). Per-side
 overrides are read directly by the smooth builder.
+
+`side=` says *which* endpoint the global `bc=` applies to, and `anchor=` (with
+its per-side spellings) says *what* an anchored endpoint is pinned to. Neither
+means anything alone, so each is rejected without the condition it qualifies
+rather than silently ignored.
 
 ## Multivariate smooths
 
@@ -279,12 +285,20 @@ zero (recover the null by default; opt into overfitting). Scale-free unless
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `order` | `1` (Linear, affine null space) | Polynomial nullspace order `p`. Polynomial block has `C(d + p, d)` columns (`p=0` → constant only, `p=1` (Linear) → `d+1` columns, `p=2` → `(d+1)(d+2)/2`). |
-| `power` | cubic default `s = (d−1)/2` | Riesz fractional smoothness `s`. The default gives `φ(r)=r³` in every dimension; an explicit value (e.g. `power=0` → `r²·log r` thin-plate in even `d`) is honored verbatim. |
+| `order` (alias `nullspace_order`) | `1` (Linear, affine null space) | Polynomial nullspace order `p`. Polynomial block has `C(d + p, d)` columns (`p=0` → constant only, `p=1` (Linear) → `d+1` columns, `p=2` → `(d+1)(d+2)/2`). Honoured whether or not `power` is also given. |
+| `power` (alias `p`) | cubic default `s = (d−1)/2` | Riesz fractional smoothness `s`. The default gives `φ(r)=r³` in every dimension; an explicit value (e.g. `power=0` → `r²·log r` thin-plate in even `d`) is honored verbatim. |
 | `centers` (`k`, `basis_dim`) | auto | Number of centres. |
 | `length_scale` | none (scale-free) | Optional global scale. Without it, the kernel is pure polyharmonic; with it, the kernel is the hybrid Duchon-Matérn (κ = 1/length_scale). |
 | `scale_dims` | `false` | Per-axis **relevance** (ARD by shrinkage): one gradient penalty `Σ(∂f/∂x_a)²` per input axis, each its own REML `λ_a`. REML flattens the surface along axes that don't earn their keep — automatic variable relevance via plain penalties. The kernel metric is held fixed at its knot-geometry init (not separately optimized). |
 | `periodic`, `period`, `period_start`, `period_end` | — | 1-D cyclic Duchon (see below). |
+
+Radial smooths follow the same period rule as the rest of the DSL: declaring a
+period makes that axis periodic, so `matern(x, y, period=[2*pi, None])` needs no
+separate `periodic=`. In **one** dimension the wrap can also be left implicit —
+`duchon(x, periodic=true)` takes its period from the closed centre lattice,
+which tiles a full period exactly. In two or more dimensions there is no such
+derivation, so a periodic axis must name its period (`period=[…, None]`), and
+`period_start=` / `period_end=`, which name a single axis's domain, are rejected.
 
 `duchon()` rejects `double_penalty` — the Hilbert-scale penalty (curvature +
 trend + mass + tension) is built in, each block with its own REML smoothing
