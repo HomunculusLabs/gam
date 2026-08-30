@@ -121,7 +121,7 @@ any fixed factor, a level that never appeared in training is a schema mismatch:
 `predict` raises and `check()` reports it, rather than silently returning the
 factor's centering point (#2137).
 
-## Univariate smooths
+## Univariate smooths {#univariate-smooths}
 
 ```
 y ~ s(x)                    # P-spline (B-spline + difference penalty)
@@ -376,15 +376,36 @@ takes the same options as `te(...)`.
 | --- | --- | --- |
 | `k` (`basis_dim`) | auto, per margin | Basis dim per margin. Scalar `k=20` applies to every margin; list/tuple forms `k=[k1, k2]`, `k=(k1, k2)`, and `k=c(k1, k2)` set per-margin sizes. Per-margin aliases such as `k_x=12, k_time=8` are also accepted. |
 | `knots` | auto, per margin | Interior knots per margin. List form accepted. |
-| `degree` | 3 | Polynomial degree (all margins). |
-| `penalty_order` | 2 | Difference-penalty order. |
-| `double_penalty` | `false` | Ridge alongside per-margin penalties. |
-| `bc` | none | Per-margin boundary conditions (list form). `periodic` / `cyclic` margins are supported; endpoint constraints such as `clamped` or `anchored` are rejected for tensor margins. |
+| `degree` | 3 | Polynomial degree. Scalar applies to every margin; list form `degree=[1, 3]` sets them per margin. |
+| `penalty_order` | 2 | Difference-penalty order, same scalar/list forms. |
+| `knot_placement` | cr quantile value-knots | `uniform` or `quantile` knot placement for the margins. |
+| `double_penalty` | `true` | Ridge alongside per-margin penalties. |
+| `bc` | none | Per-margin margin kind. A `periodic` / `cyclic` / `cc` token makes that margin wrap; `clamped` / `open` / `natural` / `free` / `none` all mark an ordinary non-periodic margin (`clamped` here is the *clamped knot vector* of an open spline, not a zero-derivative endpoint pin — for that, use a 1-D `s(x, bc=clamped)` term). `anchored` is rejected. A single token applies to every margin; any other length is an error. |
 | `periodic`, `period`, `periods`, `origin`, `origins` | — | Per-margin periodicity (see below). |
-| `by`, `identifiability` | — | See common options above. |
+| `by` | — | See [univariate smooths](#univariate-smooths). |
+| `identifiability` | `sum_tozero` (`te`), `marginal_sum_tozero` (`ti`) | `none`, `sum_tozero`, or `marginal_sum_tozero`. |
 
 `k` and `knots` cannot both be set. Margins requested as a single
 value are broadcast across all margins.
+
+### What the default margin is, and when it changes {#tensor-default-margin}
+
+Following mgcv, an unset `bs=` gives each margin a **natural cubic regression
+spline**: `k` value-knots at data quantiles, penalized by the exact integrated
+squared second derivative. `degree` and `penalty_order` are not adjustable
+properties of that basis — a cubic regression spline *is* cubic and *is*
+second-order — so a margin that asks for anything else is built as a B-spline
+margin instead, which does carry both as free parameters. Concretely, a margin
+leaves the cr basis when the formula sets
+
+* `bs=` to a B-spline family (`ps`, `bs`, `bspline`, `p-spline`) on that margin,
+* `degree` to anything other than 3, or `penalty_order` to anything other than 2,
+* `knot_placement` explicitly (either value),
+* a period on that margin (a wrapping margin is a cyclic B-spline), or
+* `k < 3`, which is below the cr minimum.
+
+Asking for the defaults — `degree=3`, `penalty_order=2` — keeps the cr margin,
+so naming an option never changes a fit by itself.
 
 Examples:
 
@@ -394,7 +415,24 @@ gamfit.fit(df, "y ~ te(space, time, k=(12, 8))")
 gamfit.fit(df, "y ~ te(space, time, k_space=12, k_time=8)")
 gamfit.fit(df, "y ~ te(theta, h, bc=['periodic', 'natural'], period=[2*pi, None], k=5)")
 gamfit.fit(df, "y ~ te(u, v, bc=['periodic', 'periodic'], period=[2*pi, 2*pi], k=5)")
+gamfit.fit(df, "y ~ te(theta, h, periods=[2*pi, None], k=5)")   # the period IS the declaration
+gamfit.fit(df, "y ~ te(x, z, degree=[1, 3], k=5)")              # linear x margin, cubic z margin
 ```
+
+### Declaring a period {#declaring-a-period}
+
+A period is not a property an aperiodic basis has, so declaring one *is* the
+periodicity declaration: `s(t, period=24)` and
+`te(theta, h, periods=[2*pi, None])` wrap on their own, and `periodic=` /
+`bc='periodic'` is a second, redundant spelling of the same fact for the axes it
+names. What is refused rather than honoured, because it names no axis:
+
+* a bare scalar `period=` on a multi-margin tensor (write `periods=[v, None]`,
+  or name the axis with `periodic=<axis>`);
+* `origin=` with no period to be the origin of;
+* `period_start=` / `period_end=` on a tensor, which have no per-margin form
+  (use `periods=` with `origins=`);
+* `periodic=false` alongside a period declaration, which is a contradiction.
 
 ### Picking the right smooth
 
