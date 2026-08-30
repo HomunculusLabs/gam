@@ -155,8 +155,8 @@ Boundary conditions are available for 1-D P-spline smooths. They are useful for 
 The 1-D B-spline path accepts these options plus `periodic`, `period`,
 `periods`, `period_start`, `period_end`, `origin`, `identifiability`.
 
-`identifiability=` selects the smooth's own gauge, with the same vocabulary
-every other smooth kind uses:
+`identifiability=` selects the smooth's own gauge. On the 1-D B-spline path —
+`s()` and `cyclic()` — and on `matern()`, the vocabulary is:
 
 | Value | Meaning |
 | --- | --- |
@@ -171,6 +171,12 @@ and `linear` needs open-knot B-spline geometry, so it is not available on a
 periodic basis (a linear trend is not periodic) or on `bs='cr'`/`'cs'`
 (a natural cubic regression basis is indexed by values at knots, not by a
 B-spline coefficient chart).
+
+The vocabulary is not identical on every smooth kind, and each one refuses a
+token it does not know. `te()`/`ti()` take `none`, `sum_tozero` and
+`marginal_sum_tozero`; `thinplate()` / multivariate `s(x1, x2, ...)`,
+`duchon()` and the other radial smooths take `none` and
+`orthogonal_to_parametric`.
 
 `cyclic(x, ...)` (aliases `cc`, `cp`) is shorthand for a periodic 1-D
 B-spline. It accepts the same period declaration two equivalent ways: a
@@ -228,7 +234,7 @@ Radial-basis surface smooth with thin-plate kernel.
 | `double_penalty` | `true` | Ridge + main penalty. |
 | `scale_dims` | `false` | Derivative-planning hint; inputs are automatically standardized. |
 | `include_intercept` | `false` | Append a constant column. |
-| `by`, `identifiability` | — | See common options above. |
+| `by`, `identifiability` | — | `identifiability` takes `none` or `orthogonal_to_parametric`; see [univariate smooths](#univariate-smooths). |
 
 ### Matérn (`matern`)
 
