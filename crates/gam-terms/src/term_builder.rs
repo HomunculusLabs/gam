@@ -1185,34 +1185,158 @@ fn parse_option_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Axes for which the caller has explicitly declared a period.
+///
+/// A period is not a property an aperiodic basis has: declaring one *is* the
+/// periodicity declaration, and `periodic=` / `bc='periodic'` is a second,
+/// redundant spelling of the same fact for the axes it names. Before #2781 the
+/// axis resolvers read only that second spelling, so `s(t, period=24)`,
+/// `s(t, period_start=0, period_end=24)` and
+/// `te(th, h, periods=[2*pi, None])` were each validated as a legal option and
+/// then dropped on the floor — the caller asked for a cyclic smooth, got an
+/// aperiodic one with a discontinuity at the seam, and was never told.
+///
+/// Only *unambiguous* declarations are read here: a per-axis list (which
+/// includes the scalar form on a 1-D smooth, where the list has length one).
+/// A bare scalar on a multi-margin tensor does not say which margin it belongs
+/// to, so it is left to [`parse_periods`], which either broadcasts it onto a
+/// lone axis already flagged periodic or refuses the length mismatch.
+fn axes_with_declared_period(
+    options: &BTreeMap<String, String>,
+    dim: usize,
+) -> Result<Vec<bool>, String> {
+    let mut axes = vec![false; dim];
+    if let Some(raw) = options.get("period").or_else(|| options.get("periods")) {
+        let values = split_list_option(raw);
+        if values.len() == dim {
+            for (axis, value) in values.iter().enumerate() {
+                if !value.trim().eq_ignore_ascii_case("none") {
+                    axes[axis] = true;
+                }
+            }
+        }
+    }
+    // The half-open endpoint spelling (`period_start=`/`period_end=`, aliases
+    // `start=`/`end=`) declares the periodic DOMAIN of one axis, so it only has
+    // a referent on a 1-D smooth. `parse_periodic_domain_1d` is what reads it.
+    if dim == 1
+        && PERIOD_ENDPOINT_OPTION_KEYS
+            .iter()
+            .any(|key| options.contains_key(*key))
+    {
+        axes[0] = true;
+    }
+    Ok(axes)
+}
+
+/// Option keys that declare a periodic domain by its endpoints.
+const PERIOD_ENDPOINT_OPTION_KEYS: [&str; 4] = ["period_start", "period_end", "start", "end"];
+
+/// Option keys that declare a period length.
+const PERIOD_LENGTH_OPTION_KEYS: [&str; 2] = ["period", "periods"];
+
+/// Option keys that place the start of a periodic domain.
+const PERIOD_ORIGIN_OPTION_KEYS: [&str; 5] = [
+    "origin",
+    "origins",
+    "period_origin",
+    "period-origin",
+    "domain_origin",
+];
+
+/// Refuse a period declaration that no axis of the smooth can consume.
+///
+/// After [`axes_with_declared_period`] has folded every unambiguous declaration
+/// into the periodic-axis set, the only ways to still hold a period option that
+/// nothing reads are (a) a bare scalar `period=` on a multi-margin tensor, which
+/// does not name its margin, (b) an `origin=` with no period to be the origin
+/// of, and (c) an explicit `periodic=false` that contradicts the declaration.
+/// Each of those is refused here rather than discarded, which is the contract
+/// `docs/formulas.md` already states for this family of options: "an unparseable
+/// endpoint or an unknown option is rejected rather than silently dropped"
+/// (#2781).
+fn reject_unconsumable_period_declaration(
+    term_name: &str,
+    options: &BTreeMap<String, String>,
+    periodic_axes: &[bool],
+) -> Result<(), String> {
+    if periodic_axes.iter().any(|periodic| *periodic) {
+        return Ok(());
+    }
+    let dim = periodic_axes.len();
+    if let Some(key) = PERIOD_LENGTH_OPTION_KEYS
+        .iter()
+        .find(|key| options.contains_key(**key))
+    {
+        let hint = if dim > 1 {
+            format!(
+                "a scalar `{key}=` does not say which of the {dim} margins wraps; write one entry \
+                 per margin (e.g. {key}=[<value>, None]) or name the axis with periodic=<axis>"
+            )
+        } else {
+            "declare it on a periodic axis or drop it".to_string()
+        };
+        return Err(TermBuilderError::invalid_option(format!(
+            "{term_name}(): `{key}=` declares a period, but no axis of this smooth is periodic — {hint}"
+        ))
+        .to_string());
+    }
+    if let Some(key) = PERIOD_ORIGIN_OPTION_KEYS
+        .iter()
+        .find(|key| options.contains_key(**key))
+    {
+        return Err(TermBuilderError::invalid_option(format!(
+            "{term_name}(): `{key}=` places the start of a periodic domain, but this smooth \
+             declares no period; add period=<value> or drop it"
+        ))
+        .to_string());
+    }
+    if let Some(key) = PERIOD_ENDPOINT_OPTION_KEYS
+        .iter()
+        .find(|key| options.contains_key(**key))
+    {
+        return Err(TermBuilderError::invalid_option(format!(
+            "{term_name}(): `{key}=` declares a periodic domain endpoint, but no axis of this \
+             smooth is periodic; on a tensor smooth use periods=[...] with origins=[...], which \
+             name their margin"
+        ))
+        .to_string());
+    }
+    Ok(())
+}
+
 fn parse_periodic_axes(
     options: &BTreeMap<String, String>,
     dim: usize,
 ) -> Result<Vec<bool>, String> {
     let mut axes = vec![false; dim];
+    // `periodic=false` is an explicit denial, not merely the absence of a
+    // declaration: it suppresses the `boundary=` spelling below, and it
+    // CONTRADICTS a period declaration rather than silently outranking it.
+    let mut explicitly_aperiodic = false;
     if let Some(raw) = options.get("periodic").or_else(|| options.get("cyclic")) {
         let lowered = raw.trim().to_ascii_lowercase();
         if matches!(lowered.as_str(), "true" | "yes" | "y") {
             axes.fill(true);
-            return Ok(axes);
-        }
-        // `false` leaves every axis non-periodic, which `axes` already is.
-        if matches!(lowered.as_str(), "false" | "no" | "n") {
-            return Ok(axes);
-        }
-        for axis_raw in parse_option_list(raw) {
-            let axis = axis_raw
-                .parse::<usize>()
-                .map_err(|err| format!("invalid periodic axis '{axis_raw}': {err}"))?;
-            if axis >= dim {
-                return Err(format!(
-                    "periodic axis {axis} out of range for {dim}D smooth"
-                ));
+        } else if matches!(lowered.as_str(), "false" | "no" | "n") {
+            explicitly_aperiodic = true;
+        } else {
+            for axis_raw in parse_option_list(raw) {
+                let axis = axis_raw
+                    .parse::<usize>()
+                    .map_err(|err| format!("invalid periodic axis '{axis_raw}': {err}"))?;
+                if axis >= dim {
+                    return Err(format!(
+                        "periodic axis {axis} out of range for {dim}D smooth"
+                    ));
+                }
+                axes[axis] = true;
             }
-            axes[axis] = true;
         }
     }
-    if let Some(raw) = options.get("boundary").or_else(|| options.get("bc")) {
+    if !explicitly_aperiodic
+        && let Some(raw) = options.get("boundary").or_else(|| options.get("bc"))
+    {
         let boundary = parse_option_list(raw);
         if boundary.len() == dim {
             for (axis, value) in boundary.iter().enumerate() {
@@ -1229,7 +1353,33 @@ fn parse_periodic_axes(
             axes[0] = true;
         }
     }
+    fold_in_declared_periods(options, dim, &mut axes, explicitly_aperiodic)?;
     Ok(axes)
+}
+
+/// Fold every unambiguous period declaration into `axes` (#2781), refusing a
+/// declaration that an explicit `periodic=false` contradicts.
+///
+/// Shared by the 1-D and tensor axis resolvers so one rule — "a declared period
+/// makes its axis periodic" — holds on both paths.
+fn fold_in_declared_periods(
+    options: &BTreeMap<String, String>,
+    dim: usize,
+    axes: &mut [bool],
+    explicitly_aperiodic: bool,
+) -> Result<(), String> {
+    let declared = axes_with_declared_period(options, dim)?;
+    if explicitly_aperiodic && declared.iter().any(|d| *d) {
+        return Err(TermBuilderError::incompatible_config(
+            "periodic=false denies the periodicity that the smooth's own period declaration \
+             asserts; drop one of the two",
+        )
+        .to_string());
+    }
+    for (axis, declared_axis) in declared.into_iter().enumerate() {
+        axes[axis] |= declared_axis;
+    }
+    Ok(())
 }
 
 fn parse_optional_numeric_list(
@@ -1433,6 +1583,19 @@ fn parse_tensor_periodic_axes(
             }
         }
     }
+    // A per-margin period list names its own margins, so it declares
+    // periodicity just as `periodic=`/`bc=` do (#2781). Without this,
+    // `te(th, h, periods=[2*pi, None])` was bit-identical to `te(th, h)`.
+    let explicitly_aperiodic = options
+        .get("periodic")
+        .or_else(|| options.get("cyclic"))
+        .is_some_and(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "false" | "no" | "n"
+            )
+        });
+    fold_in_declared_periods(options, dim, &mut axes, explicitly_aperiodic)?;
     Ok(axes)
 }
 
@@ -2581,6 +2744,10 @@ pub fn build_smooth_basis(
             let (mut n_knots, inferred, effective_degree) =
                 parse_ps_internal_knots(options, degree, default_internal)?;
             let periodic_axes = parse_periodic_axes(options, 1).map_err(|e| e.to_string())?;
+            // Every period/origin declaration this arm accepts is read only
+            // inside the `periodic_axes[0]` branch below, so one that leaves the
+            // axis aperiodic would be silently discarded (#2781).
+            reject_unconsumable_period_declaration(validation_name, options, &periodic_axes)?;
             // Periodic margins still need enough basis functions to wrap, so
             // surface the per-axis degree reduction as a config error when the
             // user explicitly asked for a periodic-but-too-small basis. The
@@ -3713,6 +3880,21 @@ pub fn build_smooth_basis(
                 }
             }
             let periodic_axes = parse_tensor_periodic_axes(options, dim)?;
+            reject_unconsumable_period_declaration("tensor", options, &periodic_axes)?;
+            // The half-open endpoint spelling names a single axis's domain and
+            // has no per-margin form, so the tensor arm never reads it — it went
+            // in through `validate_known_options` and straight out again (#2781).
+            if let Some(key) = PERIOD_ENDPOINT_OPTION_KEYS
+                .iter()
+                .find(|key| options.contains_key(**key))
+            {
+                return Err(TermBuilderError::invalid_option(format!(
+                    "tensor(): `{key}=` declares one axis's periodic domain and has no per-margin \
+                     form; on a tensor smooth give periods=[...] (with origins=[...] for the \
+                     domain start), which name their margin"
+                ))
+                .to_string());
+            }
             validate_tensor_boundary_tokens(options, dim)?;
             let periods_opt = parse_periods(options, &periodic_axes)?;
             let origins_opt = parse_period_origins(options, &periodic_axes)?;
