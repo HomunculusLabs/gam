@@ -4579,9 +4579,16 @@ fn parse_bspline_boundary_conditions(
     let fallback_anchor = option_f64(options, "anchor")
         .or_else(|| option_f64(options, "anchor_value"))
         .or_else(|| option_f64(options, "value"));
+    // `boundary` is whitelisted on this arm as the third spelling of `bc` /
+    // `boundary_conditions` and was read by NEITHER of the two functions that
+    // consume the option (`parse_periodic_axes` reads it, but only for the
+    // periodic tokens), so `s(x, boundary=clamped)` was accepted and inert
+    // (#2781's family). A periodic token never reaches here: the arm skips this
+    // function entirely once `bspline_boundary_declares_periodic_axis` fires.
     let global_boundary_conditions = options
         .get("boundary_conditions")
-        .or_else(|| options.get("bc"));
+        .or_else(|| options.get("bc"))
+        .or_else(|| options.get("boundary"));
     let mut boundary_conditions = BSplineBoundaryConditions::default();
 
     if let Some(raw_boundary_conditions) = global_boundary_conditions {
@@ -4631,8 +4638,43 @@ fn parse_bspline_boundary_conditions(
         boundary_anchor_value(options, "right", fallback_anchor),
     );
 
+    // `side=` says WHICH endpoint the global condition applies to, and an
+    // anchor value says WHAT an anchored endpoint is pinned to. Neither means
+    // anything on its own, and both were previously accepted and discarded, so
+    // `s(x, bc_left=anchored, anchor=2.5)` pinned the endpoint at 2.5 while
+    // `s(x, anchor=2.5)` silently pinned nothing at all (#2781's family).
+    if options.contains_key("side") && global_boundary_conditions.is_none() {
+        return Err(TermBuilderError::invalid_option(
+            "`side=` selects which endpoint a boundary condition applies to, but this smooth              declares none; add bc=<condition> or drop it",
+        )
+        .to_string());
+    }
+    if !boundary_conditions.has_anchor()
+        && let Some(key) = ANCHOR_VALUE_OPTION_KEYS
+            .iter()
+            .find(|key| options.contains_key(**key))
+    {
+        return Err(TermBuilderError::invalid_option(format!(
+            "`{key}=` sets the value an ANCHORED endpoint is pinned to, but no endpoint of this              smooth is anchored; add bc=anchored (or bc_left=/bc_right=anchored) or drop it"
+        ))
+        .to_string());
+    }
+
     Ok(boundary_conditions)
 }
+
+/// Option keys that carry the value an anchored endpoint is pinned to. Each is
+/// meaningless without an `anchored` endpoint to attach it to.
+const ANCHOR_VALUE_OPTION_KEYS: [&str; 8] = [
+    "anchor",
+    "anchor_value",
+    "value",
+    "anchor_left",
+    "left_anchor",
+    "anchor_right",
+    "right_anchor",
+    "anchor-value-left",
+];
 
 /// Resolve the requested internal-knot count and effective spline degree for
 /// a 1-D penalized B-spline smooth. This mirrors the tensor-margin per-axis
@@ -8181,41 +8223,7 @@ mod tests {
         // DSL validates and then throws away — found by this guard the first
         // time it ran with teeth. The reason strings ARE the bug reports; run
         // this test with an entry deleted to reproduce any one of them.
-        let known_inert: &[(&str, &str)] = &[
-            (
-                "y ~ s(x, boundary=clamped)",
-                "`boundary` is whitelisted as an alias of `bc`, but                  parse_bspline_boundary_conditions reads only `bc`/`bc_left`/…",
-            ),
-            (
-                "y ~ s(x, side=left)",
-                "`side` says WHICH endpoint a boundary condition applies to and                  does nothing without one; should be refused",
-            ),
-            (
-                "y ~ s(x, anchor=0.0)",
-                "an anchor value with no `anchored` endpoint to attach it to;                  should be refused",
-            ),
-            (
-                "y ~ s(x, anchor_value=0.0)",
-                "same as `anchor=` with no anchored endpoint",
-            ),
-            ("y ~ s(x, value=0.0)", "same as `anchor=` with no anchored endpoint"),
-            (
-                "y ~ s(x, anchor_left=0.0)",
-                "same as `anchor=` with no anchored endpoint",
-            ),
-            (
-                "y ~ s(x, left_anchor=0.0)",
-                "same as `anchor=` with no anchored endpoint",
-            ),
-            (
-                "y ~ s(x, anchor_right=0.0)",
-                "same as `anchor=` with no anchored endpoint",
-            ),
-            (
-                "y ~ s(x, right_anchor=0.0)",
-                "same as `anchor=` with no anchored endpoint",
-            ),
-            (
+        let known_inert: &[(&str, &str)] = &[            (
                 "y ~ thinplate(x, zbig, include_intercept=true)",
                 "parsed into the spec, but the built radial design is unchanged",
             ),
