@@ -8169,65 +8169,74 @@ mod tests {
             }
         };
 
-        // A probe value per key, chosen far from that key's default so a fit
-        // that reads it cannot coincidentally match the baseline.
-        let probe = |kind: &str, key: &str| -> &'static str {
+        // Probe values per key, chosen away from that key's default. Count-like
+        // keys carry TWO candidates: a single value can silently coincide with
+        // the default on a particular fixture (the factor-smooth marginal's
+        // default basis really is `k=6` on this dataset), which would report a
+        // wired option as inert. An option passes when ANY candidate changes the
+        // design, or when EVERY candidate is refused.
+        let probe = |kind: &str, key: &str| -> &'static [&'static str] {
             match (kind, key) {
                 // Periodicity: the tensor arm takes per-margin lists; the 1-D
                 // arms take a scalar.
-                ("tensor", "period" | "periods") => "[1.0, None]",
+                ("tensor", "period" | "periods") => &["[1.0, None]"],
                 ("tensor", "origin" | "origins" | "period_origin" | "period-origin"
-                | "domain_origin") => "[0.0, None]",
-                ("tensor", "periodic" | "cyclic") => "[0]",
-                ("tensor", "boundary" | "bc") => "['periodic', 'natural']",
-                (_, "periodic" | "cyclic") => "true",
-                (_, "period" | "periods") => "0.7",
-                (_, "period_start" | "start") => "0.05",
-                (_, "period_end" | "end") => "0.7",
+                | "domain_origin") => &["[0.0, None]"],
+                ("tensor", "periodic" | "cyclic") => &["[0]"],
+                ("tensor", "boundary" | "bc") => &["['periodic', 'natural']"],
+                (_, "periodic" | "cyclic") => &["true"],
+                (_, "period" | "periods") => &["0.7"],
+                (_, "period_start" | "start") => &["0.05"],
+                (_, "period_end" | "end") => &["0.7"],
                 (_, "origin" | "origins" | "period_origin" | "period-origin"
-                | "domain_origin") => "0.1",
-                (_, "boundary" | "bc" | "boundary_conditions") => "clamped",
+                | "domain_origin") => &["0.1"],
+                (_, "boundary" | "bc" | "boundary_conditions") => &["clamped"],
                 (_, "bc_left" | "left_bc" | "start_bc" | "bc_right" | "right_bc"
-                | "end_bc") => "clamped",
-                (_, "side") => "left",
+                | "end_bc") => &["clamped"],
+                (_, "side") => &["left"],
                 (_, "anchor" | "anchor_value" | "value" | "anchor_left"
-                | "left_anchor" | "anchor_right" | "right_anchor") => "0.0",
+                | "left_anchor" | "anchor_right" | "right_anchor") => &["0.0"],
                 // Sizes and orders.
-                (_, "k" | "basis_dim" | "basis-dim" | "basisdim") => "6",
-                (_, "centers") => "6",
-                (_, "knots") => "13",
-                (_, "knot_placement" | "knot-placement" | "knotplacement") => "quantile",
-                (_, "degree") => "2",
-                (_, "penalty_order" | "m") => "1",
-                (_, "l" | "l_max" | "l-max" | "lmax" | "max_degree" | "max-degree") => "2",
-                (_, "rank") => "5",
-                (_, "order" | "nullspace_order") => "3",
-                (_, "p" | "power") => "1.5",
-                (_, "nu") => "1.5",
-                (_, "kappa") => "0.5",
-                (_, "alpha") => "0.5",
-                (_, "tau") => "0.5",
-                (_, "s" | "scales") => "3",
-                (_, "length_scale") => "0.4",
-                (_, "chunk_size") => "64",
+                (_, "k" | "basis_dim" | "basis-dim" | "basisdim") => &["6", "9"],
+                (_, "centers") => &["6", "9"],
+                (_, "knots") => &["13", "5"],
+                (_, "knot_placement" | "knot-placement" | "knotplacement") => &["quantile"],
+                (_, "degree") => &["2", "1"],
+                (_, "penalty_order" | "m") => &["1", "3"],
+                (_, "l" | "l_max" | "l-max" | "lmax" | "max_degree" | "max-degree") => &["2", "1"],
+                (_, "rank") => &["5"],
+                (_, "order" | "nullspace_order") => &["3", "0"],
+                (_, "p" | "power") => &["1.5"],
+                (_, "nu") => &["1.5"],
+                (_, "kappa") => &["0.5"],
+                (_, "alpha") => &["0.5"],
+                (_, "tau") => &["0.5"],
+                // `s` is the measure-jet's JET ORDER, admissible in (0, 2)
+                // with 0.0 as the auto sentinel — not a count, and not the
+                // same key as `scales` (the multiscale band count). 1.5 is
+                // `MEASURE_JET_DEFAULT_ORDER_S`, so it would probe the default.
+                (_, "s") => &["1.2"],
+                (_, "scales") => &["3"],
+                (_, "length_scale") => &["0.4"],
+                (_, "chunk_size") => &["64"],
                 // Flags and selectors.
-                // The curvature smooth defaults to NO ridge (#1464), so `false`
-                // there would probe the default.
-                ("curvature", "double_penalty") => "true",
-                (_, "double_penalty") => "false",
-                (_, "identifiability") => "none",
-                (_, "include_intercept") => "true",
-                (_, "scale_dims") => "true",
-                (_, "multiscale") => "true",
-                (_, "learn_length_scale") => "false",
-                (_, "centered") => "false",
-                (_, "smooth_penalty") => "false",
-                (_, "lazy_path") => "true",
-                (_, "radians") => "true",
-                (_, "units") => "radians",
-                (_, "kernel") => "pseudo",
-                (_, "method") => "harmonic",
-                (_, "path" | "pca_basis_path") => "'/nonexistent/pca.npy'",
+                // Both polarities: the default is not the same on every arm
+                // (`sz` defaults the null-space penalty OFF, `fs`/`s()` ON), and
+                // a single polarity would probe the default on half of them.
+                (_, "double_penalty") => &["false", "true"],
+                (_, "identifiability") => &["none"],
+                (_, "include_intercept") => &["true"],
+                (_, "scale_dims") => &["true"],
+                (_, "multiscale") => &["true"],
+                (_, "learn_length_scale") => &["false"],
+                (_, "centered") => &["false"],
+                (_, "smooth_penalty") => &["false"],
+                (_, "lazy_path") => &["true"],
+                (_, "radians") => &["true"],
+                (_, "units") => &["radians"],
+                (_, "kernel") => &["pseudo"],
+                (_, "method") => &["harmonic"],
+                (_, "path" | "pca_basis_path") => &["'/nonexistent/pca.npy'"],
                 other => panic!(
                     "no probe value for {other:?}; add one (or an exemption with a \
                      reason) so the guard stays exhaustive"
@@ -8240,7 +8249,7 @@ mod tests {
         // radial arms; on two identically-scaled axes it is a true no-op and the
         // probe would prove nothing.
         let ds = continuous_dataset(
-            &["y", "x", "z", "zbig", "lat", "lon"],
+            &["y", "x", "z", "zbig", "lat", "lon", "g"],
             (0..240)
                 .map(|i| {
                     let t = i as f64;
@@ -8253,10 +8262,25 @@ mod tests {
                         500.0 * z + 3.0,
                         -80.0 + 160.0 * x,
                         -170.0 + 340.0 * z,
+                        (i % 3) as f64,
                     ]
                 })
                 .collect(),
         );
+        // `g` is the categorical the factor-smooth arm needs; everything else
+        // stays continuous.
+        let ds = {
+            let mut ds = ds;
+            let g = ds
+                .headers
+                .iter()
+                .position(|name| name == "g")
+                .expect("guard dataset carries a `g` column");
+            ds.schema.columns[g].kind = ColumnKindTag::Categorical;
+            ds.schema.columns[g].levels = vec!["a".into(), "b".into(), "c".into()];
+            ds.column_kinds[g] = ColumnKindTag::Categorical;
+            ds
+        };
         let col_map = ds.column_map();
         let policy = gam_runtime::resource::ResourcePolicy::default_library();
         let build = |formula: &str| -> Result<String, String> {
@@ -8308,7 +8332,14 @@ mod tests {
             ("curvature", "curv(x, zbig", CURVATURE_SMOOTH_OPTION_KEYS),
             ("measurejet", "mjs(x, zbig", MEASURE_JET_SMOOTH_OPTION_KEYS),
             ("tensor", "te(x, z", TENSOR_SMOOTH_OPTION_KEYS),
+            ("fs", "s(x, g, bs='fs'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
+            ("sz", "s(x, g, bs='sz'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
+            ("re", "s(x, g, bs='re'", SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS),
         ];
+        // `pca(...)` is the one arm not swept here: half its options name an
+        // on-disk basis file (`path`, `pca_basis_path`, `lazy_path`), so probing
+        // them means writing fixtures rather than building a term, which belongs
+        // in that path's own integration tests.
 
         // Options that are accepted and inert TODAY, each with what is actually
         // wrong. They are expected failures, so the guard stays green while
@@ -8317,12 +8348,75 @@ mod tests {
         // DSL validates and then throws away — found by this guard the first
         // time it ran with teeth. The reason strings ARE the bug reports; run
         // this test with an entry deleted to reproduce any one of them.
-        // The ratchet is EMPTY: every option this guard found accepted-and-inert
-        // when it first ran with teeth has since been wired up, refused, or
-        // exempted in `structurally_inert` with a reason. Keep it that way —
-        // an entry added here is a defect being deferred, and needs a reason
-        // saying what is actually wrong.
-        let known_inert: &[(&str, &str)] = &[];
+        // #2791, the whole factor-smooth arm: `fs`, `sz` and `re` share ONE
+        // whitelist (`SHAPE_CONSTRAINED_SMOOTH_OPTION_KEYS`) while honouring
+        // three different subsets of it. Listed here in the commit that first
+        // swept the arm; the fixes that follow delete these rows.
+        let known_inert: &[(&str, &str)] = &[
+            (
+                "y ~ s(x, g, bs='fs', m=3)",
+                "#2791: `m` is stored as `Fs { m_null_penalty_orders }` and read only as \
+                 the boolean gate `max(..) >= 1`, so every value >= 1 is the default model. \
+                 Everywhere else (and in mgcv) `m` is the marginal penalty order.",
+            ),
+            (
+                "y ~ s(x, g, bs='fs', double_penalty=true)",
+                "#2791: `build_factor_smooth` overwrites `marginal.double_penalty = false` \
+                 whenever the per-dimension null path runs (always, at the default `m`) and \
+                 then adds the null penalties unconditionally, so the flag selects nothing \
+                 in either direction.",
+            ),
+            (
+                "y ~ s(x, g, bs='sz', m=3)",
+                "#2791: `Sz` carries no `m` field at all, so the key is dropped on the \
+                 floor; `penalty_order=` on the same term genuinely moves the penalty set.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', k=9)",
+                "#2791: `bs='re'` is a PARAMETRIC random intercept+slope. The built \
+                 marginal design is discarded and replaced by `[1, x - c]`, so no \
+                 basis-shaping option can reach the model.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', basis_dim=9)",
+                "#2791: `k` alias; see the `k=9` row.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', basisdim=9)",
+                "#2791: `k` alias; see the `k=9` row.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', knots=5)",
+                "#2791: the `re` marginal has zero internal knots by construction.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', knot_placement=quantile)",
+                "#2791: no internal knots to place.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', knotplacement=quantile)",
+                "#2791: `knot_placement` alias; see the previous row.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', degree=1)",
+                "#2791: the arm forces `degree = 1` and the build then discards the \
+                 B-spline design entirely.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', penalty_order=3)",
+                "#2791: the marginal wiggliness penalty is replaced by one identity ridge \
+                 per parametric coordinate, so no difference order survives.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', m=3)",
+                "#2791: `penalty_order` alias; see the previous row.",
+            ),
+            (
+                "y ~ s(x, g, bs='re', double_penalty=true)",
+                "#2791: the `re` ridge is unconditional and already covers every \
+                 coordinate, so there is no null space left for a second penalty.",
+            ),
+        ];
 
         let mut inert = Vec::<String>::new();
         let mut honoured = 0usize;
@@ -8336,13 +8430,30 @@ mod tests {
                 if structurally_inert(kind, key).is_some() {
                     continue;
                 }
-                let formula = format!("y ~ {term}, {key}={})", probe(kind, key));
-                match build(&formula) {
-                    // Refused is a fine outcome: the option is not silently
-                    // dropped, which is the whole property under test.
-                    Err(_) => refused += 1,
-                    Ok(spec) if spec != baseline => honoured += 1,
-                    Ok(_) => inert.push(formula),
+                let mut changed_any = false;
+                let mut accepted_any = false;
+                let mut last_formula = String::new();
+                for value in probe(kind, key) {
+                    let formula = format!("y ~ {term}, {key}={value})");
+                    match build(&formula) {
+                        // Refused is a fine outcome: the option is not silently
+                        // dropped, which is the whole property under test.
+                        Err(_) => {}
+                        Ok(spec) => {
+                            accepted_any = true;
+                            last_formula = formula;
+                            if spec != baseline {
+                                changed_any = true;
+                            }
+                        }
+                    }
+                }
+                if changed_any {
+                    honoured += 1;
+                } else if !accepted_any {
+                    refused += 1;
+                } else {
+                    inert.push(last_formula);
                 }
             }
         }
