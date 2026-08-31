@@ -3516,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "gam"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "ad_trait",
  "approx",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "gam-cli"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "clap",
  "comfy-table",
@@ -3586,7 +3586,7 @@ dependencies = [
 
 [[package]]
 name = "gam-config"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "gam-gpu",
  "gam-inference",
@@ -3600,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "gam-custom-family"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "faer",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "gam-inference"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "cudarc",
@@ -3747,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "gam-model-kernels"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "gam-linalg",
  "gam-math",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "gam-models"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "csv",
@@ -3804,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "gam-predict"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "faer",
  "gam-data",
@@ -3844,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "gam-pyffi"
-version = "0.1.262"
+version = "0.1.263"
 dependencies = [
  "arrow",
  "csv",
@@ -3867,7 +3867,7 @@ dependencies = [
 
 [[package]]
 name = "gam-report"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "serde_json",
 ]
@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "gam-sae"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "cudarc",
@@ -3928,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "gam-solve"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "cudarc",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "gam-terms"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "cudarc",
@@ -3999,7 +3999,7 @@ dependencies = [
 
 [[package]]
 name = "gam-test-support"
-version = "0.3.152"
+version = "0.3.153"
 dependencies = [
  "approx",
  "csv",

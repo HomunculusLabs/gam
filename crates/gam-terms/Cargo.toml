@@ -1,6 +1,6 @@
 [package]
 name = "gam-terms"
-version = "0.3.152"
+version = "0.3.153"
 edition = "2024"
 description = "Smooth-term basis construction and penalty assembly for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"

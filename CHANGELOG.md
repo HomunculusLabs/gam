@@ -1,3 +1,184 @@
+## v0.3.153 — gam 0.3.153 / gamfit 0.1.263 (2026-08-30)
+
+The first release since `v0.3.152` (2026-08-23), one week later and much
+narrower. It finishes the basis-adequacy diagnostic that release shipped —
+which turned out not to run on ordinary 1-D smooths at all — and closes a
+cluster of documented smooth options that were accepted and then did nothing.
+
+### Documented options that were accepted and inert (#2781, #2782, #2783)
+
+Three separate bugs with one shape. `validate_known_options` answers *"is this
+key spelled right?"*, and each option was listed in its arm's whitelist — which
+is exactly what stopped the unknown-option refusal from firing — and then never
+read by that arm. The result in each case was a bit-identical fit and no
+warning.
+
+- **A declared period now makes its axis periodic (#2781).** `period=`,
+  `periods=`, `period_start=`/`period_end=`, `origin=` and `cyclic=` were read
+  only *inside* the branch that `periodic=`/`bc=periodic` opens, so
+  `s(t, period=24)` was bit-identical to `s(t)`: the caller asked for a cyclic
+  smooth, got an aperiodic one with a seam discontinuity across the wrap, and
+  was told nothing. A period is not a property an aperiodic basis has, so
+  declaring one IS the periodicity declaration — on the 1-D B-spline arm, the
+  tensor arm and the radial (`matern`/`thinplate`/`duchon`) arms alike. The
+  declarations that cannot be honoured are refused by name instead: a bare
+  scalar `period=` on a multi-margin tensor (it does not say which margin),
+  `origin=` with no period to be the origin of, `period_start=`/`period_end=`
+  where there is no per-margin form, `periodic=true` on a `d ≥ 2` radial smooth
+  (which named no axis), and `periodic=false` beside a period, which is a
+  contradiction rather than a precedence question.
+- **`te()`/`ti()` honour per-margin `degree=`, `penalty_order=` and
+  `knot_placement=` (#2782).** The default tensor margin is a natural cubic
+  regression spline, which IS cubic and IS second-order — so the arm parsed both
+  options, attached them to the margin spec, and then took a branch that reads
+  neither. A margin is now realized as `cr` exactly when that is the object the
+  caller asked for; any explicit request the `cr` basis structurally cannot
+  carry routes that margin to the B-spline branch, where the request is read.
+  Naming the default (`degree=3`, `penalty_order=2`) stays a no-op, because an
+  option may not change the fit by being mentioned. In the same mechanism:
+  list forms (`degree=[1,3]`) were parsed with a bare-integer reader and
+  silently fell back to the default; `knot_placement=uniform` was collapsed onto
+  "unset" and returned quantile knots; and a scalar `bc=periodic` on a tensor
+  was accepted and then dropped by a length guard, building an aperiodic tensor.
+- **`s(x, identifiability=...)` is parsed and validated (#2783).** Every value,
+  `totally_bogus` included, was accepted and inert on both 1-D B-spline arms
+  while `te`/`matern`/`thinplate`/`duchon` all honoured the same option and
+  rejected bad tokens. It is now read, with the sibling vocabulary, and the three
+  combinations that cannot hold at once are refused rather than silently
+  resolved. Making it live exposed a second defect: the cyclic builder suppressed
+  its null-function ridge for *every* cyclic basis, on a #874 argument that is
+  true of the CONSTRAINED chart only — under sum-to-zero the ridge is identically
+  zero and its smoothing parameter unidentified. Uncentered, the constant
+  survives in the basis, had nothing penalizing it, and the pre-fit rank audit
+  refused the model outright. The ridge is now assembled like every other 1-D
+  basis's and collapsed where the #874 property actually holds, so a centered
+  cyclic fit is bit-identical and an uncentered one is fittable.
+
+**A ratchet, so the shape cannot come back.** A guard sweeps 174 probes: for
+every smooth kind, each whitelisted option is set to a probe value and the built
+DESIGN and penalty blocks must change, or the formula must be refused. Silence
+is the only disallowed outcome. It fingerprints the built design rather than the
+spec — which is precisely what #2782 needed, since `degree=` *was* stored on the
+spec and then ignored by the builder — and it pins its own coverage so a future
+parse error cannot turn the sweep into a vacuous error-path test. Run with
+teeth, it found 33 more options of the same shape — and the ratchet is now
+EMPTY, because all 33 were carried to a resolution in the same pass:
+
+- **Wired up.** `s(x, boundary=...)`, a whitelisted third spelling of `bc=` that
+  the endpoint parser never read. `duchon(p=...)` and `duchon(nullspace_order=...)`,
+  whitelisted aliases of `power=`/`order=` that neither parser read. And
+  `duchon(order=...)` itself, which the arm discarded whenever no `power=`
+  accompanied it — it resolved the pair as
+  `CubicStructuralDefault => duchon_cubic_default(d)`, taking the null-space
+  ORDER from the default too, contradicting that module's own contract that
+  "an explicit `order=0` still selects the constant-only space". The default now
+  supplies only the spectral power. `order=1` *is* the default null space, so
+  every shipped `duchon(..., order=1)` formula is bit-identical across the change.
+- **Refused, with the reason.** `side=`, which says which endpoint a boundary
+  condition applies to, and the seven anchor-value spellings, which say what an
+  anchored endpoint is pinned to — each meaningless without the condition it
+  qualifies, each previously parsed and dropped, so `s(x, bc_left=anchored,
+  anchor=2.5)` pinned at 2.5 while `s(x, anchor=2.5)` pinned nothing. And
+  `thinplate(include_intercept=...)`, which appends a constant column to a kernel
+  basis that has no polynomial null space of its own — which is what the Matérn
+  basis is and what a thin-plate basis is not, since a TPS ships its polynomial
+  null space by construction, so the appended column would be exactly collinear.
+- **Exempted, each with what makes it structurally inert.** `matern`'s
+  `double_penalty`, resolved by the fit-time bootstrap-κ spectral test rather
+  than the cold build (gam#787/#860); `curv`'s, whose RKHS Gram is full-rank PD
+  so the ridge is identically zero in both directions (#1464) — which is exactly
+  why that arm defaults it off; `thinplate`'s `scale_dims`, documented as a
+  derivative-PLANNING hint for that family and not an anisotropy knob; `mjs`'s
+  `tau` and `learn_length_scale`, Ψ-learning switches read during the fit; and
+  `cyclic`'s `double_penalty`, which has no second penalty to switch off once the
+  periodic sum-to-zero chart has removed the only null direction (#874).
+
+### The basis-adequacy check now runs on every smooth it claims to (#2788, #2789)
+
+`docs/diagnostics.md` says the lack-of-fit test is "what every fit now measures
+for itself". For a 1-D `s()` 18 or more coefficient columns wide it measured
+nothing: `provenance = "statistic_unavailable"` and `p_value = None`, on every
+dataset and at every `n`. Below that cliff it did report, but its reference
+degrees of freedom fell as its alternative got WIDER — 8 directions against a
+36-column alternative, 1 against a 68-column one — and a smooth capturing 4% of
+the function it was asked to model was reported adequate at `p = 0.63`.
+
+**One root cause, and it was a denominator.** A direction of the residualized
+enrichment `V = Z̃ᵀW_F Z̃` counted as estimable when its eigenvalue cleared
+`1e-9 × max_j (ZᵀW_F Z)_jj` — one bar, shared across the whole alternative. The
+residual spectrum of a smooth radial kernel is a Karhunen–Loève tail: it decays
+geometrically, with no gap anywhere for an absolute threshold to sit in, and it
+decays FASTER the more centers the alternative has, while the shared scale grows
+with them. So the floor truncated harder the wider — and therefore the more
+informative — the alternative became, and past 18 columns it truncated
+everything.
+
+**What replaces it is a pure number.** The estimable directions are the
+principal angles between the enrichment and the fitted design: the eigenvalues
+`ν` of the generalized pair `(V, E)` with `E = ZᵀW_F Z`, which are `sin²` of
+those angles and live in `[0, 1]`. A direction the design cannot represent keeps
+`ν ≈ 1` however small its absolute residual energy is; one the design spans
+exactly keeps `(ε·cond(X))²`, roundoff over signal. The only other truncation is
+the ordinary numerical rank of `E` itself — the directions the alternative does
+not realize in double precision, which cannot be a denominator.
+
+Measured on the issue's own ladder (`y = sin(30πx) + N(0, 0.1)` at `n = 4000`,
+one seed; `R²` is the fitted curve against the noiseless truth):
+
+```text
+                                     before                after
+  k    k'   alt. cols     R²      d.f.  p-value      d.f.  p-value
+ 10     9       36       0.026      7   1.6e-06        29    0
+ 12    11       44       0.031      6   8.4e-05        31    0
+ 14    13       52       0.039      5   4.7e-03        32    0
+ 16    15       60       0.043      3   6.0e-02        32    0
+ 18    17       68       0.040      1   6.2e-01        32    0
+ 20    19       76       0.031      —   not measured   33    0
+ 25    24       96       0.066      —   not measured   33    0
+ 30    29      116       0.374      —   not measured   32    0
+ 40    39      156       0.961      —   not measured   32    0
+```
+
+**It did not buy that power with size.** On an adequate fixture
+(`y = sin(2πx) + N(0, 0.3)`, `n = 2000`) the reported p-values are uniform by
+Kolmogorov–Smirnov at every width tested — `k = 10` over 1200 replicates
+(KS 0.034 against a 5% critical value of 0.039), `k = 20` and `k = 40` over 400
+each — and the statistic's own moment identity holds: `E[T/r] = 1.009`, `1.007`
+and `1.009` against the `1` an exactly-scaled score statistic has. Neither
+`k = 20` nor `k = 40` reported anything at all before this release.
+
+**And it still says "adequate".** On the 15-cycle fixture above, widening the
+basis until it reaches the truth walks the verdict back: `p = 0` at
+`R² = 0.9615`, `1.4e-3` at `0.9994`, `0.24` at `0.9996`, `0.58` at `k = 120`.
+
+### Also in this release
+
+- **The HTML report shows basis adequacy (#2774).** `model.report()` gains a
+  `Basis Adequacy` card between Diagnostics and the convergence headline,
+  carrying `k'`, the joint null dimension, EDF, the alternative's degrees of
+  freedom, the statistic, the p-value and the provenance. A failing term is
+  marked by bolding the p-value cell rather than by a separate verdict column,
+  so the number and the judgement cannot disagree; a term with no verdict prints
+  its provenance rather than a blank cell, because "adequate" and "not measured"
+  are different states.
+- **The check costs ~1% of a fit instead of 27% (#2774).** It reads the design
+  in row chunks through `DesignMatrix::try_row_chunk` — so there is no size and
+  no design representation at which it goes dark, and `DESIGN_BYTE_BUDGET` and
+  the `design_not_materializable` provenance are gone — and it is computed on at
+  most 50 000 rows. That cap is not an approximation: the identities the
+  statistic rests on are properties of the SELECTED sub-design, so the reference
+  law is unchanged and the only thing a cap costs is non-centrality, which this
+  test has in surplus.
+- **The rustdoc gate is green for all 24 crates.** `[lints.rust] warnings =
+  "deny"` reaches rustdoc as well as rustc, so `rustdoc::private_intra_doc_links`
+  was a hard error and 31 of them had accumulated across six crates — invisible
+  to `cargo build` and `cargo test`, and enough that no crate documented at all.
+  Each is now plain code formatting rather than a link that renders as a
+  hyperlink and resolves to nothing.
+- **`docs/formulas.md`** documents the `identifiability=` vocabulary, the tensor
+  option table's real defaults, and — per smooth kind, because they differ —
+  which tokens each family actually accepts.
+
 ## v0.3.152 — gam 0.3.152 / gamfit 0.1.262 (2026-08-23)
 
 The first release since `v0.3.151` (2026-07-26). Four weeks of root-cause work

@@ -121,7 +121,7 @@ any fixed factor, a level that never appeared in training is a schema mismatch:
 `predict` raises and `check()` reports it, rather than silently returning the
 factor's centering point (#2137).
 
-## Univariate smooths
+## Univariate smooths {#univariate-smooths}
 
 ```
 y ~ s(x)                    # P-spline (B-spline + difference penalty)
@@ -155,6 +155,29 @@ Boundary conditions are available for 1-D P-spline smooths. They are useful for 
 The 1-D B-spline path accepts these options plus `periodic`, `period`,
 `periods`, `period_start`, `period_end`, `origin`, `identifiability`.
 
+`identifiability=` selects the smooth's own gauge. On the 1-D B-spline path —
+`s()` and `cyclic()` — and on `matern()`, the vocabulary is:
+
+| Value | Meaning |
+| --- | --- |
+| `sum_tozero` (aliases `centered`, `sum-to-zero`) | Default. Center the smooth so it cannot compete with the global intercept. |
+| `none` | Keep the unconstrained basis columns. The smooth then spans the constant, which is aliased with the intercept; the double penalty's null-function ridge is what keeps the fit identified, so `double_penalty` must stay on. |
+| `linear` (alias `remove_linear_trend`) | Remove the constant *and* linear directions, so the smooth carries only curvature and a separate parametric `x` term is free to take the slope. |
+
+Three combinations are refused rather than silently resolved: an anchored
+endpoint already fixes the smooth's level, so it cannot also be centered
+(use `identifiability='none'`, which is what an anchored smooth defaults to);
+and `linear` needs open-knot B-spline geometry, so it is not available on a
+periodic basis (a linear trend is not periodic) or on `bs='cr'`/`'cs'`
+(a natural cubic regression basis is indexed by values at knots, not by a
+B-spline coefficient chart).
+
+The vocabulary is not identical on every smooth kind, and each one refuses a
+token it does not know. `te()`/`ti()` take `none`, `sum_tozero` and
+`marginal_sum_tozero`; `thinplate()` / multivariate `s(x1, x2, ...)`,
+`duchon()` and the other radial smooths take `none` and
+`orthogonal_to_parametric`.
+
 `cyclic(x, ...)` (aliases `cc`, `cp`) is shorthand for a periodic 1-D
 B-spline. It accepts the same period declaration two equivalent ways: a
 period length via `period=` (with an optional `origin=` for the domain
@@ -185,8 +208,14 @@ y ~ s(x, bc_left=anchored, anchor_left=0)  # endpoint value 0 and slope 0
 y ~ s(x, start_bc=clamped, end_bc=anchored, anchor_right=0)
 ```
 
-Use `s(x, bc=clamped)` for the boundary-conditioned form. Per-side
+Use `s(x, bc=clamped)` for the boundary-conditioned form (`boundary=` and
+`boundary_conditions=` are accepted spellings of the same option). Per-side
 overrides are read directly by the smooth builder.
+
+`side=` says *which* endpoint the global `bc=` applies to, and `anchor=` (with
+its per-side spellings) says *what* an anchored endpoint is pinned to. Neither
+means anything alone, so each is rejected without the condition it qualifies
+rather than silently ignored.
 
 ## Multivariate smooths
 
@@ -210,8 +239,12 @@ Radial-basis surface smooth with thin-plate kernel.
 | `length_scale` | `1.0` | Global length-scale init. |
 | `double_penalty` | `true` | Ridge + main penalty. |
 | `scale_dims` | `false` | Derivative-planning hint; inputs are automatically standardized. |
-| `include_intercept` | `false` | Append a constant column. |
-| `by`, `identifiability` | — | See common options above. |
+| `by`, `identifiability` | — | `identifiability` takes `none` or `orthogonal_to_parametric`; see [univariate smooths](#univariate-smooths). |
+
+`include_intercept` is a Matérn option and is rejected here: the thin-plate
+basis already spans its polynomial null space (the constant and linear terms),
+so an appended constant column would be exactly collinear with one already in
+the span.
 
 ### Matérn (`matern`)
 
@@ -252,12 +285,20 @@ zero (recover the null by default; opt into overfitting). Scale-free unless
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `order` | `1` (Linear, affine null space) | Polynomial nullspace order `p`. Polynomial block has `C(d + p, d)` columns (`p=0` → constant only, `p=1` (Linear) → `d+1` columns, `p=2` → `(d+1)(d+2)/2`). |
-| `power` | cubic default `s = (d−1)/2` | Riesz fractional smoothness `s`. The default gives `φ(r)=r³` in every dimension; an explicit value (e.g. `power=0` → `r²·log r` thin-plate in even `d`) is honored verbatim. |
+| `order` (alias `nullspace_order`) | `1` (Linear, affine null space) | Polynomial nullspace order `p`. Polynomial block has `C(d + p, d)` columns (`p=0` → constant only, `p=1` (Linear) → `d+1` columns, `p=2` → `(d+1)(d+2)/2`). Honoured whether or not `power` is also given. |
+| `power` (alias `p`) | cubic default `s = (d−1)/2` | Riesz fractional smoothness `s`. The default gives `φ(r)=r³` in every dimension; an explicit value (e.g. `power=0` → `r²·log r` thin-plate in even `d`) is honored verbatim. |
 | `centers` (`k`, `basis_dim`) | auto | Number of centres. |
 | `length_scale` | none (scale-free) | Optional global scale. Without it, the kernel is pure polyharmonic; with it, the kernel is the hybrid Duchon-Matérn (κ = 1/length_scale). |
 | `scale_dims` | `false` | Per-axis **relevance** (ARD by shrinkage): one gradient penalty `Σ(∂f/∂x_a)²` per input axis, each its own REML `λ_a`. REML flattens the surface along axes that don't earn their keep — automatic variable relevance via plain penalties. The kernel metric is held fixed at its knot-geometry init (not separately optimized). |
 | `periodic`, `period`, `period_start`, `period_end` | — | 1-D cyclic Duchon (see below). |
+
+Radial smooths follow the same period rule as the rest of the DSL: declaring a
+period makes that axis periodic, so `matern(x, y, period=[2*pi, None])` needs no
+separate `periodic=`. In **one** dimension the wrap can also be left implicit —
+`duchon(x, periodic=true)` takes its period from the closed centre lattice,
+which tiles a full period exactly. In two or more dimensions there is no such
+derivation, so a periodic axis must name its period (`period=[…, None]`), and
+`period_start=` / `period_end=`, which name a single axis's domain, are rejected.
 
 `duchon()` rejects `double_penalty` — the Hilbert-scale penalty (curvature +
 trend + mass + tension) is built in, each block with its own REML smoothing
@@ -359,15 +400,36 @@ takes the same options as `te(...)`.
 | --- | --- | --- |
 | `k` (`basis_dim`) | auto, per margin | Basis dim per margin. Scalar `k=20` applies to every margin; list/tuple forms `k=[k1, k2]`, `k=(k1, k2)`, and `k=c(k1, k2)` set per-margin sizes. Per-margin aliases such as `k_x=12, k_time=8` are also accepted. |
 | `knots` | auto, per margin | Interior knots per margin. List form accepted. |
-| `degree` | 3 | Polynomial degree (all margins). |
-| `penalty_order` | 2 | Difference-penalty order. |
-| `double_penalty` | `false` | Ridge alongside per-margin penalties. |
-| `bc` | none | Per-margin boundary conditions (list form). `periodic` / `cyclic` margins are supported; endpoint constraints such as `clamped` or `anchored` are rejected for tensor margins. |
+| `degree` | 3 | Polynomial degree. Scalar applies to every margin; list form `degree=[1, 3]` sets them per margin. |
+| `penalty_order` | 2 | Difference-penalty order, same scalar/list forms. |
+| `knot_placement` | cr quantile value-knots | `uniform` or `quantile` knot placement for the margins. |
+| `double_penalty` | `true` | Ridge alongside per-margin penalties. |
+| `bc` | none | Per-margin margin kind. A `periodic` / `cyclic` / `cc` token makes that margin wrap; `clamped` / `open` / `natural` / `free` / `none` all mark an ordinary non-periodic margin (`clamped` here is the *clamped knot vector* of an open spline, not a zero-derivative endpoint pin — for that, use a 1-D `s(x, bc=clamped)` term). `anchored` is rejected. A single token applies to every margin; any other length is an error. |
 | `periodic`, `period`, `periods`, `origin`, `origins` | — | Per-margin periodicity (see below). |
-| `by`, `identifiability` | — | See common options above. |
+| `by` | — | See [univariate smooths](#univariate-smooths). |
+| `identifiability` | `sum_tozero` (`te`), `marginal_sum_tozero` (`ti`) | `none`, `sum_tozero`, or `marginal_sum_tozero`. |
 
 `k` and `knots` cannot both be set. Margins requested as a single
 value are broadcast across all margins.
+
+### What the default margin is, and when it changes {#tensor-default-margin}
+
+Following mgcv, an unset `bs=` gives each margin a **natural cubic regression
+spline**: `k` value-knots at data quantiles, penalized by the exact integrated
+squared second derivative. `degree` and `penalty_order` are not adjustable
+properties of that basis — a cubic regression spline *is* cubic and *is*
+second-order — so a margin that asks for anything else is built as a B-spline
+margin instead, which does carry both as free parameters. Concretely, a margin
+leaves the cr basis when the formula sets
+
+* `bs=` to a B-spline family (`ps`, `bs`, `bspline`, `p-spline`) on that margin,
+* `degree` to anything other than 3, or `penalty_order` to anything other than 2,
+* `knot_placement` explicitly (either value),
+* a period on that margin (a wrapping margin is a cyclic B-spline), or
+* `k < 3`, which is below the cr minimum.
+
+Asking for the defaults — `degree=3`, `penalty_order=2` — keeps the cr margin,
+so naming an option never changes a fit by itself.
 
 Examples:
 
@@ -377,7 +439,24 @@ gamfit.fit(df, "y ~ te(space, time, k=(12, 8))")
 gamfit.fit(df, "y ~ te(space, time, k_space=12, k_time=8)")
 gamfit.fit(df, "y ~ te(theta, h, bc=['periodic', 'natural'], period=[2*pi, None], k=5)")
 gamfit.fit(df, "y ~ te(u, v, bc=['periodic', 'periodic'], period=[2*pi, 2*pi], k=5)")
+gamfit.fit(df, "y ~ te(theta, h, periods=[2*pi, None], k=5)")   # the period IS the declaration
+gamfit.fit(df, "y ~ te(x, z, degree=[1, 3], k=5)")              # linear x margin, cubic z margin
 ```
+
+### Declaring a period {#declaring-a-period}
+
+A period is not a property an aperiodic basis has, so declaring one *is* the
+periodicity declaration: `s(t, period=24)` and
+`te(theta, h, periods=[2*pi, None])` wrap on their own, and `periodic=` /
+`bc='periodic'` is a second, redundant spelling of the same fact for the axes it
+names. What is refused rather than honoured, because it names no axis:
+
+* a bare scalar `period=` on a multi-margin tensor (write `periods=[v, None]`,
+  or name the axis with `periodic=<axis>`);
+* `origin=` with no period to be the origin of;
+* `period_start=` / `period_end=` on a tensor, which have no per-margin form
+  (use `periods=` with `origins=`);
+* `periodic=false` alongside a period declaration, which is a contradiction.
 
 ### Picking the right smooth
 
