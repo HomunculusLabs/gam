@@ -2436,7 +2436,8 @@ impl SaeManifoldTerm {
     /// |---|---|---|
     /// | `dense_step_gauge_vectors` (chart orbit) | 7 | **76 170** |
     /// | `joint_decoder_beta_null_directions` | 704 | 0.00003 |
-    /// | `decoder_channel_null_directions` | — | 0.00003 |
+    /// | `decoder_channel_null_directions` (raw) | — | 0.00003 (duchon only; the torus cell was unseedable before `72dda02` — 26 of 392 directions carry live slope, see `tests_channel_null_currency_2720`) |
+    /// | `decoder_channel_null_quotient_directions` (screened) | — | flat by the closed-form screen, `λ·(S B c)[col] ≤ tol` |
     ///
     /// The two kinds of direction are not the same object:
     ///
@@ -2510,22 +2511,185 @@ impl SaeManifoldTerm {
         Ok(residual.iter().map(|v| v * v).sum::<f64>())
     }
 
+    /// The channel-null family **screened for convergence-quotient admission**
+    /// (#2720): same stream as [`Self::decoder_channel_null_directions`], but a
+    /// direction enters the quotient only if the smoothness prior cannot see it
+    /// at the tolerance the accept path itself uses.
+    ///
+    /// The raw stream is admitted on a DATA-FIT test alone — a right-singular
+    /// channel of `B_k` with sub-floor singular value `σ_k` — while the
+    /// flatness a convergence quotient certifies is a PENALIZED-objective
+    /// claim. Along the emitted direction `δβ = e_col ⊗ c` the smoothness
+    /// value `0.5·λ·tr(BᵀSB)` has the exact slope (`tests_channel_null_currency_2720`,
+    /// verified against central differences to ~1e-9 on all 392 torus
+    /// directions):
+    ///
+    /// ```text
+    /// d/dε smoothness = λ_k · (S_k B_k c)[col] = λ_k · σ_k · (S_k u)[col]
+    /// ```
+    ///
+    /// A sub-floor `σ` therefore converts into penalty currency through the
+    /// roughness Gram: the slope vanishes only at `σ = 0` exactly, which the
+    /// relative floor does not require. It is kind-dependent — the torus
+    /// tensor-product roughness `(k² + l²)²` reaches `324` at default `H=3`
+    /// while duchon's `‖S‖₂` stays near `8e-2` — so the landed flatness
+    /// evidence, sampled only on duchon, certified the family in general from
+    /// its flat member.
+    ///
+    /// The screen is computed WITHOUT dividing by `σ_k` (`(S B c)[col]`
+    /// directly), so a denormal singular value cannot amplify roundoff into a
+    /// verdict. A zero `λ_k` admits the whole atom's family, which is correct:
+    /// with the smoothness prior off, those directions are flat for the
+    /// penalized objective. Rejected directions are NOT lost to the solver —
+    /// [`Self::likelihood_flat_block_basis`] still chains the RAW stream, so
+    /// the descent block keeps every direction the quotient drops. That is the
+    /// same division of labor the chart orbit received (`ec18eac`): a
+    /// direction leaves the convergence measure only when the posterior cannot
+    /// see it, and is descended otherwise.
+    pub(crate) fn decoder_channel_null_quotient_directions(
+        &self,
+        penalized_gram_scale: &[f64],
+    ) -> Result<Vec<Array1<f64>>, String> {
+        let k_atoms = self.k_atoms();
+        if penalized_gram_scale.len() != k_atoms {
+            return Err(format!(
+                "decoder_channel_null_quotient_directions: {} smooth scales for {k_atoms} atoms",
+                penalized_gram_scale.len()
+            ));
+        }
+        // The tolerance currency of every convergence quotient in this file:
+        // relative tolerance x iterate scale, the single source of truth the
+        // inner accept gate denominates itself in (`construction_quasi_laplace.rs:937`).
+        let slope_bound = SAE_MANIFOLD_INNER_GRAD_REL_TOL * self.inner_iterate_scale();
+        let p = self.output_dim();
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let border_dim = self.factored_border_dim();
+        let total_len = n * q + border_dim;
+        if p == 0 || border_dim == 0 {
+            return Ok(Vec::new());
+        }
+        let beta_offsets = self.factored_border_offsets();
+        let mut out = Vec::new();
+        for atom_idx in 0..k_atoms {
+            let atom = &self.atoms[atom_idx];
+            // Framed atoms do not emit this family at all (see the raw stream).
+            if atom.decoder_frame.is_some() {
+                continue;
+            }
+            let m = atom.basis_size();
+            if m == 0 {
+                continue;
+            }
+            let lambda = penalized_gram_scale[atom_idx];
+            if !lambda.is_finite() || lambda < 0.0 {
+                return Err(format!(
+                    "decoder_channel_null_quotient_directions: atom {atom_idx} smooth scale must \
+                     be finite and nonnegative, got {lambda}"
+                ));
+            }
+            let (_u, sv, vt_opt) = match atom.decoder_coefficients().svd(false, true) {
+                Ok(parts) => parts,
+                Err(_) => continue,
+            };
+            let Some(vt) = vt_opt else {
+                continue;
+            };
+            let max_sv = sv.iter().fold(0.0_f64, |acc, &v| acc.max(v));
+            let sv_floor = SAE_DECODER_BETA_NULL_RELATIVE_FLOOR.sqrt() * max_sv;
+            let beta_base = n * q + beta_offsets[atom_idx];
+            let s_gram = atom.smooth_penalty();
+            if s_gram.dim() != (m, m) {
+                return Err(format!(
+                    "decoder_channel_null_quotient_directions: atom {atom_idx} penalty shape \
+                     {:?} != ({m}, {m})",
+                    s_gram.dim()
+                ));
+            }
+            for c_idx in 0..vt.nrows() {
+                let realised = c_idx < sv.len() && max_sv > 0.0 && sv[c_idx] > sv_floor;
+                if realised {
+                    continue;
+                }
+                let channel = vt.row(c_idx);
+                if channel.len() != p {
+                    continue;
+                }
+                let norm_sq = channel.iter().map(|v| v * v).sum::<f64>();
+                if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+                    continue;
+                }
+                // `S (B c)` carries every column's slope at once:
+                // slope[col] = lambda * (S B c)[col] — the closed form, without
+                // dividing by the sub-floor sigma.
+                let mut b_c = Array1::<f64>::zeros(m);
+                for row in 0..m {
+                    let mut acc = 0.0_f64;
+                    for out_col in 0..p {
+                        acc += atom.decoder_coefficients()[[row, out_col]] * channel[out_col];
+                    }
+                    b_c[row] = acc;
+                }
+                let mut s_b_c = Array1::<f64>::zeros(m);
+                for row in 0..m {
+                    let mut acc = 0.0_f64;
+                    for col in 0..m {
+                        acc += s_gram[[row, col]] * b_c[col];
+                    }
+                    s_b_c[row] = acc;
+                }
+                for col in 0..m {
+                    let slope = (lambda * s_b_c[col]).abs();
+                    if slope > slope_bound {
+                        // The smoothness prior sees this direction above the
+                        // accept path's own tolerance: it is live posterior
+                        // descent, not gauge freedom. The descent block still
+                        // receives it (raw stream).
+                        continue;
+                    }
+                    let mut dir = Array1::<f64>::zeros(total_len);
+                    for out_col in 0..p {
+                        dir[beta_base + col * p + out_col] = channel[out_col];
+                    }
+                    out.push(dir);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The ORTHONORMAL basis of the span every convergence quotient removes,
     /// and the SINGLE source of truth for it (#2762/#2720).
     ///
     /// Membership is decided by one question — **is the PENALIZED objective flat
-    /// along this direction?** — and both families here answer it structurally
-    /// rather than by measurement at a state: they are machine-null directions
-    /// of the penalized Gram `DᵀD + λS` (basis-column deficiency) and of the
-    /// decoder's realised column span (ambient-channel deficiency). The data fit
-    /// and the smoothness prior are both flat along them by construction, and
-    /// `tests_gauge_posterior_flatness_2720` measures the whole penalized
-    /// objective flat along every one of them to `3e-9`.
+    /// along this direction at the accept path's own tolerance?** The β-null
+    /// family answers it structurally: machine-null directions of the penalized
+    /// Gram `DᵀD + λS` (basis-column deficiency). The channel-null family
+    /// answers it by SCREEN: the raw emission is flat for the data fit alone,
+    /// and the smoothness prior sees it through `λ·(S B c)[col]` — kind-dependent,
+    /// pinned by `tests_channel_null_currency_2720` — so
+    /// [`Self::decoder_channel_null_quotient_directions`] admits only the
+    /// directions whose closed-form slope is within tolerance.
+    /// decoder's realised column span (ambient-channel deficiency). The β-null
+    /// family is flat for both terms by construction; the channel-null family's
+    /// flatness is kind-dependent (see
+    /// [`Self::decoder_channel_null_quotient_directions`]), so it is screened at
+    /// admission rather than assumed. `tests_gauge_posterior_flatness_2720`
+    /// measures the whole penalized objective flat along every ADMITTED
+    /// direction.
     ///
     /// The chart reparametrisation orbit is deliberately NOT here; see
     /// [`Self::quotient_residual_norm_sq`] for the measurement and the modelling
     /// argument. It lives in [`Self::likelihood_flat_block_basis`], which is
     /// what the descent block minimizes over.
+    ///
+    /// The channel-null family is screened here (#2720): a sub-floor
+    /// singular channel is flat for the DATA FIT but the smoothness prior
+    /// sees it through `λ·(S B c)[col]` (kind-dependent — see
+    /// [`Self::decoder_channel_null_quotient_directions`]), so only the
+    /// directions that are flat for the PENALIZED objective at the accept
+    /// path's own tolerance are removed. The raw family stays in
+    /// [`Self::likelihood_flat_block_basis`] for the descent block.
     ///
     /// Order is load-bearing (Gram--Schmidt is order-dependent) and is the
     /// historical one within these two families: the penalized joint decoder
@@ -2537,7 +2701,9 @@ impl SaeManifoldTerm {
         Ok(Self::orthonormalized(
             self.joint_decoder_beta_null_directions(penalized_gram_scale)?
                 .into_iter()
-                .chain(self.decoder_channel_null_directions()?),
+                .chain(self.decoder_channel_null_quotient_directions(
+                    penalized_gram_scale,
+                )?),
         ))
     }
 

@@ -306,3 +306,106 @@ fn smoothness_gram_nullspace_measures_flat_2720() {
          flatness argument (S v = 0) is falsified through the value function"
     );
 }
+
+/// The two-span invariant the #2720 channel-null screen must keep true, stated
+/// as a property of the two spans themselves (#2762's lesson, applied to this
+/// family): every direction the quotient screen DROPS must remain in the
+/// DESCENT block, and on at least one seeded kind the screen must actually
+/// drop something — otherwise this test certifies nothing and the screen's
+/// subject matter has moved.
+///
+/// This is the guard against the failure mode where a future change routes the
+/// descent block through the screen too: live posterior descent would then
+/// vanish from BOTH spans — invisible to the gates AND unreachable by the
+/// movers — which is precisely the #2762 pathology.
+#[test]
+fn screened_channel_null_directions_stay_reachable_by_the_descent_block_2720() {
+    let z = tests_gauge_posterior_flatness_2720::planted_circle_cloud();
+    let mut any_dropped = 0usize;
+    let mut any_kept = 0usize;
+    for &(kind, latent_dim) in tests_gauge_posterior_flatness_2720::GAUGE_SWEEP_KINDS {
+        let term =
+            tests_gauge_posterior_flatness_2720::seeded_term_of_kind(z.view(), kind, latent_dim);
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.0,
+            vec![Array1::<f64>::zeros(term.assignment.coords[0].latent_dim())],
+        );
+        let lambda_smooth = rho
+            .lambda_smooth_vec()
+            .expect("the fixture rho carries one smoothing block per atom");
+        let raw = term.decoder_channel_null_directions().expect("raw stream");
+        if raw.is_empty() {
+            continue;
+        }
+        let screened =
+            term.decoder_channel_null_quotient_directions(&lambda_smooth)
+                .expect("screened stream");
+        let block = term
+            .likelihood_flat_block_basis(&lambda_smooth)
+            .expect("descent block");
+        println!(
+            "[2720-screen] kind={kind} raw={} screened={} block={}",
+            raw.len(),
+            screened.len(),
+            block.len()
+        );
+        // The screen may only remove, never add or mutate: every screened
+        // direction must be recognisable as a raw emission (same support,
+        // same values), and a strict subset on at least one kind.
+        assert!(
+            screened.len() <= raw.len(),
+            "{kind}: the screen emitted {} directions against {} raw — it may only drop, \
+             not add",
+            screened.len(),
+            raw.len()
+        );
+        for direction in &screened {
+            let matches_raw = raw.iter().any(|candidate| {
+                candidate.len() == direction.len()
+                    && candidate
+                        .iter()
+                        .zip(direction.iter())
+                        .all(|(a, b)| (a - b).abs() <= 1.0e-12 * (1.0 + a.abs().max(b.abs())))
+            });
+            assert!(
+                matches_raw,
+                "{kind}: a screened direction is not an element of the raw stream — the \
+                 screen must be a filter, not a constructor"
+            );
+        }
+        any_kept += screened.len();
+        any_dropped += raw.len() - screened.len();
+        // THE invariant: every RAW direction (kept or dropped by the screen)
+        // must lie in the descent block's span, so dropped directions remain
+        // reachable by the movers.
+        for direction in &raw {
+            let mut residual = direction.clone();
+            for basis in &block {
+                let coeff = residual.dot(basis);
+                for i in 0..residual.len() {
+                    residual[i] -= coeff * basis[i];
+                }
+            }
+            let retained = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(
+                retained <= 1.0e-9,
+                "{kind}: a raw channel-null direction is OUTSIDE the descent block \
+                 (residual norm {retained:.6e} of a unit vector). A direction the quotient \
+                 screen dropped would then be unreachable by any mover — the #2762 pathology."
+            );
+        }
+    }
+    assert!(
+        any_dropped > 0,
+        "the screen dropped nothing on any seeded kind: either every kind's channel-null \
+         family is genuinely flat (and this test's subject matter is gone) or the screen \
+         is not running"
+    );
+    assert!(
+        any_kept > 0,
+        "the screen kept nothing on any seeded kind: if every direction is live on every \
+         kind, the raw family has no flat member left and the quotient admission rule \
+         should be re-examined"
+    );
+}
