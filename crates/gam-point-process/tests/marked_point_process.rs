@@ -706,7 +706,10 @@ fn recurrent_event_impulses_drive_later_forecast_risk() {
         forecast_cumulative_incidence(&feedback_model, &landmark, &future, &[0], monte_carlo)
             .unwrap();
 
-    assert_eq!(feedback.cumulative_incidence[[0, 0]], autonomous.cumulative_incidence[[0, 0]]);
+    assert_eq!(
+        feedback.cumulative_incidence[[0, 0]],
+        autonomous.cumulative_incidence[[0, 0]]
+    );
     assert!(
         feedback.cumulative_incidence[[1, 0]] > autonomous.cumulative_incidence[[1, 0]] + 0.1,
         "feedback={}, autonomous={}",

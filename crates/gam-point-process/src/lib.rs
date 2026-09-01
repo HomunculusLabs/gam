@@ -1267,8 +1267,7 @@ pub fn forecast_cumulative_incidence(
     let mut survival_sum: Array1<f64> = Array1::zeros(intervals);
     let mut survival_square_sum: Array1<f64> = Array1::zeros(intervals);
     let mut normals = NormalStream::new(monte_carlo.seed);
-    let mut event_rng =
-        StdRng::seed_from_u64(monte_carlo.seed ^ 0x9e37_79b9_7f4a_7c15_u64);
+    let mut event_rng = StdRng::seed_from_u64(monte_carlo.seed ^ 0x9e37_79b9_7f4a_7c15_u64);
     let log_max_f64 = f64::MAX.ln();
     let log_max_exact_integer = 9_007_199_254_740_992.0_f64.ln();
 
