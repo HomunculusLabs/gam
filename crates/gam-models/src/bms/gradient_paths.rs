@@ -685,8 +685,8 @@ pub(crate) fn signed_probit_neglog_unary_stack(signed_margin: f64, weight: f64) 
 
 /// The OBSERVED slope `b = s·g`. Identity in `g`, exactly as in the survival
 /// family — see `survival::marginal_slope::row_math::rigid_observed_slope` for
-/// why the block's `slope` name is the thing that is wrong here and not the
-/// map (gam#2764).
+/// why the block's former `logslope` name was the thing that was wrong here
+/// and not the map (gam#2764).
 ///
 /// One argument is even shorter on this side. The survival lane carries a score
 /// covariance, so "rescale `z`" is a reparameterisation there and the invariance

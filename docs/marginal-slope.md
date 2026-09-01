@@ -114,7 +114,7 @@ slope surface.
 
 ### A note on the name: `slope_formula` is the SLOPE surface
 
-The keyword says `slope`; the map is the identity. `slope_formula=`
+The block used to be called `logslope`; the map is the identity. `slope_formula=`
 gives the surface `b(x)` that the latent score enters the probit index
 with directly, not its logarithm, and that is deliberate rather than an
 oversight:
@@ -135,9 +135,11 @@ oversight:
   penalty on `log b` would additionally pin the numeric value of `λ̂`; that
   is a statement about units, and it would cost the sign.
 
-The keyword, the CLI flag and the saved-model fields keep the historical
-spelling. Inside the library the function that states the map is called
-`rigid_observed_slope`, because that is what it computes.
+The keyword, the CLI flag and the saved-model fields were renamed to `slope`
+as a deliberately breaking change: no `logslope` alias or persisted fallback
+is retained, so a model saved under the old field names is not read as a
+slope model and must be refitted. Inside the library the function that states
+the map is called `rigid_observed_slope`, because that is what it computes.
 
 ## Letting the slope vary along follow-up (survival)
 
