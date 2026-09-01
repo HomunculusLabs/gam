@@ -249,3 +249,57 @@ fn forecast_integrates_paths_and_preserves_probability_mass() {
     assert!(forecast.cumulative_incidence[[1, 0]] > forecast.cumulative_incidence[[0, 0]]);
     assert!(forecast.survival[1] < forecast.survival[0]);
 }
+
+#[test]
+fn forecast_survival_includes_absorbing_causes_omitted_from_cif_output() {
+    let model = MarkedPointProcessModel {
+        factors: vec![MaternFactor {
+            order: MaternMarkovOrder::Half,
+            marginal_variance: 1.0,
+            length_scale: 2.0,
+        }],
+        mark_names: vec![
+            "disease".to_string(),
+            "encounter".to_string(),
+            "death".to_string(),
+        ],
+        mark_roles: vec![
+            MarkRole::Absorbing,
+            MarkRole::Encounter,
+            MarkRole::Absorbing,
+        ],
+        loadings: array![[0.3], [-0.2], [0.1]],
+        mark_impulses: Array2::zeros((1, 3)),
+    };
+    let landmark = FilteredState {
+        time: 4.0,
+        mean: array![0.1],
+        covariance: array![[0.2]],
+    };
+    let future = [ForecastInterval {
+        duration: 0.75,
+        fixed_log_intensity: array![-1.7, -0.1, -1.2],
+    }];
+    let monte_carlo = ForecastMonteCarlo {
+        trajectories: 2048,
+        seed: 91,
+    };
+    let subset =
+        forecast_cumulative_incidence(&model, &landmark, &future, &[0], monte_carlo).unwrap();
+    let all_causes =
+        forecast_cumulative_incidence(&model, &landmark, &future, &[0, 2], monte_carlo).unwrap();
+
+    assert_abs_diff_eq!(
+        subset.survival[0],
+        all_causes.survival[0],
+        epsilon = 1.0e-15
+    );
+    assert!(subset.survival[0] + subset.cumulative_incidence[[0, 0]] < 1.0);
+    assert_abs_diff_eq!(
+        all_causes.survival[0]
+            + all_causes.cumulative_incidence[[0, 0]]
+            + all_causes.cumulative_incidence[[0, 1]],
+        1.0,
+        epsilon = 2.0e-14
+    );
+}
