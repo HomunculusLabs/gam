@@ -205,7 +205,7 @@ fn sparse_design(dense: &Array2<f64>) -> DesignMatrix {
 }
 
 /// Build an n-row closed-form survival family with empty time/marginal/
-/// logslope blocks (so q0/q1/qd1 come from offsets only). No flex
+/// slope blocks (so q0/q1/qd1 come from offsets only). No flex
 /// deviations are configured, so `log_likelihood_only` takes the
 /// closed-form fast path.
 fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
@@ -237,7 +237,7 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         gaussian_frailty_sd: None,
         family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
         derivative_guard: 1e-6,
-        // Empty time/marginal/logslope designs: `n_rows × 0` so the
+        // Empty time/marginal/slope designs: `n_rows × 0` so the
         // closed-form q geometry is driven entirely by offsets.
         design_entry: DesignMatrix::from(Array2::zeros((n, 0))),
         design_exit: DesignMatrix::from(Array2::zeros((n, 0))),
@@ -246,7 +246,7 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         offset_exit: Arc::new(offset_exit),
         derivative_offset_exit: Arc::new(derivative_offset_exit),
         marginal_design: DesignMatrix::from(Array2::zeros((n, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((n, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((n, 0)))).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -261,7 +261,7 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
 }
 
 #[test]
-fn k1_shared_logslope_uses_cached_arbitrary_variance_932() {
+fn k1_shared_slope_uses_cached_arbitrary_variance_932() {
     let mut family = make_closed_form_test_family(3);
     family.score_covariance =
         ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(array![3.75]).unwrap());
@@ -271,7 +271,7 @@ fn k1_shared_logslope_uses_cached_arbitrary_variance_932() {
         .ones_quadratic_form();
     assert!((cached - 3.75).abs() <= f64::EPSILON);
     for row in 0..family.n {
-        assert_eq!(family.shared_logslope_covariance_scale(row), cached);
+        assert_eq!(family.shared_slope_covariance_scale(row), cached);
     }
 }
 
@@ -307,11 +307,11 @@ fn converged_identifiability_scalars_use_current_vector_geometry_932() {
     let mut family = make_closed_form_test_family(n);
     let design = array![[1.0], [2.0]];
     let offset = array![0.2, -0.1];
-    family.logslope_layout = SlopeTopology::shared()
+    family.slope_layout = SlopeTopology::shared()
         .materialize_identity(DesignMatrix::from(design.clone()), &offset)
         .unwrap();
-    let beta_logslope = array![0.5];
-    let eta_logslope = design.dot(&beta_logslope) + &offset;
+    let beta_slope = array![0.5];
+    let eta_slope = design.dot(&beta_slope) + &offset;
     let states = vec![
         ParameterBlockState {
             beta: Array1::zeros(0),
@@ -322,8 +322,8 @@ fn converged_identifiability_scalars_use_current_vector_geometry_932() {
             eta: Array1::zeros(n),
         },
         ParameterBlockState {
-            beta: beta_logslope,
-            eta: eta_logslope.clone(),
+            beta: beta_slope,
+            eta: eta_slope.clone(),
         },
     ];
 
@@ -342,7 +342,7 @@ fn converged_identifiability_scalars_use_current_vector_geometry_932() {
         assert_eq!(scalars.qd1_i[row], family.derivative_offset_exit[row]);
         assert_eq!(
             scalars.c_i[row],
-            (1.0 + eta_logslope[row] * eta_logslope[row]).sqrt(),
+            (1.0 + eta_slope[row] * eta_slope[row]).sqrt(),
         );
     }
 }
@@ -539,7 +539,7 @@ fn assert_blockwise_matches_joint_principal_blocks(
     let mut block_ranges = vec![
         slices.time.clone(),
         slices.marginal.clone(),
-        slices.logslope.clone(),
+        slices.slope.clone(),
     ];
     if let Some(range) = slices.score_warp.clone() {
         block_ranges.push(range);
@@ -589,7 +589,7 @@ fn test_family(
         offset_exit: Arc::new(Array1::zeros(1)),
         derivative_offset_exit: Arc::new(Array1::from_elem(1, 1e-6)),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 2))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 3)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 3)))).into(),
         score_warp,
         link_dev,
         influence_absorber: None,
@@ -615,7 +615,7 @@ fn validate_spec_rejects_coordinate_cone_without_guard_offset() {
         marginalspec: empty_termspec(),
         marginal_offset: Array1::zeros(2),
         frailty: FrailtySpec::None,
-        logslope_template: SurvivalCovariateTermBlockTemplate::Static,
+        slope_template: SurvivalCovariateTermBlockTemplate::Static,
         derivative_guard: 1e-4,
         baseline_hyper: SurvivalMarginalSlopeBaselineHyperSpec::Linear {
             config: crate::survival::construction::SurvivalBaselineConfig {
@@ -638,9 +638,9 @@ fn validate_spec_rejects_coordinate_cone_without_guard_offset() {
             ..base_time_block()
         },
         timewiggle_block: None,
-        logslopespec: empty_termspec(),
-        logslopespecs: None,
-        logslope_offset: Array1::zeros(2),
+        slopespec: empty_termspec(),
+        slopespecs: None,
+        slope_offset: Array1::zeros(2),
         score_warp: None,
         link_dev: None,
         score_influence_jacobian: None,
@@ -660,7 +660,7 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
     // clear it, so the two cannot drift apart again.
     const LEARNED_SHIFT_GUARD: f64 = 1e-4;
     let spec = SurvivalMarginalSlopeTermSpec {
-        logslope_template: SurvivalCovariateTermBlockTemplate::Static,
+        slope_template: SurvivalCovariateTermBlockTemplate::Static,
         age_entry: array![0.0, 0.0],
         age_exit: array![1.0, 1.0],
         event_target: array![0.0, 1.0],
@@ -703,9 +703,9 @@ fn validate_spec_accepts_learned_gaussian_shift_sigma() {
             ..base_time_block()
         },
         timewiggle_block: None,
-        logslopespec: empty_termspec(),
-        logslopespecs: None,
-        logslope_offset: Array1::zeros(2),
+        slopespec: empty_termspec(),
+        slopespecs: None,
+        slope_offset: Array1::zeros(2),
         score_warp: None,
         link_dev: None,
         score_influence_jacobian: None,
@@ -759,16 +759,16 @@ fn exact_survival_callbacks_lock_the_family_owned_coefficient_chart() {
     let time = TimeBlockJacobian::new(Arc::clone(&one), Arc::clone(&one), Arc::clone(&one));
     let marginal = MarginalBlockJacobian::new(Arc::clone(&one));
     let family = test_family(None, None);
-    let logslope = SlopeBlockJacobian::new(
-        family.logslope_layout.clone(),
+    let slope = SlopeBlockJacobian::new(
+        family.slope_layout.clone(),
         Arc::clone(&family.z),
         family.score_covariance.clone(),
     )
-    .expect("test logslope callback");
+    .expect("test slope callback");
 
     assert!(time.locks_raw_width_reduction());
     assert!(marginal.locks_raw_width_reduction());
-    assert!(logslope.locks_raw_width_reduction());
+    assert!(slope.locks_raw_width_reduction());
 }
 
 // ── Single-source block-layout parity (#428) ─────────────────────────
@@ -799,7 +799,7 @@ fn parity_make_slices(
     };
     let time = take(pt);
     let marginal = take(pm);
-    let logslope = take(pg);
+    let slope = take(pg);
     let score_warp = (ph > 0).then(|| take(ph));
     let link_dev = (pw > 0).then(|| take(pw));
     let influence = (pi > 0).then(|| take(pi));
@@ -807,7 +807,7 @@ fn parity_make_slices(
     BlockSlices {
         time,
         marginal,
-        logslope,
+        slope,
         score_warp,
         link_dev,
         influence,
@@ -875,7 +875,7 @@ fn parity_reference_dense(acc: &BlockHessianAccumulator, sl: &BlockSlices) -> Ar
         .assign(&acc.h_tt);
     out.slice_mut(s![sl.marginal.clone(), sl.marginal.clone()])
         .assign(&acc.h_mm);
-    out.slice_mut(s![sl.logslope.clone(), sl.logslope.clone()])
+    out.slice_mut(s![sl.slope.clone(), sl.slope.clone()])
         .assign(&acc.h_gg);
     if let Some(h) = &sl.score_warp {
         out.slice_mut(s![h.clone(), h.clone()]).assign(&acc.h_hh);
@@ -892,17 +892,17 @@ fn parity_reference_dense(acc: &BlockHessianAccumulator, sl: &BlockSlices) -> Ar
             out.slice_mut(s![c, r]).assign(&m.t());
         };
     place(sl.time.clone(), sl.marginal.clone(), acc.h_tm.view());
-    place(sl.time.clone(), sl.logslope.clone(), acc.h_tg.view());
-    place(sl.marginal.clone(), sl.logslope.clone(), acc.h_mg.view());
+    place(sl.time.clone(), sl.slope.clone(), acc.h_tg.view());
+    place(sl.marginal.clone(), sl.slope.clone(), acc.h_mg.view());
     if let Some(h) = &sl.score_warp {
         place(sl.time.clone(), h.clone(), acc.h_th.view());
         place(sl.marginal.clone(), h.clone(), acc.h_mh.view());
-        place(sl.logslope.clone(), h.clone(), acc.h_gh.view());
+        place(sl.slope.clone(), h.clone(), acc.h_gh.view());
     }
     if let Some(w) = &sl.link_dev {
         place(sl.time.clone(), w.clone(), acc.h_tw.view());
         place(sl.marginal.clone(), w.clone(), acc.h_mw.view());
-        place(sl.logslope.clone(), w.clone(), acc.h_gw.view());
+        place(sl.slope.clone(), w.clone(), acc.h_gw.view());
     }
     if let (Some(h), Some(w)) = (&sl.score_warp, &sl.link_dev) {
         place(h.clone(), w.clone(), acc.h_hw.view());
@@ -910,7 +910,7 @@ fn parity_reference_dense(acc: &BlockHessianAccumulator, sl: &BlockSlices) -> Ar
     if let Some(i) = &sl.influence {
         place(sl.time.clone(), i.clone(), acc.h_ti.view());
         place(sl.marginal.clone(), i.clone(), acc.h_mi.view());
-        place(sl.logslope.clone(), i.clone(), acc.h_gi.view());
+        place(sl.slope.clone(), i.clone(), acc.h_gi.view());
         if let Some(h) = &sl.score_warp {
             place(h.clone(), i.clone(), acc.h_hi.view());
         }
@@ -1056,7 +1056,7 @@ fn exact_flex_row_matches_rigid_closed_form_without_deviations() {
         offset_exit: Arc::new(array![0.4]),
         derivative_offset_exit: Arc::new(array![0.8]),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -1371,7 +1371,7 @@ impl gam_math::jet_tower::RowProgram<4> for SurvivalMarginalSlopeRigidNllProgram
 }
 
 /// Build a rigid K=1 survival marginal-slope family whose entry/exit/
-/// derivative/marginal/logslope designs are all nontrivial dense blocks,
+/// derivative/marginal/slope designs are all nontrivial dense blocks,
 /// so every one of the four primaries `(q0, q1, qd1, g)` is exercised
 /// when the kernel reads its designs. `n` rows, `event` per row.
 fn oracle_rigid_family(
@@ -1407,7 +1407,7 @@ fn oracle_rigid_family(
         offset_exit: Arc::new(Array1::from_shape_fn(n, |r| 0.15 - 0.03 * (r as f64))),
         derivative_offset_exit: Arc::new(Array1::from_elem(n, 0.0)),
         marginal_design: DesignMatrix::from(Array2::zeros((n, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((n, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((n, 0)))).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -1434,7 +1434,7 @@ fn oracle_rigid_family(
 /// the first channel is `d/dt|₀` and the second channel is `d²/dt²|₀` of
 /// every (objective, gradient, Hessian) entry. The beta-drift lowering must
 /// equal a central FD over realizable block-state shifts (marginal-η,
-/// logslope-η, and time-β directions) of the first-channel terms themselves,
+/// slope-η, and time-β directions) of the first-channel terms themselves,
 /// pinning the `OneSeed::eps` wiring end-to-end through the production
 /// helper.
 #[test]
@@ -1562,7 +1562,7 @@ fn rigid_family_direction_terms_match_fd_witness_932() {
             // first-channel terms across the shifted states.
             let probes: [(&str, usize, [f64; 4]); 3] = [
                 ("marginal-eta", 1, [1.0, 1.0, 0.0, 0.0]),
-                ("logslope-eta", 2, [0.0, 0.0, 0.0, 1.0]),
+                ("slope-eta", 2, [0.0, 0.0, 0.0, 1.0]),
                 (
                     "time-beta",
                     0,
@@ -1648,7 +1648,7 @@ fn rigid_row_kernel_agrees_with_jet_tower_program_all_channels() {
     // Mix exact events and right-censored rows; the last two rows push
     // eta into opposite normal-tail regimes while retaining finite truth.
     let event = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-    // logslope eta (g) per row, fed through block 2.
+    // slope eta (g) per row, fed through block 2.
     let g_eta = array![0.2, -0.5, 0.35, -0.15, 0.6, 0.45, -0.55];
     // marginal eta (block 1) — additive index shared by η0 and η1.
     let marginal_eta = array![0.1, -0.2, 0.05, 0.12, -0.08, 6.2, -7.4];
@@ -1682,7 +1682,7 @@ fn rigid_row_kernel_agrees_with_jet_tower_program_all_channels() {
         let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(family.clone(), block_states.clone());
 
         // Build the tower program's primaries exactly as `row_kernel` reads
-        // them (designs · beta_time + offsets + shared marginal/logslope eta).
+        // them (designs · beta_time + offsets + shared marginal/slope eta).
         let mut primaries = Vec::with_capacity(n);
         for row in 0..n {
             let q0 = family.design_entry.dot_row(row, &beta_time)
@@ -1858,7 +1858,7 @@ fn exact_flex_row_value_matches_rigid_with_zero_score_and_link_coefficients() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.6]),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -1947,7 +1947,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
     let link_runtime = test_deviation_runtime();
     // Several fixture rows: events + censored, distinct q-geometry, frailty off
     // (probit scale = 1; the rigid program and the flex path share the closed
-    // form there) and a non-zero logslope g so the c(g) coupling is live.
+    // form there) and a non-zero slope g so the c(g) coupling is live.
     struct Fix {
         event: f64,
         weight: f64,
@@ -2004,7 +2004,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
             offset_exit: Arc::new(array![fix.q1]),
             derivative_offset_exit: Arc::new(array![fix.qd1]),
             marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-            logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+            slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
             score_warp: Some(score_runtime.clone()),
             link_dev: Some(link_runtime.clone()),
             influence_absorber: None,
@@ -2044,7 +2044,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
 
         let primary = flex_primary_slices(&family);
         let p = primary.total;
-        // The four time/marginal/logslope primaries occupy the leading slots.
+        // The four time/marginal/slope primaries occupy the leading slots.
         let block_idx = [primary.q0, primary.q1, primary.qd1, primary.g];
 
         // Independent rigid Tower4 program at the SAME primaries.
@@ -2103,7 +2103,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
                 .row_flex_primary_third_contracted_exact(0, &block_states, &embed(d4))
                 .expect("flex third contracted (tripwire)");
             let rigid = program_third_contracted(&program, 0, d4).expect("rigid third (tripwire)");
-            // (q0, g) cross block — the marginal↔logslope coupling.
+            // (q0, g) cross block — the marginal↔slope coupling.
             let want = rigid[0][3];
             let scale = want.abs().max(1.0);
             if want.abs() > 1e-6 {
@@ -2202,7 +2202,7 @@ fn flex_contracted_tower_matches_independent_fd_witness_nonzero_deviation() {
         offset_exit: Arc::new(array![q1v]),
         derivative_offset_exit: Arc::new(array![qd1v]),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -2582,7 +2582,7 @@ fn flex_contracted_tower_matches_independent_fd_witness_nonzero_deviation() {
         );
     }
     // ── Third order: production D_dir H[u,v] vs witness ∂³ along (u,v,dir) ───
-    // Contract along the logslope axis g; check cross blocks touching the
+    // Contract along the slope axis g; check cross blocks touching the
     // deviation coordinates (the channels Arm A cannot reach).
     let third = family
         .row_flex_primary_third_contracted_exact(0, &block_states, &unit(gi))
@@ -2645,7 +2645,7 @@ fn link_flex_family_supports_second_order_exact_outer_path() {
         offset_exit: Arc::new(Array1::zeros(1)),
         derivative_offset_exit: Arc::new(Array1::ones(1)),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -2689,7 +2689,7 @@ fn timewiggle_scorewarp_family_supports_second_order_exact_outer_path() {
         offset_exit: Arc::new(Array1::zeros(1)),
         derivative_offset_exit: Arc::new(Array1::ones(1)),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -2844,7 +2844,7 @@ fn survival_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
         offset_exit: Arc::new(Array1::zeros(n)),
         derivative_offset_exit: Arc::new(Array1::ones(n)),
         marginal_design: DesignMatrix::from(Array2::zeros((n, p_marg))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((n, p_log)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((n, p_log)))).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -2891,7 +2891,7 @@ fn exact_outer_row_work_gate_keeps_large_timewiggle_link_models_under_linear_fle
         offset_exit: Arc::new(Array1::zeros(1)),
         derivative_offset_exit: Arc::new(Array1::ones(1)),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 20))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 20)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 20)))).into(),
         score_warp: None,
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -2936,7 +2936,7 @@ fn timewiggle_scorewarp_beta_hessian_directional_derivative_returns_finite_matri
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -2971,7 +2971,7 @@ fn timewiggle_scorewarp_beta_hessian_directional_derivative_returns_finite_matri
     d_beta_flat[slices.time.start] = 0.07;
     d_beta_flat[slices.time.start + 1] = -0.03;
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
     if let Some(h_range) = slices.score_warp.as_ref() {
         d_beta_flat[h_range.start] = 0.02;
     }
@@ -3007,7 +3007,7 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -3043,10 +3043,10 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
     d_beta_u[slices.time.start] = 0.07;
     d_beta_u[slices.time.start + 1] = -0.03;
     d_beta_u[slices.marginal.start] = 0.05;
-    d_beta_u[slices.logslope.start] = -0.04;
+    d_beta_u[slices.slope.start] = -0.04;
     d_beta_v[slices.time.start + 2] = 0.06;
     d_beta_v[slices.marginal.start + 1] = -0.02;
-    d_beta_v[slices.logslope.start] = 0.03;
+    d_beta_v[slices.slope.start] = 0.03;
     if let Some(h_range) = slices.score_warp.as_ref() {
         d_beta_u[h_range.start] = 0.02;
         d_beta_v[h_range.start] = -0.01;
@@ -3070,7 +3070,7 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
     let score_runtime = test_deviation_runtime();
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2], [0.1, 0.6]];
-    let logslope_design = array![[1.0], [0.5]];
+    let slope_design = array![[1.0], [0.5]];
     let family = SurvivalMarginalSlopeFamily {
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
@@ -3087,7 +3087,7 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
         offset_exit: Arc::new(array![0.15, 0.08]),
         derivative_offset_exit: Arc::new(array![0.9, 1.1]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3100,7 +3100,7 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
         auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let marginal_beta = array![0.35, -0.1];
-    let logslope_beta = array![0.2];
+    let slope_beta = array![0.2];
     let block_states = vec![
         ParameterBlockState {
             beta: array![0.0],
@@ -3111,8 +3111,8 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -3133,7 +3133,7 @@ fn link_flex_marginal_psi_terms_return_finite_joint_terms() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_beta = array![0.2];
+    let slope_beta = array![0.2];
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
         event: Arc::new(array![1.0]),
@@ -3150,7 +3150,7 @@ fn link_flex_marginal_psi_terms_return_finite_joint_terms() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3172,8 +3172,8 @@ fn link_flex_marginal_psi_terms_return_finite_joint_terms() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_beta.clone(),
+            beta: slope_beta.clone(),
+            eta: slope_beta.clone(),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -3215,8 +3215,8 @@ fn link_flex_marginal_psi_second_order_returns_finite_joint_terms() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.2, -0.3]];
-    let logslope_beta = array![0.2, -0.05];
+    let slope_design = array![[1.2, -0.3]];
+    let slope_beta = array![0.2, -0.05];
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
         event: Arc::new(array![1.0]),
@@ -3233,7 +3233,7 @@ fn link_flex_marginal_psi_second_order_returns_finite_joint_terms() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3255,8 +3255,8 @@ fn link_flex_marginal_psi_second_order_returns_finite_joint_terms() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -3323,7 +3323,7 @@ fn link_flex_marginal_psi_hessian_directional_returns_finite_matrix() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3374,7 +3374,7 @@ fn link_flex_marginal_psi_hessian_directional_returns_finite_matrix() {
     let mut d_beta_flat = Array1::zeros(slices.total);
     d_beta_flat[slices.time.start] = 0.07;
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
     if let Some(h_range) = slices.score_warp.as_ref() {
         d_beta_flat[h_range.start] = 0.02;
     }
@@ -3413,7 +3413,7 @@ fn timewiggle_marginal_psi_terms_return_finite_joint_terms() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -3473,7 +3473,7 @@ fn timewiggle_blockwise_exact_newton_matches_joint_principal_blocks() {
     let score_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2], [0.1, 0.6]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_beta = array![0.2];
+    let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 2,
@@ -3500,7 +3500,7 @@ fn timewiggle_blockwise_exact_newton_matches_joint_principal_blocks() {
         offset_exit: Arc::new(array![0.15, 0.08]),
         derivative_offset_exit: Arc::new(array![0.9, 1.1]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0], [0.5]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0], [0.5]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -3522,7 +3522,7 @@ fn timewiggle_blockwise_exact_newton_matches_joint_principal_blocks() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
+            beta: slope_beta.clone(),
             eta: array![0.2, 0.1],
         },
         ParameterBlockState {
@@ -3540,8 +3540,8 @@ fn flex_timewiggle_fast_gradient_matches_dense_joint_gradient() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.0]];
-    let logslope_beta = array![0.2];
+    let slope_design = array![[1.0]];
+    let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
@@ -3559,7 +3559,7 @@ fn flex_timewiggle_fast_gradient_matches_dense_joint_gradient() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3581,8 +3581,8 @@ fn flex_timewiggle_fast_gradient_matches_dense_joint_gradient() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -3634,8 +3634,8 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.0]];
-    let logslope_beta = array![0.2];
+    let slope_design = array![[1.0]];
+    let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
@@ -3653,7 +3653,7 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3672,7 +3672,7 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
 
     // Base block states. Per-block coefficient consumption (verified against the
     // geometry / dense entry): the TIME block (0) feeds `q` through its design
-    // directly (its `eta` is unused); the MARGINAL (1) and LOGSLOPE (2) blocks
+    // directly (its `eta` is unused); the MARGINAL (1) and SLOPE (2) blocks
     // feed through their `eta = design·beta`; the SCORE-WARP (3) and LINK-DEV
     // (4) deviation blocks feed through their `beta` directly. A faithful
     // perturbation therefore rebuilds `eta = design·beta` for blocks 1 and 2.
@@ -3686,8 +3686,8 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             // score-warp block width is `basis_dim * score_dim`; with a
@@ -3723,8 +3723,8 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
         states[0].beta = flat.slice(s![slices.time.clone()]).to_owned();
         states[1].beta = flat.slice(s![slices.marginal.clone()]).to_owned();
         states[1].eta = marginal_design.dot(&states[1].beta);
-        states[2].beta = flat.slice(s![slices.logslope.clone()]).to_owned();
-        states[2].eta = logslope_design.dot(&states[2].beta);
+        states[2].beta = flat.slice(s![slices.slope.clone()]).to_owned();
+        states[2].eta = slope_design.dot(&states[2].beta);
         if let Some(range) = slices.score_warp.clone() {
             states[3].beta = flat.slice(s![range]).to_owned();
         }
@@ -3744,7 +3744,7 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
         .slice_mut(s![slices.marginal.clone()])
         .assign(&base_states[1].beta);
     base_flat
-        .slice_mut(s![slices.logslope.clone()])
+        .slice_mut(s![slices.slope.clone()])
         .assign(&base_states[2].beta);
     if let Some(range) = slices.score_warp.clone() {
         base_flat.slice_mut(s![range]).assign(&base_states[3].beta);
@@ -3827,8 +3827,8 @@ fn row_dynamic_q_geometry_into_pooled_matches_fresh_allocation_bitwise() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2], [0.1, 0.6]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.0], [0.5]];
-    let logslope_beta = array![0.2];
+    let slope_design = array![[1.0], [0.5]];
+    let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 2,
@@ -3855,7 +3855,7 @@ fn row_dynamic_q_geometry_into_pooled_matches_fresh_allocation_bitwise() {
         offset_exit: Arc::new(array![0.15, 0.08]),
         derivative_offset_exit: Arc::new(array![0.9, 1.1]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -3877,8 +3877,8 @@ fn row_dynamic_q_geometry_into_pooled_matches_fresh_allocation_bitwise() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -4007,8 +4007,8 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
     let link_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2], [0.1, 0.6]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.0], [0.5]];
-    let logslope_beta = array![0.2];
+    let slope_design = array![[1.0], [0.5]];
+    let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 2,
@@ -4035,7 +4035,7 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
         offset_exit: Arc::new(array![0.15, 0.08]),
         derivative_offset_exit: Arc::new(array![0.9, 1.1]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -4057,8 +4057,8 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -4087,12 +4087,12 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
 }
 
 #[test]
-fn timewiggle_marginal_logslope_psi_second_order_returns_finite_joint_terms() {
+fn timewiggle_marginal_slope_psi_second_order_returns_finite_joint_terms() {
     let score_runtime = test_deviation_runtime();
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_design = array![[1.2, -0.3]];
-    let logslope_beta = array![0.2, -0.05];
+    let slope_design = array![[1.2, -0.3]];
+    let slope_beta = array![0.2, -0.05];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
@@ -4110,7 +4110,7 @@ fn timewiggle_marginal_logslope_psi_second_order_returns_finite_joint_terms() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(logslope_design.clone())).into(),
+        slope_layout: (DesignMatrix::from(slope_design.clone())).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -4132,8 +4132,8 @@ fn timewiggle_marginal_logslope_psi_second_order_returns_finite_joint_terms() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_design.dot(&logslope_beta),
+            beta: slope_beta.clone(),
+            eta: slope_design.dot(&slope_beta),
         },
         ParameterBlockState {
             beta: Array1::zeros(score_runtime.basis_dim()),
@@ -4196,7 +4196,7 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: None,
         influence_absorber: None,
@@ -4244,7 +4244,7 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
     d_beta_flat[slices.time.start] = 0.07;
     d_beta_flat[slices.time.start + 1] = -0.03;
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
     if let Some(h_range) = slices.score_warp.as_ref() {
         d_beta_flat[h_range.start] = 0.02;
     }
@@ -4263,7 +4263,7 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
 fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
-    let logslope_beta = array![0.2];
+    let slope_beta = array![0.2];
     let sigma = 0.65;
     let family = SurvivalMarginalSlopeFamily {
         n: 1,
@@ -4281,7 +4281,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
         offset_exit: Arc::new(array![0.15]),
         derivative_offset_exit: Arc::new(array![0.9]),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -4303,8 +4303,8 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
             eta: marginal_design.dot(&marginal_beta),
         },
         ParameterBlockState {
-            beta: logslope_beta.clone(),
-            eta: logslope_beta.clone(),
+            beta: slope_beta.clone(),
+            eta: slope_beta.clone(),
         },
     ];
     let specs = vec![
@@ -4352,7 +4352,7 @@ fn censored_rows_still_reject_invalid_time_derivative() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4424,7 +4424,7 @@ fn exact_newton_evaluation_propagates_invalid_rows() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4489,7 +4489,7 @@ fn time_constraints_use_exact_derivative_guard_rows() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((2, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((2, 0)),
         )))
         .into(),
@@ -4584,7 +4584,7 @@ fn time_block_constraints_synthesize_qd1_rows_when_stored_constraints_missing() 
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4658,7 +4658,7 @@ fn time_block_max_feasible_step_uses_synthesized_qd1_rows() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4727,7 +4727,7 @@ fn coupled_qd1_guard_limits_time_step_before_post_update_projection() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4813,7 +4813,7 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4873,7 +4873,7 @@ fn time_block_post_update_rejects_infeasible_beta_instead_of_projecting() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -4965,7 +4965,7 @@ fn time_block_post_update_rejects_qd1_when_no_linear_constraints() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -5049,7 +5049,7 @@ fn time_block_post_update_errors_when_current_violates_qd1() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -5121,7 +5121,7 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )),
-        logslope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_layout: (DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((1, 0)),
         )))
         .into(),
@@ -5207,7 +5207,7 @@ fn mixed_blockwise_exact_newton_preserves_sparse_block_hessians() {
         offset_exit: Arc::new(array![0.0, 0.0]),
         derivative_offset_exit: Arc::new(array![0.05, 0.05]),
         marginal_design: sparse_design(&array![[1.0, 0.0], [0.0, 1.0]]),
-        logslope_layout: (DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0], [0.5]])))
+        slope_layout: (DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0], [0.5]])))
             .into(),
         score_warp: None,
         link_dev: None,
@@ -5504,7 +5504,7 @@ fn survival_sigma_psihessian_directional_derivative_subsample_half_scales_correc
     assert!(rel < 1e-12, "drift rel {}", rel);
 }
 
-/// Multi-row test family with non-empty marginal/logslope designs but no
+/// Multi-row test family with non-empty marginal/slope designs but no
 /// score_warp / link_dev / time_wiggle. Drives the rigid block path of
 /// `psi_terms_inner` so we can subsample-check Horvitz-Thompson scaling.
 fn make_block_psi_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
@@ -5523,11 +5523,11 @@ fn make_block_psi_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
     );
     let derivative_offset_exit: Array1<f64> =
         Array1::from_iter((0..n).map(|i| 0.5 + 0.05 * ((i * 23 + 1) % 3) as f64));
-    // Single-column marginal/logslope designs with row-varying entries.
+    // Single-column marginal/slope designs with row-varying entries.
     let marginal_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.3 + 0.4 * (((i * 29 + 11) % n) as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
+    let slope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
     });
     SurvivalMarginalSlopeFamily {
@@ -5546,7 +5546,7 @@ fn make_block_psi_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         offset_exit: Arc::new(offset_exit),
         derivative_offset_exit: Arc::new(derivative_offset_exit),
         marginal_design: DesignMatrix::from(marginal_design),
-        logslope_layout: (DesignMatrix::from(logslope_design)).into(),
+        slope_layout: (DesignMatrix::from(slope_design)).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -5568,7 +5568,7 @@ fn block_psi_test_block_states(
     let n = family.n;
     let m_design = family.marginal_design.to_dense().to_owned();
     let g_design = family
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
@@ -5667,7 +5667,7 @@ fn make_flex_baseline_psi_test_fixture() -> (
     exit_design[[0, 0]] = 0.45;
     derivative_design[[0, 0]] = 0.15;
     let marginal_design = array![[0.30]];
-    let logslope_design = array![[0.40]];
+    let slope_design = array![[0.40]];
     let family_hyper =
         SurvivalMarginalSlopeFamilyHyperState::new(Some(Arc::clone(&geometry)), None)
             .expect("install FLEX baseline family coordinates");
@@ -5687,7 +5687,7 @@ fn make_flex_baseline_psi_test_fixture() -> (
         offset_exit: Arc::new(geometry.offset_exit.clone()),
         derivative_offset_exit: Arc::new(geometry.derivative_offset_exit.clone()),
         marginal_design: DesignMatrix::from(marginal_design.clone()),
-        logslope_layout: DesignMatrix::from(logslope_design.clone()).into(),
+        slope_layout: DesignMatrix::from(slope_design.clone()).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -5706,7 +5706,7 @@ fn make_flex_baseline_psi_test_fixture() -> (
         beta_time[1 + local] = 0.006 + 0.002 * local as f64;
     }
     let beta_marginal = array![0.12];
-    let beta_logslope = array![0.20];
+    let beta_slope = array![0.20];
     let beta_score =
         Array1::from_iter((0..score_runtime.basis_dim()).map(|axis| 0.004 * (1.0 + axis as f64)));
     let beta_link =
@@ -5721,8 +5721,8 @@ fn make_flex_baseline_psi_test_fixture() -> (
             beta: beta_marginal,
         },
         ParameterBlockState {
-            eta: logslope_design.dot(&beta_logslope),
-            beta: beta_logslope,
+            eta: slope_design.dot(&beta_slope),
+            beta: beta_slope,
         },
         ParameterBlockState {
             beta: beta_score,
@@ -6001,7 +6001,7 @@ fn block_psi_test_marginal_derivative_blocks(
     ]
 }
 
-/// Derivative blocks with one ψ on marginal (block 1) and one on logslope
+/// Derivative blocks with one ψ on marginal (block 1) and one on slope
 /// (block 2), so second-order terms can mix.
 fn block_psi_test_dual_derivative_blocks(
     n: usize,
@@ -6323,7 +6323,7 @@ fn survival_psi_hessian_directional_derivative_subsample_full_equals_unsampled()
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .psi_hessian_directional_derivative(&states, &derivative_blocks, 0, &d_beta_flat)
@@ -6359,7 +6359,7 @@ fn survival_psi_hessian_directional_derivative_subsample_half_scales_correctly()
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();
@@ -6410,7 +6410,7 @@ fn survival_psi_workspace_hessian_directional_derivative_is_operator_and_matches
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let dense = family
         .psi_hessian_directional_derivative_with_options(
@@ -6461,7 +6461,7 @@ fn survival_psi_hessian_directional_derivative_operator_subsample_full_equals_un
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .psi_hessian_directional_derivative_operator_with_options(
@@ -6505,7 +6505,7 @@ fn survival_psi_hessian_directional_derivative_operator_subsample_half_scales_co
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();
@@ -6575,7 +6575,7 @@ fn make_flex_no_wiggle_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
     let marginal_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.3 + 0.4 * (((i * 29 + 11) % n) as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
+    let slope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
     });
     SurvivalMarginalSlopeFamily {
@@ -6594,7 +6594,7 @@ fn make_flex_no_wiggle_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         offset_exit: Arc::new(offset_exit),
         derivative_offset_exit: Arc::new(derivative_offset_exit),
         marginal_design: DesignMatrix::from(marginal_design),
-        logslope_layout: (DesignMatrix::from(logslope_design)).into(),
+        slope_layout: (DesignMatrix::from(slope_design)).into(),
         score_warp: Some(score_runtime),
         link_dev: None,
         influence_absorber: None,
@@ -6614,7 +6614,7 @@ fn flex_no_wiggle_test_block_states(
     let n = family.n;
     let m_design = family.marginal_design.to_dense().to_owned();
     let g_design = family
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
@@ -6658,7 +6658,7 @@ fn survival_jointhessian_flex_no_wiggle_operator_subsample_full_equals_unsampled
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .exact_newton_joint_hessian_directional_derivative_operator_flex_no_wiggle_with_options(
@@ -6742,7 +6742,7 @@ fn survival_jointhessian_flex_no_wiggle_operator_subsample_half_scales_correctly
     let slices = block_slices(&family, &states);
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();
@@ -6893,7 +6893,7 @@ fn flex_contraction_fixture_family(
         offset_exit: Arc::new(array![fixture.q1]),
         derivative_offset_exit: Arc::new(array![fixture.qd1]),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-        logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+        slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
         score_warp: Some(score_runtime.clone()),
         link_dev: Some(link_runtime.clone()),
         influence_absorber: None,
@@ -7125,7 +7125,7 @@ fn make_time_guard_family(deriv_coeff: f64, deriv_offset: f64) -> SurvivalMargin
         offset_exit: Arc::new(array![0.0]),
         derivative_offset_exit: Arc::new(array![deriv_offset]),
         marginal_design: DesignMatrix::from(Array2::zeros((1, 1))),
-        logslope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -7238,14 +7238,14 @@ fn fill_block_hessian_accumulator(
 fn full_block_slices(p_t: usize, p_m: usize, p_g: usize, p_h: usize, p_w: usize) -> BlockSlices {
     let time = 0..p_t;
     let marginal = time.end..time.end + p_m;
-    let logslope = marginal.end..marginal.end + p_g;
-    let score_warp = logslope.end..logslope.end + p_h;
+    let slope = marginal.end..marginal.end + p_g;
+    let score_warp = slope.end..slope.end + p_h;
     let link_dev = score_warp.end..score_warp.end + p_w;
     let total = link_dev.end;
     BlockSlices {
         time,
         marginal,
-        logslope,
+        slope,
         score_warp: Some(score_warp),
         link_dev: Some(link_dev),
         influence: None,
@@ -7258,7 +7258,7 @@ fn full_block_slices(p_t: usize, p_m: usize, p_g: usize, p_h: usize, p_w: usize)
 /// `BlockHessianOperator` (the operator wrapping the accumulator) must
 /// agree *exactly* with the dense scatter — to_dense, matvec, and the
 /// bilinear form — across the full five-block layout (time, marginal,
-/// logslope, score_warp, link_dev) that the directional-derivative path
+/// slope, score_warp, link_dev) that the directional-derivative path
 /// produces. Any future reintroduction of a second, divergent block
 /// layout would break this test.
 #[test]
@@ -7348,7 +7348,7 @@ fn zz_diag_failure1_flex_vs_rigid_vs_fdhess() {
             offset_exit: Arc::new(array![q1]),
             derivative_offset_exit: Arc::new(array![qd1]),
             marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
-            logslope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+            slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
             score_warp: Some(score_runtime.clone()),
             link_dev: Some(link_runtime.clone()),
             influence_absorber: None,
@@ -7492,7 +7492,7 @@ fn zz_diag_failure1_flex_vs_rigid_vs_fdhess() {
 /// The new overrides build each row's tower ONCE and contract every axis off
 /// that single build. A batched override is only a valid optimisation if it is
 /// bit-for-bit what the per-axis sweep returns. This gate builds a
-/// representative rigid fixture (non-trivial time / marginal / logslope designs,
+/// representative rigid fixture (non-trivial time / marginal / slope designs,
 /// `n = 300` rows so the `ARROW_ROW_CHUNK = 256` chunked reduction spans more
 /// than one tile, mixed event / censored, with and without Gaussian frailty so
 /// the probit scale ≠ 1) and asserts, for EVERY coefficient axis, that the
@@ -7513,32 +7513,32 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
     let weights: Vec<f64> = (0..n).map(|r| 0.7 + 0.5 * ((r % 5) as f64) / 5.0).collect();
     let event: Vec<f64> = (0..n).map(|r| ((r % 3 == 0) as u8) as f64).collect();
 
-    // Non-trivial marginal (2-col) and logslope (2-col) designs so the
+    // Non-trivial marginal (2-col) and slope (2-col) designs so the
     // all-axes sweep exercises the coupled marginal block (which feeds BOTH
-    // the entry and exit primaries through `jacobian_action`) and the logslope
+    // the entry and exit primaries through `jacobian_action`) and the slope
     // block, not just the single time axis.
     let p_m = 2usize;
     let p_g = 2usize;
     let marginal_design = Array2::from_shape_fn((n, p_m), |(r, j)| {
         0.2 + 0.05 * (r as f64).cos() + 0.11 * (j as f64) - 0.013 * (r as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
+    let slope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
         0.1 + 0.07 * (r as f64).sin() - 0.09 * (j as f64) + 0.004 * (r as f64) / (n as f64)
     });
     let beta_marginal = Array1::from_vec(vec![0.18, -0.12]);
-    let beta_logslope = Array1::from_vec(vec![-0.2, 0.13]);
+    let beta_slope = Array1::from_vec(vec![-0.2, 0.13]);
     // Realized linear predictors carried on the block states (the marginal /
-    // logslope eta channels the rigid primaries read), exactly as a real fit
+    // slope eta channels the rigid primaries read), exactly as a real fit
     // installs them: eta = design · beta.
     let marginal_eta = marginal_design.dot(&beta_marginal);
-    let logslope_eta = logslope_design.dot(&beta_logslope);
+    let slope_eta = slope_design.dot(&beta_slope);
 
     for frailty in [None, Some(0.55_f64)] {
         let mut family = oracle_rigid_family(n, &z, &weights, &event, frailty);
         family.marginal_design = DesignMatrix::from(marginal_design.clone());
         family
-            .logslope_layout
-            .replace_coefficient_design(DesignMatrix::from(logslope_design.clone()));
+            .slope_layout
+            .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
 
         let beta_time = array![0.65];
         let block_states = vec![
@@ -7551,8 +7551,8 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
                 eta: marginal_eta.clone(),
             },
             ParameterBlockState {
-                beta: beta_logslope.clone(),
-                eta: logslope_eta.clone(),
+                beta: beta_slope.clone(),
+                eta: slope_eta.clone(),
             },
         ];
 
@@ -7561,7 +7561,7 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
         assert_eq!(
             p,
             1 + p_m + p_g,
-            "fixture coefficient width should be time(1)+marginal({p_m})+logslope({p_g})"
+            "fixture coefficient width should be time(1)+marginal({p_m})+slope({p_g})"
         );
 
         // ---- Dense Hessian: BLAS-3 override vs canonical row scatter ---------
@@ -7662,7 +7662,7 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
 /// twin of the BMS gate `bernoulli_jeffreys_contracted_trace_hessian_matches_fd_of_trace`).
 ///
 /// Builds the same kind of non-trivial rigid fixture as the build-once gate
-/// above (`oracle_rigid_family` + 2-column marginal/logslope designs, so the
+/// above (`oracle_rigid_family` + 2-column marginal/slope designs, so the
 /// hook's `time` block genuinely shares 3 different design rows with the
 /// `q0/q1/qd1` primaries and `marginal_design` genuinely couples `q0` and
 /// `q1`), picks a fixed deterministic symmetric 5×5 trace weight `W`, and
@@ -7682,15 +7682,15 @@ fn survival_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
     let marginal_design = Array2::from_shape_fn((n, p_m), |(r, j)| {
         0.2 + 0.05 * (r as f64).cos() + 0.11 * (j as f64) - 0.013 * (r as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
+    let slope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
         0.1 + 0.07 * (r as f64).sin() - 0.09 * (j as f64) + 0.004 * (r as f64) / (n as f64)
     });
 
     let mut family = oracle_rigid_family(n, &z, &weights, &event, None);
     family.marginal_design = DesignMatrix::from(marginal_design.clone());
     family
-        .logslope_layout
-        .replace_coefficient_design(DesignMatrix::from(logslope_design.clone()));
+        .slope_layout
+        .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
 
     let total = 1 + p_m + p_g;
     let specs = vec![
@@ -7699,13 +7699,13 @@ fn survival_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
         dummy_blockspec(p_g),
     ];
 
-    // beta_flat = [time(1), marginal(2), logslope(2)].
+    // beta_flat = [time(1), marginal(2), slope(2)].
     let states_at = |beta_flat: &Array1<f64>| -> Vec<ParameterBlockState> {
         let beta_time = beta_flat.slice(ndarray::s![0..1]).to_owned();
         let beta_marginal = beta_flat.slice(ndarray::s![1..1 + p_m]).to_owned();
-        let beta_logslope = beta_flat.slice(ndarray::s![1 + p_m..total]).to_owned();
+        let beta_slope = beta_flat.slice(ndarray::s![1 + p_m..total]).to_owned();
         let marginal_eta = marginal_design.dot(&beta_marginal);
-        let logslope_eta = logslope_design.dot(&beta_logslope);
+        let slope_eta = slope_design.dot(&beta_slope);
         vec![
             ParameterBlockState {
                 beta: beta_time,
@@ -7719,8 +7719,8 @@ fn survival_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
                 eta: marginal_eta,
             },
             ParameterBlockState {
-                beta: beta_logslope,
-                eta: logslope_eta,
+                beta: beta_slope,
+                eta: slope_eta,
             },
         ]
     };
@@ -7852,7 +7852,7 @@ fn survival_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
 /// gam#979 perf datapoint + large-`p` correctness cross-check: the O(n·p²)
 /// contracted-trace hook vs the `p(p+1)/2` pairwise second-directional
 /// completion it replaces, at the issue's repro scale (`matern(...,
-/// centers≈20)` ⇒ `p_marginal = p_logslope = 20`, total `p = 41`).
+/// centers≈20)` ⇒ `p_marginal = p_slope = 20`, total `p = 41`).
 ///
 /// This is the mechanism behind the #979 rescope: the exact Firth/Jeffreys
 /// second-order completion is gated on
@@ -7888,7 +7888,7 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
     let marginal_design = Array2::from_shape_fn((n, p_m), |(r, j)| {
         0.2 + 0.05 * ((r + j) as f64).cos() + 0.011 * (j as f64) - 0.003 * (r as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
+    let slope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
         0.1 + 0.07 * ((r + 2 * j) as f64).sin() - 0.009 * (j as f64)
             + 0.004 * (r as f64) / (n as f64)
     });
@@ -7896,8 +7896,8 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
     let mut family = oracle_rigid_family(n, &z, &weights, &event, None);
     family.marginal_design = DesignMatrix::from(marginal_design.clone());
     family
-        .logslope_layout
-        .replace_coefficient_design(DesignMatrix::from(logslope_design.clone()));
+        .slope_layout
+        .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
 
     let total = 1 + p_m + p_g;
     let specs = vec![
@@ -7909,7 +7909,7 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
     let beta0 = Array1::from_shape_fn(total, |i| 0.1 + 0.03 * ((i as f64) * 1.7).sin());
     let beta_time = beta0.slice(ndarray::s![0..1]).to_owned();
     let beta_marginal = beta0.slice(ndarray::s![1..1 + p_m]).to_owned();
-    let beta_logslope = beta0.slice(ndarray::s![1 + p_m..total]).to_owned();
+    let beta_slope = beta0.slice(ndarray::s![1 + p_m..total]).to_owned();
     let states0 = vec![
         ParameterBlockState {
             beta: beta_time,
@@ -7920,8 +7920,8 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
             eta: marginal_design.dot(&beta_marginal),
         },
         ParameterBlockState {
-            beta: beta_logslope.clone(),
-            eta: logslope_design.dot(&beta_logslope),
+            beta: beta_slope.clone(),
+            eta: slope_design.dot(&beta_slope),
         },
     ];
 
@@ -8214,21 +8214,21 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
     let marginal_design = Array2::from_shape_fn((n, p_m), |(r, j)| {
         0.2 + 0.05 * (r as f64).cos() + 0.11 * (j as f64) - 0.013 * (r as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
+    let slope_design = Array2::from_shape_fn((n, p_g), |(r, j)| {
         0.1 + 0.07 * (r as f64).sin() - 0.09 * (j as f64) + 0.004 * (r as f64) / (n as f64)
     });
 
     let mut family = oracle_rigid_family(n, &z, &weights, &event, None);
     family.marginal_design = DesignMatrix::from(marginal_design.clone());
     family
-        .logslope_layout
-        .replace_coefficient_design(DesignMatrix::from(logslope_design.clone()));
+        .slope_layout
+        .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
 
     let beta_time = array![0.6];
     let beta_marginal = array![0.18, -0.12];
-    let beta_logslope = array![-0.2, 0.13];
+    let beta_slope = array![-0.2, 0.13];
     let marginal_eta = marginal_design.dot(&beta_marginal);
-    let logslope_eta = logslope_design.dot(&beta_logslope);
+    let slope_eta = slope_design.dot(&beta_slope);
     let block_states = vec![
         ParameterBlockState {
             beta: beta_time.clone(),
@@ -8239,8 +8239,8 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
             eta: marginal_eta.clone(),
         },
         ParameterBlockState {
-            beta: beta_logslope.clone(),
-            eta: logslope_eta.clone(),
+            beta: beta_slope.clone(),
+            eta: slope_eta.clone(),
         },
     ];
     let probit_scale = family.probit_frailty_scale();
@@ -8255,7 +8255,7 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
             + marginal_eta[row];
         let qd1 = family.design_derivative_exit.dot_row(row, &beta_time)
             + family.derivative_offset_exit[row];
-        let g = logslope_eta[row];
+        let g = slope_eta[row];
         primaries.push([q0, q1, qd1, g]);
     }
     let program = SurvivalMarginalSlopeRigidNllProgram {
@@ -8320,7 +8320,7 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
     );
 }
 
-// ── #2352 ports: logslope block-jacobian production contract ────────────────
+// ── #2352 ports: slope block-jacobian production contract ────────────────
 //
 // Moved from `tests/survival/misc/frailty_scale_audit_plumbing.rs` and
 // `tests/survival/survival/survival_marginal_slope_jacobian_hyperbolic_correction.rs`
@@ -8330,7 +8330,7 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
 // deliberately replaced by origin-linearization (q ≡ 0) for the pre-fit
 // structural audit, so the ports assert the CURRENT contract.
 
-fn logslope_port_design(n: usize, p: usize, seed: u64) -> Array2<f64> {
+fn slope_port_design(n: usize, p: usize, seed: u64) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((n, p));
     let mut state = seed;
     for i in 0..n {
@@ -8344,7 +8344,7 @@ fn logslope_port_design(n: usize, p: usize, seed: u64) -> Array2<f64> {
     out
 }
 
-fn logslope_port_z(n: usize, seed: u64) -> Vec<f64> {
+fn slope_port_z(n: usize, seed: u64) -> Vec<f64> {
     let mut state = seed ^ 0xdeadbeef;
     (0..n)
         .map(|_| {
@@ -8356,7 +8356,7 @@ fn logslope_port_z(n: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
-fn logslope_port_jacobian(
+fn slope_port_jacobian(
     design: &Array2<f64>,
     z: &[f64],
 ) -> super::block_jacobians::SlopeBlockJacobian {
@@ -8365,21 +8365,21 @@ fn logslope_port_jacobian(
     let z_mat = Array2::from_shape_fn((n, 1), |(i, _)| z[i]);
     let covariance = MarginalSlopeCovariance::diagonal(array![1.0]).expect("unit covariance");
     super::block_jacobians::SlopeBlockJacobian::new(layout, Arc::new(z_mat), covariance.into())
-        .expect("logslope jacobian construction")
+        .expect("slope jacobian construction")
 }
 
-/// At β = 0 the logslope Jacobian's η0/η1 channels are `s·z_i·G[i,j]` with `s`
+/// At β = 0 the slope Jacobian's η0/η1 channels are `s·z_i·G[i,j]` with `s`
 /// read from `state.probit_frailty_scale` (NOT baked in at construction), and
 /// the ad1 channel is zero; two states with different `s` scale exactly.
 #[test]
-fn logslope_jacobian_reads_probit_scale_from_state_at_beta_zero() {
+fn slope_jacobian_reads_probit_scale_from_state_at_beta_zero() {
     use crate::custom_family::{BlockEffectiveJacobian, FamilyLinearizationState};
     let n = 40;
     let p = 5;
-    let design = logslope_port_design(n, p, 42);
-    let z = logslope_port_z(n, 42);
+    let design = slope_port_design(n, p, 42);
+    let z = slope_port_z(n, 42);
     let s_f = 0.75_f64;
-    let cb = logslope_port_jacobian(&design, &z);
+    let cb = slope_port_jacobian(&design, &z);
 
     let beta_zero = vec![0.0f64; p];
     let jac_at = |s: f64| {
@@ -8390,7 +8390,7 @@ fn logslope_jacobian_reads_probit_scale_from_state_at_beta_zero() {
             probit_frailty_scale: s,
         };
         cb.effective_jacobian_at(&state)
-            .expect("beta=0 logslope jacobian")
+            .expect("beta=0 slope jacobian")
     };
     let jac_sf = jac_at(s_f);
     let jac_1 = jac_at(1.0);
@@ -8421,20 +8421,20 @@ fn logslope_jacobian_reads_probit_scale_from_state_at_beta_zero() {
 }
 
 /// With populated `SurvivalMarginalSlopeFamilyScalars` at moderate β, the
-/// production logslope Jacobian carries the full hyperbolic correction
+/// production slope Jacobian carries the full hyperbolic correction
 /// `(q·dc/dg + s·z)·G` — FD-verified against the frozen-q η stack. Without
 /// scalars the same point linearizes q at the origin (pre-fit audit
 /// convention) and returns the pure `s·z_i·G` rows.
 #[test]
-fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
+fn slope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
     use crate::custom_family::{BlockEffectiveJacobian, FamilyLinearizationState};
     use std::any::Any;
     let n = 40;
     let p = 5;
-    let design = logslope_port_design(n, p, 31415);
-    let z = logslope_port_z(n, 31415);
+    let design = slope_port_design(n, p, 31415);
+    let z = slope_port_z(n, 31415);
     let s_f = 0.8_f64;
-    let cb = logslope_port_jacobian(&design, &z);
+    let cb = slope_port_jacobian(&design, &z);
     let covariance = MarginalSlopeCovariance::diagonal(array![1.0]).expect("unit covariance");
 
     // Moderate deterministic beta so g_i != 0 on every row scale.
@@ -8478,7 +8478,7 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
     };
     let jac = cb
         .effective_jacobian_at(&state)
-        .expect("logslope jacobian with scalars");
+        .expect("slope jacobian with scalars");
     assert_eq!(jac.nrows(), 3 * n);
     assert_eq!(jac.ncols(), p);
 
@@ -8531,7 +8531,7 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
     }
     assert!(
         max_rel < 1e-5,
-        "logslope jacobian must carry the hyperbolic correction: max rel err vs FD = {max_rel:.3e}"
+        "slope jacobian must carry the hyperbolic correction: max rel err vs FD = {max_rel:.3e}"
     );
 
     // Origin-linearized fallback: scalars=None at the SAME nonzero beta gives
@@ -8544,7 +8544,7 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
     };
     let jac_none = cb
         .effective_jacobian_at(&state_none)
-        .expect("origin-linearized logslope jacobian");
+        .expect("origin-linearized slope jacobian");
     for i in 0..n {
         for j in 0..p {
             let expected = s_f * z[i] * design[[i, j]];
@@ -8583,7 +8583,7 @@ fn make_timewiggle_test_family(
     n: usize,
     p_base: usize,
     p_m: usize,
-    logslope_layout: SlopeLayout,
+    slope_layout: SlopeLayout,
     z: Array2<f64>,
     covariance: MarginalSlopeCovariance,
 ) -> SurvivalMarginalSlopeFamily {
@@ -8627,7 +8627,7 @@ fn make_timewiggle_test_family(
         offset_exit: Arc::new(offset_exit),
         derivative_offset_exit: Arc::new(derivative_offset_exit),
         marginal_design: DesignMatrix::from(marginal_design),
-        logslope_layout,
+        slope_layout,
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -8658,7 +8658,7 @@ fn timewiggle_states(
     family: &SurvivalMarginalSlopeFamily,
     beta_time: &Array1<f64>,
     beta_marginal: &Array1<f64>,
-    beta_logslope: &Array1<f64>,
+    beta_slope: &Array1<f64>,
 ) -> Vec<ParameterBlockState> {
     let n = family.n;
     let eta_marginal =
@@ -8673,7 +8673,7 @@ fn timewiggle_states(
             eta: eta_marginal,
         },
         ParameterBlockState {
-            beta: beta_logslope.clone(),
+            beta: beta_slope.clone(),
             eta: Array1::zeros(n),
         },
     ]
@@ -8712,10 +8712,10 @@ fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
     let p_time = p_base + TIMEWIGGLE_TEST_NCOLS;
     let p_m = 2usize;
 
-    let logslope_design = Array2::from_shape_fn((n, 1), |(row, _)| 0.4 + 0.2 * row as f64);
-    let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
+    let slope_design = Array2::from_shape_fn((n, 1), |(row, _)| 0.4 + 0.2 * row as f64);
+    let slope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
     let layout = SlopeTopology::shared()
-        .materialize_identity(DesignMatrix::from(logslope_design), &logslope_offset)
+        .materialize_identity(DesignMatrix::from(slope_design), &slope_offset)
         .unwrap();
     let z = Array2::from_shape_fn((n, 1), |(row, _)| -0.5 + 0.3 * row as f64);
     let family = make_timewiggle_test_family(
@@ -8733,13 +8733,13 @@ fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
 
     let beta_time = Array1::from_iter((0..p_time).map(|j| 0.18 - 0.05 * j as f64));
     let beta_marginal = Array1::from_iter((0..p_m).map(|j| 0.09 + 0.04 * j as f64));
-    let beta_logslope = array![0.3];
+    let beta_slope = array![0.3];
     assert!(
         beta_time.iter().any(|value| *value != 0.0),
         "β must be nonzero: the refusal this gate covers fires only off β = 0",
     );
 
-    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_logslope);
+    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_slope);
     let erased = timewiggle_scalars(&family, &states);
     let scalars = erased
         .downcast_ref::<SurvivalMarginalSlopeFamilyScalars>()
@@ -8758,8 +8758,8 @@ fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
         let mut minus = beta_time.clone();
         plus[j] += eps;
         minus[j] -= eps;
-        let states_plus = timewiggle_states(&family, &plus, &beta_marginal, &beta_logslope);
-        let states_minus = timewiggle_states(&family, &minus, &beta_marginal, &beta_logslope);
+        let states_plus = timewiggle_states(&family, &plus, &beta_marginal, &beta_slope);
+        let states_minus = timewiggle_states(&family, &minus, &beta_marginal, &beta_slope);
         for row in 0..n {
             let hi = family
                 .row_dynamic_q_values(row, &states_plus)
@@ -8793,8 +8793,8 @@ fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
         let mut minus = beta_marginal.clone();
         plus[j] += eps;
         minus[j] -= eps;
-        let states_plus = timewiggle_states(&family, &beta_time, &plus, &beta_logslope);
-        let states_minus = timewiggle_states(&family, &beta_time, &minus, &beta_logslope);
+        let states_plus = timewiggle_states(&family, &beta_time, &plus, &beta_slope);
+        let states_minus = timewiggle_states(&family, &beta_time, &minus, &beta_slope);
         for row in 0..n {
             let hi = family
                 .row_dynamic_q_values(row, &states_plus)
@@ -8837,24 +8837,24 @@ fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
     let p_time = p_base + TIMEWIGGLE_TEST_NCOLS;
     let p_m = 2usize;
 
-    let logslope_design =
+    let slope_design =
         Array2::from_shape_fn((n, 2), |(row, col)| 1.0 + 0.5 * row as f64 + col as f64);
     let z = Array2::from_shape_fn((n, 2), |(row, col)| -0.4 + 0.2 * row as f64 + 0.1 * col as f64);
     let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
-    let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
+    let slope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
     let layout = SlopeTopology::per_score(vec![0..1, 1..2], 2)
         .unwrap()
         .materialize_identity(
-            DesignMatrix::from(logslope_design.clone()),
-            &logslope_offset,
+            DesignMatrix::from(slope_design.clone()),
+            &slope_offset,
         )
         .unwrap();
     let family = make_timewiggle_test_family(n, p_base, p_m, layout, z, covariance);
 
     let beta_time = Array1::from_iter((0..p_time).map(|j| 0.12 - 0.04 * j as f64));
     let beta_marginal = Array1::from_iter((0..p_m).map(|j| 0.07 + 0.03 * j as f64));
-    let beta_logslope = array![0.25, -0.15];
-    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_logslope);
+    let beta_slope = array![0.25, -0.15];
+    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_slope);
     let erased = timewiggle_scalars(&family, &states);
     let scalars = erased
         .downcast_ref::<SurvivalMarginalSlopeFamilyScalars>()
@@ -8862,8 +8862,8 @@ fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
 
     let s = family.probit_frailty_scale();
     for row in 0..n {
-        let g0 = logslope_design[[row, 0]] * beta_logslope[0] + logslope_offset[row];
-        let g1 = logslope_design[[row, 1]] * beta_logslope[1] + logslope_offset[row];
+        let g0 = slope_design[[row, 0]] * beta_slope[0] + slope_offset[row];
+        let g1 = slope_design[[row, 1]] * beta_slope[1] + slope_offset[row];
         let quadratic = 2.0 * g0 * g0 + 0.5 * g1 * g1;
         let expected = (1.0 + s * s * quadratic).sqrt();
         assert_close(

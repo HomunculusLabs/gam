@@ -24,7 +24,7 @@ use gam_row_macros::row_program;
 /// probit index with, given the block's linear predictor `g` and the frailty
 /// probit scale `s_f`.
 ///
-/// # The block is called "logslope" and this map is the IDENTITY (gam#2764)
+/// # The block is called "slope" and this map is the IDENTITY (gam#2764)
 ///
 /// It is the identity on purpose, and it has to be.
 ///
@@ -63,7 +63,7 @@ use gam_row_macros::row_program;
 /// log-likelihood, the preserving scale `c` and the index `η` all unchanged to
 /// round-off.
 ///
-/// The block, its formula keyword and its on-disk fields keep the `logslope`
+/// The block, its formula keyword and its on-disk fields keep the `slope`
 /// spelling: renaming a public keyword and a saved-model contract is a breaking
 /// change and belongs to whoever owns that decision, not to this function. What
 /// is fixed here is the name at the point where the mathematics is STATED.
@@ -116,14 +116,14 @@ pub(crate) fn rigid_observed_eta(q: f64, g: f64, z: f64, probit_scale: f64) -> f
 ///
 /// This is the η₁-channel row curvature. The full survival row Hessian is
 /// 4×4 in primary scalars `(q₀, q₁, qd₁, g)` and chains differently into
-/// each block (time/marginal share `dη₁/dq = c`; logslope chains through
+/// each block (time/marginal share `dη₁/dq = c`; slope chains through
 /// `dη₁/dg = q₁·c₁ + s_f·z`; flex bases chain through `dη₁/dη = 1`). The
 /// cross-block orthogonalisation here is therefore exact in the η₁
 /// direction and approximate along the η₀ and ad₁ directions and between
 /// blocks whose chain factors differ. In practice η₁ dominates because
 /// both event and censored rows contribute through it while only entry
 /// contributes to η₀; the alias structure the audit reported on the
-/// large-scale fit is along the η₁ channel (time ↔ marginal ↔ logslope
+/// large-scale fit is along the η₁ channel (time ↔ marginal ↔ slope
 /// ↔ score_warp ↔ link_dev all share constant + low-order columns that
 /// project onto η₁). A fully chain-corrected metric is exactly what
 /// `identifiability::families::compiler` (Phase 3, family-agnostic
@@ -133,10 +133,10 @@ pub(crate) fn rigid_observed_eta(q: f64, g: f64, z: f64, probit_scale: f64) -> f
 /// same chain factor (time ↔ marginal here, both `dη₁/dq = c`) produce
 /// identical η contributions iff their bare-design columns are linearly
 /// dependent — killed by bare-design orthogonality regardless of chain.
-/// Different-chain aliases (marginal ↔ logslope) require alias structure
+/// Different-chain aliases (marginal ↔ slope) require alias structure
 /// that exactly matches the chain ratio `(q₁·c₁ + s_f·z)/c`, a
 /// degenerate case not observed. The large-scale alias chain the audit
-/// reported (`time ↔ marginal ↔ logslope ↔ score_warp ↔ link_dev`) is
+/// reported (`time ↔ marginal ↔ slope ↔ score_warp ↔ link_dev`) is
 /// driven by shared constant + low-order columns — chain-independent and
 /// killed by this scalar W. The reparam is one-shot and pre-PIRLS by
 /// necessity: PIRLS itself cannot proceed on the aliased design.
@@ -168,7 +168,7 @@ pub(crate) fn survival_pilot_irls_row_metric_at_eta(
 }
 
 /// Build the SMGS rigid pooled-probit pilot η at training rows from the
-/// time-block offsets, marginal/logslope offsets, baseline slope and z. This
+/// time-block offsets, marginal/slope offsets, baseline slope and z. This
 /// is the survival analog of BMS `rigid_pooled_probit_pilot_eta`; the basis
 /// is intentionally β-independent so the resulting W metric depends only on
 /// data + spec offsets and the cross-block orthogonalisation remains a one-
@@ -179,20 +179,20 @@ pub(crate) fn survival_rigid_pilot_eta(
     z_primary: &Array1<f64>,
     offset_exit: &Array1<f64>,
     marginal_offset: &Array1<f64>,
-    logslope_offset: &Array1<f64>,
+    slope_offset: &Array1<f64>,
     baseline_slope: f64,
     probit_scale: f64,
 ) -> Array1<f64> {
     Array1::from_iter((0..n).map(|row| {
         let q_exit = offset_exit[row] + marginal_offset[row];
-        let slope = baseline_slope + logslope_offset[row];
+        let slope = baseline_slope + slope_offset[row];
         rigid_observed_eta(q_exit, slope, z_primary[row], probit_scale)
     }))
 }
 
 /// One-step IRLS refinement of the rigid pilot η along the dominant η₁ row
 /// channel. Starts from `survival_rigid_pilot_eta` (offset+baseline), runs
-/// a single weighted Newton step over the joint location-anchor + logslope
+/// a single weighted Newton step over the joint location-anchor + slope
 /// design `X = [T_exit | M | G]`, and returns the refined per-row η₁ pilot
 /// that the cross-block W metric uses. Prevents the flex-anchor bases
 /// (`link_dev`, `score_warp`) from collapsing onto the same constant scalar
@@ -206,10 +206,10 @@ pub(crate) fn survival_rigid_pilot_eta(
 /// Returns a [`NonRigidPilot`]: the per-row observed index `eta1` (used by
 /// the cross-block W metric, unchanged from the legacy scalar return) AND the
 /// one-step IRLS estimate of the joint coefficients, split back into the
-/// `[T_exit | M]` location half and the `G` logslope half.
+/// `[T_exit | M]` location half and the `G` slope half.
 ///
-/// `logslope_beta` is the #808 operating-point WARM START for the logslope
-/// block's `initial_beta`: on clustered-PC designs the logslope block is
+/// `slope_beta` is the #808 operating-point WARM START for the slope
+/// block's `initial_beta`: on clustered-PC designs the slope block is
 /// EXACTLY W-null at the `g = 0` seed (the slope-channel IRLS weight vanishes
 /// at the null slope), so the inner joint-Newton cannot take its first step
 /// and freezes; seeding the block at the pilot's `g ≈ 0.3` operating point
@@ -224,7 +224,7 @@ pub(crate) fn survival_rigid_pilot_eta(
 /// and then dropped on the floor — leaving the time and marginal blocks to
 /// cold-start at β = 0 (the guard-linear baseline `q'(t) ≡ derivative_guard`)
 /// on an objective that is not concave in the joint β, because the effective
-/// row weight `c(g) = √(1 + s(g)²)` couples the logslope coefficients
+/// row weight `c(g) = √(1 + s(g)²)` couples the slope coefficients
 /// multiplicatively with the location ones. Every ρ-seed's validation fit then
 /// started from the same out-of-basin point and refused, which surfaces as
 /// `solver_started = 0` — the outer ρ-search never begins and the fit measures
@@ -235,40 +235,40 @@ pub(crate) fn survival_rigid_pilot_eta(
 pub(crate) fn survival_nonrigid_pilot_eta(
     n: usize,
     location_anchor_design: &DesignMatrix,
-    logslope_design: &DesignMatrix,
+    slope_design: &DesignMatrix,
     z_primary: &Array1<f64>,
     offset_exit: &Array1<f64>,
     marginal_offset: &Array1<f64>,
-    logslope_offset: &Array1<f64>,
+    slope_offset: &Array1<f64>,
     baseline_slope: f64,
     sample_weights: &Array1<f64>,
     event: &Array1<f64>,
     probit_scale: f64,
 ) -> Result<NonRigidPilot, String> {
     if location_anchor_design.nrows() != n
-        || logslope_design.nrows() != n
+        || slope_design.nrows() != n
         || z_primary.len() != n
         || offset_exit.len() != n
         || marginal_offset.len() != n
-        || logslope_offset.len() != n
+        || slope_offset.len() != n
         || sample_weights.len() != n
         || event.len() != n
     {
         return Err(format!(
-            "survival_nonrigid_pilot_eta: row-count mismatch (n={n}, location={}, logslope={}, \
-             z={}, offset_exit={}, marginal_offset={}, logslope_offset={}, weights={}, event={})",
+            "survival_nonrigid_pilot_eta: row-count mismatch (n={n}, location={}, slope={}, \
+             z={}, offset_exit={}, marginal_offset={}, slope_offset={}, weights={}, event={})",
             location_anchor_design.nrows(),
-            logslope_design.nrows(),
+            slope_design.nrows(),
             z_primary.len(),
             offset_exit.len(),
             marginal_offset.len(),
-            logslope_offset.len(),
+            slope_offset.len(),
             sample_weights.len(),
             event.len(),
         ));
     }
     let p_loc = location_anchor_design.ncols();
-    let p_g = logslope_design.ncols();
+    let p_g = slope_design.ncols();
     let p_joint = p_loc + p_g;
     if p_joint == 0 {
         return Ok(NonRigidPilot {
@@ -277,12 +277,12 @@ pub(crate) fn survival_nonrigid_pilot_eta(
                 z_primary,
                 offset_exit,
                 marginal_offset,
-                logslope_offset,
+                slope_offset,
                 baseline_slope,
                 probit_scale,
             ),
             location_beta: Array1::<f64>::zeros(p_loc),
-            logslope_beta: Array1::<f64>::zeros(p_g),
+            slope_beta: Array1::<f64>::zeros(p_g),
         });
     }
     // Starting pilot (offset-only). Decompose into q_exit and slope so the
@@ -292,12 +292,12 @@ pub(crate) fn survival_nonrigid_pilot_eta(
     let mut eta1 = Array1::<f64>::zeros(n);
     for i in 0..n {
         q_exit[i] = offset_exit[i] + marginal_offset[i];
-        slope[i] = baseline_slope + logslope_offset[i];
+        slope[i] = baseline_slope + slope_offset[i];
         eta1[i] = rigid_observed_eta(q_exit[i], slope[i], z_primary[i], probit_scale);
     }
     // Per-row chain factors and IRLS gradient/Hessian along η₁.
     //
-    //   η₁ = q·c(g) + s(g)·z   with c(g) = √(1 + s(g)²), s(g) = observed_logslope(g)
+    //   η₁ = q·c(g) + s(g)·z   with c(g) = √(1 + s(g)²), s(g) = observed_slope(g)
     //   ∂η₁/∂q = c(g)
     //   ∂η₁/∂g = q·c'(g) + s'(g)·z
     //
@@ -354,7 +354,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
     }
     // Normal equations: (Xᵀ W X + λI) β = -Xᵀ g, where W = diag(hess_eta1)
     // along η₁, g = grad_eta1, and X is the η₁ chain-corrected joint design
-    // (each location column scaled by chain_q, each logslope column by
+    // (each location column scaled by chain_q, each slope column by
     // chain_g). X is never materialized at full height: a one-shot dense
     // `(n, p_joint)` build was ~0.7 GiB at biobank scale (n=320k) and sat
     // co-resident with the construction phase's other dense transients —
@@ -372,9 +372,9 @@ pub(crate) fn survival_nonrigid_pilot_eta(
         let loc_rows = location_anchor_design
             .try_row_chunk(chunk_start..chunk_end)
             .map_err(|e| format!("survival_nonrigid_pilot_eta: location anchor rows: {e}"))?;
-        let g_rows = logslope_design
+        let g_rows = slope_design
             .try_row_chunk(chunk_start..chunk_end)
-            .map_err(|e| format!("survival_nonrigid_pilot_eta: logslope rows: {e}"))?;
+            .map_err(|e| format!("survival_nonrigid_pilot_eta: slope rows: {e}"))?;
         {
             let mut x_view = x_chunk.slice_mut(s![..rows, ..]);
             for local in 0..rows {
@@ -440,7 +440,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
         beta_g[j] = beta_step[p_loc + j];
     }
     let q_delta = location_anchor_design.apply(&beta_loc);
-    let g_delta = logslope_design.apply(&beta_g);
+    let g_delta = slope_design.apply(&beta_g);
     // Trust-region cap to prevent a runaway first step on ill-conditioned
     // pilots: limit |Δη₁| per row to 4·σ_η (σ_η ≈ 1 under probit), measured
     // by the rigid pilot's η₁ standard deviation. This keeps the pilot in
@@ -481,13 +481,13 @@ pub(crate) fn survival_nonrigid_pilot_eta(
         };
         pilot_eta[i] = capped;
     }
-    // Warm starts (#808 logslope, #2627 location). Both halves of the SAME
+    // Warm starts (#808 slope, #2627 location). Both halves of the SAME
     // joint Newton step; `beta_step` was already finite-checked above, so
     // neither half can carry a non-finite entry past this point.
     Ok(NonRigidPilot {
         eta1: pilot_eta,
         location_beta: beta_loc,
-        logslope_beta: beta_g,
+        slope_beta: beta_g,
     })
 }
 
@@ -501,7 +501,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
 pub(crate) struct NonRigidPilot {
     pub(crate) eta1: Array1<f64>,
     pub(crate) location_beta: Array1<f64>,
-    pub(crate) logslope_beta: Array1<f64>,
+    pub(crate) slope_beta: Array1<f64>,
 }
 
 pub fn survival_marginal_slope_vector_scale(
@@ -2486,7 +2486,7 @@ mod tests {
     /// guards the two ingredients the chain depends on, independent of the chain
     /// assembly above.
     #[test]
-    fn c_and_logslope_derivatives_match_central_difference() {
+    fn c_and_slope_derivatives_match_central_difference() {
         let h: f64 = 1.0e-7;
         for &probit_scale in &[0.3_f64, 0.8, 1.5] {
             for &g in &[-1.4_f64, -0.2, 0.0, 0.6, 2.0] {

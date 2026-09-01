@@ -3186,13 +3186,13 @@ impl SurvivalMarginalSlopeFamily {
             }) => {
                 if !matches!(*block, 1 | 2) {
                     return Err(format!(
-                        "survival marginal-slope FLEX family design direction supports marginal/logslope blocks 1 or 2, got block {block}"
+                        "survival marginal-slope FLEX family design direction supports marginal/slope blocks 1 or 2, got block {block}"
                     ));
                 }
                 let expected_range = if *block == 1 {
                     &slices.marginal
                 } else {
-                    &slices.logslope
+                    &slices.slope
                 };
                 if coefficient_range != expected_range {
                     return Err(format!(
@@ -3229,7 +3229,7 @@ impl SurvivalMarginalSlopeFamily {
         let mut expected = vec![
             ("time", slices.time.clone()),
             ("marginal", slices.marginal.clone()),
-            ("logslope", slices.logslope.clone()),
+            ("slope", slices.slope.clone()),
         ];
         if let Some(range) = slices.score_warp.as_ref() {
             expected.push(("score warp", range.clone()));
@@ -3258,7 +3258,7 @@ impl SurvivalMarginalSlopeFamily {
                 ));
             }
         }
-        for (block, name) in [(0usize, "time"), (1, "marginal"), (2, "logslope")] {
+        for (block, name) in [(0usize, "time"), (1, "marginal"), (2, "slope")] {
             if block_states[block].eta.len() <= row {
                 return Err(format!(
                     "survival marginal-slope FLEX family {name} block eta length {} does not contain row {row}",
@@ -3284,7 +3284,7 @@ impl SurvivalMarginalSlopeFamily {
             coefficient_direction,
             Some(FlexCoefficientRowDirection::Design { block: 1, .. })
         );
-        let design_targets_logslope = matches!(
+        let design_targets_slope = matches!(
             coefficient_direction,
             Some(FlexCoefficientRowDirection::Design { block: 2, .. })
         );
@@ -3305,16 +3305,16 @@ impl SurvivalMarginalSlopeFamily {
             .marginal_design
             .try_row_chunk(row..row + 1)
             .map_err(|error| format!("FLEX family marginal_design row: {error}"))?;
-        let logslope_chunk = self
-            .logslope_layout
+        let slope_chunk = self
+            .slope_layout
             .coefficient_design()
             .try_row_chunk(row..row + 1)
-            .map_err(|error| format!("FLEX family logslope design row: {error}"))?;
+            .map_err(|error| format!("FLEX family slope design row: {error}"))?;
         let entry_row = time_entry_chunk.row(0);
         let exit_row = time_exit_chunk.row(0);
         let derivative_row = time_derivative_chunk.row(0);
         let marginal_row = marginal_chunk.row(0);
-        let logslope_row = logslope_chunk.row(0);
+        let slope_row = slope_chunk.row(0);
 
         let mut q0_gradient = vec![0.0; dimension];
         let mut q1_gradient = vec![0.0; dimension];
@@ -3493,12 +3493,12 @@ impl SurvivalMarginalSlopeFamily {
         };
 
         let mut g_gradient = vec![0.0; dimension];
-        add_coefficient_row(&mut g_gradient, &slices.logslope, logslope_row, "logslope")?;
+        add_coefficient_row(&mut g_gradient, &slices.slope, slope_row, "slope")?;
         let g = lifted_coefficient_affine::<J>(
             block_states[2].eta[row],
             g_gradient,
             coefficient_direction,
-            design_targets_logslope,
+            design_targets_slope,
             0.0,
             0.0,
         );
@@ -3727,7 +3727,7 @@ impl SurvivalMarginalSlopeFamily {
     /// Evaluate one complete FLEX row under one arbitrary family direction.
     ///
     /// The inner width is the canonical flattened coefficient layout
-    /// `time | marginal | logslope | score-warp? | link-dev? | influence?`.
+    /// `time | marginal | slope | score-warp? | link-dev? | influence?`.
     /// Consequently `first.gradient` is the complete family-by-coefficient
     /// mixed-partial row in one evaluation.  This is distinct from a
     /// family-by-design-hyper partial: the latter must use
@@ -3768,7 +3768,7 @@ impl SurvivalMarginalSlopeFamily {
     }
 
     /// Evaluate the derivative of the complete family row channel with respect
-    /// to one marginal/logslope design coordinate at fixed coefficients.
+    /// to one marginal/slope design coordinate at fixed coefficients.
     ///
     /// `derivative_row` is one row of `X_psi`.  Its Jet3 epsilon part is seeded
     /// with both `X_psi beta` and the coefficient gradient `X_psi`; therefore
@@ -3787,10 +3787,10 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let (beta, coefficient_range) = match block {
             1 => (&block_states[1].beta, slices.marginal),
-            2 => (&block_states[2].beta, slices.logslope),
+            2 => (&block_states[2].beta, slices.slope),
             _ => {
                 return Err(format!(
-                    "survival marginal-slope FLEX family design direction supports marginal/logslope blocks 1 or 2, got block {block}"
+                    "survival marginal-slope FLEX family design direction supports marginal/slope blocks 1 or 2, got block {block}"
                 ));
             }
         };
@@ -5065,7 +5065,7 @@ mod moment_engine_tests {
     }
     // ── §3c: real-family finite-difference and nested-dual gates ──────────────
     /// A minimal g-only survival marginal-slope family for the §3c directional gates:
-    /// scalar score covariance, raw `z`, a 1-col marginal + 1-col logslope design, no
+    /// scalar score covariance, raw `z`, a 1-col marginal + 1-col slope design, no
     /// score-warp/link-dev/wiggle/absorber. Deterministic synthetic data.
     fn make_g_only_flex_family(n: usize) -> SurvivalMarginalSlopeFamily {
         let event: Array1<f64> =
@@ -5086,7 +5086,7 @@ mod moment_engine_tests {
         let marginal_design = Array2::from_shape_fn((n, 1), |(i, _)| {
             0.3 + 0.4 * (((i * 29 + 11) % n) as f64) / (n as f64)
         });
-        let logslope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
+        let slope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
             0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
         });
         SurvivalMarginalSlopeFamily {
@@ -5107,7 +5107,7 @@ mod moment_engine_tests {
             offset_exit: Arc::new(offset_exit),
             derivative_offset_exit: Arc::new(derivative_offset_exit),
             marginal_design: DesignMatrix::from(marginal_design),
-            logslope_layout: DesignMatrix::from(logslope_design).into(),
+            slope_layout: DesignMatrix::from(slope_design).into(),
             score_warp: None,
             link_dev: None,
             influence_absorber: None,
@@ -5487,8 +5487,8 @@ mod moment_engine_tests {
         family.marginal_design = DesignMatrix::from(
             Array2::from_shape_vec((1, 1), vec![0.30]).expect("marginal fixture shape"),
         );
-        family.logslope_layout = DesignMatrix::from(
-            Array2::from_shape_vec((1, 1), vec![0.40]).expect("logslope fixture shape"),
+        family.slope_layout = DesignMatrix::from(
+            Array2::from_shape_vec((1, 1), vec![0.40]).expect("slope fixture shape"),
         )
         .into();
         family.influence_absorber = Some(
@@ -5509,7 +5509,7 @@ mod moment_engine_tests {
             beta_time[1 + local] = 0.006 + 0.002 * local as f64;
         }
         let beta_marginal = Array1::from(vec![0.12]);
-        let beta_logslope = Array1::from(vec![0.20]);
+        let beta_slope = Array1::from(vec![0.20]);
         let score_width = family
             .score_warp
             .as_ref()
@@ -5522,10 +5522,10 @@ mod moment_engine_tests {
         let beta_influence = Array1::from(vec![0.03, -0.02]);
         let time_eta = family.design_exit.dot_row(0, &beta_time) + family.offset_exit[0];
         let marginal_eta = family.marginal_design.dot_row(0, &beta_marginal);
-        let logslope_eta = family
-            .logslope_layout
+        let slope_eta = family
+            .slope_layout
             .coefficient_design()
-            .dot_row(0, &beta_logslope);
+            .dot_row(0, &beta_slope);
         let states = vec![
             ParameterBlockState {
                 beta: beta_time,
@@ -5536,8 +5536,8 @@ mod moment_engine_tests {
                 eta: Array1::from(vec![marginal_eta]),
             },
             ParameterBlockState {
-                beta: beta_logslope,
-                eta: Array1::from(vec![logslope_eta]),
+                beta: beta_slope,
+                eta: Array1::from(vec![slope_eta]),
             },
             ParameterBlockState {
                 beta: beta_score,
@@ -5604,8 +5604,8 @@ mod moment_engine_tests {
             check(jets.qd1.v.g[axis], q.dqd1_marginal[local], "qd1 marginal");
         }
         assert_eq!(
-            jets.g.v.g[slices.logslope.start],
-            family.logslope_layout.coefficient_design().to_dense()[[0, 0]],
+            jets.g.v.g[slices.slope.start],
+            family.slope_layout.coefficient_design().to_dense()[[0, 0]],
         );
         let h_primary = primary.h.as_ref().expect("score primary").start;
         let h_coefficient = slices.score_warp.as_ref().expect("score slice").start;
