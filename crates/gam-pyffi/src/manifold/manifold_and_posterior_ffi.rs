@@ -172,7 +172,7 @@ struct PosteriorPredictResult {
     /// Serialized parameterized `InverseLink` metadata for callers that inspect
     /// the fitted link. Response draws themselves come from the polymorphic core
     /// predictor and never reconstruct a mean from this metadata.
-    link_spec: Option<String>,
+    link_spec: String,
 }
 
 fn posterior_predict_bands_encoded_table_impl(
@@ -224,7 +224,7 @@ fn posterior_predict_encoded_table_impl(
         mean: matrices.mean,
         model_class: prediction_model_class_label(&model),
         family_kind: family_link_kind(&model_likelihood_spec(&model)).to_string(),
-        link_spec: model_link_spec_json(&model),
+        link_spec: model_link_spec_json(&model)?,
     })
 }
 
@@ -246,7 +246,7 @@ fn sample_encoded_table_impl(
         training_headers,
         &cfg,
     )?;
-    Ok(build_sample_payload(&model, nuts, &cfg))
+    build_sample_payload(&model, nuts, &cfg)
 }
 
 /// plain string on the Python side (the Rust `LikelihoodSpec` itself is
@@ -275,9 +275,10 @@ fn family_link_kind(family: &LikelihoodSpec) -> &'static str {
 /// (`Sas`, `Mixture`, `LatentCLogLog`, `BetaLogistic`) carry per-fit state that
 /// the bare string tag cannot represent; this is the seam that wires their
 /// response-scale draws (issue #1133).
-fn model_link_spec_json(model: &FittedModel) -> Option<String> {
+fn model_link_spec_json(model: &FittedModel) -> Result<String, String> {
     let spec = model_likelihood_spec(model);
-    serde_json::to_string(&spec.link).ok()
+    serde_json::to_string(&spec.link)
+        .map_err(|error| format!("failed to serialize fitted inverse-link identity: {error}"))
 }
 
 /// Extract the `LikelihoodSpec` carried by the saved model's `family_state`.
@@ -300,10 +301,14 @@ fn model_likelihood_spec(model: &FittedModel) -> LikelihoodSpec {
     }
 }
 
-fn build_sample_payload(model: &FittedModel, nuts: NutsResult, cfg: &NutsConfig) -> SamplePayload {
+fn build_sample_payload(
+    model: &FittedModel,
+    nuts: NutsResult,
+    cfg: &NutsConfig,
+) -> Result<SamplePayload, String> {
     let n_coeffs = nuts.samples.ncols();
     let coefficient_names: Vec<String> = (0..n_coeffs).map(|j| format!("beta_{j}")).collect();
-    SamplePayload {
+    Ok(SamplePayload {
         samples: nuts.samples,
         coefficient_names,
         posterior_mean: nuts.posterior_mean,
@@ -320,14 +325,14 @@ fn build_sample_payload(model: &FittedModel, nuts: NutsResult, cfg: &NutsConfig)
         },
         model_class: prediction_model_class_label(model),
         family_kind: family_link_kind(&model_likelihood_spec(&model)).to_string(),
-        link_spec: model_link_spec_json(model),
+        link_spec: model_link_spec_json(model)?,
         // The badge is a property of the draws, stamped by the sampler that
         // produced them (gam#2778); nothing here re-derives it from the
         // model class.
         method: nuts.sampler.label().to_string(),
         exact: nuts.sampler.targets_exact_posterior(),
         covariance_source: nuts.covariance.as_str().to_string(),
-    }
+    })
 }
 
 #[derive(Serialize)]

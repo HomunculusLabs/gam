@@ -454,10 +454,9 @@ struct SamplePayload {
     /// Serialized parameterized [`gam::types::InverseLink`] (JSON). The bare
     /// `family_kind` tag cannot represent the per-fit state of the
     /// parameterized links (`Sas`, `Mixture`, `LatentCLogLog`, `BetaLogistic`),
-    /// so this carries the full link spec back into the response-scale
-    /// transforms. `None` when serialization is unavailable; the wrapper then
-    /// falls back to the string tag (issue #1133).
-    link_spec: Option<String>,
+    /// so every payload carries the full fitted link identity back into the
+    /// response-scale transforms (issue #1133).
+    link_spec: String,
     /// The sampler that produced the draws, stamped by that sampler itself
     /// (`PosteriorSampler::label`): `"nuts"`, `"polya-gamma"`, `"laplace"`,
     /// or `"truncated-laplace"`. Callers use it to badge the posterior or to
