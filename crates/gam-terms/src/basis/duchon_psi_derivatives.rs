@@ -1326,6 +1326,19 @@ pub(crate) fn build_duchon_design_psi_derivativeswithworkspace(
     let p_final = identifiability_transform
         .map(|zf| zf.ncols())
         .unwrap_or(p_padded);
+    // gam#979: the forward design ships `α·K` (see `duchon_kernel_chart`), so
+    // the design ψ-derivative is formed under that same chart.
+    let chart = duchon_kernel_chart(
+        centers,
+        Some(length_scale),
+        p_order,
+        s_order,
+        data.ncols(),
+        spec.aniso_log_scales.as_deref(),
+        Some(&coeffs),
+        None,
+    )
+    .design_chart();
     build_scalar_design_psi_derivatives_shared(
         data,
         centers,
@@ -1342,6 +1355,7 @@ pub(crate) fn build_duchon_design_psi_derivativeswithworkspace(
             coeffs,
         },
         duchon_scaling_exponent(p_order, s_order, data.ncols()),
+        chart,
     )
 }
 
@@ -1473,6 +1487,19 @@ pub fn build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspa
     let p_final = identifiability_transform
         .map(|zf| zf.ncols())
         .unwrap_or(p_padded);
+    // gam#979: same chart as the isotropic sibling — the forward design is
+    // `α·K` in the anisotropic metric too.
+    let chart = duchon_kernel_chart(
+        centers,
+        Some(length_scale),
+        p_order,
+        s_order,
+        dim,
+        Some(&eta),
+        Some(&coeffs),
+        None,
+    )
+    .design_chart();
     let mut result = build_aniso_design_psi_derivatives_shared(
         data,
         centers,
@@ -1488,6 +1515,7 @@ pub fn build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspa
             dim,
             coeffs,
         },
+        chart,
     )?;
 
     let directions: Vec<DuchonPsiDirection> = (0..dim).map(DuchonPsiDirection::Axis).collect();
@@ -1678,12 +1706,71 @@ pub(crate) fn duchon_kernel_amplification(
     coeffs: Option<&DuchonPartialFractionCoeffs>,
     pure_poly_coeff: Option<&PolyharmonicBlockCoeff>,
 ) -> f64 {
+    duchon_kernel_chart(
+        centers,
+        length_scale,
+        p_order,
+        s_order,
+        d,
+        aniso_log_scales,
+        coeffs,
+        pure_poly_coeff,
+    )
+    .amplification
+}
+
+/// The numerical chart of one realized Duchon kernel block (gam#979).
+///
+/// [`duchon_kernel_amplification`] is the amplitude `α` the forward basis
+/// multiplies into every kernel value; `α` is `1/|K(r*)|` at the center pair
+/// `(i*, j*)` carrying the largest kernel magnitude whenever that magnitude
+/// has underflowed, and `1` otherwise. Because `K` moves with the length
+/// scale and the anisotropy, so does `α` — the design the criterion is built
+/// on is `α(ψ)·K(ψ)`, and a ψ-derivative of the design that differentiates
+/// `K` alone is a derivative of something the fit never evaluates. The
+/// derivative builders read the reference pair from here and form the exact
+/// ψ-jets of `ln α` from the SAME radial jets they use for every other pair,
+/// so the charted derivative is the derivative of the charted kernel.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DuchonKernelChart {
+    /// `α`: `1/|K(r*)|` when amplified, `1.0` otherwise.
+    pub(crate) amplification: f64,
+    /// The `(i*, j*)` center pair whose kernel magnitude defines `α`; `None`
+    /// when the chart is not amplified (`amplification == 1.0`).
+    pub(crate) reference_pair: Option<(usize, usize)>,
+}
+
+impl DuchonKernelChart {
+    pub(crate) const IDENTITY: Self = Self {
+        amplification: 1.0,
+        reference_pair: None,
+    };
+
+    pub(crate) fn design_chart(&self) -> crate::basis::DesignKernelChart {
+        crate::basis::DesignKernelChart {
+            scale: self.amplification,
+            reference_pair: self.reference_pair,
+        }
+    }
+}
+
+pub(crate) fn duchon_kernel_chart(
+    centers: ArrayView2<'_, f64>,
+    length_scale: Option<f64>,
+    p_order: usize,
+    s_order: usize,
+    d: usize,
+    aniso_log_scales: Option<&[f64]>,
+    coeffs: Option<&DuchonPartialFractionCoeffs>,
+    pure_poly_coeff: Option<&PolyharmonicBlockCoeff>,
+) -> DuchonKernelChart {
     let k = centers.nrows();
     if k == 0 {
-        return 1.0;
+        return DuchonKernelChart::IDENTITY;
     }
     let axis_scales = aniso_log_scales.map(aniso_axis_scales);
     let mut max_abs = 0.0_f64;
+    let mut reference_pair = None;
     for i in 0..k {
         for j in i..k {
             let r = if let Some(scales) = axis_scales.as_deref() {
@@ -1708,6 +1795,7 @@ pub(crate) fn duchon_kernel_amplification(
             };
             if val.abs() > max_abs {
                 max_abs = val.abs();
+                reference_pair = Some((i, j));
             }
         }
     }
@@ -1715,9 +1803,12 @@ pub(crate) fn duchon_kernel_amplification(
     // well above any meaningful smoothing-relevant kernel scale yet far from
     // 1.0, so well-conditioned kernels pass through unchanged (α = 1).
     if max_abs > 0.0 && max_abs < 1e-10 {
-        1.0 / max_abs
+        DuchonKernelChart {
+            amplification: 1.0 / max_abs,
+            reference_pair,
+        }
     } else {
-        1.0
+        DuchonKernelChart::IDENTITY
     }
 }
 

@@ -220,7 +220,7 @@ impl SurvivalMarginalSlopeFamily {
             row_iter.len(),
             |range| -> Result<f64, String> {
                 let mut ll = 0.0;
-                let mut slope_workspace = self.slope_row_workspace()?;
+                let mut logslope_workspace = self.logslope_row_workspace()?;
                 let value_workspace = if score_dim > 1 {
                     Some(RigidVectorValueWorkspace::new(&self.score_covariance))
                 } else {
@@ -237,7 +237,7 @@ impl SurvivalMarginalSlopeFamily {
                                 q_geom,
                                 block_states,
                                 probit_scale,
-                                &mut slope_workspace,
+                                &mut logslope_workspace,
                                 value_workspace.as_ref().expect(
                                     "vector value workspace is constructed for multi-score rows",
                                 ),
@@ -366,7 +366,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.slope.len();
+        let p_g = slices.logslope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -428,7 +428,7 @@ impl SurvivalMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&score_m);
         score_psi
-            .slice_mut(s![slices.slope.clone()])
+            .slice_mut(s![slices.logslope.clone()])
             .assign(&score_g);
         if let Some(range) = slices.score_warp.as_ref() {
             score_psi.slice_mut(s![range.clone()]).assign(&score_h);
@@ -469,7 +469,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.slope.len();
+        let p_g = slices.logslope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -531,7 +531,7 @@ impl SurvivalMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&score_m);
         score_psi_psi
-            .slice_mut(s![slices.slope.clone()])
+            .slice_mut(s![slices.logslope.clone()])
             .assign(&score_g);
         if let Some(range) = slices.score_warp.as_ref() {
             score_psi_psi.slice_mut(s![range.clone()]).assign(&score_h);
@@ -576,7 +576,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.slope.len();
+        let p_g = slices.logslope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());

@@ -2960,7 +2960,7 @@ mod tests {
     /// `cell_moving_boundary_flux_tower`: the boundary jet that the production
     /// flex path hand-codes (and dropped `z_uv` from) is exactly `∂²` of this
     /// tower. K=3 reduced frame: slot 0 = a-axis carrier (an arbitrary smooth
-    /// a(θ) with nonzero a_u/a_uv), slot 1 = g (the slope), slot 2 unused.
+    /// a(θ) with nonzero a_u/a_uv), slot 1 = g (the log-slope), slot 2 unused.
     #[test]
     fn crossing_edge_tower_matches_handpath_velocity_formulas() {
         const TAU: f64 = 1.3; // the link-knot crossing threshold τ

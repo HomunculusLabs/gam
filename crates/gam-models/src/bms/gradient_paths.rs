@@ -415,16 +415,16 @@ pub(super) fn rigid_pooled_probit_pilot_eta(
     base_link: &InverseLink,
     z: &Array1<f64>,
     marginal_offset: &Array1<f64>,
-    slope_offset: &Array1<f64>,
+    logslope_offset: &Array1<f64>,
     baseline_marginal: f64,
-    baseline_slope: f64,
+    baseline_logslope: f64,
     probit_scale: f64,
 ) -> Result<Array1<f64>, String> {
     let n = z.len();
     let mut out = Array1::<f64>::zeros(n);
     for i in 0..n {
         let a_pre = baseline_marginal + marginal_offset[i];
-        let b_pre = baseline_slope + slope_offset[i];
+        let b_pre = baseline_logslope + logslope_offset[i];
         let q_marg = bernoulli_marginal_link_map(base_link, a_pre)
             .map_err(|e| format!("rigid_pooled_probit_pilot_eta marginal link map: {e}"))?
             .q;
@@ -450,9 +450,9 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
     weights: &Array1<f64>,
     marginal_design: &DesignMatrix,
     marginal_offset: &Array1<f64>,
-    slope_offset: &Array1<f64>,
+    logslope_offset: &Array1<f64>,
     baseline_marginal: f64,
-    baseline_slope: f64,
+    baseline_logslope: f64,
     probit_scale: f64,
 ) -> Result<Array1<f64>, String> {
     use gam_linalg::faer_ndarray::FaerCholesky;
@@ -470,7 +470,7 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
     let mut residual = Array1::<f64>::zeros(n);
     for i in 0..n {
         let a_pre = baseline_marginal + marginal_offset[i];
-        let b_pre = baseline_slope + slope_offset[i];
+        let b_pre = baseline_logslope + logslope_offset[i];
         let q_marg = bernoulli_marginal_link_map(base_link, a_pre)
             .map_err(|e| {
                 format!("pilot_eta_for_link_dev_orthogonalisation marginal link map: {e}")
@@ -508,16 +508,16 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
 pub(super) fn joint_setup(
     data: ArrayView2<'_, f64>,
     marginalspec: &TermCollectionSpec,
-    slopespec: &TermCollectionSpec,
+    logslopespec: &TermCollectionSpec,
     marginal_penalties: usize,
-    slope_penalties: usize,
+    logslope_penalties: usize,
     absorber_rho0: Option<f64>,
     extra_rho0: &[f64],
     kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
     let marginal_terms = spatial_length_scale_term_indices(marginalspec);
-    let slope_terms = spatial_length_scale_term_indices(slopespec);
-    let rho_dim = marginal_penalties + slope_penalties + extra_rho0.len();
+    let logslope_terms = spatial_length_scale_term_indices(logslopespec);
+    let rho_dim = marginal_penalties + logslope_penalties + extra_rho0.len();
     let mut rho0vec = Array1::<f64>::zeros(rho_dim);
     // The #461 influence-absorber ridge is the TRAILING marginal coordinate
     // (see `marginal_penalties_with_influence_ridge`); it is REML-learned like
@@ -530,7 +530,7 @@ pub(super) fn joint_setup(
         rho0vec[marginal_penalties - 1] = seed;
     }
     for (idx, &value) in extra_rho0.iter().enumerate() {
-        rho0vec[marginal_penalties + slope_penalties + idx] = value;
+        rho0vec[marginal_penalties + logslope_penalties + idx] = value;
     }
     let rho_lower = Array1::<f64>::from_elem(rho_dim, -12.0);
     let rho_upper = Array1::<f64>::from_elem(rho_dim, 12.0);
@@ -540,18 +540,18 @@ pub(super) fn joint_setup(
         kappa_options,
     )
     .reseed_from_data(data, marginalspec, &marginal_terms, kappa_options)?;
-    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        slopespec,
-        &slope_terms,
+    let logslope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
+        logslopespec,
+        &logslope_terms,
         kappa_options,
     )
-    .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
+    .reseed_from_data(data, logslopespec, &logslope_terms, kappa_options)?;
     let mut values = marginal_kappa.as_array().to_vec();
-    values.extend(slope_kappa.as_array().iter());
+    values.extend(logslope_kappa.as_array().iter());
     let marginal_dims = marginal_kappa.dims_per_term().to_vec();
-    let slope_dims = slope_kappa.dims_per_term().to_vec();
+    let logslope_dims = logslope_kappa.dims_per_term().to_vec();
     let mut dims = marginal_dims.clone();
-    dims.extend(slope_dims.iter().copied());
+    dims.extend(logslope_dims.iter().copied());
     let log_kappa0 = SpatialLogKappaCoords::new_with_dims(Array1::from_vec(values), dims.clone());
     // Bounds: concatenate per-block data-aware bounds in the same order.
     let marginal_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
@@ -561,15 +561,15 @@ pub(super) fn joint_setup(
         &marginal_dims,
         kappa_options,
     )?;
-    let slope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
+    let logslope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
         data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
+        logslopespec,
+        &logslope_terms,
+        &logslope_dims,
         kappa_options,
     )?;
     let mut lower_vals = marginal_lower.as_array().to_vec();
-    lower_vals.extend(slope_lower.as_array().iter());
+    lower_vals.extend(logslope_lower.as_array().iter());
     let log_kappa_lower =
         SpatialLogKappaCoords::new_with_dims(Array1::from_vec(lower_vals), dims.clone());
     let marginal_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
@@ -579,15 +579,15 @@ pub(super) fn joint_setup(
         &marginal_dims,
         kappa_options,
     )?;
-    let slope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
+    let logslope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
         data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
+        logslopespec,
+        &logslope_terms,
+        &logslope_dims,
         kappa_options,
     )?;
     let mut upper_vals = marginal_upper.as_array().to_vec();
-    upper_vals.extend(slope_upper.as_array().iter());
+    upper_vals.extend(logslope_upper.as_array().iter());
     let log_kappa_upper = SpatialLogKappaCoords::new_with_dims(Array1::from_vec(upper_vals), dims);
     // Project seed onto bounds in case a user-provided spec.length_scale falls
     // outside the data-derived ψ window; seed was a hint, not a hard constraint.
@@ -688,7 +688,7 @@ pub(crate) fn signed_probit_neglog_unary_stack(signed_margin: f64, weight: f64) 
 
 /// The OBSERVED slope `b = s·g`. Identity in `g`, exactly as in the survival
 /// family — see `survival::marginal_slope::row_math::rigid_observed_slope` for
-/// why the block's `slope` name is the thing that is wrong here and not the
+/// why the block's `logslope` name is the thing that is wrong here and not the
 /// map (gam#2764).
 ///
 /// One argument is even shorter on this side. The survival lane carries a score
@@ -703,47 +703,47 @@ pub(super) fn rigid_observed_slope(slope: f64, probit_scale: f64) -> f64 {
 }
 
 #[inline]
-pub(super) fn rigid_observed_scale(slope: f64, probit_scale: f64) -> f64 {
-    let observed_slope = rigid_observed_slope(slope, probit_scale);
+pub(super) fn rigid_observed_scale(logslope: f64, probit_scale: f64) -> f64 {
+    let observed_slope = rigid_observed_slope(logslope, probit_scale);
     (1.0 + observed_slope * observed_slope).sqrt()
 }
 
 #[inline]
 pub(super) fn rigid_intercept_from_marginal(
     marginal_eta: f64,
-    slope: f64,
+    logslope: f64,
     probit_scale: f64,
 ) -> f64 {
-    marginal_eta * rigid_observed_scale(slope, probit_scale)
+    marginal_eta * rigid_observed_scale(logslope, probit_scale)
 }
 
 #[inline]
 pub(super) fn rigid_prescale_intercept_from_marginal(
     marginal_eta: f64,
-    slope: f64,
+    logslope: f64,
     probit_scale: f64,
 ) -> f64 {
-    rigid_intercept_from_marginal(marginal_eta, slope, probit_scale) / probit_scale
+    rigid_intercept_from_marginal(marginal_eta, logslope, probit_scale) / probit_scale
 }
 
 #[inline]
 pub(super) fn rigid_prescale_intercept_derivative_abs(
     marginal_eta: f64,
-    slope: f64,
+    logslope: f64,
     probit_scale: f64,
 ) -> f64 {
-    let c = rigid_observed_scale(slope, probit_scale);
+    let c = rigid_observed_scale(logslope, probit_scale);
     probit_scale * normal_pdf(marginal_eta) / c
 }
 
 #[inline]
 pub(super) fn rigid_observed_eta(
     marginal_eta: f64,
-    slope: f64,
+    logslope: f64,
     z: f64,
     probit_scale: f64,
 ) -> f64 {
-    marginal_slope_standard_normal_scalar_eta(marginal_eta, slope, z, probit_scale)
+    marginal_slope_standard_normal_scalar_eta(marginal_eta, logslope, z, probit_scale)
 }
 
 #[inline]
@@ -1642,7 +1642,7 @@ fn rigid_observed_scale_stack(observed_slope: f64) -> [f64; 5] {
 row_program! {
     fn rigid_standard_normal_program(
         marginal_eta,
-        slope;
+        logslope;
         marginal_q,
         marginal_q1,
         marginal_q2,
@@ -1673,11 +1673,11 @@ row_program! {
             marginal_q3,
             marginal_q4
         );
-        let observed_slope = scale(slope, probit_scale);
-        let observed_scale_value = compose(observed_scale, observed_slope);
+        let observed_logslope = scale(logslope, probit_scale);
+        let observed_scale_value = compose(observed_scale, observed_logslope);
         let latent_index = add(
             mul(q, observed_scale_value),
-            scale(observed_slope, latent_score)
+            scale(observed_logslope, latent_score)
         );
         let signed_margin = scale(latent_index, outcome_sign);
         return compose(signed_probit, signed_margin, weight);
@@ -1817,7 +1817,7 @@ fn non_finite_signed_margin(signed_margin: f64) -> String {
 /// sensitivity to the calibrated score is
 /// `s_i = ∂score_β,i/∂ζ_i = J_iᵀ·(∂²(log L_i)/∂(q,g)∂ζ_i)`, and the primary
 /// 2-vector returned here is exactly `∂²(log L_i)/∂(q,g)∂ζ_i`. The block-level
-/// contraction `J_iᵀ` (marginal+slope design rows) is applied by the caller.
+/// contraction `J_iᵀ` (marginal+logslope design rows) is applied by the caller.
 ///
 /// It is computed by seeding `z` as a THIRD jet variable (index 2) in the SAME
 /// order-≤2 jet algebra the value/gradient/Hessian path uses, carried by the
@@ -1854,8 +1854,8 @@ pub(super) fn rigid_standard_normal_mixed_z_sensitivity(
     q.h[0][0] = marginal.q2;
     let slope = Tower2::<3>::variable(g, 1);
     let z_var = Tower2::<3>::variable(z, 2);
-    let observed_slope = slope * probit_scale;
-    let c = (observed_slope * observed_slope + 1.0).sqrt();
+    let observed_logslope = slope * probit_scale;
+    let c = (observed_logslope * observed_logslope + 1.0).sqrt();
     // η = q·c + g·(s·z): z enters linearly through the slope×z product, so the
     // mixed (q,z)/(g,z) curvature is carried entirely by the unary NLL chain and
     // the η-bilinear, exactly as in the Tower4<2> production path.
@@ -1906,15 +1906,15 @@ pub(super) fn rigid_standard_normal_mixed_z_sensitivity(
 /// z-augmented row jet ([`rigid_standard_normal_mixed_z_sensitivity`]) at the
 /// converged marginal index `q_i` (`marginal_eta[i]`) and slope `g_i`
 /// (`slope_eta[i]`) and calibrated score `ζ_i` (`z[i]`), then contracted through
-/// the block Jacobian `J_iᵀ` (the same marginal+slope design-row scatter the
+/// the block Jacobian `J_iᵀ` (the same marginal+logslope design-row scatter the
 /// row kernel exposes via `jacobian_transpose_action`):
 ///
 /// ```text
 ///   s_i[marginal_range]  = (∂²(log L_i)/∂q∂ζ_i) · marginal_design.row(i)
-///   s_i[slope_range]  = (∂²(log L_i)/∂g∂ζ_i) · slope_design.row(i)
+///   s_i[logslope_range]  = (∂²(log L_i)/∂g∂ζ_i) · logslope_design.row(i)
 /// ```
 ///
-/// `slope_design` MUST be the reduced-basis design `G·T` actually fitted and
+/// `logslope_design` MUST be the reduced-basis design `G·T` actually fitted and
 /// `p_beta` MUST equal `p_marginal + r`. Flex models use the separate exact
 /// cubic-jet channel that includes score_warp/link_dev coordinates; this rigid
 /// helper never accepts or zero-pads a wider covariance frame (#2303).
@@ -1927,33 +1927,33 @@ pub(super) fn rigid_standard_normal_score_zeta_sensitivity(
     weights: &Array1<f64>,
     probit_scale: f64,
     marginal_design: ArrayView2<'_, f64>,
-    slope_design: ArrayView2<'_, f64>,
+    logslope_design: ArrayView2<'_, f64>,
     p_beta: usize,
 ) -> Result<Array2<f64>, String> {
     let n = marginal_eta.len();
     let p_m = marginal_design.ncols();
-    let r = slope_design.ncols();
+    let r = logslope_design.ncols();
     if slope_eta.len() != n
         || z.len() != n
         || y.len() != n
         || weights.len() != n
         || marginal_design.nrows() != n
-        || slope_design.nrows() != n
+        || logslope_design.nrows() != n
     {
         return Err(format!(
             "score_zeta_sensitivity row mismatch: marginal_eta={n}, slope_eta={}, z={}, y={}, \
-             weights={}, marginal_design rows={}, slope_design rows={}",
+             weights={}, marginal_design rows={}, logslope_design rows={}",
             slope_eta.len(),
             z.len(),
             y.len(),
             weights.len(),
             marginal_design.nrows(),
-            slope_design.nrows()
+            logslope_design.nrows()
         ));
     }
     if p_m + r != p_beta {
         return Err(format!(
-            "rigid score_zeta_sensitivity width mismatch: marginal({p_m}) + slope({r}) != p_beta({p_beta})"
+            "rigid score_zeta_sensitivity width mismatch: marginal({p_m}) + logslope({r}) != p_beta({p_beta})"
         ));
     }
     let mut s = Array2::<f64>::zeros((n, p_beta));
@@ -1968,7 +1968,7 @@ pub(super) fn rigid_standard_normal_score_zeta_sensitivity(
             probit_scale,
         )?;
         // J_iᵀ scatter into the reduced-frame coordinates: marginal block first,
-        // then the reduced slope block.
+        // then the reduced logslope block.
         if s_q != 0.0 {
             let m_row = marginal_design.row(i);
             for (j, &mij) in m_row.iter().enumerate() {
@@ -1976,7 +1976,7 @@ pub(super) fn rigid_standard_normal_score_zeta_sensitivity(
             }
         }
         if s_g != 0.0 {
-            let g_row = slope_design.row(i);
+            let g_row = logslope_design.row(i);
             for (j, &gij) in g_row.iter().enumerate() {
                 s[[i, p_m + j]] = s_g * gij;
             }
@@ -2840,15 +2840,15 @@ mod jet_tower_oracle_tests {
         probit_scale: f64,
     ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
         let s = 2.0 * y - 1.0;
-        let observed_slope = probit_scale * g;
-        let g2 = observed_slope * observed_slope;
+        let observed_logslope = probit_scale * g;
+        let g2 = observed_logslope * observed_logslope;
         let c = (1.0 + g2).sqrt();
-        let c1 = probit_scale * observed_slope / c;
+        let c1 = probit_scale * observed_logslope / c;
         let c_inv3 = 1.0 / (c * c * c);
         let c2 = probit_scale * probit_scale * c_inv3;
         let q = marginal.q;
         // η = q·c(g) + s_f·g·z, m = (2y−1)·η  (marginal_slope_standard_normal_scalar_eta).
-        let eta = q * c + observed_slope * z;
+        let eta = q * c + observed_logslope * z;
         let m = s * eta;
         let stack = signed_probit_neglog_unary_stack(m, w);
         let (k1, k2) = (stack[1], stack[2]);
@@ -3082,7 +3082,7 @@ mod flex_primary_hessian_oracle_tests {
     /// (`make_flex_hvp_cache_test_family`), kept in-crate so the oracle can run
     /// without the test crate (the family struct is `pub(super)`). Builds a small
     /// flex BMS family with both a score-warp and a link-deviation block so the
-    /// flex Hessian assembly exercises every primary block (q, slope, h, w).
+    /// flex Hessian assembly exercises every primary block (q, logslope, h, w).
     fn make_flex_oracle_family(
         n: usize,
     ) -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockState>) {
@@ -3112,7 +3112,7 @@ mod flex_primary_hessian_oracle_tests {
                 -0.4 + 0.8 * ((i * 19 + 7) % n) as f64 / n as f64
             }
         });
-        let slope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
+        let logslope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
             if j == 0 {
                 1.0
             } else {
@@ -3128,7 +3128,7 @@ mod flex_primary_hessian_oracle_tests {
             gaussian_frailty_sd: Some(0.15),
             base_link: InverseLink::Standard(gam_problem::StandardLink::Probit),
             marginal_design: DesignMatrix::Dense(DenseDesignMatrix::from(marginal_x.clone())),
-            slope_design: DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone())),
+            logslope_design: DesignMatrix::Dense(DenseDesignMatrix::from(logslope_x.clone())),
             score_warp: Some(score_prepared.runtime.clone()),
             link_dev: Some(link_prepared.runtime.clone()),
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
@@ -3153,7 +3153,7 @@ mod flex_primary_hessian_oracle_tests {
                 beta: beta_m,
             },
             ParameterBlockState {
-                eta: slope_x.dot(&beta_g),
+                eta: logslope_x.dot(&beta_g),
                 beta: beta_g,
             },
             ParameterBlockState {
@@ -3170,7 +3170,7 @@ mod flex_primary_hessian_oracle_tests {
 
     /// The flex primary gradient at a perturbed primary point. Perturbs primary
     /// coordinate `u` by `delta` (mutating the relevant block state — the
-    /// marginal/slope row η or a deviation β plus its design contribution
+    /// marginal/logslope row η or a deviation β plus its design contribution
     /// where applicable), rebuilds the row context FRESH (re-solving the
     /// calibration intercept root at the perturbed point), and returns the
     /// analytic gradient. The Hessian-assembly branch is never run, so this is a
@@ -3185,13 +3185,13 @@ mod flex_primary_hessian_oracle_tests {
     ) -> Array1<f64> {
         let mut states = states.to_vec();
         // Map the primary coordinate `u` onto the parameter that controls it.
-        // q / slope live in the per-row η of blocks 0 / 1; the deviation
+        // q / logslope live in the per-row η of blocks 0 / 1; the deviation
         // bases live in the β of blocks 2 (score-warp) / 3 (link-wiggle), which
         // the row context reads via `score_beta` / `link_beta` (their η rows are
         // unused on the flex per-row path, so only β need move).
         if u == primary.q {
             states[0].eta[row] += delta;
-        } else if u == primary.slope {
+        } else if u == primary.logslope {
             states[1].eta[row] += delta;
         } else if let Some(h_range) = primary.h.as_ref()
             && h_range.contains(&u)
@@ -3241,7 +3241,7 @@ mod flex_primary_hessian_oracle_tests {
     }
 
     /// #2303: the Murphy–Topel observed-z channel must cover BOTH deviation
-    /// blocks, not merely the rigid q/slope coordinates. Compare every
+    /// blocks, not merely the rigid q/logslope coordinates. Compare every
     /// primary coordinate to an independent central difference of the score,
     /// then assert the coefficient-space scatter retains nonzero score-warp and
     /// link-deviation columns.
@@ -3342,7 +3342,7 @@ mod flex_primary_hessian_oracle_tests {
         let r = primary.total;
         assert!(
             r >= 4,
-            "flex fixture must carry q + slope + deviation blocks"
+            "flex fixture must carry q + logslope + deviation blocks"
         );
 
         // Central-difference step. The flex gradient is smooth in every primary
