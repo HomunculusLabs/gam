@@ -540,12 +540,9 @@ pub(super) fn joint_setup(
         kappa_options,
     )
     .reseed_from_data(data, marginalspec, &marginal_terms, kappa_options)?;
-    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        slopespec,
-        &slope_terms,
-        kappa_options,
-    )
-    .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
+    let slope_kappa =
+        SpatialLogKappaCoords::from_length_scales_aniso(slopespec, &slope_terms, kappa_options)
+            .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
     let mut values = marginal_kappa.as_array().to_vec();
     values.extend(slope_kappa.as_array().iter());
     let marginal_dims = marginal_kappa.dims_per_term().to_vec();
@@ -737,12 +734,7 @@ pub(super) fn rigid_prescale_intercept_derivative_abs(
 }
 
 #[inline]
-pub(super) fn rigid_observed_eta(
-    marginal_eta: f64,
-    slope: f64,
-    z: f64,
-    probit_scale: f64,
-) -> f64 {
+pub(super) fn rigid_observed_eta(marginal_eta: f64, slope: f64, z: f64, probit_scale: f64) -> f64 {
     marginal_slope_standard_normal_scalar_eta(marginal_eta, slope, z, probit_scale)
 }
 
@@ -2390,9 +2382,7 @@ mod jet_tower_oracle_tests {
 
     use super::*;
 
-    use crate::bms::test_support::{
-        RigidStandardNormalRow, rigid_standard_normal_tower,
-    };
+    use crate::bms::test_support::{RigidStandardNormalRow, rigid_standard_normal_tower};
 
     #[test]
     fn signed_probit_stack_preserves_extreme_tail_derivatives_and_weight_sign() {
@@ -2977,7 +2967,8 @@ mod jet_tower_oracle_tests {
         const ROWS: usize = 64;
         let reps = 15usize;
         let iterations = 5_000usize;
-        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-BERNOULLI-VGH-932"));
+        let mut gate =
+            (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-BERNOULLI-VGH-932"));
 
         for (case_idx, &(eta, g, z, y, w)) in cases.iter().enumerate() {
             let marginal = bernoulli_marginal_link_map(
@@ -3012,14 +3003,8 @@ mod jet_tower_oracle_tests {
                 iterations,
                 0x9320_0BAD ^ case_idx as u64,
                 batched(ROWS, |nudge| {
-                    let (value, gradient, hessian) = measured_production_rigid_vgh(
-                        marginal,
-                        g + nudge,
-                        z,
-                        y,
-                        w,
-                        probit_scale,
-                    );
+                    let (value, gradient, hessian) =
+                        measured_production_rigid_vgh(marginal, g + nudge, z, y, w, probit_scale);
                     value + gradient[0] + hessian[0][0]
                 }),
                 batched(ROWS, |nudge| {

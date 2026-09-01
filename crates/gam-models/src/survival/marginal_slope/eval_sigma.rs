@@ -69,11 +69,10 @@ fn compiled_sigma_primary_terms(
         }
         total
     };
-    let matrix_direction = |matrix: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
-                            row: usize,
-                            direction: &[f64; RIGID_FEATURE_DIMENSION]| {
-        dot(&matrix[row], direction)
-    };
+    let matrix_direction =
+        |matrix: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+         row: usize,
+         direction: &[f64; RIGID_FEATURE_DIMENSION]| { dot(&matrix[row], direction) };
 
     let f_b = dot(&feature_gradient, &tangent);
     let h_times_tangent: [f64; RIGID_FEATURE_DIMENSION] =
@@ -311,10 +310,11 @@ impl SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         second_sigma: bool,
     ) -> Result<CompiledSigmaPrimaryTerms, String> {
-        let primaries = rigid_row_kernel_primaries::<
-            STATIC_SLOPE_PRIMARIES,
-            StaticSlopeGeometry,
-        >(self, block_states, row)?;
+        let primaries = rigid_row_kernel_primaries::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+            self,
+            block_states,
+            row,
+        )?;
         let scale = self.sigma_scale_derivatives()?;
         let mut inputs = rigid_row_inputs(
             self,
@@ -599,9 +599,9 @@ impl SurvivalMarginalSlopeFamily {
                     d_beta_flat,
                 )?;
                 let primaries = rigid_row_kernel_primaries::<
-            STATIC_SLOPE_PRIMARIES,
-            StaticSlopeGeometry,
-        >(self, block_states, row)?;
+                    STATIC_SLOPE_PRIMARIES,
+                    StaticSlopeGeometry,
+                >(self, block_states, row)?;
                 let direction = std::array::from_fn(|axis| row_dir[axis]);
                 let terms = first_parameter_directional_order2_terms(
                     primaries,

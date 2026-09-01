@@ -1748,7 +1748,6 @@ pub fn moving_limit_boundary_tower_theta_integrand<const K1: usize, const K: usi
     full - interior
 }
 
-
 // ── The program seam ─────────────────────────────────────────────────
 
 // ── The canonical single-source seam (#932 consolidation) ────────────

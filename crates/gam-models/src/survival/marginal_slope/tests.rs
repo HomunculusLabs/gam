@@ -1679,7 +1679,11 @@ fn rigid_row_kernel_agrees_with_jet_tower_program_all_channels() {
             },
         ];
 
-        let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(family.clone(), block_states.clone());
+        let kernel =
+            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+                family.clone(),
+                block_states.clone(),
+            );
 
         // Build the tower program's primaries exactly as `row_kernel` reads
         // them (designs · beta_time + offsets + shared marginal/slope eta).
@@ -1784,11 +1788,9 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
         };
 
         let dense_vars: [Order2<4>; 4] = std::array::from_fn(|a| Order2::variable(p[a], a));
-        let dense = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-            &dense_vars,
-            &inputs,
-        )
-        .expect("generic scalar feature map");
+        let dense =
+            rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&dense_vars, &inputs)
+                .expect("generic scalar feature map");
         let (value, gradient, hessian) =
             rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(&p, &inputs)
                 .expect("scalar feature pullback");
@@ -1806,10 +1808,10 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
             inputs.di,
             inputs.probit_scale,
         );
-        let sliced_witnesses =
-            rigid_row_admission_witnesses::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
-                &p, &inputs,
-            );
+        let sliced_witnesses = rigid_row_admission_witnesses::<
+            STATIC_SLOPE_PRIMARIES,
+            StaticSlopeGeometry,
+        >(&p, &inputs);
 
         let mut check = |a: f64, b: f64| {
             let rel = (a - b).abs() / (1.0 + a.abs().max(b.abs()));
@@ -5207,8 +5209,7 @@ fn mixed_blockwise_exact_newton_preserves_sparse_block_hessians() {
         offset_exit: Arc::new(array![0.0, 0.0]),
         derivative_offset_exit: Arc::new(array![0.05, 0.05]),
         marginal_design: sparse_design(&array![[1.0, 0.0], [0.0, 1.0]]),
-        slope_layout: (DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0], [0.5]])))
-            .into(),
+        slope_layout: (DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0], [0.5]]))).into(),
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -7556,7 +7557,11 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
             },
         ];
 
-        let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(family, block_states);
+        let kernel =
+            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+                family,
+                block_states,
+            );
         let p = RowKernel::n_coefficients(&kernel);
         assert_eq!(
             p,
@@ -7573,18 +7578,16 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
         // or sign error behind a fixed absolute tolerance.
         let cache = crate::row_kernel::build_row_kernel_cache(&kernel, &RowSet::All)
             .expect("rigid row-kernel cache");
-        let blas3 = crate::row_kernel::row_kernel_hessian_dense(
-            &kernel,
-            &cache,
-            &RowSet::All,
-        )
-        .expect("dense-design BLAS-3 Hessian");
+        let blas3 = crate::row_kernel::row_kernel_hessian_dense(&kernel, &cache, &RowSet::All)
+            .expect("dense-design BLAS-3 Hessian");
         let scalar = crate::row_kernel::row_kernel_hessian_dense_generic(
             &kernel,
             &RowSet::All,
             &cache.hessians,
         );
-        let scale = scalar.iter().fold(1.0_f64, |acc, value| acc.max(value.abs()));
+        let scale = scalar
+            .iter()
+            .fold(1.0_f64, |acc, value| acc.max(value.abs()));
         let max_hessian_gap = blas3
             .iter()
             .zip(scalar.iter())
@@ -7654,7 +7657,6 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
                  diverged from the per-axis sweep by {max_gap:e}"
             );
         }
-
     }
 }
 
@@ -8004,7 +8006,9 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
             let mut w = w.clone();
             w[[0, 0]] += nudge;
             family
-                .joint_jeffreys_information_contracted_trace_hessian_with_specs(&states0, &specs, &w)
+                .joint_jeffreys_information_contracted_trace_hessian_with_specs(
+                    &states0, &specs, &w,
+                )
                 .expect("contracted trace hessian call")
                 .expect("rigid path must supply the contracted completion")
                 .sum()
@@ -8073,20 +8077,16 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         let dense = program_full_tower(&program, 0).expect("dense tower");
         let third_vars: [OneSeed<4>; 4] =
             std::array::from_fn(|a| OneSeed::seed_direction([q0, q1, qd1, g][a], a, dir_u[a]));
-        let third = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-            &third_vars,
-            &inputs,
-        )
-        .expect("specialized third")
-        .contracted_third();
+        let third =
+            rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&third_vars, &inputs)
+                .expect("specialized third")
+                .contracted_third();
         let fourth_vars: [TwoSeed<4>; 4] =
             std::array::from_fn(|a| TwoSeed::seed([q0, q1, qd1, g][a], a, dir_u[a], dir_v[a]));
-        let fourth = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-            &fourth_vars,
-            &inputs,
-        )
-        .expect("specialized fourth")
-        .contracted_fourth();
+        let fourth =
+            rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&fourth_vars, &inputs)
+                .expect("specialized fourth")
+                .contracted_fourth();
         let dense_third = dense.third_contracted(&dir_u);
         let dense_fourth = dense.fourth_contracted(&dir_u, &dir_v);
         for a in 0..4 {
@@ -8122,11 +8122,10 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
                 let vars: [OneSeed<4>; 4] = std::array::from_fn(|a| {
                     OneSeed::seed_direction([q0, q1, qd1, perturbed_g][a], a, dir_u[a])
                 });
-                let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-                    &vars, &inputs,
-                )
-                .expect("specialized third")
-                .contracted_third();
+                let t =
+                    rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
+                        .expect("specialized third")
+                        .contracted_third();
                 t[0][0] + t[3][3]
             },
             |perturbation| {
@@ -8152,11 +8151,10 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
                 let vars: [TwoSeed<4>; 4] = std::array::from_fn(|a| {
                     TwoSeed::seed([q0, q1, qd1, perturbed_g][a], a, dir_u[a], dir_v[a])
                 });
-                let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-                    &vars, &inputs,
-                )
-                .expect("specialized fourth")
-                .contracted_fourth();
+                let t =
+                    rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
+                        .expect("specialized fourth")
+                        .contracted_fourth();
                 t[0][0] + t[3][3]
             },
             |perturbation| {
@@ -8284,12 +8282,11 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
             "sparse-vs-dense t4 isolation test",
         )
         .expect("rigid row inputs");
-        let vars: [SparseTower4<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>; STATIC_SLOPE_PRIMARIES] =
-            std::array::from_fn(|a| SparseTower4::variable(p[a], a));
-        let sparse = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-            &vars, &inputs,
-        )
-        .expect("sparse tower4");
+        let vars: [SparseTower4<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>;
+            STATIC_SLOPE_PRIMARIES] = std::array::from_fn(|a| SparseTower4::variable(p[a], a));
+        let sparse =
+            rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
+                .expect("sparse tower4");
 
         for a in 0..4 {
             for b in 0..4 {
@@ -8407,7 +8404,10 @@ fn slope_jacobian_reads_probit_scale_from_state_at_beta_zero() {
                 "eta0[{i},{j}]: got {got:.6e} expected {expected:.6e}"
             );
             let ad1 = jac_sf[[2 * n + i, j]];
-            assert!(ad1.abs() < 1e-12, "ad1[{i},{j}] must be 0 at beta=0: {ad1:.3e}");
+            assert!(
+                ad1.abs() < 1e-12,
+                "ad1[{i},{j}] must be 0 at beta=0: {ad1:.3e}"
+            );
             if got.abs() > 1e-14 {
                 let ratio = jac_1[[i, j]] / got;
                 assert!(
@@ -8451,7 +8451,10 @@ fn slope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
                 .sum()
         })
         .collect();
-    assert!(g.iter().any(|&v| v.abs() > 0.05), "fixture must reach nonzero g");
+    assert!(
+        g.iter().any(|&v| v.abs() > 0.05),
+        "fixture must reach nonzero g"
+    );
 
     // Frozen primary scalars (pilot q values held fixed for the FD functional).
     let q0: Vec<f64> = (0..n).map(|i| -0.5 + 0.3 * z[i]).collect();
@@ -8602,8 +8605,7 @@ fn make_timewiggle_test_family(
         Array1::from_iter((0..n).map(|i| if (i * 31 + 7) % 5 >= 3 { 1.0 } else { 0.0 }));
     let weights: Array1<f64> =
         Array1::from_iter((0..n).map(|i| 0.5 + ((i * 13 + 4) % 5) as f64 * 0.1));
-    let offset_entry: Array1<f64> =
-        Array1::from_iter((0..n).map(|i| -0.30 + 0.11 * i as f64));
+    let offset_entry: Array1<f64> = Array1::from_iter((0..n).map(|i| -0.30 + 0.11 * i as f64));
     let offset_exit: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.15 + 0.09 * i as f64));
     // qd1 must stay well above the derivative guard at every perturbed beta.
     let derivative_offset_exit: Array1<f64> =
@@ -8839,15 +8841,14 @@ fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
 
     let slope_design =
         Array2::from_shape_fn((n, 2), |(row, col)| 1.0 + 0.5 * row as f64 + col as f64);
-    let z = Array2::from_shape_fn((n, 2), |(row, col)| -0.4 + 0.2 * row as f64 + 0.1 * col as f64);
+    let z = Array2::from_shape_fn((n, 2), |(row, col)| {
+        -0.4 + 0.2 * row as f64 + 0.1 * col as f64
+    });
     let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
     let slope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
     let layout = SlopeTopology::per_score(vec![0..1, 1..2], 2)
         .unwrap()
-        .materialize_identity(
-            DesignMatrix::from(slope_design.clone()),
-            &slope_offset,
-        )
+        .materialize_identity(DesignMatrix::from(slope_design.clone()), &slope_offset)
         .unwrap();
     let family = make_timewiggle_test_family(n, p_base, p_m, layout, z, covariance);
 
@@ -8923,26 +8924,27 @@ fn rigid_row_primary_mixed_in_z_matches_finite_difference() {
                             qd1_lower: derivative_guard,
                         };
                         let primaries = [q0, q1, qd1, g];
-                        let analytic =
-                            rigid_row_primary_mixed_in_z::<
-                                STATIC_SLOPE_PRIMARIES,
-                                StaticSlopeGeometry,
-                            >(&primaries, &inputs_at(z))
-                            .expect("analytic mixed derivative");
+                        let analytic = rigid_row_primary_mixed_in_z::<
+                            STATIC_SLOPE_PRIMARIES,
+                            StaticSlopeGeometry,
+                        >(&primaries, &inputs_at(z))
+                        .expect("analytic mixed derivative");
                         // Central difference of the primary gradient in z. The
                         // step is scaled to |z| so the relative truncation error
                         // stays ~h² across the grid.
                         let h = 1e-5 * (1.0 + z.abs());
-                        let (_, grad_plus, _) = rigid_row_order2::<
-                            STATIC_SLOPE_PRIMARIES,
-                            StaticSlopeGeometry,
-                        >(&primaries, &inputs_at(z + h))
-                        .expect("gradient +h");
-                        let (_, grad_minus, _) = rigid_row_order2::<
-                            STATIC_SLOPE_PRIMARIES,
-                            StaticSlopeGeometry,
-                        >(&primaries, &inputs_at(z - h))
-                        .expect("gradient -h");
+                        let (_, grad_plus, _) =
+                            rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                                &primaries,
+                                &inputs_at(z + h),
+                            )
+                            .expect("gradient +h");
+                        let (_, grad_minus, _) =
+                            rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                                &primaries,
+                                &inputs_at(z - h),
+                            )
+                            .expect("gradient -h");
                         for axis in 0..4 {
                             let fd = (grad_plus[axis] - grad_minus[axis]) / (2.0 * h);
                             let scale = analytic[axis].abs().max(fd.abs()).max(1.0);

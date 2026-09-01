@@ -606,8 +606,7 @@ pub fn survival_marginal_slope_vector_neglog(
         linear_dot += slopes[axis] * z[axis];
     }
     let linear = probit_scale * linear_dot;
-    let variance =
-        validated_vector_variance(workspace.quadratic_value(row, slopes), probit_scale)?;
+    let variance = validated_vector_variance(workspace.quadratic_value(row, slopes), probit_scale)?;
     let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0)
         .map(|value| RuntimeValue::constant(value, RIGID_FEATURE_DIMENSION, &()));
     Ok(rigid_feature_runtime_nll(&features, &inputs, RIGID_FEATURE_DIMENSION, &())?.value())
@@ -1661,8 +1660,7 @@ impl StaticSlopeFeatureContraction {
                 + feature_hessian[other_left][other_right]
         };
         Self {
-            gradient_linear: feature_gradient[FEATURE_LINEAR0]
-                + feature_gradient[FEATURE_LINEAR1],
+            gradient_linear: feature_gradient[FEATURE_LINEAR0] + feature_gradient[FEATURE_LINEAR1],
             gradient_variance: feature_gradient[FEATURE_VARIANCE0]
                 + feature_gradient[FEATURE_VARIANCE1],
             linear_linear: pair(
@@ -1709,8 +1707,8 @@ fn write_rigid_vector_score_hessian_block(
     for left_score in 0..linear_direction.len() {
         let left_linear = linear_direction[left_score];
         let left_variance = variance_direction[left_score];
-        let to_linear = contraction.linear_linear * left_linear
-            + contraction.linear_variance * left_variance;
+        let to_linear =
+            contraction.linear_linear * left_linear + contraction.linear_variance * left_variance;
         let to_variance = contraction.linear_variance * left_linear
             + contraction.variance_variance * left_variance;
         let left_primary = 3 + left_score;
@@ -3189,8 +3187,9 @@ mod tests {
         assert!(checked_upper_triangle_cells(usize::MAX).is_err());
 
         assert!(MarginalSlopeCovariance::diagonal(Array1::zeros(0)).is_err());
-        let covariance =
-            ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(Array1::ones(3)).unwrap());
+        let covariance = ScoreCovarianceField::pooled(
+            MarginalSlopeCovariance::diagonal(Array1::ones(3)).unwrap(),
+        );
         let mut workspace = RigidVectorRowWorkspace::new(&covariance).expect("k=3 workspace");
         let error = row_primary_closed_form_vector_into(
             0,
@@ -3223,7 +3222,8 @@ mod tests {
         // pullback must beat the reusable strongest-hand schedule. Both arms
         // reuse derivative output and covariance scratch so the timing is row
         // arithmetic only; the nudge perturbs the marginal predictor.
-        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("G932_PACKED_WIDTH_RELEASE"));
+        let mut gate =
+            (!cfg!(debug_assertions)).then(|| SpeedGate::open("G932_PACKED_WIDTH_RELEASE"));
 
         macro_rules! measure_width {
             ($k:literal, $dim:literal) => {{
