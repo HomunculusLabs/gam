@@ -219,6 +219,20 @@ row_program! {
 type Channels = (f64, [f64; K], [[f64; K]; K]);
 
 #[inline(always)]
+/// The activity flag and stack of a plan slot the planner may leave absent.
+///
+/// The hand arm reads the `Option` discriminant (`if let Some(u1) = plan.u1`);
+/// the generated arm must read the same bit, not flatten the slot to zeros
+/// and rediscover its absence with a five-way compare scan. Both arms then
+/// do the same scaffolding on the same plan, and the timing compares the
+/// kernels.
+fn presence(slot: Option<[f64; 5]>) -> (f64, [f64; 5]) {
+    match slot {
+        Some(stack) => (1.0, stack),
+        None => (0.0, [0.0; 5]),
+    }
+}
+
 fn stack_active(stack: &[f64; 5]) -> f64 {
     if stack.iter().all(|value| *value == 0.0) {
         0.0
@@ -230,8 +244,8 @@ fn stack_active(stack: &[f64; 5]) -> f64 {
 #[inline(never)]
 fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
     let plan = outer_plan_order2(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let (value, gradient, hessian, []) = generated_sls_order2(
         p[0],
         p[1],
@@ -248,13 +262,13 @@ fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -267,8 +281,8 @@ fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
 #[inline(never)]
 fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; K] {
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     generated_sls_third_contracted(
         p[0],
         p[1],
@@ -285,13 +299,13 @@ fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -309,8 +323,8 @@ fn generated_fourth(
     direction_v: &[f64; K],
 ) -> [[f64; K]; K] {
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     generated_sls_fourth_contracted(
         p[0],
         p[1],
@@ -327,13 +341,13 @@ fn generated_fourth(
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -349,8 +363,8 @@ fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; 
     use gam_math::jet_scalar::OneSeed;
 
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let vars: [OneSeed<K>; K] =
         std::array::from_fn(|axis| OneSeed::seed_direction(p[axis], axis, direction[axis]));
     let (value, []) = generated_sls(
@@ -369,13 +383,13 @@ fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; 
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -395,8 +409,8 @@ fn jet_fourth(
     use gam_math::jet_scalar::TwoSeed;
 
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let vars: [TwoSeed<K>; K] = std::array::from_fn(|axis| {
         TwoSeed::seed(p[axis], axis, direction_u[axis], direction_v[axis])
     });
@@ -416,13 +430,13 @@ fn jet_fourth(
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -700,73 +714,46 @@ fn hand_analytic_contracted<const ORDER: usize>(
     output
 }
 
+/// The strongest hand order-2 kernel for the same row.
+///
+/// It consumes the same `outer_plan_order2` plan the generated arm consumes,
+/// through the same `Option` discriminants, so the paired timing compares the
+/// two kernels and not two planners. (An earlier hand arm rebuilt the stacks
+/// inline as three scalars per slot and never materialised the plan; it was
+/// stronger than the production hand kernel, which shares the planner with
+/// the generated kernel, and the deficit it measured was the plan's round
+/// trip through the stack, not the compiled program.)
 #[inline(never)]
 fn hand(p: &[f64; K], kernel: &Kernel) -> Channels {
+    let plan = outer_plan_order2(kernel);
     let entry_exp = (-p[7]).exp();
     let exit_exp = (-p[6]).exp();
 
     let u0_point = p[0] - p[4] * entry_exp;
-    let u0_stack = [
-        kernel.w * kernel.u0[0],
-        kernel.w * kernel.u0[1],
-        kernel.w * kernel.u0[2],
-        0.0,
-        0.0,
-    ];
-    let u0_active = !u0_stack.iter().all(|value| *value == 0.0);
+    let u0_active = !plan.u0.iter().all(|value| *value == 0.0);
     let u0_stack = if u0_active {
-        preserve_composition_domain(u0_point, u0_stack)
+        preserve_composition_domain(u0_point, plan.u0)
     } else {
-        u0_stack
+        plan.u0
     };
     let mut value = u0_stack[0];
     let u0_first = u0_stack[1];
     let u0_second = u0_stack[2];
 
-    let censored_weight = kernel.w * (1.0 - kernel.d);
-    let event_weight = kernel.w * kernel.d;
-    let mut u1_value = 0.0;
-    let mut u1_first = 0.0;
-    let mut u1_second = 0.0;
-    if censored_weight != 0.0 {
-        u1_value -= censored_weight * kernel.censored_u1[0];
-        u1_first -= censored_weight * kernel.censored_u1[1];
-        u1_second -= censored_weight * kernel.censored_u1[2];
-    }
-    if event_weight != 0.0 {
-        u1_value -= event_weight * kernel.event_u1[0];
-        u1_first -= event_weight * kernel.event_u1[1];
-        u1_second -= event_weight * kernel.event_u1[2];
-    }
     let u1_point = p[1] - p[3] * exit_exp;
-    let [u1_value, u1_first, u1_second, _, _] = if censored_weight != 0.0 || event_weight != 0.0 {
-        preserve_composition_domain(u1_point, [u1_value, u1_first, u1_second, 0.0, 0.0])
-    } else {
-        [u1_value, u1_first, u1_second, 0.0, 0.0]
+    let u1_active = plan.u1.is_some();
+    let [u1_value, u1_first, u1_second, _, _] = match plan.u1 {
+        Some(stack) => preserve_composition_domain(u1_point, stack),
+        None => [0.0; 5],
     };
     value += u1_value;
 
     let inner = p[3] * p[8] - p[5];
     let g_point = p[2] + exit_exp * inner;
-    let [g_value, g_first, g_second, _, _] = if event_weight != 0.0 {
-        preserve_composition_domain(
-            g_point,
-            [
-                -event_weight * kernel.event_g[0],
-                -event_weight * kernel.event_g[1],
-                -event_weight * kernel.event_g[2],
-                0.0,
-                0.0,
-            ],
-        )
-    } else {
-        [
-            -event_weight * kernel.event_g[0],
-            -event_weight * kernel.event_g[1],
-            -event_weight * kernel.event_g[2],
-            0.0,
-            0.0,
-        ]
+    let g_active = plan.g.is_some();
+    let [g_value, g_first, g_second, _, _] = match plan.g {
+        Some(stack) => preserve_composition_domain(g_point, stack),
+        None => [0.0; 5],
     };
     value += g_value;
 
@@ -785,12 +772,12 @@ fn hand(p: &[f64; K], kernel: &Kernel) -> Channels {
         gradient[4] = u0_first * u0_g4;
         gradient[7] = u0_first * u0_g7;
     }
-    if censored_weight != 0.0 || event_weight != 0.0 {
+    if u1_active {
         gradient[1] = u1_first;
         gradient[3] = u1_first * u1_g3;
         gradient[6] = u1_first * u1_g6;
     }
-    if event_weight != 0.0 {
+    if g_active {
         gradient[2] = g_first;
         gradient[3] += g_first * g3;
         gradient[5] = g_first * g5;
@@ -818,7 +805,7 @@ fn hand(p: &[f64; K], kernel: &Kernel) -> Channels {
         symmetric!(7, 7, u0_second * u0_g7 * u0_g7 - u0_first * u0_g7);
     }
 
-    if censored_weight != 0.0 || event_weight != 0.0 {
+    if u1_active {
         symmetric!(1, 1, u1_second);
         symmetric!(1, 3, u1_second * u1_g3);
         symmetric!(1, 6, u1_second * u1_g6);
@@ -827,7 +814,7 @@ fn hand(p: &[f64; K], kernel: &Kernel) -> Channels {
         symmetric!(6, 6, u1_second * u1_g6 * u1_g6 - u1_first * u1_g6);
     }
 
-    if event_weight != 0.0 {
+    if g_active {
         symmetric!(2, 2, g_second);
         symmetric!(2, 3, g_second * g3);
         symmetric!(2, 5, g_second * g5);

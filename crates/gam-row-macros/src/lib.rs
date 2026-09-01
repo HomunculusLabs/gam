@@ -210,6 +210,14 @@ impl Graph {
     }
 
     fn constant(&mut self, value: f64) -> usize {
+        // Zero has one spelling. The algebra already discards the sign of a
+        // zero (`x * 0` folds to `0` whatever `x` is), and a `-0.0` -- reached
+        // by negating an identically-zero derivative -- would intern as a
+        // second zero: a channel spelled `-0.0`, or two gates that differ only
+        // in the sign of an inactive branch, which lower to two identical
+        // `phi`s that LLVM does not unify and therefore two spills of one
+        // value (measured on the cause-specific order-2 row).
+        let value = if value == 0.0 { 0.0 } else { value };
         self.intern(Node::Constant(value.to_bits()))
     }
 
@@ -376,25 +384,6 @@ impl Graph {
     }
 
     fn select(&mut self, activity: usize, when_true: usize, when_false: usize) -> usize {
-        if when_true == when_false {
-            return when_true;
-        }
-        if self.is_zero(when_true) && self.is_zero(when_false) {
-            return self.constant(0.0);
-        }
-        // The inactive branch's zero has one spelling. A negation pushed
-        // through a gate yields `-0.0` there while a later derivative of the
-        // same gate yields `0.0`, and two gates that differ only in the sign of
-        // an inactive zero would intern as two nodes: two identical `phi`s
-        // after the branch merge, which LLVM does not unify, and therefore two
-        // spills and two stores of one value (measured on the cause-specific
-        // order-2 row: the entry gate's gradient and Hessian channels). The
-        // sign of an inactive contribution carries no information.
-        let when_false = if self.is_zero(when_false) {
-            self.constant(0.0)
-        } else {
-            when_false
-        };
         if when_true == when_false {
             return when_true;
         }

@@ -230,3 +230,204 @@ fn duchon_chart_is_inert_where_the_kernel_does_not_underflow() {
     assert!(first_gap < 1e-5, "∂X/∂ψ gap {first_gap:.3e}");
     assert!(second_gap < 1e-4, "∂²X/∂ψ² gap {second_gap:.3e}");
 }
+
+// ---------------------------------------------------------------------------
+// The latent-coordinate Jacobian under the same chart.
+//
+// `LatentCoordDesignDerivative::new_duchon` supplies `∂X/∂t` for the joint
+// `[rho, latent]` driver. The shipped design is `α·φ(||t/σ − c||)`, and `α`
+// depends on the centers and the range only, so the coordinate Jacobian is
+// the raw one times `α`. The ground truth is the production rebuild
+// (`build_term_collection_design` through the frozen spec), central-differenced
+// in one latent coordinate — the same discipline as the #2643 frame gate.
+// ---------------------------------------------------------------------------
+
+use crate::latent::{LatentCoordValues, LatentIdMode};
+use crate::smooth::{
+    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
+    build_term_collection_design, freeze_term_collection_from_design,
+};
+use ndarray::{Array1, s};
+
+fn latent_duchon_collection(
+    d: usize,
+    centers: usize,
+    order: DuchonNullspaceOrder,
+    power: f64,
+) -> TermCollectionSpec {
+    TermCollectionSpec {
+        linear_terms: vec![],
+        random_effect_terms: vec![],
+        smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
+            name: "latent_duchon".to_string(),
+            basis: SmoothBasisSpec::Duchon {
+                feature_cols: (0..d).collect(),
+                spec: DuchonBasisSpec {
+                    radial_reparam: None,
+                    periodic: None,
+                    center_strategy: CenterStrategy::FarthestPoint {
+                        num_centers: centers,
+                    },
+                    length_scale: Some(1.0),
+                    power,
+                    nullspace_order: order,
+                    // Global parametric centering would couple every row's
+                    // design to the differenced coordinate; the operator's
+                    // contract is the term-local design.
+                    identifiability: SpatialIdentifiability::None,
+                    aniso_log_scales: None,
+                    operator_penalties: DuchonOperatorPenaltySpec::default(),
+                    boundary: OneDimensionalBoundary::Open,
+                },
+                input_scale: None,
+            },
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }],
+    }
+}
+
+/// The term's design row at latent configuration `data`, through the FROZEN
+/// spec (σ and centers held; only the coordinate moves).
+fn latent_design_row(data: &Array2<f64>, spec: &TermCollectionSpec, row: usize) -> Array1<f64> {
+    let built = build_term_collection_design(data.view(), spec).expect("design rebuild");
+    let p_total = built.design.ncols();
+    let smooth_start = p_total.saturating_sub(built.smooth.total_smooth_cols());
+    let range = &built.smooth.terms[0].coeff_range;
+    built
+        .design
+        .to_dense()
+        .row(row)
+        .slice(s![smooth_start + range.start..smooth_start + range.end])
+        .to_owned()
+}
+
+/// Worst relative disagreement between `local_design_jacobian_row` and the
+/// central difference of the production rebuild, over three rows and every
+/// axis. Returns `(chart amplification, worst relative error)`.
+fn latent_jacobian_worst_gap(
+    d: usize,
+    order: DuchonNullspaceOrder,
+    power: f64,
+    label: &str,
+) -> (f64, f64) {
+    // A raw cloud with σ ≠ 1 so the standardized and original frames differ
+    // (the #2643 trap) and the chart is exercised at the benchmark's shape.
+    let data = standardized_cloud(60, d) * 2.5;
+    let fresh = latent_duchon_collection(d, 12, order, power);
+    let built = build_term_collection_design(data.view(), &fresh).expect("fresh design");
+    let frozen = freeze_term_collection_from_design(&fresh, &built).expect("freeze");
+    let BasisMetadata::Duchon {
+        centers,
+        length_scale,
+        power: meta_power,
+        nullspace_order,
+        identifiability_transform,
+        input_scale,
+        ..
+    } = &built.smooth.terms[0].metadata
+    else {
+        panic!("fixture must produce Duchon metadata");
+    };
+    let sigma = input_scale.reciprocal().recip();
+    let coeffs = {
+        let p_order = duchon_p_from_nullspace_order(duchon_effective_nullspace_order(
+            centers.view(),
+            *nullspace_order,
+        ));
+        let ell = input_scale
+            .to_standardized_units(length_scale.expect("hybrid fixture"))
+            .standardized_value();
+        (p_order, ell, duchon_partial_fraction_coeffs(p_order, power as usize, 1.0 / ell))
+    };
+    let amplification = duchon_kernel_chart(
+        centers.view(),
+        Some(coeffs.1),
+        coeffs.0,
+        power as usize,
+        d,
+        None,
+        Some(&coeffs.2),
+        None,
+    )
+    .amplification;
+
+    let latent = std::sync::Arc::new(LatentCoordValues::from_flat(
+        Array1::from_iter(data.iter().copied()),
+        data.nrows(),
+        d,
+        LatentIdMode::None,
+    ));
+    let derivative = LatentCoordDesignDerivative::new_duchon(
+        latent,
+        std::sync::Arc::new(centers.clone()),
+        *input_scale,
+        *length_scale,
+        *meta_power,
+        *nullspace_order,
+        identifiability_transform.clone(),
+    )
+    .expect("latent Duchon design derivative");
+
+    let step = f64::EPSILON.cbrt() * sigma;
+    let mut worst = 0.0_f64;
+    let mut largest_analytic = 0.0_f64;
+    for row in [0usize, 17, 41] {
+        for axis in 0..d {
+            let analytic = derivative
+                .local_design_jacobian_row(row, axis)
+                .expect("analytic local design jacobian");
+            let mut plus = data.clone();
+            plus[[row, axis]] += step;
+            let mut minus = data.clone();
+            minus[[row, axis]] -= step;
+            let numeric = (latent_design_row(&plus, &frozen, row)
+                - latent_design_row(&minus, &frozen, row))
+                / (2.0 * step);
+            assert_eq!(analytic.len(), numeric.len(), "Jacobian rows must span the same columns");
+            let magnitude = analytic
+                .iter()
+                .chain(numeric.iter())
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            largest_analytic = largest_analytic.max(
+                analytic
+                    .iter()
+                    .fold(0.0_f64, |acc, value| acc.max(value.abs())),
+            );
+            let denominator = magnitude.max(1e-8);
+            for (a, n) in analytic.iter().zip(numeric.iter()) {
+                worst = worst.max((a - n).abs() / denominator);
+            }
+        }
+    }
+    eprintln!(
+        "[{label}] sigma={sigma:.4} alpha={amplification:.6e} step={step:.3e} \
+         max|analytic|={largest_analytic:.3e} worst_relative_error={worst:.3e}"
+    );
+    (amplification, worst)
+}
+
+/// The benchmark's chart again, now for the coordinate Jacobian: the chart
+/// MUST be amplified, and `∂X/∂t` must be the derivative of the shipped
+/// (amplified) design. Before the chart reached this operator the analytic
+/// rows were ~`1/α` of the numeric ones.
+#[test]
+fn latent_jacobian_matches_the_shipped_design_16d_order0_power9() {
+    let (amplification, worst) =
+        latent_jacobian_worst_gap(16, DuchonNullspaceOrder::Zero, 9.0, "latent_16d_order0_power9");
+    assert!(
+        amplification != 1.0,
+        "the 16-D power-9 fixture must underflow so the chart is exercised; got α = {amplification}"
+    );
+    assert!(worst < 1e-5, "latent Jacobian differs from the rebuild by {worst:.3e} (relative)");
+}
+
+/// The low-dimensional control: identity chart, the Jacobian unchanged.
+#[test]
+fn latent_jacobian_chart_is_inert_where_the_kernel_does_not_underflow() {
+    let (amplification, worst) =
+        latent_jacobian_worst_gap(2, DuchonNullspaceOrder::Linear, 1.0, "latent_2d_linear_power1");
+    assert_eq!(amplification, 1.0, "a 2-D power-1 hybrid must not be amplified");
+    assert!(worst < 1e-5, "latent Jacobian differs from the rebuild by {worst:.3e} (relative)");
+}
