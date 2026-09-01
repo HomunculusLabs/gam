@@ -6,7 +6,7 @@ use faer::{Accum, Mat, MatRef, Par, Side};
 use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd};
 use gam_linalg::matrix::symmetrize_in_place;
 use gam_linalg::utils::KahanSum;
-use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut2, Axis, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut2, s};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };

@@ -4,13 +4,6 @@ use gam_solve::rho_optimizer::{
     FixedPointCertificateEval, FixedPointCoordinateCertificate, OuterResult,
 };
 
-/// #1033 — temperature on the chart-geometry routing predictor's cosine-aligned
-/// logit `gate_logit_scale · ⟨x, γ̂⟩`. The alignment `⟨x, γ̂⟩` is on the natural
-/// `‖x‖` scale; this scale maps it into the gate's logit range so a
-/// well-reconstructing atom gets a clearly-on gate and a poorly-reconstructing one
-/// a clearly-off gate. A starting value pending the MSI accuracy-gate calibration
-/// (the single knob the fit-quality measurement tunes).
-const AMORTIZED_GATE_LOGIT_SCALE: f64 = 1.0;
 
 /// `SaeManifoldTerm::set_homotopy_eta` rejects exactly one thing: an η that is
 /// not finite or falls outside [0, 1]. Every call below passes a literal 0.0 /

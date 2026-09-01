@@ -1,7 +1,7 @@
 use crate::inference::generative::NoiseModel;
 use crate::model_types::{EstimationError, FittedLinkState, UnifiedFitResult};
 use crate::quadrature::{
-    IntegratedMomentsJet, QuadratureContext, cloglog_posterior_meanvariance,
+    QuadratureContext, cloglog_posterior_meanvariance,
     integrated_family_moments_jet, integrated_inverse_link_jetwith_state,
     integrated_inverse_link_mean_and_derivative, logit_posterior_meanvariance,
     normal_expectation_1d_adaptive, normal_expectation_1d_adaptive_pair,

@@ -1,7 +1,4 @@
-use crate::bms::{
-    DEFAULT_EMPIRICAL_LATENT_GRID_SIZE, DeviationBlockConfig, LatentMeasureSpec, LatentZCheckMode,
-    LatentZNormalizationMode, LatentZPolicy,
-};
+use crate::bms::{DeviationBlockConfig, LatentZCheckMode};
 use crate::survival::construction::SurvivalBaselineTarget;
 use gam_problem::{InverseLink, StandardLink};
 
