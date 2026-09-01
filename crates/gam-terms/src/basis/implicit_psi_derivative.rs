@@ -2859,6 +2859,7 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
             full_ident_transform,
             n_poly,
         );
+        let op = install_design_chart(op, &chart_jets);
         return Ok(AnisoBasisPsiDerivatives {
             design_first: Vec::new(),
             design_second_diag: Vec::new(),
