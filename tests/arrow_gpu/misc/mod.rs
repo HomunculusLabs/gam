@@ -3,3 +3,8 @@ mod arrow_schur_complement_matches_dense_reference;
 mod arrow_schur_cross_row;
 mod arrow_schur_inertia_matches_sylvester_law;
 mod arrow_schur_mixed_precision;
+mod gpu_encode_throughput_measured_1412;
+mod owed_1017_gpu;
+mod owed_1412;
+mod owed_1551_sae_direct_device_engage;
+mod sae_throughput_gate_honesty_guard_1412;

@@ -10,3 +10,4 @@ mod measure_jet_scale_smoke;
 mod measure_jet_web_quality;
 mod probe_2750_psi_box;
 mod probe_2750_range_state;
+mod bug_hunt_measure_jet_gap_follows_trend_not_mean;

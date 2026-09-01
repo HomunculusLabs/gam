@@ -25,7 +25,7 @@
 //! compile time via `include_str!` and asserts the honest properties survive so
 //! a refactor cannot silently restore the CPU×100 green-wash.
 
-const BENCH_SRC: &str = include_str!("sae/sae/sae_encode_throughput_bench.rs");
+const BENCH_SRC: &str = include_str!("../../sae/sae/sae_encode_throughput_bench.rs");
 
 /// (1) The green-wash constants must be GONE from the gate: no CPU→GPU scaling
 /// factor and no `gate / scaling` derived floor may drive the decision. Their
