@@ -36,7 +36,6 @@
 //! That is process state, and `log::info!` evaluates its format arguments
 //! eagerly, so a logger installed by one test silently taxes every other test in
 //! the same process — `measure_jet`'s target carries a wall-clock speed gate.
-//! `tests/probe_2750_range_cost.rs` is split out for exactly this reason.
 
 use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism};
 use gam::utils::splitmix64;
