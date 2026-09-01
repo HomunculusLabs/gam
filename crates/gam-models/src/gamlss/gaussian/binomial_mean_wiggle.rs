@@ -761,6 +761,32 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         Ok(beta)
     }
 
+    /// The classical binomial deviance at the wiggled probabilities
+    /// `g⁻¹(η + η_w)` (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        validate_block_count::<GamlssError>("BinomialMeanWiggleFamily", 2, block_states.len())?;
+        let eta = &block_states[Self::BLOCK_ETA].eta;
+        let etaw = &block_states[Self::BLOCK_WIGGLE].eta;
+        let n = self.y.len();
+        if eta.len() != n || etaw.len() != n || self.weights.len() != n {
+            return Err(GamlssError::DimensionMismatch {
+                reason: "BinomialMeanWiggleFamily deviance input size mismatch".to_string(),
+            }
+            .into());
+        }
+        let mut mu = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let q = eta[i] + etaw[i];
+            mu[i] = inverse_link_jet_for_inverse_link(&self.link_kind, q)
+                .map_err(|e| format!("fixed-link wiggle inverse-link evaluation failed: {e}"))?
+                .mu;
+        }
+        crate::gamlss::binomial::binomial_classical_deviance(&self.y, &self.weights, &mu).map(Some)
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         validate_block_count::<GamlssError>("BinomialMeanWiggleFamily", 2, block_states.len())?;
         let eta = &block_states[Self::BLOCK_ETA].eta;

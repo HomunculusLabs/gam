@@ -107,6 +107,46 @@ pub(crate) fn log1mexp_neg_positive(z: f64) -> f64 {
     }
 }
 
+/// Classical binomial deviance `2·Σ wᵢ [y ln(y/μ) + (1−y) ln((1−y)/(1−μ))]` at
+/// the fitted probabilities `mu` — the number every standard binomial fit
+/// reports, shared by the location-scale family, its link-wiggle form, and
+/// the mean-wiggle family (#2786). For a 0/1 response it equals `−2·log L`;
+/// for a grouped proportion with trial weights it does not, because the
+/// saturated log-likelihood is then non-zero.
+pub(crate) fn binomial_classical_deviance(
+    y: &Array1<f64>,
+    weights: &Array1<f64>,
+    mu: &Array1<f64>,
+) -> Result<f64, String> {
+    fn xlogy(x: f64, y: f64) -> f64 {
+        if x == 0.0 { 0.0 } else { x * y.ln() }
+    }
+    if y.len() != weights.len() || y.len() != mu.len() {
+        return Err(format!(
+            "binomial classical deviance size mismatch: y={}, weights={}, mu={}",
+            y.len(),
+            weights.len(),
+            mu.len()
+        ));
+    }
+    let mut half = 0.0_f64;
+    for i in 0..y.len() {
+        let w = weights[i];
+        if w == 0.0 {
+            continue;
+        }
+        let (yi, mui) = (y[i], mu[i]);
+        let unit = xlogy(yi, yi / mui) + xlogy(1.0 - yi, (1.0 - yi) / (1.0 - mui));
+        half += w * unit;
+        if !half.is_finite() {
+            return Err(format!(
+                "binomial classical deviance is non-finite at row {i}: y={yi}, mu={mui}, weight={w}"
+            ));
+        }
+    }
+    Ok(2.0 * half)
+}
+
 #[inline]
 pub(crate) fn bernoulli_log_likelihood_from_probability(
     y: f64,

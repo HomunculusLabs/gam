@@ -36,6 +36,7 @@
 pub(crate) use super::*;
 
 mod kernel;
+pub(crate) use kernel::binomial_classical_deviance;
 pub(crate) use kernel::*;
 
 mod location_scale;

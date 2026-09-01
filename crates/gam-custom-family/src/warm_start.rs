@@ -180,6 +180,11 @@ pub(crate) fn warm_start_without_cached_inner_for_psi_derivatives(
 pub struct BlockwiseFitResultParts {
     pub block_states: Vec<ParameterBlockState>,
     pub log_likelihood: f64,
+    /// The classical family deviance at the mode when the family declares one
+    /// (`CustomFamily::classical_deviance`); `None` publishes
+    /// `−2·log_likelihood`, the convention for a family whose saturated
+    /// log-likelihood is zero or undefined (#2786).
+    pub deviance: Option<f64>,
     pub log_lambdas: Array1<f64>,
     pub lambdas: Array1<f64>,
     pub covariance_conditional: Option<Array2<f64>>,
@@ -605,6 +610,7 @@ mod assembly_convergence_tests {
         BlockwiseFitResultParts {
             block_states: Vec::new(),
             log_likelihood: 0.0,
+            deviance: None,
             log_lambdas: Array1::zeros(0),
             lambdas: Array1::zeros(0),
             covariance_conditional: None,
@@ -684,6 +690,7 @@ pub fn blockwise_fit_from_parts(
     let BlockwiseFitResultParts {
         block_states,
         log_likelihood,
+        deviance,
         log_lambdas,
         lambdas,
         covariance_conditional,
@@ -933,7 +940,12 @@ pub fn blockwise_fit_from_parts(
             }
         })
         .collect();
-    let deviance = -2.0 * log_likelihood;
+    // A family that declares a classical deviance publishes it — the unscaled
+    // `2·Σ w·d(y, μ̂)` every standard fit reports. The others publish
+    // `−2·log_likelihood`, which is that deviance exactly when the saturated
+    // log-likelihood is zero (categorical responses) and the family's own
+    // convention when no finite saturated point exists (#2786).
+    let deviance = deviance.unwrap_or(-2.0 * log_likelihood);
 
     // Assemble the inference block from the converged geometry. CTN and other
     // custom families estimate their own likelihood scale, so the penalized

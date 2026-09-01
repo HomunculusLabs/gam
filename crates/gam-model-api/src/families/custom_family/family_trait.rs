@@ -221,6 +221,27 @@ pub trait CustomFamily {
         self.evaluate(block_states).map(|e| e.log_likelihood)
     }
 
+    /// The classical family deviance `D = 2·Σ wᵢ·d(yᵢ, μ̂ᵢ)` at these block
+    /// predictors, in the UNSCALED convention every standard fit reports
+    /// (#2126, #2131, #2786): no dispersion factor, no normalizing constants,
+    /// so a location-scale fit and the identical standard fit publish the same
+    /// number and every deviance-based comparison across that boundary is one
+    /// functional.
+    ///
+    /// `Ok(None)` declares that this family has no classical deviance to
+    /// report: a categorical response, whose saturated log-likelihood is zero
+    /// (`D ≡ −2·log L`), or a likelihood with no finite saturated point (a
+    /// continuous transformation law, a censored survival law). The result
+    /// assembler then reports `−2·log_likelihood`, which the fit's
+    /// `log_likelihood_normalization` names as the family's own convention.
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        assert_blockstates_are_a_point(block_states, "classical deviance");
+        Ok(None)
+    }
+
     /// Options-aware log-likelihood evaluation for line search.
     ///
     /// Default forwards to `log_likelihood_only` and ignores `_options`.

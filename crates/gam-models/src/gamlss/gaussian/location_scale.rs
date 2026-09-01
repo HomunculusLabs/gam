@@ -908,6 +908,36 @@ impl GaussianLocationScaleFamily {
     }
 }
 
+/// Weighted residual sum of squares `Σ wᵢ (yᵢ − μᵢ)²` at the fitted means —
+/// the classical Gaussian deviance, shared by the location-scale family and
+/// its link-wiggle form (#2786). Zero-weight rows are inert, as they are in
+/// the likelihood.
+pub(crate) fn gaussian_weighted_rss(
+    y: &Array1<f64>,
+    weights: &Array1<f64>,
+    mean: impl Fn(usize) -> f64,
+) -> Result<f64, String> {
+    let mut total = 0.0_f64;
+    for i in 0..y.len() {
+        let w = weights[i];
+        if w == 0.0 {
+            continue;
+        }
+        let residual = y[i] - mean(i);
+        total += w * residual * residual;
+        if !total.is_finite() {
+            return Err(GamlssError::RowGeometryUnrepresentable {
+                row: i,
+                quantity: "Gaussian classical deviance",
+                eta: mean(i),
+                value: total,
+            }
+            .into());
+        }
+    }
+    Ok(total)
+}
+
 impl CustomFamily for GaussianLocationScaleFamily {
     /// The Gaussian location-scale joint curvature is the OBSERVED joint
     /// Hessian (Wood–Pya–Säfken 2016 LAML object; #1561): (μ,μ) weight `w = a/σ²`,
@@ -985,6 +1015,23 @@ impl CustomFamily for GaussianLocationScaleFamily {
             self.y.len() as u64,
             specs,
         )
+    }
+
+    /// `D = Σ wᵢ (yᵢ − μ̂ᵢ)²`: the weighted residual sum of squares every
+    /// standard Gaussian fit reports — no `σ̂ᵢ` factor, no `ln 2π` (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        validate_block_count::<GamlssError>("GaussianLocationScaleFamily", 2, block_states.len())?;
+        let eta_mu = &block_states[Self::BLOCK_MU].eta;
+        if eta_mu.len() != self.y.len() || self.weights.len() != self.y.len() {
+            return Err(GamlssError::DimensionMismatch {
+                reason: "GaussianLocationScaleFamily deviance input size mismatch".to_string(),
+            }
+            .into());
+        }
+        gaussian_weighted_rss(&self.y, &self.weights, |i| eta_mu[i]).map(Some)
     }
 
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {

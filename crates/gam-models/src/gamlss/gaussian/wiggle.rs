@@ -2080,6 +2080,32 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
         Ok(beta)
     }
 
+    /// `Σ wᵢ (yᵢ − (η_μ,ᵢ + η_w,ᵢ))²`: the mean is the wiggled predictor, and the
+    /// deviance is the same weighted RSS the un-wiggled family reports (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        validate_block_count::<GamlssError>(
+            "GaussianLocationScaleWiggleFamily",
+            3,
+            block_states.len(),
+        )?;
+        let eta_mu = &block_states[Self::BLOCK_MU].eta;
+        let etaw = &block_states[Self::BLOCK_WIGGLE].eta;
+        let n = self.y.len();
+        if eta_mu.len() != n || etaw.len() != n || self.weights.len() != n {
+            return Err(GamlssError::DimensionMismatch {
+                reason: "GaussianLocationScaleWiggleFamily deviance input size mismatch".to_string(),
+            }
+            .into());
+        }
+        super::location_scale::gaussian_weighted_rss(&self.y, &self.weights, |i| {
+            eta_mu[i] + etaw[i]
+        })
+        .map(Some)
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         validate_block_count::<GamlssError>(
             "GaussianLocationScaleWiggleFamily",

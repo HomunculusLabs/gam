@@ -2221,6 +2221,33 @@ impl CustomFamily for BinomialLocationScaleFamily {
         )
     }
 
+    /// The classical binomial deviance at the location-scale fitted
+    /// probabilities (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        validate_block_count::<GamlssError>("BinomialLocationScaleFamily", 2, block_states.len())?;
+        let n = self.y.len();
+        let eta_t = &block_states[Self::BLOCK_T].eta;
+        let eta_ls = &block_states[Self::BLOCK_LOG_SIGMA].eta;
+        if eta_t.len() != n || eta_ls.len() != n || self.weights.len() != n {
+            return Err(GamlssError::DimensionMismatch {
+                reason: "BinomialLocationScaleFamily deviance input size mismatch".to_string(),
+            }
+            .into());
+        }
+        let core = binomial_location_scale_core(
+            &self.y,
+            &self.weights,
+            eta_t,
+            eta_ls,
+            None,
+            &self.link_kind,
+        )?;
+        super::kernel::binomial_classical_deviance(&self.y, &self.weights, &core.mu).map(Some)
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         validate_block_count::<GamlssError>("BinomialLocationScaleFamily", 2, block_states.len())?;
         let n = self.y.len();

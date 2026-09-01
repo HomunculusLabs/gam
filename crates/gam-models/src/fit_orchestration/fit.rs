@@ -1680,10 +1680,13 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
     // Change-of-variables correction for the likelihood-scale summaries. The
     // internal fit maximizes the density of y_internal = y/s; the raw-response
     // density is p_raw(y) = p_internal(y/s)/s, so per observation
-    // log p_raw = log p_internal − ln(s). The deviance (−2·loglik) and the
-    // REML/LAML objective (which carries the data log-likelihood) shift
-    // accordingly. This keeps reported log-likelihood / deviance / REML in raw
-    // response units, matching what an un-standardized fit would report.
+    // log p_raw = log p_internal − ln(s), and the REML/LAML objective (which
+    // carries the data log-likelihood) shifts accordingly. The deviance is the
+    // classical weighted RSS `Σ w (y − μ)²` (#2786), which scales by `s²`
+    // rather than shifting. This keeps reported log-likelihood / deviance /
+    // REML in raw response units, matching what an un-standardized fit would
+    // report.
+    result.fit.fit.deviance *= s * s;
     // The number of observations is the fitted eta length for any parameter
     // block. Use the first block state instead of optional geometry so the
     // public objective fields stay in one unit system even when covariance or
@@ -1698,7 +1701,6 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
     {
         let ln_s = s.ln();
         result.fit.fit.log_likelihood -= n_obs * ln_s;
-        result.fit.fit.deviance += 2.0 * n_obs * ln_s;
         result.fit.fit.shift_criterion(n_obs * ln_s);
     }
 
