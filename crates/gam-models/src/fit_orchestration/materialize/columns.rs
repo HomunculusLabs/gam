@@ -1,6 +1,6 @@
 use super::*;
 
-fn resolve_continuous_column(
+pub(crate) fn resolve_continuous_column(
     data: &Dataset,
     col_map: &HashMap<String, usize>,
     column_name: &str,

@@ -848,7 +848,7 @@ fn encoded_table_from_columns(
     headers: Vec<String>,
     numeric_values: PyReadonlyArray2<'_, f64>,
     numeric_positions: Vec<usize>,
-    categorical_values: Vec<Vec<String>>,
+    categorical_values: Vec<Vec<Option<String>>>,
     categorical_positions: Vec<usize>,
 ) -> PyResult<PyEncodedTable> {
     ensure_unique_headers(&headers).map_err(py_value_error)?;
@@ -892,15 +892,14 @@ fn encoded_table_from_columns(
     let mut column_kinds = vec![ColumnKindTag::Continuous; headers.len()];
     for (matrix_column, &table_column) in numeric_positions.iter().enumerate() {
         let column = numeric.column(matrix_column);
-        if let Some(row) = column.iter().position(|value| !value.is_finite()) {
-            return Err(py_value_error(format!(
-                "non-finite value at row {}, column '{}'",
-                row + 1,
-                headers[table_column]
-            )));
-        }
         let kind = infer_numeric_array_column_kind(column);
-        values.column_mut(table_column).assign(&column);
+        for (row, value) in column.iter().enumerate() {
+            values[[row, table_column]] = if value.is_finite() {
+                *value
+            } else {
+                f64::NAN
+            };
+        }
         column_kinds[table_column] = kind;
         schema_columns[table_column] = Some(SchemaColumn {
             name: headers[table_column].clone(),
@@ -911,14 +910,15 @@ fn encoded_table_from_columns(
     for (source_column, &table_column) in
         categorical_values.iter().zip(categorical_positions.iter())
     {
-        let marked = source_column
+        let labels = source_column
             .iter()
-            .map(|value| format!("{}{}", gam::data::CATEGORICAL_CELL_SENTINEL, value))
+            .map(|value| value.as_deref())
             .collect::<Vec<_>>();
-        let refs = marked.iter().map(String::as_str).collect::<Vec<_>>();
-        let (schema, encoded) =
-            infer_and_encode_column_major(&headers[table_column], &refs, table_column + 1)
-                .map_err(py_value_error)?;
+        let (schema, encoded) = gam::data::encode_optional_categorical_column(
+            &headers[table_column],
+            &labels,
+        )
+        .map_err(|error| py_value_error(error.to_string()))?;
         values
             .column_mut(table_column)
             .assign(&ndarray::ArrayView1::from(&encoded));
@@ -995,18 +995,13 @@ fn dataset_with_model_schema_from_encoded(
         return Err(missing.join(" "));
     }
     let consumable = prediction_consumable_columns(model)?;
-    let mut keep = source
+    let keep = source
         .headers
         .iter()
         .enumerate()
         .filter(|(_, name)| consumable.contains(name.as_str()))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    // Preserve row count for intercept-only models, exactly like the textual
-    // projection path: a zero-column dataset cannot represent N.
-    if keep.is_empty() {
-        keep = (0..source.headers.len()).collect();
-    }
 
     let training_schema = model.require_data_schema()?;
     let training_by_name = training_schema
@@ -1023,6 +1018,17 @@ fn dataset_with_model_schema_from_encoded(
 
     for (destination, &source_index) in keep.iter().enumerate() {
         let name = &source.headers[source_index];
+        if let Some(row) = source
+            .values
+            .column(source_index)
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(format!(
+                "non-finite value at row {}, column '{name}'",
+                row + 1
+            ));
+        }
         let source_schema = source
             .schema
             .columns
@@ -1122,6 +1128,27 @@ fn schema_check_encoded(
             column: Some(missing.clone()),
         })
         .collect::<Vec<_>>();
+    let consumable = prediction_consumable_columns(model)?;
+    for (column_index, column) in source.headers.iter().enumerate() {
+        if !consumable.contains(column.as_str()) {
+            continue;
+        }
+        if let Some(row) = source
+            .values
+            .column(column_index)
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            issues.push(SchemaIssue {
+                kind: "non_finite".to_string(),
+                message: format!(
+                    "non-finite value at row {}, column '{column}'",
+                    row + 1
+                ),
+                column: Some(column.clone()),
+            });
+        }
+    }
     if issues.is_empty()
         && let Err(message) = dataset_with_model_schema_from_encoded(model, source)
     {

@@ -15,7 +15,7 @@ pub(crate) fn materialize_standard<'a>(
         );
     }
     let y_col = resolve_role_col(col_map, &parsed.response, "response")?;
-    let y = data.values.column(y_col).to_owned();
+    let y = resolve_continuous_column(data, col_map, &parsed.response, "response")?;
     let y_kind = response_column_kind(data, y_col);
     let mut inference_notes = Vec::new();
 

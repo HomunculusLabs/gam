@@ -23,7 +23,8 @@ use crate::basis::{
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
-    option_usize_any, option_usize_any_strict, option_usize_strict, strip_quotes,
+    option_usize_any, option_usize_any_strict, option_usize_strict, parsed_term_column_names,
+    strip_quotes,
 };
 use crate::smooth::{
     BySmoothKind, ByVarKind, ByVariableSpec, FactorSmoothFlavour, FactorSmoothSpec,
@@ -379,6 +380,27 @@ pub fn build_termspec(
     inference_notes: &mut Vec<String>,
     policy: &ResourcePolicy,
 ) -> Result<TermCollectionSpec, TermBuilderError> {
+    // Generic ingestion deliberately preserves missing cells because it runs
+    // before a formula exists. This is the first layer that knows the complete
+    // set of columns consumed by term construction (including `by=` and nested
+    // log-slope surfaces), so completeness is enforced here and nowhere wider.
+    let mut consumed_columns = BTreeSet::new();
+    parsed_term_column_names(terms, &mut consumed_columns);
+    for name in consumed_columns {
+        let column = resolve_col(col_map, &name)?;
+        if let Some(row) = ds
+            .values
+            .column(column)
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(TermBuilderError::degenerate_data(format!(
+                "model term column '{name}' contains a non-finite value at row {}",
+                row + 1
+            )));
+        }
+    }
+
     let mut linear_terms = Vec::<LinearTermSpec>::new();
     let mut random_terms = Vec::<RandomEffectTermSpec>::new();
     let mut smooth_terms = Vec::<SmoothTermSpec>::new();

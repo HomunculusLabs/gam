@@ -145,11 +145,7 @@ def normalize_table(data: Any) -> tuple[list[str], Any, str]:
     # their levels without ever constructing a row-major Python table.
     categorical_values = [
         [
-            stringify_cell(
-                _external_scalar(columns[headers[index]][row]),
-                column=headers[index],
-                row=row,
-            )
+            nullable_categorical_cell(_external_scalar(columns[headers[index]][row]))
             for row in range(row_count)
         ]
         for index in categorical_positions
@@ -588,6 +584,26 @@ def stringify_cell(value: Any, *, column: str | None = None, row: int | None = N
             raise ValueError(f"column '{column}' contains empty string")
         else:
             raise ValueError("table cells cannot be empty strings")
+    return text
+
+
+def nullable_categorical_cell(value: Any) -> str | None:
+    """Render a present category and preserve a missing cell as ``None``.
+
+    Table normalization cannot know which columns a formula or fitted model
+    will consume. Missing categorical cells therefore cross the native boundary
+    explicitly and become typed missing values there; model-aware validation is
+    responsible for rejecting them only when the column is actually required.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (numbers.Real, Decimal)):
+        numeric_value = float(value)
+        if not math.isfinite(numeric_value):
+            return None
+    text = str(value)
+    if not text:
+        return None
     return text
 
 

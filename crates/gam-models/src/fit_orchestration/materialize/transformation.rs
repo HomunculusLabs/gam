@@ -33,8 +33,7 @@ pub(crate) fn materialize_transformation_normal<'a>(
         .into());
     }
 
-    let y_col = resolve_role_col(col_map, &parsed.response, "response")?;
-    let y = data.values.column(y_col).to_owned();
+    let y = resolve_continuous_column(data, col_map, &parsed.response, "response")?;
     let mut inference_notes = Vec::new();
 
     let policy = resolved_resource_policy(config, marginal_slope_hints(config));

@@ -232,6 +232,41 @@ fn continuous_dataset(headers: &[&str], rows: Vec<Vec<f64>>) -> Dataset {
     }
 }
 
+#[test]
+fn term_completeness_is_scoped_to_formula_columns() {
+    let mut data = continuous_dataset(
+        &["y", "x", "unused"],
+        (0..12)
+            .map(|row| vec![row as f64, row as f64 / 11.0, 1.0])
+            .collect(),
+    );
+    data.values[[4, 2]] = f64::NAN;
+    let parsed = parse_formula("y ~ x").expect("parse linear formula");
+    build_termspec(
+        &parsed.terms,
+        &data,
+        &data.column_map(),
+        &mut Vec::new(),
+        &gam_runtime::resource::ResourcePolicy::default_library(),
+    )
+    .expect("a missing cell in an unreferenced column must be irrelevant");
+
+    data.values[[4, 1]] = f64::NAN;
+    let error = build_termspec(
+        &parsed.terms,
+        &data,
+        &data.column_map(),
+        &mut Vec::new(),
+        &gam_runtime::resource::ResourcePolicy::default_library(),
+    )
+    .expect_err("a missing cell in a model term must fail before design construction");
+    assert!(
+        error
+            .to_string()
+            .contains("model term column 'x' contains a non-finite value at row 5")
+    );
+}
+
 fn factor_dataset() -> Dataset {
     let rows = (0..24)
         .map(|i| {

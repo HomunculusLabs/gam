@@ -50,6 +50,70 @@ fn sort_levels_canonical(levels: &mut [String]) {
     levels.sort_by(|a, b| natural_level_cmp(a, b));
 }
 
+/// Encode a dtype-declared categorical column while preserving missing cells.
+///
+/// Generic table ingestion happens before a formula or fitted-model schema is
+/// available, so it cannot decide whether a missing cell belongs to a column
+/// the model will consume.  Missing categorical cells therefore travel in the
+/// same representation as missing numeric cells (`NaN`) and are rejected only
+/// after the caller projects to the model's actual input contract.  Present
+/// labels retain the canonical natural ordering used by every other ingestion
+/// path.
+pub fn encode_optional_categorical_column(
+    name: &str,
+    column: &[Option<&str>],
+) -> Result<(SchemaColumn, Vec<f64>), DataError> {
+    if column.is_empty() {
+        return Err(DataError::EmptyInput {
+            reason: "table data cannot be empty".to_string(),
+        });
+    }
+
+    let mut levels = Vec::new();
+    for (row, label) in column.iter().enumerate() {
+        let Some(label) = label else {
+            continue;
+        };
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(DataError::EmptyInput {
+                reason: format!("empty field at row {}, column '{name}'", row + 1),
+            });
+        }
+        levels.push(label.to_string());
+    }
+    sort_levels_canonical(&mut levels);
+    levels.dedup();
+    let level_map = levels
+        .iter()
+        .enumerate()
+        .map(|(index, level)| (level.as_str(), index as f64))
+        .collect::<HashMap<_, _>>();
+    let values = column
+        .iter()
+        .map(|value| match value {
+            None => Ok(f64::NAN),
+            Some(label) => level_map.get(label.trim()).copied().ok_or_else(|| {
+                DataError::EncodingFailure {
+                    reason: format!(
+                        "internal: level '{}' missing from freshly built map for column '{name}'",
+                        label.trim()
+                    ),
+                }
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((
+        SchemaColumn {
+            name: name.to_string(),
+            kind: ColumnKindTag::Categorical,
+            levels,
+        },
+        values,
+    ))
+}
+
 /// Canonical bit key for a floating-point categorical / grouping level.
 ///
 /// Factor dummies, random-effect groups, `by=` gates and factor-smooth blocks
@@ -913,7 +977,9 @@ impl CategoricalEncoder {
                     remap[*old_code] = new_code;
                 }
                 for code in encoded.iter_mut() {
-                    *code = remap[*code as usize] as f64;
+                    if code.is_finite() {
+                        *code = remap[*code as usize] as f64;
+                    }
                 }
                 levels_with_old_codes
                     .into_iter()
@@ -1370,39 +1436,28 @@ fn arrow_field_is_string(dt: &arrow::datatypes::DataType) -> bool {
 }
 
 fn write_arrow_numeric_values(
-    values: impl IntoIterator<Item = f64>,
-    base_row: usize,
-    header: &str,
+    values: impl IntoIterator<Item = Option<f64>>,
     mut output: ArrayViewMut1<'_, f64>,
     categorical_encoder: Option<&mut CategoricalEncoder>,
     all_binary: &mut bool,
-) -> Result<(), DataError> {
+    saw_numeric: &mut bool,
+) {
     match categorical_encoder {
         Some(encoder) => {
             for (batch_row, value) in values.into_iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(DataError::InvalidValue {
-                        reason: format!(
-                            "non-finite value at row {}, column '{}'",
-                            base_row + batch_row + 1,
-                            header
-                        ),
-                    });
-                }
-                output[batch_row] = encoder.encode(&value.to_string()) as f64;
+                output[batch_row] = match value.filter(|value| value.is_finite()) {
+                    Some(value) => encoder.encode(&value.to_string()) as f64,
+                    None => f64::NAN,
+                };
             }
         }
         None => {
             for (batch_row, value) in values.into_iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(DataError::InvalidValue {
-                        reason: format!(
-                            "non-finite value at row {}, column '{}'",
-                            base_row + batch_row + 1,
-                            header
-                        ),
-                    });
-                }
+                let Some(value) = value.filter(|value| value.is_finite()) else {
+                    output[batch_row] = f64::NAN;
+                    continue;
+                };
+                *saw_numeric = true;
                 if (value - 0.0).abs() >= 1e-12 && (value - 1.0).abs() >= 1e-12 {
                     *all_binary = false;
                 }
@@ -1410,27 +1465,6 @@ fn write_arrow_numeric_values(
             }
         }
     }
-    Ok(())
-}
-
-fn reject_arrow_null_values(
-    col: &dyn arrow::array::Array,
-    base_row: usize,
-    header: &str,
-) -> Result<(), DataError> {
-    let Some(nulls) = col.logical_nulls() else {
-        return Ok(());
-    };
-    if let Some(batch_row) = (0..col.len()).find(|&row| nulls.is_null(row)) {
-        return Err(DataError::InvalidValue {
-            reason: format!(
-                "null value at row {}, column '{}'",
-                base_row + batch_row + 1,
-                header
-            ),
-        });
-    }
-    Ok(())
 }
 
 fn arrow_dictionary_string_value_at<'a, K>(
@@ -1438,7 +1472,7 @@ fn arrow_dictionary_string_value_at<'a, K>(
     index: usize,
     logical_row: usize,
     header: &str,
-) -> Result<&'a str, DataError>
+) -> Result<Option<&'a str>, DataError>
 where
     K: arrow::datatypes::ArrowDictionaryKeyType,
 {
@@ -1453,11 +1487,9 @@ where
                 header
             ),
         })?;
-    let value_index = dictionary
-        .key(index)
-        .ok_or_else(|| DataError::InvalidValue {
-            reason: format!("null value at row {logical_row}, column '{header}'"),
-        })?;
+    let Some(value_index) = dictionary.key(index) else {
+        return Ok(None);
+    };
     if value_index >= dictionary.values().len() {
         return Err(DataError::EncodingFailure {
             reason: format!(
@@ -1481,7 +1513,7 @@ fn arrow_string_value_at<'a>(
     index: usize,
     logical_row: usize,
     header: &str,
-) -> Result<&'a str, DataError> {
+) -> Result<Option<&'a str>, DataError> {
     use arrow::array::{LargeStringArray, StringArray};
     use arrow::datatypes::{
         DataType, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
@@ -1497,23 +1529,21 @@ fn arrow_string_value_at<'a>(
         });
     }
     if col.is_null(index) {
-        return Err(DataError::InvalidValue {
-            reason: format!("null value at row {logical_row}, column '{header}'"),
-        });
+        return Ok(None);
     }
 
     match col.data_type() {
         DataType::Utf8 => col
             .as_any()
             .downcast_ref::<StringArray>()
-            .map(|array| array.value(index))
+            .map(|array| Some(array.value(index)))
             .ok_or_else(|| DataError::EncodingFailure {
                 reason: format!("Arrow column '{}' could not be read as Utf8", header),
             }),
         DataType::LargeUtf8 => col
             .as_any()
             .downcast_ref::<LargeStringArray>()
-            .map(|array| array.value(index))
+            .map(|array| Some(array.value(index)))
             .ok_or_else(|| DataError::EncodingFailure {
                 reason: format!("Arrow column '{}' could not be read as LargeUtf8", header),
             }),
@@ -1572,10 +1602,11 @@ fn decode_arrow_batch_column_into(
     mut output: ArrayViewMut1<'_, f64>,
     mut categorical_encoder: Option<&mut CategoricalEncoder>,
     all_binary: &mut bool,
+    saw_numeric: &mut bool,
 ) -> Result<(), DataError> {
     use arrow::array::{
-        BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-        UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        Array as _, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+        Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use arrow::datatypes::DataType;
 
@@ -1590,8 +1621,6 @@ fn decode_arrow_batch_column_into(
             ),
         });
     }
-    reject_arrow_null_values(col, base_row, header)?;
-
     if is_string_col {
         let encoder =
             categorical_encoder
@@ -1600,8 +1629,15 @@ fn decode_arrow_batch_column_into(
                     reason: format!("categorical Arrow encoder missing for column '{header}'"),
                 })?;
         for batch_row in 0..n_rows {
-            let label = arrow_string_value_at(col, batch_row, base_row + batch_row + 1, header)?;
-            output[batch_row] = encoder.encode(label) as f64;
+            output[batch_row] = match arrow_string_value_at(
+                col,
+                batch_row,
+                base_row + batch_row + 1,
+                header,
+            )? {
+                Some(label) => encoder.encode(label) as f64,
+                None => f64::NAN,
+            };
         }
         return Ok(());
     }
@@ -1625,10 +1661,6 @@ fn decode_arrow_batch_column_into(
     } else {
         col
     };
-    // Defensively validate the decoded primitive too: the cast itself must not
-    // introduce a null while resolving dictionary keys.
-    reject_arrow_null_values(col, base_row, header)?;
-
     macro_rules! write_primitive {
         ($array_type:ty, $convert:expr) => {{
             let array = col
@@ -1636,13 +1668,15 @@ fn decode_arrow_batch_column_into(
                 .downcast_ref::<$array_type>()
                 .expect("array type is the one this `col.data_type()` arm matched");
             write_arrow_numeric_values(
-                array.values().iter().copied().map($convert),
-                base_row,
-                header,
+                (0..n_rows).map(|index| {
+                    (!array.is_null(index)).then(|| $convert(array.value(index)))
+                }),
                 output,
-                categorical_encoder,
+                categorical_encoder.as_deref_mut(),
                 all_binary,
-            )
+                saw_numeric,
+            );
+            Ok(())
         }};
     }
 
@@ -1663,13 +1697,15 @@ fn decode_arrow_batch_column_into(
                 .downcast_ref::<BooleanArray>()
                 .expect("array type is BooleanArray in the DataType::Boolean arm");
             write_arrow_numeric_values(
-                (0..n_rows).map(|i| if arr.value(i) { 1.0 } else { 0.0 }),
-                base_row,
-                header,
+                (0..n_rows).map(|index| {
+                    (!arr.is_null(index)).then(|| if arr.value(index) { 1.0 } else { 0.0 })
+                }),
                 output,
-                categorical_encoder,
+                categorical_encoder.as_deref_mut(),
                 all_binary,
-            )
+                saw_numeric,
+            );
+            Ok(())
         }
         other => Err(DataError::InvalidValue {
             reason: format!(
@@ -1735,6 +1771,7 @@ pub fn encode_arrow_record_batch_reader_with_inferred_schema(
         .map(|field| arrow_field_is_string(field.data_type()))
         .collect::<Vec<_>>();
     let mut all_binary = vec![true; p];
+    let mut saw_numeric = vec![false; p];
     let mut categorical_encoders = is_string_col
         .iter()
         .map(|&is_string| is_string.then(CategoricalEncoder::default))
@@ -1800,8 +1837,9 @@ pub fn encode_arrow_record_batch_reader_with_inferred_schema(
             .into_par_iter()
             .zip(categorical_encoders.par_iter_mut())
             .zip(all_binary.par_iter_mut())
+            .zip(saw_numeric.par_iter_mut())
             .enumerate()
-            .map(|(j, ((output, encoder), column_all_binary))| {
+            .map(|(j, (((output, encoder), column_all_binary), column_saw_numeric))| {
                 decode_arrow_batch_column_into(
                     batch.column(j).as_ref(),
                     rows_seen,
@@ -1810,6 +1848,7 @@ pub fn encode_arrow_record_batch_reader_with_inferred_schema(
                     output,
                     encoder.as_mut(),
                     column_all_binary,
+                    column_saw_numeric,
                 )
             })
             .collect::<Vec<_>>();
@@ -1846,7 +1885,7 @@ pub fn encode_arrow_record_batch_reader_with_inferred_schema(
     for (j, name) in headers.iter().enumerate() {
         let kind = if is_string_col[j] {
             ColumnKindTag::Categorical
-        } else if all_binary[j] {
+        } else if all_binary[j] && saw_numeric[j] {
             ColumnKindTag::Binary
         } else {
             ColumnKindTag::Continuous
@@ -1947,6 +1986,7 @@ fn load_parquet_inferred(
         .collect::<Vec<_>>();
     let mut values = Array2::<f64>::zeros((total_rows, p));
     let mut all_binary = vec![true; p];
+    let mut saw_numeric = vec![false; p];
     let mut categorical_encoders = (0..p)
         .map(|j| {
             (is_string_col[j] || forced_numeric_categorical[j]).then(CategoricalEncoder::default)
@@ -1970,8 +2010,9 @@ fn load_parquet_inferred(
             .into_par_iter()
             .zip(categorical_encoders.par_iter_mut())
             .zip(all_binary.par_iter_mut())
+            .zip(saw_numeric.par_iter_mut())
             .enumerate()
-            .map(|(j, ((output, encoder), column_all_binary))| {
+            .map(|(j, (((output, encoder), column_all_binary), column_saw_numeric))| {
                 decode_arrow_batch_column_into(
                     batch.column(j).as_ref(),
                     rows_seen,
@@ -1980,6 +2021,7 @@ fn load_parquet_inferred(
                     output,
                     encoder.as_mut(),
                     column_all_binary,
+                    column_saw_numeric,
                 )
             })
             .collect::<Vec<_>>();
@@ -2032,7 +2074,7 @@ fn load_parquet_inferred(
     for j in 0..p {
         let kind = if is_string_col[j] || forced_numeric_categorical[j] {
             ColumnKindTag::Categorical
-        } else if all_binary[j] {
+        } else if all_binary[j] && saw_numeric[j] {
             ColumnKindTag::Binary
         } else {
             ColumnKindTag::Continuous
@@ -2768,6 +2810,20 @@ mod missing_value_inference_tests {
             .collect()
     }
 
+    #[test]
+    fn dtype_categorical_missing_cell_is_not_promoted_to_a_level() {
+        let column = [Some("g10"), None, Some("g2"), Some("g10")];
+        let (schema, values) = encode_optional_categorical_column("group", &column)
+            .expect("encode typed categorical values with a missing cell");
+
+        assert_eq!(schema.kind, ColumnKindTag::Categorical);
+        assert_eq!(schema.levels, vec!["g2", "g10"]);
+        assert_eq!(values[0], 1.0);
+        assert!(values[1].is_nan());
+        assert_eq!(values[2], 0.0);
+        assert_eq!(values[3], 1.0);
+    }
+
     /// The #2495 defect, pinned. `parker` in `bench/datasets/wine.csv` is 29
     /// Parker scores spanning 65.0–94.4 plus 18 `NA`s. Before the fix the single
     /// non-parsing token re-typed the whole column CATEGORICAL, every distinct
@@ -3055,29 +3111,38 @@ mod tests {
     }
 
     #[test]
-    fn arrow_reader_reports_typed_null_nonfinite_and_unsupported_errors() {
+    fn arrow_reader_preserves_missing_cells_and_rejects_unsupported_types() {
         use arrow::array::{Date32Array, DictionaryArray, Float64Array, Int8Array, StringArray};
         use arrow::datatypes::Int8Type;
 
         let null_numeric =
             encode_single_arrow_array(Arc::new(Float64Array::from(vec![Some(1.0), None])))
-                .expect_err("numeric null should fail");
-        assert!(matches!(&null_numeric, DataError::InvalidValue { .. }));
-        assert!(null_numeric.to_string().contains("null value at row 2"));
+                .expect("numeric null should remain representable until model projection");
+        assert_eq!(null_numeric.values[[0, 0]], 1.0);
+        assert!(null_numeric.values[[1, 0]].is_nan());
 
         let null_dictionary = DictionaryArray::<Int8Type>::new(
             Int8Array::from(vec![0, 1]),
             Arc::new(StringArray::from(vec![Some("present"), None])),
         );
         let logical_null = encode_single_arrow_array(Arc::new(null_dictionary))
-            .expect_err("null dictionary value should fail");
-        assert!(matches!(&logical_null, DataError::InvalidValue { .. }));
-        assert!(logical_null.to_string().contains("null value at row 2"));
+            .expect("null dictionary value should remain representable");
+        assert_eq!(logical_null.schema.columns[0].levels, vec!["present"]);
+        assert_eq!(logical_null.values[[0, 0]], 0.0);
+        assert!(logical_null.values[[1, 0]].is_nan());
 
-        let nonfinite = encode_single_arrow_array(Arc::new(Float64Array::from(vec![f64::NAN])))
-            .expect_err("NaN should fail");
-        assert!(matches!(&nonfinite, DataError::InvalidValue { .. }));
-        assert!(nonfinite.to_string().contains("non-finite value"));
+        let nonfinite = encode_single_arrow_array(Arc::new(Float64Array::from(vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ])))
+        .expect("non-finite values should remain representable until model projection");
+        assert!(nonfinite.values.column(0).iter().all(|value| value.is_nan()));
+        assert_eq!(
+            nonfinite.column_kinds,
+            vec![ColumnKindTag::Continuous],
+            "an all-missing typed numeric column is not vacuously binary"
+        );
 
         let unsupported = encode_single_arrow_array(Arc::new(Date32Array::from(vec![1])))
             .expect_err("date column should fail");
@@ -3249,6 +3314,7 @@ mod tests {
         let mut encoded = Array1::<f64>::zeros(dictionary.len());
         let mut encoder = CategoricalEncoder::default();
         let mut all_binary = true;
+        let mut saw_numeric = false;
 
         decode_arrow_batch_column_into(
             &dictionary,
@@ -3258,6 +3324,7 @@ mod tests {
             encoded.view_mut(),
             Some(&mut encoder),
             &mut all_binary,
+            &mut saw_numeric,
         )
         .expect("dictionary strings decode directly");
         let levels = encoder.finish(encoded.view_mut(), LevelOrder::Encounter);
@@ -3306,6 +3373,7 @@ mod tests {
         // numeric values directly into the destination view.
         let mut decoded = ndarray::Array1::<f64>::zeros(dict.len());
         let mut all_binary = true;
+        let mut saw_numeric = false;
         decode_arrow_batch_column_into(
             &dict,
             0,
@@ -3314,6 +3382,7 @@ mod tests {
             decoded.view_mut(),
             None,
             &mut all_binary,
+            &mut saw_numeric,
         )
         .expect("numeric dictionary column should decode as numeric");
         assert_eq!(decoded.to_vec(), vec![5.0, 7.0, 5.0, 7.0, 5.0]);
