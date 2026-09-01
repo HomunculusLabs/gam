@@ -10,23 +10,14 @@
 //! differ across families — the κ-coordinate assembly does not. This module is
 //! the single home for that assembly so improvements to it land once.
 
-use crate::fit_orchestration::drivers::{ExactJointHyperSetup, spatial_length_scale_term_indices};
+use crate::fit_orchestration::drivers::{
+    ExactJointHyperSetup, JOINT_RHO_BOUND, joint_rho_search_box,
+    spatial_length_scale_term_indices,
+};
 use gam_terms::smooth::{
     SpatialLengthScaleOptimizationOptions, SpatialLogKappaCoords, TermCollectionSpec,
 };
 use ndarray::{Array1, ArrayView2};
-
-/// Bound on every `rho` (log smoothing / log dispersion) coordinate in the
-/// exact-joint theta vector. Shared by all location-scale families.
-///
-/// Consumed ONLY by the exact-joint (ρ, ψ) outer optimizer, i.e. when spatial
-/// κ coordinates exist and are enabled. A location-scale fit with no spatial
-/// terms routes through `fit_custom_family`, whose ρ box ceiling is
-/// `gam_custom_family::fit::EFFECTIVE_DF_CEILING` (same value 12.0, different
-/// constant): a λ railed at `exp(12)` in such a fit is railed THERE, and
-/// widening this bound does nothing — measured bit-identical across a 5×
-/// widening on #1561 (2026-07-26).
-pub(crate) const EXACT_JOINT_RHO_BOUND: f64 = 12.0;
 
 /// Shared operator-aware coefficient-Hessian cost for joint-coupled
 /// location-scale families.
@@ -56,17 +47,25 @@ pub(crate) fn location_scale_coefficient_hessian_cost(
 /// expects.
 ///
 /// `rho0` carries the caller-assembled smoothing/dispersion seed (already
-/// ordered to match the penalty layout); its `[-EXACT_JOINT_RHO_BOUND,
-/// EXACT_JOINT_RHO_BOUND]` box bounds are supplied here so the seed assembly
-/// and bounding live in one place.
+/// ordered to match the penalty layout). Its box is the ONE joint-search box
+/// policy, [`joint_rho_search_box`]: the `±JOINT_RHO_BOUND` prior per
+/// coordinate, widened to the engine's own `±RHO_BOUND` on any coordinate
+/// whose incumbent the prior would pin to a wall. This site used to write a
+/// flat `±12` box of its own (`EXACT_JOINT_RHO_BOUND`, a second copy of the
+/// same number), which is the mechanism #2760 and #2748 measured on the
+/// spatial and mean-wiggle routes: an incumbent at or past the wall is an
+/// active constraint from iteration zero, its outward gradient is projected
+/// away, and the search reports a non-stationary refusal one coordinate away
+/// from a feasible-set defect. A location-scale fit with NO spatial terms
+/// never reaches this box — it routes through `fit_custom_family`, whose ρ
+/// ceiling is `gam_custom_family::fit::EFFECTIVE_DF_CEILING`.
 pub(crate) fn build_location_scale_exact_joint_setup(
     data: ArrayView2<'_, f64>,
     blocks: &[&TermCollectionSpec],
     rho0: Array1<f64>,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
-    let rho_lower = Array1::<f64>::from_elem(rho0.len(), -EXACT_JOINT_RHO_BOUND);
-    let rho_upper = Array1::<f64>::from_elem(rho0.len(), EXACT_JOINT_RHO_BOUND);
+    let (rho_lower, rho_upper) = joint_rho_search_box(rho0.view(), JOINT_RHO_BOUND);
 
     // Concatenate per-block anisotropic log(kappa) seeds and their dims in
     // block order. The exact-joint setup stores the spatial tail in log(kappa),
@@ -288,7 +287,8 @@ mod tests {
         let upper = setup.upper();
 
         // Rho head: seed (sanitized clamp leaves these untouched) and the shared
-        // ±RHO_BOUND box.
+        // joint-search box: every seed here is strictly inside the prior, so the
+        // box is the prior itself.
         for k in 0..rho_dim {
             assert!(
                 (theta0[k] - rho0[k]).abs() <= 1e-12,
@@ -296,8 +296,13 @@ mod tests {
                 theta0[k],
                 rho0[k]
             );
-            assert_eq!(lower[k], -EXACT_JOINT_RHO_BOUND, "rho lower bound at {k}");
-            assert_eq!(upper[k], EXACT_JOINT_RHO_BOUND, "rho upper bound at {k}");
+            assert!(
+                rho0[k].abs() < JOINT_RHO_BOUND,
+                "fixture premise: seed {k} = {} must be interior to the prior",
+                rho0[k]
+            );
+            assert_eq!(lower[k], -JOINT_RHO_BOUND, "rho lower bound at {k}");
+            assert_eq!(upper[k], JOINT_RHO_BOUND, "rho upper bound at {k}");
         }
 
         // κ tail: must be block A then block B, coordinate-for-coordinate equal

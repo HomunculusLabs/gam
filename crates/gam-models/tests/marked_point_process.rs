@@ -667,6 +667,62 @@ fn forecast_survival_includes_absorbing_causes_omitted_from_cif_output() {
 }
 
 #[test]
+fn recurrent_event_impulses_drive_later_forecast_risk() {
+    let mut feedback_model = MarkedPointProcessModel {
+        factors: vec![MaternFactor {
+            order: MaternMarkovOrder::Half,
+            marginal_variance: 1.0e-8,
+            length_scale: 10.0,
+        }],
+        mark_names: vec!["disease".to_string(), "encounter".to_string()],
+        mark_roles: vec![MarkRole::Absorbing, MarkRole::Encounter],
+        loadings: array![[1.0], [0.0]],
+        mark_impulses: array![[0.0, 1.5]],
+    };
+    let landmark = FilteredState {
+        time: 0.0,
+        mean: array![0.0],
+        covariance: array![[0.0]],
+    };
+    let future = [
+        ForecastInterval {
+            duration: 1.0,
+            fixed_log_intensity: array![-3.0, 2.0_f64.ln()],
+        },
+        ForecastInterval {
+            duration: 1.0,
+            fixed_log_intensity: array![-3.0, 2.0_f64.ln()],
+        },
+    ];
+    let monte_carlo = ForecastMonteCarlo {
+        trajectories: 4096,
+        seed: 0x2764,
+    };
+    let feedback =
+        forecast_cumulative_incidence(&feedback_model, &landmark, &future, &[0], monte_carlo)
+            .unwrap();
+    feedback_model.mark_impulses.fill(0.0);
+    let autonomous =
+        forecast_cumulative_incidence(&feedback_model, &landmark, &future, &[0], monte_carlo)
+            .unwrap();
+
+    assert_eq!(feedback.cumulative_incidence[[0, 0]], autonomous.cumulative_incidence[[0, 0]]);
+    assert!(
+        feedback.cumulative_incidence[[1, 0]] > autonomous.cumulative_incidence[[1, 0]] + 0.1,
+        "feedback={}, autonomous={}",
+        feedback.cumulative_incidence[[1, 0]],
+        autonomous.cumulative_incidence[[1, 0]],
+    );
+    for index in 0..future.len() {
+        assert_abs_diff_eq!(
+            feedback.survival[index] + feedback.cumulative_incidence[[index, 0]],
+            1.0,
+            epsilon = 3.0e-14,
+        );
+    }
+}
+
+#[test]
 fn forecast_handles_extreme_log_rates_deterministically() {
     let model = MarkedPointProcessModel {
         factors: vec![MaternFactor {

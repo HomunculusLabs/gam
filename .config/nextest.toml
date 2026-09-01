@@ -193,7 +193,7 @@ slow-timeout = { period = "600s", terminate-after = 6 }
 #
 #   `survival_marginal_slope_converges_with_deadline_disarmed_979` deliberately
 #   DISARMS the fit's outer wall-clock deadline (raising it to 900s, hard-limit
-#   1140s in the test) to prove the #979 reduced-logslope joint-Newton
+#   1140s in the test) to prove the #979 reduced-slope joint-Newton
 #   self-certifies WITHOUT the deadline being load-bearing. That 900s internal
 #   budget is, by design, far above the default 600s cap, so the probe's own
 #   `secs < budget - margin` assertion can never run at the default budget. The
@@ -212,7 +212,7 @@ slow-timeout = { period = "600s", terminate-after = 6 }
 # 300s default with `terminate-after = 2`. That is exactly the
 # TERMINATING + TIMEOUT pair the ledger records for it. An override keyed on
 # a name that does not exist is not a budget; it is a silent default.
-filter = 'test(/(competing_risks_cif_is_invariant_to_cause_label_permutation_1593|survival_marginal_slope_auto_matern_logslope_centers12_converges)/)'
+filter = 'test(/(competing_risks_cif_is_invariant_to_cause_label_permutation_1593|survival_marginal_slope_auto_matern_slope_centers12_converges)/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
 
 # ---------------------------------------------------------------------------
@@ -473,4 +473,3 @@ threads-required = 'num-test-threads'
 [[profile.default.overrides]]
 filter = 'test(/^inner_fit_core_scaling$/)'
 threads-required = 'num-test-threads'
-

@@ -22,6 +22,8 @@
 //!   respectively.  The Matérn state transition itself is exact.
 
 use ndarray::{Array1, Array2, ArrayView1, Axis};
+use rand::{SeedableRng, rngs::StdRng};
+use rand_distr::{Distribution, Poisson};
 use serde::{Deserialize, Serialize};
 use statrs::function::gamma::ln_gamma;
 use thiserror::Error;
@@ -1149,6 +1151,9 @@ pub struct CumulativeIncidenceForecast {
 /// a posterior mean state or a mean intensity into the nonlinear survival law.
 /// Survival includes every mark declared [`MarkRole::Absorbing`], even when
 /// `competing_marks` requests CIF output for only a subset of those causes.
+/// Recurrent and encounter marks with non-zero impulse columns are sampled from
+/// their exact conditional Poisson rows and applied at interval endpoints, so
+/// their effects propagate into every later forecast interval.
 pub fn forecast_cumulative_incidence(
     model: &MarkedPointProcessModel,
     landmark: &FilteredState,
@@ -1243,12 +1248,29 @@ pub fn forecast_cumulative_incidence(
     let observation = model.observation_matrix();
     let intervals = future.len();
     let causes = competing_marks.len();
+    let feedback_marks: Vec<usize> = model
+        .mark_roles
+        .iter()
+        .enumerate()
+        .filter_map(|(mark, role)| {
+            (*role != MarkRole::Absorbing
+                && model
+                    .mark_impulses
+                    .column(mark)
+                    .iter()
+                    .any(|value| *value != 0.0))
+            .then_some(mark)
+        })
+        .collect();
     let mut cif_sum: Array2<f64> = Array2::zeros((intervals, causes));
     let mut cif_square_sum: Array2<f64> = Array2::zeros((intervals, causes));
     let mut survival_sum: Array1<f64> = Array1::zeros(intervals);
     let mut survival_square_sum: Array1<f64> = Array1::zeros(intervals);
     let mut normals = NormalStream::new(monte_carlo.seed);
+    let mut event_rng =
+        StdRng::seed_from_u64(monte_carlo.seed ^ 0x9e37_79b9_7f4a_7c15_u64);
     let log_max_f64 = f64::MAX.ln();
+    let log_max_exact_integer = 9_007_199_254_740_992.0_f64.ln();
 
     for _ in 0..monte_carlo.trajectories {
         let initial_noise = normals.vector(model.state_dimension());
@@ -1256,6 +1278,15 @@ pub fn forecast_cumulative_incidence(
         let mut survival = 1.0;
         let mut cif: Array1<f64> = Array1::zeros(causes);
         for index in 0..intervals {
+            if survival == 0.0 {
+                for remaining in index..intervals {
+                    for cause in 0..causes {
+                        cif_sum[[remaining, cause]] += cif[cause];
+                        cif_square_sum[[remaining, cause]] += cif[cause] * cif[cause];
+                    }
+                }
+                break;
+            }
             let innovation = normals.vector(model.state_dimension());
             state =
                 transitions[index].0.transition.dot(&state) + transitions[index].1.dot(&innovation);
@@ -1289,6 +1320,38 @@ pub fn forecast_cumulative_incidence(
                     cif[cause] += event_mass * cause_probability;
                 }
                 survival *= (-integrated_rate).exp();
+            }
+            if survival > 0.0 && index + 1 < intervals && !feedback_marks.is_empty() {
+                let mut feedback_counts = Array1::zeros(model.mark_count());
+                for &mark in &feedback_marks {
+                    let log_mean = eta[mark] + future[index].duration.ln();
+                    if log_mean >= log_max_exact_integer {
+                        return Err(MarkedPointProcessError::NumericalFailure {
+                            context: "forecast feedback-event count rate",
+                        });
+                    }
+                    let mean = log_mean.exp();
+                    if mean > 0.0 {
+                        let distribution = Poisson::new(mean).map_err(|_| {
+                            MarkedPointProcessError::NumericalFailure {
+                                context: "forecast feedback-event distribution",
+                            }
+                        })?;
+                        let draw: f64 = distribution.sample(&mut event_rng);
+                        if !draw.is_finite() {
+                            return Err(MarkedPointProcessError::NumericalFailure {
+                                context: "forecast feedback-event draw",
+                            });
+                        }
+                        feedback_counts[mark] = draw;
+                    }
+                }
+                state += &model.mark_impulses.dot(&feedback_counts);
+                if state.iter().any(|value| !value.is_finite()) {
+                    return Err(MarkedPointProcessError::NumericalFailure {
+                        context: "forecast feedback-event state",
+                    });
+                }
             }
             for cause in 0..causes {
                 cif_sum[[index, cause]] += cif[cause];
