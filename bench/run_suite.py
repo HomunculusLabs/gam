@@ -2401,7 +2401,7 @@ def run_rust_gamlss_marginal_slope_cv(
             "error": str(e),
         }
 
-    z_column, mean_formula, logslope_formula = _rust_marginal_slope_formulas_for_scenario(
+    z_column, mean_formula, slope_formula = _rust_marginal_slope_formulas_for_scenario(
         scenario_name,
         ds,
     )
@@ -2435,8 +2435,8 @@ def run_rust_gamlss_marginal_slope_cv(
             fit_cmd = [
                 str(rust_bin),
                 "fit",
-                "--logslope-formula",
-                logslope_formula,
+                "--slope-formula",
+                slope_formula,
                 "--z-column",
                 z_column,
                 "--out",
@@ -2508,7 +2508,7 @@ def run_rust_gamlss_marginal_slope_cv(
                     "nagelkerke_r2": nagelkerke_r2_score(y_test, pred, null_mean=float(np.mean(y_train))),
                     "n_test": int(len(fold.test_idx)),
                     "model_spec": (
-                        f"marginal: {mean_formula}; logslope: {logslope_formula}; "
+                        f"marginal: {mean_formula}; slope: {slope_formula}; "
                         f"z: {z_column} via release binary {eval_suffix}"
                     ),
                 }
@@ -2735,7 +2735,7 @@ def run_rust_gamlss_survival_marginal_slope_cv(
             "error": str(e),
         }
 
-    z_column, rhs_formula, rhs_logslope = _rust_survival_marginal_slope_formulas_for_scenario(
+    z_column, rhs_formula, rhs_slope = _rust_survival_marginal_slope_formulas_for_scenario(
         scenario_name,
         ds,
     )
@@ -2767,14 +2767,14 @@ def run_rust_gamlss_survival_marginal_slope_cv(
             test_pred_df.to_csv(test_path, index=False)
 
             fit_formula = f"Surv(__entry, {ds['time_col']}, {ds['event_col']}) ~ {rhs_formula}"
-            logslope_formula = rhs_logslope
+            slope_formula = rhs_slope
             fit_cmd = [
                 str(rust_bin),
                 "fit",
                 "--survival-likelihood",
                 "marginal-slope",
-                "--logslope-formula",
-                logslope_formula,
+                "--slope-formula",
+                slope_formula,
                 "--z-column",
                 z_column,
                 "--out",
@@ -2874,7 +2874,7 @@ def run_rust_gamlss_survival_marginal_slope_cv(
                     "n_test": int(len(fold.test_idx)),
                     "model_spec": (
                         f"{fit_formula} [survival-likelihood=marginal-slope; "
-                        f"logslope={logslope_formula}; z={z_column}; risk_score={score_src}; "
+                        f"slope={slope_formula}; z={z_column}; risk_score={score_src}; "
                         f"native survival curve scoring] {eval_suffix}"
                     ),
                 }

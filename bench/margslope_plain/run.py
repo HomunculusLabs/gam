@@ -6,7 +6,7 @@ Target spec (no scale_dimensions, no linkwiggle, no score-warp, no survival):
     formula: case ~ duchon(PC1..PC10, centers=40, order=1, power=2, length_scale=1)
                   + sex
     link   : probit
-    logslope: duchon(PC1..PC10, centers=40, order=1, power=2, length_scale=1)
+    slope: duchon(PC1..PC10, centers=40, order=1, power=2, length_scale=1)
     z-column: prs_z
 
 Outputs:
@@ -42,7 +42,7 @@ DUCHON_TERM = (
     f"duchon({PC_COLS}, centers=40, order=1, power=2, length_scale=1)"
 )
 MEAN_FORMULA = f"case ~ link(type=probit) + sex + {DUCHON_TERM}"
-LOGSLOPE_FORMULA = DUCHON_TERM
+SLOPE_FORMULA = DUCHON_TERM
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +83,7 @@ def run_one(binary: Path, n: int, outdir: Path, budget: float, seed: int) -> dic
         str(binary), "fit",
         str(data),
         MEAN_FORMULA,
-        "--logslope-formula", LOGSLOPE_FORMULA,
+        "--slope-formula", SLOPE_FORMULA,
         "--z-column", "prs_z",
         "--out", str(model),
     ]

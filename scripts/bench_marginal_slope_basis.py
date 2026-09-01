@@ -43,7 +43,7 @@ def time_fit(
     label: str,
     data: dict[str, list[float]],
     formula: str,
-    logslope_formula: str,
+    slope_formula: str,
     stage1: gamfit.CtnStage1,
     repeats: int,
 ) -> list[float]:
@@ -55,7 +55,7 @@ def time_fit(
             data,
             formula,
             family="bernoulli-marginal-slope",
-            logslope_formula=logslope_formula,
+            slope_formula=slope_formula,
             transformation_normal_stage1=stage1,
             scale_dimensions=True,
         )

@@ -1,6 +1,6 @@
 //! Fast iteration harness for #979 (NOT a test — examples skip dev-deps so the
 //! build avoids the slow `autodiff` crate). Mirrors the integration test
-//! `tests/bug_hunt_979_margslope_matern_logslope_slowdown.rs`.
+//! `tests/bug_hunt_979_margslope_matern_slope_slowdown.rs`.
 //!
 //! Run: `RUST_LOG=info cargo run --profile release-dev --example repro979_margslope`
 
@@ -104,7 +104,7 @@ fn build(
         random_effect_terms: vec![],
         smooth_terms: vec![matern_smooth("f_pc", centers, kappa_auto)],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![matern_smooth("ls_pc", centers, kappa_auto)],
@@ -115,9 +115,9 @@ fn build(
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset: Array1::<f64>::zeros(n),
-        logslope_offset: Array1::<f64>::zeros(n),
+        slope_offset: Array1::<f64>::zeros(n),
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,

@@ -36,7 +36,7 @@
       "scale_dimensions": true,
       "z_column": "pgs_ctn_z",
       "mean_linkwiggle_knots": 8,
-      "logslope_linkwiggle_knots": 8
+      "slope_linkwiggle_knots": 8
     },
     {
       "name": "rust_survival_margslope_aniso_duchon16d_gm_linkwiggle_scorewarp_timewiggle_fast",
@@ -51,7 +51,7 @@
       "scale_dimensions": true,
       "z_column": "pgs_ctn_z",
       "mean_linkwiggle_knots": 8,
-      "logslope_linkwiggle_knots": 8,
+      "slope_linkwiggle_knots": 8,
       "timewiggle_knots": 8
     }
   ]

@@ -1,5 +1,5 @@
 //! gam#2765 / gam#2767 probe: why does the outer REML solve refuse on a
-//! follow-up-varying log-slope?
+//! follow-up-varying slope?
 //!
 //! The acceptance fixture fails with
 //!
@@ -210,9 +210,9 @@ fn main() {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some("1".to_string()),
-        logslope_time_k: time_k,
-        logslope_time_degree: 2,
+        slope_formula: Some("1".to_string()),
+        slope_time_k: time_k,
+        slope_time_degree: 2,
         time_num_internal_knots: 3,
         baseline_target: if smooth_arm {
             "linear".to_string()
@@ -223,7 +223,7 @@ fn main() {
     };
 
     eprintln!(
-        "[2765-probe] n={n} arm={arm} formula={formula:?} logslope_time_k={time_k:?} \
+        "[2765-probe] n={n} arm={arm} formula={formula:?} slope_time_k={time_k:?} \
          baseline={}",
         config.baseline_target
     );
@@ -255,10 +255,10 @@ fn report_recovery(result: gam::FitResult, times: &[f64]) {
         return;
     };
     let beta = &fit.fit.blocks[2].beta;
-    let design = fit.logslope_design.design.to_dense();
+    let design = fit.slope_design.design.to_dense();
     if design.ncols() != beta.len() || design.nrows() != times.len() {
         eprintln!(
-            "[2765-probe] log-slope design {}x{} against {} coefficients and {} rows",
+            "[2765-probe] slope design {}x{} against {} coefficients and {} rows",
             design.nrows(),
             design.ncols(),
             beta.len(),

@@ -651,12 +651,12 @@ def _rust_marginal_slope_formulas_for_scenario(scenario_name: str, ds: dict[str,
         ds,
         cfg_override=marginal_cfg,
     )
-    _, logslope_formula = _rust_formula_for_scenario(
+    _, slope_formula = _rust_formula_for_scenario(
         scenario_name,
         ds,
         cfg_override=marginal_cfg,
     )
-    return z_column, marginal_formula, _formula_rhs_text(logslope_formula)
+    return z_column, marginal_formula, _formula_rhs_text(slope_formula)
 
 
 def _mgcv_formula_for_scenario(scenario_name: typing.Any, ds: typing.Any) -> typing.Any:

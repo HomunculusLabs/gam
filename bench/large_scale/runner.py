@@ -319,7 +319,7 @@ class MethodSpec:
     z_column: str | None = None
     pc_count: int = 16
     mean_linkwiggle_knots: int | None = None
-    logslope_linkwiggle_knots: int | None = None
+    slope_linkwiggle_knots: int | None = None
     timewiggle_knots: int | None = None
 
 
@@ -536,7 +536,7 @@ def validate_method_spec(spec: MethodSpec) -> None:
         raise RuntimeError(f"method '{spec.name}' must set scale_dimensions=true")
     for key, value in (
         ("mean_linkwiggle_knots", spec.mean_linkwiggle_knots),
-        ("logslope_linkwiggle_knots", spec.logslope_linkwiggle_knots),
+        ("slope_linkwiggle_knots", spec.slope_linkwiggle_knots),
         ("timewiggle_knots", spec.timewiggle_knots),
     ):
         if value is not None and value < 3:
@@ -586,9 +586,9 @@ def validate_method_spec(spec: MethodSpec) -> None:
                 raise RuntimeError(
                     f"survival marginal-slope method '{spec.name}' must set mean_linkwiggle_knots"
                 )
-            if spec.logslope_linkwiggle_knots is None:
+            if spec.slope_linkwiggle_knots is None:
                 raise RuntimeError(
-                    f"survival marginal-slope method '{spec.name}' must set logslope_linkwiggle_knots"
+                    f"survival marginal-slope method '{spec.name}' must set slope_linkwiggle_knots"
                 )
             if spec.timewiggle_knots is None:
                 raise RuntimeError(
@@ -2696,9 +2696,9 @@ def build_method_specs(cfg: dict[str, Any]) -> list[MethodSpec]:
                 if item.get("mean_linkwiggle_knots") is not None
                 else None
             ),
-            logslope_linkwiggle_knots=(
-                int(item["logslope_linkwiggle_knots"])
-                if item.get("logslope_linkwiggle_knots") is not None
+            slope_linkwiggle_knots=(
+                int(item["slope_linkwiggle_knots"])
+                if item.get("slope_linkwiggle_knots") is not None
                 else None
             ),
             timewiggle_knots=(
@@ -2754,7 +2754,7 @@ def rust_formula_classification(spec: MethodSpec) -> tuple[str, str]:
 
 
 def rust_marginal_slope_formula_classification(spec: MethodSpec, centers: int) -> tuple[str, str]:
-    """Build mean and logslope formulas for large-scale marginal-slope classification.
+    """Build mean and slope formulas for large-scale marginal-slope classification.
 
     Uses the shared joint-PC helper so duchon / thinplate / matern lanes all
     route through the same grouping-manifold contract.
@@ -2766,7 +2766,7 @@ def rust_marginal_slope_formula_classification(spec: MethodSpec, centers: int) -
         "smooth(age_entry_std)",
         spatial,
     ]
-    logslope_terms = [
+    slope_terms = [
         "smooth(age_entry_std)",
         spatial,
     ]
@@ -2774,13 +2774,13 @@ def rust_marginal_slope_formula_classification(spec: MethodSpec, centers: int) -
         mean_terms.append(
             f"linkwiggle(internal_knots={int(spec.mean_linkwiggle_knots)})"
         )
-    if spec.logslope_linkwiggle_knots is not None:
-        logslope_terms.append(
-            f"linkwiggle(internal_knots={int(spec.logslope_linkwiggle_knots)})"
+    if spec.slope_linkwiggle_knots is not None:
+        slope_terms.append(
+            f"linkwiggle(internal_knots={int(spec.slope_linkwiggle_knots)})"
         )
     mean_formula = "phenotype ~ " + " + ".join(mean_terms)
-    logslope_formula = " + ".join(logslope_terms)
-    return mean_formula, logslope_formula
+    slope_formula = " + ".join(slope_terms)
+    return mean_formula, slope_formula
 
 
 def run_rust_marginal_slope_classification(
@@ -2798,13 +2798,13 @@ def run_rust_marginal_slope_classification(
         d_pc=int(spec.pc_count),
         centers=centers,
         linkwiggle_knots=spec.mean_linkwiggle_knots,
-        scorewarp_knots=spec.logslope_linkwiggle_knots,
+        scorewarp_knots=spec.slope_linkwiggle_knots,
     )
     print("\n".join(preflight.lines), file=sys.stderr, flush=True)
     require_shared_ctn_columns(spec, train_csv, test_csv)
     ctn_train_csv = train_csv
     ctn_test_csv = test_csv
-    mean_formula, logslope_formula = rust_marginal_slope_formula_classification(spec, centers)
+    mean_formula, slope_formula = rust_marginal_slope_formula_classification(spec, centers)
     z_column = spec.z_column or PGS_CTN_Z_COLUMN
     if z_column != PGS_CTN_Z_COLUMN:
         raise RuntimeError(
@@ -2814,7 +2814,7 @@ def run_rust_marginal_slope_classification(
     pred_path = out_dir / f"{spec.name}.pred.csv"
     fit_cmd = [
         str(rust_bin), "fit",
-        "--logslope-formula", logslope_formula,
+        "--slope-formula", slope_formula,
         "--z-column", z_column,
         "--out", str(model_path),
     ]
@@ -2860,15 +2860,15 @@ def rust_survival_marginal_slope_formula_parts(spec: MethodSpec, centers: int) -
         mean_terms.append(f"timewiggle(internal_knots={int(spec.timewiggle_knots)})")
     if spec.mean_linkwiggle_knots is not None:
         mean_terms.append(f"linkwiggle(internal_knots={int(spec.mean_linkwiggle_knots)})")
-    logslope_terms = ["smooth(age_entry_std)", spatial]
-    if spec.logslope_linkwiggle_knots is not None:
-        logslope_terms.append(
-            f"linkwiggle(internal_knots={int(spec.logslope_linkwiggle_knots)})"
+    slope_terms = ["smooth(age_entry_std)", spatial]
+    if spec.slope_linkwiggle_knots is not None:
+        slope_terms.append(
+            f"linkwiggle(internal_knots={int(spec.slope_linkwiggle_knots)})"
         )
     fit_formula = (
         f"Surv({SURVIVAL_ENTRY_COLUMN}, time, event) ~ " + " + ".join(mean_terms)
     )
-    return fit_formula, " + ".join(logslope_terms)
+    return fit_formula, " + ".join(slope_terms)
 
 
 def rust_survival_formula_rhs(spec: MethodSpec) -> str:
@@ -3000,7 +3000,7 @@ def run_rust_survival(spec: MethodSpec, train_csv: Path, test_csv: Path, out_dir
     train_rows_raw = read_csv_rows(train_csv)
     test_rows_raw = read_csv_rows(test_csv)
     centers = int(spec.centers or 24)
-    logslope_formula = None
+    slope_formula = None
     fit_csv = train_csv
     prediction_rows_raw = test_rows_raw
     train_metric_rows_raw = train_rows_raw
@@ -3011,14 +3011,14 @@ def run_rust_survival(spec: MethodSpec, train_csv: Path, test_csv: Path, out_dir
             d_pc=int(spec.pc_count),
             centers=centers,
             linkwiggle_knots=spec.mean_linkwiggle_knots,
-            scorewarp_knots=spec.logslope_linkwiggle_knots,
+            scorewarp_knots=spec.slope_linkwiggle_knots,
         )
         print("\n".join(preflight.lines), file=sys.stderr, flush=True)
         require_shared_ctn_columns(spec, train_csv, test_csv)
         fit_csv = train_csv
         train_metric_rows_raw = train_rows_raw
         prediction_rows_raw = test_rows_raw
-        fit_formula, logslope_formula = rust_survival_marginal_slope_formula_parts(spec, centers)
+        fit_formula, slope_formula = rust_survival_marginal_slope_formula_parts(spec, centers)
     else:
         fit_formula = rust_survival_formula(spec)
     prediction_preflight = preflight_survival_prediction(
@@ -3060,7 +3060,7 @@ def run_rust_survival(spec: MethodSpec, train_csv: Path, test_csv: Path, out_dir
             str(model_path),
         ]
         if likelihood_mode == "marginal-slope":
-            fit_cmd.extend(["--logslope-formula", logslope_formula or "1"])
+            fit_cmd.extend(["--slope-formula", slope_formula or "1"])
             fit_cmd.extend(["--z-column", spec.z_column or PGS_CTN_Z_COLUMN])
             if spec.scale_dimensions:
                 fit_cmd.append("--scale-dimensions")
@@ -3124,7 +3124,7 @@ def run_rust_survival(spec: MethodSpec, train_csv: Path, test_csv: Path, out_dir
         "model_spec": (
             f"{fit_formula} [survival-likelihood={likelihood_mode}; "
             + (
-                f"logslope={logslope_formula}; z={spec.z_column or PGS_CTN_Z_COLUMN}; "
+                f"slope={slope_formula}; z={spec.z_column or PGS_CTN_Z_COLUMN}; "
                 if likelihood_mode == "marginal-slope"
                 else ""
             )

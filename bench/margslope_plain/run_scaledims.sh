@@ -19,7 +19,7 @@ MEAN="case ~ link(type=probit) + sex + $DUCHON"
 ./target/release/gam fit \
   "$RUNS/dch_${N}_sd.csv" \
   "$MEAN" \
-  --logslope-formula "$DUCHON" \
+  --slope-formula "$DUCHON" \
   --z-column prs_z \
   --scale-dimensions \
   --out "$RUNS/dch_${N}_sd.model" \

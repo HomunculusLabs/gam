@@ -25,8 +25,8 @@ use csv::StringRecord;
 use gam::utils::splitmix64;
 use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism};
 
-const LOGSLOPE_TIME_DEGREE: usize = 2;
-const LOGSLOPE_TIME_K: usize = 4;
+const SLOPE_TIME_DEGREE: usize = 2;
+const SLOPE_TIME_K: usize = 4;
 const SLOPE_LEVEL: f64 = 0.85;
 const SLOPE_TREND: f64 = -0.32;
 const LOCATION_LEVEL: f64 = -1.15;
@@ -146,7 +146,7 @@ fn main() {
     let time_k = if arm == "static" {
         None
     } else {
-        Some(LOGSLOPE_TIME_K)
+        Some(SLOPE_TIME_K)
     };
 
     // Grade the WHOLE θ vector, not just ψ. The ρ block and the ψ block share
@@ -160,9 +160,9 @@ fn main() {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some("1".to_string()),
-        logslope_time_k: time_k,
-        logslope_time_degree: LOGSLOPE_TIME_DEGREE,
+        slope_formula: Some("1".to_string()),
+        slope_time_k: time_k,
+        slope_time_degree: SLOPE_TIME_DEGREE,
         time_num_internal_knots: 3,
         baseline_target: "weibull".to_string(),
         // The audit runs at the first bounded seed; capping the joint problem
@@ -174,7 +174,7 @@ fn main() {
         ..FitConfig::default()
     };
 
-    eprintln!("[2765-FD] n={n} arm={arm} logslope_time_k={time_k:?}");
+    eprintln!("[2765-FD] n={n} arm={arm} slope_time_k={time_k:?}");
     let started = std::time::Instant::now();
     match fit_from_formula("Surv(time, event) ~ 1", &data, &config) {
         Ok(_) => eprintln!(

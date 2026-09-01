@@ -232,7 +232,7 @@ tie_certificate_report()
 # that is proportional to the nodes). A node channel with no shape content
 # contributes exactly nothing.
 #
-# Measured over grid size and logslope magnitude (V1 a scaled KMS correlation,
+# Measured over grid size and slope magnitude (V1 a scaled KMS correlation,
 # Vb = 0.25*I + 0.02 off-diagonal, so the ABSOLUTE ratios are fixture-specific;
 # the pattern across the sweep is not):
 #
@@ -257,7 +257,7 @@ tie_certificate_report()
 #    channel would be wrong by well under a percent here. That is exactly why
 #    it would have been a dangerous shortcut rather than an obvious one — it is
 #    the size of error nobody notices.
-# 3. It is NOT uniformly small, and what it scales with is the logslope, not
+# 3. It is NOT uniformly small, and what it scales with is the slope, not
 #    the grid size: 3x the slope moves it by ~700x on the matrix and ~14x on
 #    the SE, while 3x the grid size barely moves either. The channel exists
 #    because the slope is what lets a row see the latent axis at all

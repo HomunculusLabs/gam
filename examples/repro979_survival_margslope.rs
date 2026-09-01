@@ -110,7 +110,7 @@ fn main() {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs_z".to_string()),
-        logslope_formula: Some(duchon_term),
+        slope_formula: Some(duchon_term),
         baseline_target: "linear".to_string(),
         gpu_policy: gam::gpu::GpuPolicy::Off,
         ..FitConfig::default()
