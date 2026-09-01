@@ -17,12 +17,6 @@ use gam_solve::mixture_link::{
 };
 use ndarray::{Array1, ArrayView1};
 
-/// Floor on the Bernoulli posterior variance `p(1 - p)`. Keeps the reported
-/// variance strictly positive when the integrated probability saturates at 0
-/// or 1, so downstream weighting / standard-error code never divides by zero.
-/// Matches the `PROB_EPS` floor used for the same `mean·(1 - mean)` variance
-/// in `crate::inference::quadrature`.
-const PROB_VARIANCE_FLOOR: f64 = 1e-12;
 
 /// Runtime family behavior carrier built from a `LikelihoodSpec` (response
 /// distribution + parameterized inverse-link).
