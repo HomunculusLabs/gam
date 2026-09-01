@@ -9374,9 +9374,6 @@ mod eigenvalue_range_predicate_agreement_2740_tests {
         }
     }
 
-    fn projected() -> Array2<f64> {
-        array![[0.7], [0.5], [0.3], [0.2], [0.1]]
-    }
 
     /// The classification and the rank are the same question asked once.
     #[test]

@@ -561,17 +561,6 @@ impl ExactJeffreysTerm {
         }
     }
 
-    /// Construct a tangent-projected variant: wraps the same operator but
-    /// returns `½ log|ZᵀJZ|` from `value()`.
-    pub(crate) fn with_projected_value(
-        operator: std::sync::Arc<super::super::FirthDenseOperator>,
-        projected_value: f64,
-    ) -> Self {
-        Self {
-            operator: Some(operator),
-            value_override: Some(projected_value),
-        }
-    }
 
     #[inline]
     pub(crate) fn value(&self) -> f64 {
@@ -582,10 +571,6 @@ impl ExactJeffreysTerm {
         })
     }
 
-    #[inline]
-    pub(crate) fn operator_arc(&self) -> Option<std::sync::Arc<super::super::FirthDenseOperator>> {
-        self.operator.as_ref().map(std::sync::Arc::clone)
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
