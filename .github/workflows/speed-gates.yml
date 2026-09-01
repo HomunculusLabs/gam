@@ -24,16 +24,27 @@ name: Speed Gates
 on:
   push:
     branches: [main]
+    # Per-push runs are scoped to the files that change WHAT THE GATES MEASURE:
+    # the two jet compilers, the jet algebra, the harness and the runner.
+    # `main` receives a push every minute or two, and a run whose release build
+    # is still waiting for a runner is "pending" and is replaced by the next
+    # push, so a per-push trigger on every crate never produced a verdict at
+    # all (measured: every run of this lane's first hour was cancelled while
+    # queued). The nightly run below covers every family kernel regardless of
+    # which file moved.
     paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
+      - "crates/gam-row-macros/**"
+      - "crates/gam-math/src/paired_timing.rs"
+      - "crates/gam-math/src/jet_*.rs"
+      - "crates/gam-math/src/fast_channel.rs"
+      - "crates/gam-math/src/nested_dual.rs"
       - "scripts/speed_gates.py"
       - ".github/workflows/speed-gates.yml"
       - ".github/actions/setup-rust-ci/**"
   schedule:
     # Nightly, so a host-image or toolchain change that moves a fine margin is
-    # seen within a day even when nothing in the tree changed.
+    # seen within a day even when nothing in the tree changed, and so every
+    # family kernel is measured daily whichever file moved.
     - cron: "17 6 * * *"
   workflow_dispatch:
 

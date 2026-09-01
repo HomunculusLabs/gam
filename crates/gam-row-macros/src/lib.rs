@@ -1939,6 +1939,43 @@ pub fn row_program(input: TokenStream) -> TokenStream {
 mod row_atom_tests {
     use super::RowAtomInput;
 
+    /// The activity-gate schedule the cause-specific row was measured into
+    /// (#932): every gate on one activity is ONE `if` block per lowering, the
+    /// work shared by that activity's channels (the reciprocal of the spline
+    /// derivative that feeds both the gradient and the Hessian of
+    /// `ln(derivative)`) is defined once, the unconditional exponentials are
+    /// defined once, and no inactive zero is negative. Each of these was a
+    /// measured deficit against the hand kernel before it was fixed, and each
+    /// is a property of the emitted TEXT, so this pins the text.
+    #[test]
+    fn activity_gates_are_grouped_and_define_shared_work_once() {
+        let input = syn::parse_str::<RowAtomInput>(
+            "fn atom [order2, third](
+                eta_exit, eta_entry, derivative;
+                weight: scale, entry_active: bool, event: bool
+            ) {
+                weight
+                    * (exp(eta_exit)
+                        - entry_active * exp(eta_entry)
+                        - event * (eta_exit + ln(derivative)))
+            }",
+        )
+        .expect("cause-specific row atom");
+        let expanded = super::expand(input)
+            .expect("expand row atom")
+            .to_string()
+            .replace(' ', "");
+        // Two lowerings (order2, third): one gate block per activity in each.
+        assert_eq!(expanded.matches("ifevent{").count(), 2, "{expanded}");
+        assert_eq!(expanded.matches("ifentry_active{").count(), 2, "{expanded}");
+        // The reciprocal is defined once per lowering, never once per channel.
+        assert_eq!(expanded.matches(".recip()").count(), 2, "{expanded}");
+        // Both exponentials once per lowering.
+        assert_eq!(expanded.matches(".exp()").count(), 4, "{expanded}");
+        // An inactive contribution is `0.0`, never `-0.0`.
+        assert!(!expanded.contains("-0.0"), "{expanded}");
+    }
+
     #[test]
     fn constant_roles_are_explicit_and_structural() {
         let input = syn::parse_str::<RowAtomInput>(
