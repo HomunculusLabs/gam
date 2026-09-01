@@ -712,17 +712,22 @@ pub fn smooth_laplace(
         let mut step = 1.0;
         let accepted = loop {
             let candidate = add_scaled_blocks(&states, &direction, step);
-            match evaluate_log_joint(model, history, &prior, &candidate) {
-                Ok(candidate_evaluation)
-                    if candidate_evaluation.log_joint
+            // A trial point that fails the Armijo test and one at which the
+            // joint is not numerically evaluable are rejected the same way:
+            // the step shrinks. Any other error is the caller's.
+            let sufficient_ascent = match evaluate_log_joint(model, history, &prior, &candidate)
+            {
+                Ok(candidate_evaluation) => {
+                    candidate_evaluation.log_joint
                         >= evaluation.log_joint
-                            + control.armijo_fraction * step * directional_derivative =>
-                {
-                    states = candidate;
-                    break true;
+                            + control.armijo_fraction * step * directional_derivative
                 }
-                Ok(_) | Err(MarkedPointProcessError::NumericalFailure { .. }) => {}
+                Err(MarkedPointProcessError::NumericalFailure { .. }) => false,
                 Err(error) => return Err(error),
+            };
+            if sufficient_ascent {
+                states = candidate;
+                break true;
             }
             step *= control.step_shrink;
             if step < control.minimum_step {
@@ -902,23 +907,25 @@ pub fn filter_laplace(
             let mut step = 1.0;
             let accepted = loop {
                 let candidate = &mode + &(step * &direction);
-                match one_state_log_posterior(
+                // Same rejection rule as the joint Newton ascent above: an
+                // Armijo failure and a non-evaluable trial point both shrink
+                // the step; any other error is the caller's.
+                let sufficient_ascent = match one_state_log_posterior(
                     interval,
                     &observation,
                     &prior_precision,
                     &predicted_mean,
                     &candidate,
                 ) {
-                    Ok(value)
-                        if value
-                            >= current
-                                + control.armijo_fraction * step * directional_derivative =>
-                    {
-                        mode = candidate;
-                        break true;
+                    Ok(value) => {
+                        value >= current + control.armijo_fraction * step * directional_derivative
                     }
-                    Ok(_) | Err(MarkedPointProcessError::NumericalFailure { .. }) => {}
+                    Err(MarkedPointProcessError::NumericalFailure { .. }) => false,
                     Err(error) => return Err(error),
+                };
+                if sufficient_ascent {
+                    mode = candidate;
+                    break true;
                 }
                 step *= control.step_shrink;
                 if step < control.minimum_step {
