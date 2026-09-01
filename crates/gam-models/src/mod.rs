@@ -87,7 +87,7 @@ pub mod joint_penalty;
 pub(crate) mod location_scale_engine;
 pub mod marginal_slope_orthogonal;
 pub mod marginal_slope_shared;
-pub mod marked_point_process;
+pub use gam_point_process as marked_point_process;
 pub mod multinomial;
 pub mod multinomial_posterior;
 pub mod multinomial_predictive;

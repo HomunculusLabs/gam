@@ -1,5 +1,5 @@
 use approx::assert_abs_diff_eq;
-use gam_models::marked_point_process::*;
+use gam_point_process::*;
 use ndarray::{Array2, array, s};
 
 fn control() -> LaplaceControl {
