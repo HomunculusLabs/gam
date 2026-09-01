@@ -967,9 +967,6 @@ pub struct PirlsRowBackend {
 struct PirlsRowBackendLinux {
     ctx: Arc<CudaContext>,
     modules: Mutex<std::collections::HashMap<ModuleKey, Arc<CudaModule>>>,
-    /// Stage 6: separate cache for JIT-compiled custom-family modules
-    /// keyed by `(spec_id, curvature)`. Distinct JIT specs in the same
-    /// process get distinct cached modules.
 }
 
 /// Distinguishes the three kernel modes in the per-process module cache.
