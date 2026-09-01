@@ -184,11 +184,8 @@ fn gamma_log_eta_wald_intervals_have_nominal_coverage() {
     // The #679 double-count signature: half-widths scaled by √(1/shape) collapse
     // coverage to P(|Z| ≤ √(1/shape)·z_{0.975}).
     let shrink = (1.0_f64 / SHAPE).sqrt();
-    let buggy_coverage = {
-        // Φ(shrink·z975) via erf; std normal CDF.
-        let a = shrink * z975 / std::f64::consts::SQRT_2;
-        erf(a) // P(|Z| ≤ shrink·z975) = erf(shrink·z975/√2)
-    };
+    // P(|Z| ≤ shrink·z975) = 2Φ(shrink·z975) − 1.
+    let buggy_coverage = 2.0 * gam_math::probability::normal_cdf(shrink * z975) - 1.0;
 
     eprintln!(
         "gamma(log) η Wald coverage: replicates={usable_replicates} trials={total} \
@@ -217,16 +214,3 @@ fn gamma_log_eta_wald_intervals_have_nominal_coverage() {
     );
 }
 
-/// Error function (Abramowitz & Stegun 7.1.26), accurate to ~1e-7 — ample for an
-/// informational comparison value in the assertion message and guard.
-fn erf(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0
-        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
-            + 0.254_829_592)
-            * t
-            * (-x * x).exp();
-    sign * y
-}

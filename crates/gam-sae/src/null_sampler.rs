@@ -229,8 +229,6 @@ impl CurveballSampler {
 pub struct CoactivationExceedance {
     g: usize,
     n_obs: usize,
-    obs: Vec<f64>, // upper-tri joint counts
-    null_mean: Vec<f64>,
     z: Vec<f64>,
 }
 
@@ -291,14 +289,11 @@ pub fn coactivation_exceedance(
         sampler.accumulate(&mut obs, &mut obs_marg);
     }
 
-    let mut null_mean = vec![0.0_f64; size];
     let mut z = vec![0.0_f64; size];
     if g < 2 || n_obs < 2 || replicates == 0 {
         return CoactivationExceedance {
             g,
             n_obs,
-            obs,
-            null_mean,
             z,
         };
     }
@@ -339,7 +334,6 @@ pub fn coactivation_exceedance(
     for u in 0..g {
         for w in (u + 1)..g {
             let idx = u * g + w;
-            null_mean[idx] = mean[idx];
             let var = m2[idx] / denom;
             let sd = var.max(0.0).sqrt();
             z[idx] = if sd > NULL_SD_FLOOR {
@@ -354,8 +348,6 @@ pub fn coactivation_exceedance(
     CoactivationExceedance {
         g,
         n_obs,
-        obs,
-        null_mean,
         z,
     }
 }

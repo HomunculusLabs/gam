@@ -411,7 +411,7 @@ fn validate_symmetric_psd_core(matrix: &Array2<f64>, what: &str) -> Result<(), S
 /// Computes the Kronecker product A ⊗ B for penalty matrix construction.
 /// This is used to create tensor product penalties that enforce smoothness
 /// in multiple dimensions for interaction terms.
-fn kronecker_product(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+pub fn kronecker_product(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     let (arows, a_cols) = a.dim();
     let (brows, b_cols) = b.dim();
     if arows == 0 || a_cols == 0 || brows == 0 || b_cols == 0 {

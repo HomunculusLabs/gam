@@ -46,6 +46,7 @@ use gam::identifiability::audit::{
 use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
+use gam_problem::test_support::spec_from_dense;
 
 struct FirstBetaScaledJacobian {
     base: Array2<f64>,
@@ -70,23 +71,6 @@ impl BlockEffectiveJacobian for FirstBetaScaledJacobian {
             .slice(ndarray::s![rows.start..rows.end, ..])
             .mapv(|v| scale * v);
         Ok(out)
-    }
-}
-
-fn spec_from_dense(name: &str, design: Array2<f64>) -> ParameterBlockSpec {
-    let n = design.nrows();
-    ParameterBlockSpec {
-        name: name.to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(design)),
-        offset: Array1::<f64>::zeros(n),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::<f64>::zeros(0),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
     }
 }
 

@@ -27,12 +27,6 @@ const BRACKET_EXPANSION_LIMIT: usize = 48;
 const BRENT_ITERATION_LIMIT: usize = 96;
 const BRENT_REL_TOL: f64 = 1.0e-8;
 const MIN_RESIDUAL_DF: f64 = 1.0;
-const CONDITIONALITY_NULL_REPLICATES: usize = 8;
-const CONDITIONALITY_SPIKE_TRIALS: usize = 8;
-const CONDITIONALITY_CLAIMED_SNR: f64 = 1.0;
-const CONDITIONALITY_CLAIMED_FPR: f64 = 0.05;
-const CONDITIONALITY_NULL_SEED: u64 = 0xC0A_C7A1;
-const CONDITIONALITY_SPIKE_SEED: u64 = 0xC0A_51C1;
 
 /// Configuration for the native varying-coefficient GAM conditionality fit.
 #[derive(Clone, Copy, Debug)]
@@ -234,53 +228,7 @@ pub fn estimate_on_rows(
 }
 
 
-fn selected_pair_matrix(
-    gate_i: &[f64],
-    gate_j: &[f64],
-    rows: &[usize],
-) -> Result<ndarray::Array2<f64>, String> {
-    let mut out = ndarray::Array2::<f64>::zeros((rows.len(), 2));
-    for (slot, &row) in rows.iter().enumerate() {
-        if row >= gate_i.len() || row >= gate_j.len() {
-            return Err(format!(
-                "selected_pair_matrix: sampled row {row} out of range"
-            ));
-        }
-        out[[slot, 0]] = gate_i[row];
-        out[[slot, 1]] = gate_j[row];
-    }
-    Ok(out)
-}
 
-fn conditionality_matrix_stat(data: ArrayView2<'_, f64>) -> Result<f64, String> {
-    if data.nrows() < 4 || data.ncols() < 2 {
-        return Err(
-            "conditionality null statistic requires at least four rows and two columns".to_string(),
-        );
-    }
-    let mut mean_i = 0.0_f64;
-    let mut mean_j = 0.0_f64;
-    for row in 0..data.nrows() {
-        mean_i += data[[row, 0]];
-        mean_j += data[[row, 1]];
-    }
-    mean_i /= data.nrows() as f64;
-    mean_j /= data.nrows() as f64;
-    let mut var_i = 0.0_f64;
-    let mut var_j = 0.0_f64;
-    let mut cov = 0.0_f64;
-    for row in 0..data.nrows() {
-        let zi = data[[row, 0]] - mean_i;
-        let zj = data[[row, 1]] - mean_j;
-        var_i += zi * zi;
-        var_j += zj * zj;
-        cov += zi * zj;
-    }
-    if !(var_i > 0.0 && var_j > 0.0) {
-        return Ok(0.0);
-    }
-    Ok((cov / (var_i.sqrt() * var_j.sqrt())).abs())
-}
 
 /// Full influence vector for the weighted-Pearson coupling statistic.
 #[derive(Clone, Debug)]

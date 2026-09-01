@@ -28,26 +28,9 @@ use gam::identifiability::audit::audit_identifiability;
 use ndarray::Array2;
 
 mod common {
-    use gam::families::custom_family::ParameterBlockSpec;
-    use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
-    use ndarray::{Array1, Array2};
+    use ndarray::Array1;
 
-    pub fn spec_from_dense(name: &str, design: Array2<f64>) -> ParameterBlockSpec {
-        let n = design.nrows();
-        ParameterBlockSpec {
-            name: name.to_string(),
-            design: DesignMatrix::Dense(DenseDesignMatrix::from(design)),
-            offset: Array1::<f64>::zeros(n),
-            penalties: Vec::new(),
-            nullspace_dims: Vec::new(),
-            initial_log_lambdas: Array1::<f64>::zeros(0),
-            initial_beta: None,
-            gauge_priority: 100,
-            jacobian_callback: None,
-            stacked_design: None,
-            stacked_offset: None,
-        }
-    }
+    pub use gam_problem::test_support::spec_from_dense;
 
     pub fn linspace_minus_one_to_one(n: usize) -> Array1<f64> {
         if n <= 1 {

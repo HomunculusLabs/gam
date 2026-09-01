@@ -23,23 +23,7 @@ use gam::families::custom_family::ParameterBlockSpec;
 use gam::identifiability::audit::audit_identifiability;
 use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use ndarray::{Array1, Array2};
-
-fn spec_from_dense(name: &str, design: Array2<f64>) -> ParameterBlockSpec {
-    let n = design.nrows();
-    ParameterBlockSpec {
-        name: name.to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(design)),
-        offset: Array1::<f64>::zeros(n),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::<f64>::zeros(0),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    }
-}
+use gam_problem::test_support::spec_from_dense;
 
 /// Compute S2_k = Σ_i (φ_i²/‖φ‖²)² for a column slice.
 fn s2_from_col(col: &[f64]) -> f64 {
