@@ -1313,6 +1313,10 @@ impl HessianFactorization for FullyPinnedModeResponse {
     fn dim(&self) -> usize {
         self.dimension
     }
+
+    fn active_rank(&self) -> usize {
+        0
+    }
 }
 
 /// If the inner solution carries a non-empty active inequality-constraint
