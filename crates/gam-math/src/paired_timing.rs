@@ -393,6 +393,151 @@ where
     }
 }
 
+/// Whether a wall-clock ratio measured in this build is about the SHIPPED
+/// codegen.
+///
+/// It is not the optimisation level: `[profile.test]` already carries
+/// `opt-level = 2`. It is codegen LAYOUT. `[profile.test.package.gam-models]`
+/// sets `codegen-units = 16` and the test profile carries no LTO, while
+/// `[profile.release]` is `codegen-units = 1` plus thin-LTO, and the whole
+/// margin of a compiled-vs-hand row kernel can be cross-CGU inlining. A ratio
+/// taken in the test profile therefore measures a different program than the
+/// one that ships, and a debug build measures fixed per-call overhead and
+/// nothing else. Every speed gate in this workspace opens only here.
+#[must_use]
+pub fn release_profile() -> bool {
+    !cfg!(debug_assertions)
+}
+
+/// One speed gate: a named set of paired cells, each printed as it is
+/// measured and all asserted together at the end.
+///
+/// This is the ONE shape a wall-clock contract takes in this workspace, and
+/// its call site is the marker the release lane derives the gate population
+/// from: `scripts/speed_gates.py` walks the crates for every `#[test]` whose
+/// body calls [`SpeedGate::open`], resolves each to an exact test path in the
+/// compiled release binary, runs exactly that set, and refuses a run in which
+/// any derived gate did not execute. A gate therefore cannot be forgotten by
+/// a name-prefix filter, cannot print `ok` having asserted nothing, and
+/// cannot assert in a lane whose codegen is not the shipped one.
+///
+/// # Shape of a gate
+///
+/// ```text
+/// // parity pins run in EVERY build, before the gate opens
+/// let Some(mut gate) = SpeedGate::open("RIGID-BERNOULLI-VGH-932") else { return };
+/// let timing = paired_interleaved(15, 300_000, seed, production_arm, hand_arm);
+/// gate.faster("y=1", &timing, "production", "hand");
+/// gate.finish();
+/// ```
+///
+/// [`SpeedGate::open`] returns `None` outside [`release_profile`], so the
+/// measurement itself is skipped where its verdict would be about the wrong
+/// program (and the dev lane does not pay for millions of timed iterations
+/// whose result it could not use).
+///
+/// # Two contracts, no third
+///
+/// * [`SpeedGate::faster`] — the #932 contract: A (the compiled lowering) must
+///   be strictly faster than B (the strongest hand path or the generic tower
+///   it specialises). Loss when `median_ratio() <= 1`.
+/// * [`SpeedGate::not_slower`] — for a cell whose two arms do the same work by
+///   construction and where no speed claim is made: A must not be measurably
+///   slower than B, where "measurably" is the measurement's OWN resolution,
+///   [`PairedTiming::ratio_resolution`]. Loss when
+///   `median_ratio() + ratio_resolution() < 1`. There is no chosen tolerance
+///   here: the instrument reports its noise floor, and that is the only
+///   denominator a parity bar can honestly be stated in.
+///
+/// A gate that is opened and dropped without [`SpeedGate::finish`] panics, and
+/// a gate finished with no cells panics: both are gates that verified nothing.
+pub struct SpeedGate {
+    token: &'static str,
+    cells: usize,
+    losses: Vec<String>,
+    finished: bool,
+}
+
+impl SpeedGate {
+    /// Open a gate in the release profile; `None` anywhere else.
+    ///
+    /// `token` is the stable, grep-able prefix every cell line of this gate
+    /// is printed under (for example `RIGID-BERNOULLI-VGH-932`).
+    #[must_use]
+    pub fn open(token: &'static str) -> Option<Self> {
+        release_profile().then_some(Self {
+            token,
+            cells: 0,
+            losses: Vec::new(),
+            finished: false,
+        })
+    }
+
+    fn record(&mut self, verdict: &str, cell: &str, timing: &PairedTiming, a: &str, b: &str) {
+        self.cells += 1;
+        eprintln!(
+            "{} {cell} {} verdict={verdict}",
+            self.token,
+            timing.summary(a, b),
+        );
+        if verdict != "pass" {
+            self.losses
+                .push(format!("{cell}: {} ({verdict})", timing.summary(a, b)));
+        }
+    }
+
+    /// Record a cell whose contract is "A is strictly faster than B".
+    pub fn faster(&mut self, cell: &str, timing: &PairedTiming, a: &str, b: &str) {
+        let verdict = if timing.median_ratio() > 1.0 {
+            "pass"
+        } else {
+            "FAIL: A must be faster than B"
+        };
+        self.record(verdict, cell, timing, a, b);
+    }
+
+    /// Record a cell whose contract is "A is not measurably slower than B",
+    /// measurable meaning beyond the paired measurement's own resolution.
+    pub fn not_slower(&mut self, cell: &str, timing: &PairedTiming, a: &str, b: &str) {
+        let verdict = if timing.median_ratio() + timing.ratio_resolution() >= 1.0 {
+            "pass"
+        } else {
+            "FAIL: A is slower than B beyond the measurement's resolution"
+        };
+        self.record(verdict, cell, timing, a, b);
+    }
+
+    /// Assert that every recorded cell met its contract, naming all that did
+    /// not. Consumes the gate.
+    pub fn finish(mut self) {
+        self.finished = true;
+        assert!(
+            self.cells > 0,
+            "{}: a speed gate finished with no measured cell verifies nothing",
+            self.token
+        );
+        assert!(
+            self.losses.is_empty(),
+            "{}: {} of {} cell(s) failed their speed contract:\n{}",
+            self.token,
+            self.losses.len(),
+            self.cells,
+            self.losses.join("\n"),
+        );
+    }
+}
+
+impl Drop for SpeedGate {
+    fn drop(&mut self) {
+        if !self.finished && !std::thread::panicking() {
+            panic!(
+                "{}: a speed gate was opened and dropped without `finish()`; it asserted nothing",
+                self.token
+            );
+        }
+    }
+}
+
 /// Nanoseconds per iteration for one arm of one repetition.
 ///
 /// The `checksum * 1e-18` perturbation is a feedback barrier, not a nudge: it

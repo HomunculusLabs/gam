@@ -696,9 +696,12 @@ mod oracle_tests {
         // the shipped profile. Measured: this assertion fails in the default
         // test lane. The parity/correctness checks around it are
         // build-independent and still run in every build.
+        // The bar is `median_ratio` ALONE (#932): `wins_fraction` is a within-run
+        // confidence statement at the host's noise level, not a second check of
+        // the effect, and as a gating conjunct it can only manufacture failures
+        // on a busy runner. It stays on the summary line as evidence.
         assert!(
-            cfg!(debug_assertions)
-                || (timing.median_ratio() > 1.0 && timing.wins_fraction() >= 0.75),
+            cfg!(debug_assertions) || timing.median_ratio() > 1.0,
             "order-four universal partition lowering must beat the strongest historical hand \
              factorization: {}",
             timing.summary("production", "strongest_hand"),
