@@ -85,6 +85,20 @@ fn matern_three_halves_transition_preserves_stationary_covariance() {
 }
 
 #[test]
+fn tiny_time_transitions_have_positive_innovation_covariance() {
+    let ou = model(MaternMarkovOrder::Half).transition(2.3e-12).unwrap();
+    assert!(ou.innovation_covariance[[0, 0]] > 0.0);
+
+    let matern = model(MaternMarkovOrder::ThreeHalves)
+        .transition(2.3e-8)
+        .unwrap();
+    let innovation = &matern.innovation_covariance;
+    assert!(innovation[[0, 0]] > 0.0);
+    assert!(innovation[[1, 1]] > 0.0);
+    assert!(innovation[[0, 0]] * innovation[[1, 1]] - innovation[[0, 1]].powi(2) > 0.0);
+}
+
+#[test]
 fn poisson_interval_derivatives_are_exact() {
     let evaluation =
         evaluate_poisson_interval(array![2_u32, 0].view(), array![0.3, -0.7].view(), 0.4).unwrap();

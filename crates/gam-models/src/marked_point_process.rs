@@ -248,9 +248,10 @@ impl MarkedPointProcessModel {
             let variance = factor.marginal_variance;
             match factor.order {
                 MaternMarkovOrder::Half => {
-                    let decay = (-elapsed / factor.length_scale).exp();
+                    let scaled_time = elapsed / factor.length_scale;
+                    let decay = (-scaled_time).exp();
                     transition[[offset, offset]] = decay;
-                    innovation[[offset, offset]] = variance * (1.0 - decay * decay);
+                    innovation[[offset, offset]] = variance * -(-2.0 * scaled_time).exp_m1();
                 }
                 MaternMarkovOrder::ThreeHalves => {
                     let rate = 3.0_f64.sqrt() / factor.length_scale;
@@ -261,17 +262,21 @@ impl MarkedPointProcessModel {
                     transition[[offset + 1, offset]] = -decay * rate * rate * elapsed;
                     transition[[offset + 1, offset + 1]] = decay * (1.0 - scaled_time);
 
-                    let decay2 = decay * decay;
+                    let twice_scaled_time = 2.0 * scaled_time;
+                    let decay2 = (-twice_scaled_time).exp();
                     let scaled_time2 = scaled_time * scaled_time;
-                    innovation[[offset, offset]] =
-                        variance * (1.0 - decay2 * (1.0 + 2.0 * scaled_time + 2.0 * scaled_time2));
+                    innovation[[offset, offset]] = variance
+                        * matern_three_halves_position_innovation_fraction(twice_scaled_time);
                     let cross = 2.0 * variance * decay2 * rate * scaled_time2;
                     innovation[[offset, offset + 1]] = cross;
                     innovation[[offset + 1, offset]] = cross;
                     innovation[[offset + 1, offset + 1]] = variance
                         * rate
                         * rate
-                        * (1.0 - decay2 * (1.0 - 2.0 * scaled_time + 2.0 * scaled_time2));
+                        * (-(-twice_scaled_time).exp_m1()
+                            + decay2
+                                * (twice_scaled_time
+                                    - 0.5 * twice_scaled_time * twice_scaled_time));
                 }
             }
         }
@@ -327,6 +332,28 @@ impl MarkedPointProcessModel {
         let variance_weighted_loadings = &self.loadings * &factor_variances.insert_axis(Axis(0));
         Ok(variance_weighted_loadings.dot(&self.loadings.t()))
     }
+}
+
+/// `1 - exp(-x) * (1 + x + x²/2)`, evaluated without cancellation near zero.
+fn matern_three_halves_position_innovation_fraction(x: f64) -> f64 {
+    if x > 1.0 {
+        return 1.0 - (-x).exp() * (1.0 + x + 0.5 * x * x);
+    }
+
+    // Integrating `exp(-t) * t²/2` from zero to x gives the target function.
+    // On [0, 1] its alternating power series decreases term-by-term.
+    let mut term = x * x * x / 6.0;
+    let mut sum = term;
+    for index in 0..64 {
+        let k = index as f64;
+        term *= -x * (k + 3.0) / ((k + 1.0) * (k + 4.0));
+        let updated = sum + term;
+        if updated == sum {
+            break;
+        }
+        sum = updated;
+    }
+    sum
 }
 
 /// One piecewise-constant risk-set row for one subject.
