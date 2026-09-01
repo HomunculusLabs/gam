@@ -3862,7 +3862,6 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "statrs 0.19.0",
 ]
 
 [[package]]
