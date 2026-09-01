@@ -2686,6 +2686,115 @@ impl ImplicitDesignPsiDerivative {
     }
 }
 
+/// The kernel chart a design ψ-derivative builder must differentiate under
+/// (gam#979): the amplitude `scale` the forward basis multiplies into the
+/// kernel block, and the center pair whose kernel magnitude defines it.
+/// `scale == 1.0` is the identity chart (Matérn, thin-plate, sphere, and any
+/// Duchon block whose kernel did not underflow).
+#[derive(Clone, Copy, Debug)]
+pub struct DesignKernelChart {
+    pub scale: f64,
+    pub reference_pair: Option<(usize, usize)>,
+}
+
+impl DesignKernelChart {
+    pub const IDENTITY: Self = Self {
+        scale: 1.0,
+        reference_pair: None,
+    };
+}
+
+/// The chart's ψ-jets in the operator's own coordinates: `∂ ln scale/∂ψ_a`
+/// per raw axis and `∂² ln scale/∂ψ_a∂ψ_b` per raw axis pair.
+#[derive(Clone, Debug)]
+pub(crate) struct DesignChartJets {
+    pub(crate) scale: f64,
+    pub(crate) first: Vec<f64>,
+    pub(crate) second: Array2<f64>,
+}
+
+/// Form the chart's ψ-jets from the reference pair's radial jets, with the
+/// SAME kernel-value rule the operator applies to every pair. With
+/// `M = |K(r*)|` and `scale = 1/M`:
+///
+/// ```text
+///   ∂ ln scale/∂ψ_a          = −K_a / K
+///   ∂² ln scale/∂ψ_a∂ψ_b     = −K_ab / K + (K_a / K)(K_b / K)
+/// ```
+///
+/// where `K_a`, `K_ab` are the operator's own first/second kernel values at
+/// the reference pair under the raw share `c`. At a center collision
+/// (`r* = 0`, the reference of every positive-definite hybrid) every axis
+/// component vanishes, so the jets reduce to `−c` and `0`: the chart exactly
+/// cancels the `κ^δ` scaling-law prefactor, and the charted kernel is the
+/// pure shape function.
+fn design_chart_jets(
+    chart: DesignKernelChart,
+    centers: ArrayView2<'_, f64>,
+    eta: Option<&[f64]>,
+    radial_kind: &RadialScalarKind,
+    per_axis: bool,
+    share_c: f64,
+) -> Result<Option<DesignChartJets>, BasisError> {
+    if chart.scale == 1.0 {
+        return Ok(None);
+    }
+    let Some((i, j)) = chart.reference_pair else {
+        return Err(BasisError::InvalidInput(format!(
+            "design kernel chart is amplified (scale={}) but names no reference center pair",
+            chart.scale
+        )));
+    };
+    let dim = centers.ncols();
+    let metric = centered_aniso_metric_weights(&eta.map(<[f64]>::to_vec).unwrap_or_else(|| vec![0.0; dim]));
+    let mut components = vec![0.0_f64; dim];
+    for a in 0..dim {
+        let h = centers[[i, a]] - centers[[j, a]];
+        components[a] = metric[a] * h * h;
+    }
+    let r2: f64 = components.iter().sum();
+    let r = r2.sqrt();
+    let (phi, q, t) = radial_kind.eval_design_triplet(r)?;
+    if !(phi.is_finite() && phi != 0.0) {
+        return Err(BasisError::InvalidInput(format!(
+            "design kernel chart reference pair ({i}, {j}) at r={r:.6e} has kernel value {phi:e}; \
+             the chart's log-derivative is undefined there"
+        )));
+    }
+    let s_axes: Vec<f64> = if per_axis { components } else { vec![r2] };
+    let n_axes = s_axes.len();
+    let mut first = vec![0.0_f64; n_axes];
+    for (a, &s_a) in s_axes.iter().enumerate() {
+        let k_a = ImplicitDesignPsiDerivative::first_kernel_value(1.0, phi, q, s_a, share_c);
+        first[a] = -k_a / phi;
+    }
+    let mut second = Array2::<f64>::zeros((n_axes, n_axes));
+    for (a, &s_a) in s_axes.iter().enumerate() {
+        for (b, &s_b) in s_axes.iter().enumerate() {
+            let overlap = if a == b { s_a } else { 0.0 };
+            let k_ab = ImplicitDesignPsiDerivative::second_kernel_value(
+                1.0, phi, q, t, s_a, s_b, overlap, share_c, share_c, 0.0,
+            );
+            second[[a, b]] = -k_ab / phi + first[a] * first[b];
+        }
+    }
+    Ok(Some(DesignChartJets {
+        scale: chart.scale,
+        first,
+        second,
+    }))
+}
+
+fn install_design_chart(
+    op: ImplicitDesignPsiDerivative,
+    jets: &Option<DesignChartJets>,
+) -> ImplicitDesignPsiDerivative {
+    match jets {
+        Some(jets) => op.with_kernel_chart(jets.scale, jets.first.clone(), jets.second.clone()),
+        None => op,
+    }
+}
+
 pub(crate) fn build_aniso_design_psi_derivatives_shared(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -2695,6 +2804,7 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
     full_ident_transform: Option<Array2<f64>>,
     n_poly: usize,
     radial_kind: RadialScalarKind,
+    chart: DesignKernelChart,
 ) -> Result<AnisoBasisPsiDerivatives, BasisError> {
     let n = data.nrows();
     let k = centers.nrows();
@@ -2705,6 +2815,14 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
             eta.len()
         );
     }
+    let chart_jets = design_chart_jets(
+        chart,
+        centers,
+        Some(eta),
+        &radial_kind,
+        true,
+        radial_kind.raw_psi_isotropic_share(),
+    )?;
 
     let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let force_operator = radial_kind.is_duchon_family();
@@ -2889,6 +3007,7 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
         dim,
     )
     .with_psi_scale_share(psi_scale_share);
+    let op = install_design_chart(op, &chart_jets);
 
     // gam#1376 — the operator stays in the NATIVE per-axis ψ frame (no
     // `with_raw_eta_centering`): the κ-optimizer coordinate `psi_a` already maps
@@ -2950,6 +3069,7 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
     n_poly: usize,
     radial_kind: RadialScalarKind,
     psi_scale_share: f64,
+    chart: DesignKernelChart,
 ) -> Result<ScalarDesignPsiDerivatives, BasisError> {
     let n = data.nrows();
     let k = centers.nrows();
@@ -2962,6 +3082,14 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
             eta.len()
         );
     }
+    let chart_jets = design_chart_jets(
+        chart,
+        centers,
+        fixed_eta,
+        &radial_kind,
+        false,
+        psi_scale_share,
+    )?;
 
     let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let force_operator = radial_kind.is_duchon_family();
@@ -2983,6 +3111,7 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
             n_poly,
         )
         .with_psi_scale_share(psi_scale_share);
+    let op = install_design_chart(op, &chart_jets);
         return Ok(ScalarDesignPsiDerivatives {
             design_first: Array2::<f64>::zeros((0, 0)),
             design_second_diag: Array2::<f64>::zeros((0, 0)),
@@ -3113,6 +3242,7 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
         1,
     )
     .with_psi_scale_share(psi_scale_share);
+    let op = install_design_chart(op, &chart_jets);
 
     if operator_only {
         return Ok(ScalarDesignPsiDerivatives {

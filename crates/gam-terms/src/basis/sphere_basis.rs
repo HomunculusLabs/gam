@@ -2991,6 +2991,7 @@ pub(crate) fn build_matern_design_psi_derivatives(
         usize::from(include_intercept),
         RadialScalarKind::Matern { length_scale, nu },
         0.0,
+        DesignKernelChart::IDENTITY,
     )
 }
 
@@ -3367,6 +3368,7 @@ pub(crate) fn build_matern_design_psi_aniso_derivatives(
         None,
         n_poly,
         RadialScalarKind::Matern { length_scale, nu },
+        DesignKernelChart::IDENTITY,
     )
 }
 

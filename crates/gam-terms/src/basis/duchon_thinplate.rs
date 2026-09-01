@@ -3214,6 +3214,7 @@ pub(crate) fn build_thin_plate_scalar_design_psi_derivatives(
             dim: data.ncols(),
         },
         0.0,
+        DesignKernelChart::IDENTITY,
     )
 }
 

@@ -39,6 +39,12 @@ pub enum MarkedPointProcessError {
         diagonal: usize,
         value: f64,
     },
+    #[error("{context} is not positive semidefinite at diagonal {diagonal}: {value}")]
+    NonPositiveSemidefinite {
+        context: &'static str,
+        diagonal: usize,
+        value: f64,
+    },
     #[error(
         "Laplace mode did not converge in {iterations} iterations (stationarity={stationarity})"
     )]
@@ -1035,7 +1041,9 @@ pub fn filter_laplace(
         filtered.push(FilteredState {
             time: interval.exit,
             mean: mode,
-            covariance: posterior_covariance.expect("converged filter stores covariance"),
+            covariance: posterior_covariance.ok_or(MarkedPointProcessError::NumericalFailure {
+                context: "filtered posterior covariance",
+            })?,
         });
     }
     Ok(filtered)
@@ -1087,7 +1095,7 @@ pub fn gaussian_mean_intensity(
         return Err(invalid("Gaussian intensity inputs must be finite"));
     }
     ensure_finite_matrix(state_covariance, "state covariance")?;
-    cholesky(state_covariance, "state covariance")?;
+    positive_semidefinite_square_root(state_covariance, "state covariance")?;
     let observation = model.observation_matrix();
     let mut intensity = Array1::zeros(model.mark_count());
     for mark in 0..model.mark_count() {
@@ -1218,7 +1226,8 @@ pub fn forecast_cumulative_incidence(
         }
         horizons.push(elapsed);
     }
-    let initial_cholesky = cholesky(&landmark.covariance, "landmark covariance")?;
+    let initial_cholesky =
+        positive_semidefinite_square_root(&landmark.covariance, "landmark covariance")?;
     let transitions: Vec<(StateTransition, Array2<f64>)> = future
         .iter()
         .map(|interval| {
@@ -1459,6 +1468,64 @@ fn cholesky(
             }
         }
     }
+    Ok(lower)
+}
+
+/// Lower-triangular square root for a symmetric positive-semidefinite matrix.
+///
+/// Unlike [`cholesky`], this deliberately accepts zero pivots.  A zero pivot
+/// in a positive-semidefinite matrix requires the remaining residuals in that
+/// column to be zero as well; enforcing that condition prevents an indefinite
+/// matrix from slipping through as a degenerate Gaussian covariance.
+fn positive_semidefinite_square_root(
+    matrix: &Array2<f64>,
+    context: &'static str,
+) -> Result<Array2<f64>, MarkedPointProcessError> {
+    if matrix.nrows() == 0 || matrix.nrows() != matrix.ncols() {
+        return Err(invalid(format!(
+            "{context} must be a non-empty square matrix"
+        )));
+    }
+    ensure_finite_matrix(matrix, context)?;
+    ensure_symmetric_matrix(matrix, context)?;
+    let dimension = matrix.nrows();
+    let scale = matrix.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let tolerance = 128.0 * f64::EPSILON * dimension as f64 * scale;
+    let mut lower = Array2::zeros((dimension, dimension));
+    for row in 0..dimension {
+        for column in 0..=row {
+            let mut residual = matrix[[row, column]];
+            for inner in 0..column {
+                residual -= lower[[row, inner]] * lower[[column, inner]];
+            }
+            if !residual.is_finite() {
+                return Err(MarkedPointProcessError::NumericalFailure { context });
+            }
+            if row == column {
+                if residual < -tolerance {
+                    return Err(MarkedPointProcessError::NonPositiveSemidefinite {
+                        context,
+                        diagonal: row,
+                        value: residual,
+                    });
+                }
+                lower[[row, column]] = if residual <= tolerance {
+                    0.0
+                } else {
+                    residual.sqrt()
+                };
+            } else if lower[[column, column]] > 0.0 {
+                lower[[row, column]] = residual / lower[[column, column]];
+            } else if residual.abs() > tolerance {
+                return Err(MarkedPointProcessError::NonPositiveSemidefinite {
+                    context,
+                    diagonal: column,
+                    value: residual,
+                });
+            }
+        }
+    }
+    ensure_finite_matrix(&lower, context)?;
     Ok(lower)
 }
 

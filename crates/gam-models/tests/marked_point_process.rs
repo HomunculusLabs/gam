@@ -481,8 +481,18 @@ fn gaussian_intensity_includes_jensen_correction() {
 }
 
 #[test]
-fn covariance_inputs_must_be_symmetric_positive_definite() {
+fn covariance_inputs_must_be_symmetric_positive_semidefinite() {
     let model = mixed_order_model();
+    let singular = array![[1.0, 1.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let singular_mean = gaussian_mean_intensity(
+        &model,
+        array![0.0, 0.0, 0.0].view(),
+        array![0.0, 0.0, 0.0].view(),
+        &singular,
+    )
+    .unwrap();
+    assert!(singular_mean.iter().all(|value| value.is_finite()));
+
     let asymmetric = array![[1.0, 0.2, 0.0], [-0.1, 1.0, 0.0], [0.0, 0.0, 1.0]];
     assert!(
         gaussian_mean_intensity(
@@ -624,7 +634,7 @@ fn forecast_handles_extreme_log_rates_deterministically() {
     let landmark = FilteredState {
         time: 0.0,
         mean: array![0.0],
-        covariance: array![[1.0]],
+        covariance: array![[0.0]],
     };
     let monte_carlo = ForecastMonteCarlo {
         trajectories: 8,
