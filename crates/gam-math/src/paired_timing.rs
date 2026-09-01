@@ -403,12 +403,21 @@ where
 /// margin of a compiled-vs-hand row kernel can be cross-CGU inlining. A ratio
 /// taken in the test profile therefore measures a different program than the
 /// one that ships, and a debug build measures fixed per-call overhead and
-/// nothing else. Every speed gate in this workspace opens only here.
-#[must_use]
-pub fn release_profile() -> bool {
-    !cfg!(debug_assertions)
-}
-
+/// nothing else. Every speed gate in this workspace opens only there.
+///
+/// That decision is made by the TEST that opens the gate, never by this
+/// module: test code may query its own build configuration, library code may
+/// not (`build.rs` bans `cfg!(debug_assertions)` outside test modules, because
+/// a library branch that only runs in one build configuration silently means
+/// something else in the other). A gate opened in the dev lane would assert
+/// about the wrong program, so the test returns before opening it:
+///
+/// ```text
+/// if cfg!(debug_assertions) {
+///     return; // dev lane: the codegen is not the shipped one
+/// }
+/// let mut gate = SpeedGate::open("RIGID-BERNOULLI-VGH-932");
+/// ```
 /// One speed gate: a named set of paired cells, each printed as it is
 /// measured and all asserted together at the end.
 ///
@@ -425,16 +434,19 @@ pub fn release_profile() -> bool {
 ///
 /// ```text
 /// // parity pins run in EVERY build, before the gate opens
-/// let Some(mut gate) = SpeedGate::open("RIGID-BERNOULLI-VGH-932") else { return };
+/// if cfg!(debug_assertions) {
+///     return; // dev lane: skip the measurement, its verdict is about the wrong program
+/// }
+/// let mut gate = SpeedGate::open("RIGID-BERNOULLI-VGH-932");
 /// let timing = paired_interleaved(15, 300_000, seed, production_arm, hand_arm);
 /// gate.faster("y=1", &timing, "production", "hand");
 /// gate.finish();
 /// ```
 ///
-/// [`SpeedGate::open`] returns `None` outside [`release_profile`], so the
-/// measurement itself is skipped where its verdict would be about the wrong
-/// program (and the dev lane does not pay for millions of timed iterations
-/// whose result it could not use).
+/// The profile check is the test's, not the gate's (see the module
+/// documentation above): a gate that is opened always asserts, and the dev
+/// lane does not pay for millions of timed iterations whose result it could
+/// not use because the test never opens one there.
 ///
 /// # Two contracts, no third
 ///
@@ -459,18 +471,19 @@ pub struct SpeedGate {
 }
 
 impl SpeedGate {
-    /// Open a gate in the release profile; `None` anywhere else.
+    /// Open a gate. It always asserts; the test decides whether this build is
+    /// one whose verdict is meaningful before calling (see the type docs).
     ///
     /// `token` is the stable, grep-able prefix every cell line of this gate
     /// is printed under (for example `RIGID-BERNOULLI-VGH-932`).
     #[must_use]
-    pub fn open(token: &'static str) -> Option<Self> {
-        release_profile().then_some(Self {
+    pub fn open(token: &'static str) -> Self {
+        Self {
             token,
             cells: 0,
             losses: Vec::new(),
             finished: false,
-        })
+        }
     }
 
     fn record(&mut self, verdict: &str, cell: &str, timing: &PairedTiming, a: &str, b: &str) {
@@ -529,6 +542,10 @@ impl SpeedGate {
 
 impl Drop for SpeedGate {
     fn drop(&mut self) {
+        // SAFETY: a gate dropped without `finish()` verified nothing, and a
+        // test that reached this point would otherwise print `ok`; failing
+        // loudly is the whole contract, and the `panicking()` guard keeps an
+        // unwinding test from double-panicking.
         if !self.finished && !std::thread::panicking() {
             panic!(
                 "{}: a speed gate was opened and dropped without `finish()`; it asserted nothing",

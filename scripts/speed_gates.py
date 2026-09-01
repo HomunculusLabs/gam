@@ -14,8 +14,8 @@ Why the release profile: `[profile.test.package.gam-models]` sets
 `codegen-units = 16` and the test profile carries no LTO, while the shipped
 profile is `codegen-units = 1` + thin-LTO. A compiled-vs-hand ratio whose margin
 is cross-CGU inlining measures a different program in the test profile, which is
-why `SpeedGate::open` returns `None` outside the release profile and why this
-runner always passes `--release`.
+why every gate's test returns before opening it outside the release profile and
+why this runner always passes `--release`.
 """
 
 from __future__ import annotations
