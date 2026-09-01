@@ -1496,6 +1496,57 @@ pub fn validate_smooth_basis_frozen(
 }
 
 impl TermCollectionSpec {
+    /// Return every feature column that is interpreted as a categorical factor
+    /// anywhere in this frozen term collection, together with its known levels.
+    ///
+    /// This is the single structural walk for consumers that must synthesize
+    /// valid rows from a saved spec (summary replay, representative designs,
+    /// and similar tooling).  Factor state is not confined to smooth terms:
+    /// categorical main effects live in `random_effect_terms`, factor-aware
+    /// linear interactions carry level gates in `categorical_levels`, and
+    /// smooth factors may sit under arbitrarily nested basis wrappers.  A
+    /// caller that scans only one of those carriers can fabricate a value that
+    /// belongs to no frozen level and make an otherwise valid design replay
+    /// fail (gam#2787).
+    ///
+    /// Stored keys are canonicalized with [`gam_data::canonical_level_bits`]
+    /// before unioning, so signed zero and NaN payload aliases name one level,
+    /// exactly as the corresponding design gates do.  Columns without any
+    /// frozen/gated level are omitted; in particular, numeric `by=` columns and
+    /// continuous factor-smooth coordinates are not factors.
+    pub fn frozen_factor_levels_by_col(&self) -> BTreeMap<usize, Vec<u64>> {
+        let mut levels = BTreeMap::<usize, BTreeSet<u64>>::new();
+        let mut record = |col: usize, bits: &[u64]| {
+            if bits.is_empty() {
+                return;
+            }
+            let entry = levels.entry(col).or_default();
+            entry.extend(
+                bits.iter()
+                    .map(|&bits| gam_data::canonical_level_bits(f64::from_bits(bits))),
+            );
+        };
+
+        for linear in &self.linear_terms {
+            for &(col, bits) in &linear.categorical_levels {
+                record(col, &[bits]);
+            }
+        }
+        for random_effect in &self.random_effect_terms {
+            if let Some(frozen) = &random_effect.frozen_levels {
+                record(random_effect.feature_col, frozen);
+            }
+        }
+        for smooth in &self.smooth_terms {
+            collect_smooth_basis_frozen_factor_levels(&smooth.basis, &mut record);
+        }
+
+        levels
+            .into_iter()
+            .map(|(col, levels)| (col, levels.into_iter().collect()))
+            .collect()
+    }
+
     /// Write this collection's topology identity into a warm-start cache
     /// fingerprint (#869).
     ///
@@ -2068,6 +2119,63 @@ impl TermCollectionSpec {
             remap_smooth_basis_feature_columns(&mut st.basis, &mut remap)?;
         }
         Ok(out)
+    }
+}
+
+/// Exhaustive smooth-basis half of
+/// [`TermCollectionSpec::frozen_factor_levels_by_col`].  This stays separate
+/// from the collection walk so wrapper recursion cannot accidentally omit a
+/// nested factor carrier when a new summary/replay consumer is added.
+fn collect_smooth_basis_frozen_factor_levels(
+    basis: &SmoothBasisSpec,
+    record: &mut dyn FnMut(usize, &[u64]),
+) {
+    match basis {
+        SmoothBasisSpec::ByVariable {
+            inner, by_col, by, ..
+        } => {
+            if let ByVariableSpec::Level { value_bits, .. } = by {
+                record(*by_col, &[*value_bits]);
+            }
+            collect_smooth_basis_frozen_factor_levels(inner, record);
+        }
+        SmoothBasisSpec::FactorSumToZero {
+            inner,
+            by_col,
+            levels,
+            ..
+        } => {
+            record(*by_col, levels);
+            collect_smooth_basis_frozen_factor_levels(inner, record);
+        }
+        SmoothBasisSpec::BySmooth { smooth, by_kind } => {
+            if let ByVarKind::Factor {
+                feature_col,
+                frozen_levels: Some(frozen),
+                ..
+            } = by_kind
+            {
+                record(*feature_col, frozen);
+            }
+            collect_smooth_basis_frozen_factor_levels(smooth, record);
+        }
+        SmoothBasisSpec::FactorSmooth { spec } => {
+            if let Some(frozen) = &spec.group_frozen_levels {
+                record(spec.group_col, frozen);
+            }
+        }
+        // Leaf geometric bases carry no categorical level vocabulary.  Keep
+        // the match exhaustive so every new basis variant must declare whether
+        // it introduces factor state before this code can compile.
+        SmoothBasisSpec::BSpline1D { .. }
+        | SmoothBasisSpec::ThinPlate { .. }
+        | SmoothBasisSpec::Sphere { .. }
+        | SmoothBasisSpec::ConstantCurvature { .. }
+        | SmoothBasisSpec::Matern { .. }
+        | SmoothBasisSpec::MeasureJet { .. }
+        | SmoothBasisSpec::Duchon { .. }
+        | SmoothBasisSpec::Pca { .. }
+        | SmoothBasisSpec::TensorBSpline { .. } => {}
     }
 }
 
@@ -9996,5 +10104,179 @@ mod linear_term_contract_tests {
             !term.double_penalty,
             "descriptor and formula defaults must both preserve parametric MLE semantics"
         );
+    }
+}
+
+#[cfg(test)]
+mod frozen_factor_level_collection_tests {
+    use super::*;
+
+    fn marginal() -> BSplineBasisSpec {
+        BSplineBasisSpec {
+            degree: 3,
+            penalty_order: 2,
+            knotspec: BSplineKnotSpec::Provided(Array1::from(vec![
+                0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0,
+            ])),
+            double_penalty: false,
+            identifiability: BSplineIdentifiability::None,
+            boundary: crate::basis::OneDimensionalBoundary::Open,
+            boundary_conditions: crate::basis::BSplineBoundaryConditions::default(),
+        }
+    }
+
+    fn linear_gate(name: &str, col: usize, value: f64) -> LinearTermSpec {
+        LinearTermSpec {
+            name: name.to_string(),
+            feature_col: col,
+            feature_cols: Vec::new(),
+            categorical_levels: vec![(col, value.to_bits())],
+            double_penalty: false,
+            coefficient_geometry: LinearCoefficientGeometry::Unconstrained,
+            coefficient_min: None,
+            coefficient_max: None,
+            frozen_function_mass: None,
+        }
+    }
+
+    fn smooth(name: &str, basis: SmoothBasisSpec) -> SmoothTermSpec {
+        SmoothTermSpec {
+            frozen_parametric_residualization: None,
+            name: name.to_string(),
+            basis,
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }
+    }
+
+    fn canonical_levels(values: &[f64]) -> Vec<u64> {
+        values
+            .iter()
+            .map(|&value| gam_data::canonical_level_bits(value))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// gam#2787: a fixed categorical main effect is represented by a frozen
+    /// random-effect block.  It must be visible even when the co-fitted smooth
+    /// is a wholly unrelated numeric leaf; scanning `smooth_terms` alone made
+    /// representative summary rows invent a non-level midpoint and erased the
+    /// entire smooth significance table.
+    #[test]
+    fn categorical_main_effect_is_collected_outside_the_smooth_tree() {
+        let spec = TermCollectionSpec {
+            linear_terms: Vec::new(),
+            random_effect_terms: vec![RandomEffectTermSpec {
+                name: "g".to_string(),
+                feature_col: 1,
+                drop_first_level: false,
+                penalized: true,
+                frozen_levels: Some(vec![2.0_f64.to_bits(), 1.0_f64.to_bits()]),
+                lenient_unseen: false,
+            }],
+            smooth_terms: vec![smooth(
+                "s(x)",
+                SmoothBasisSpec::BSpline1D {
+                    feature_col: 0,
+                    spec: marginal(),
+                },
+            )],
+        };
+
+        let levels = spec.frozen_factor_levels_by_col();
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels.get(&1), Some(&canonical_levels(&[1.0, 2.0])));
+        assert!(
+            !levels.contains_key(&0),
+            "numeric smooth axis is not a factor"
+        );
+    }
+
+    /// Every place in `TermCollectionSpec` that can gate rows categorically
+    /// contributes to the same canonical union, including factors nested under
+    /// multiple smooth wrappers.  Numeric wrappers/coordinates remain absent.
+    #[test]
+    fn collector_unifies_linear_random_effect_and_nested_smooth_factor_carriers() {
+        let nested = SmoothBasisSpec::ByVariable {
+            by_col: 2,
+            kind: BySmoothKind::Level {
+                level_bits: 3.0_f64.to_bits(),
+            },
+            by: ByVariableSpec::Level {
+                value_bits: 3.0_f64.to_bits(),
+                label: "three".to_string(),
+            },
+            inner: Box::new(SmoothBasisSpec::FactorSumToZero {
+                by_col: 3,
+                levels: vec![5.0_f64.to_bits(), 4.0_f64.to_bits()],
+                frozen_global_orthogonality: None,
+                inner: Box::new(SmoothBasisSpec::BySmooth {
+                    by_kind: ByVarKind::Factor {
+                        feature_col: 4,
+                        ordered: false,
+                        frozen_levels: Some(vec![7.0_f64.to_bits(), 6.0_f64.to_bits()]),
+                    },
+                    smooth: Box::new(SmoothBasisSpec::FactorSmooth {
+                        spec: FactorSmoothSpec {
+                            continuous_cols: vec![8],
+                            group_col: 5,
+                            marginal: marginal(),
+                            flavour: FactorSmoothFlavour::Fs {},
+                            group_frozen_levels: Some(vec![9.0_f64.to_bits(), 8.0_f64.to_bits()]),
+                            frozen_global_orthogonality: None,
+                        },
+                    }),
+                }),
+            }),
+        };
+        let numeric_wrappers = SmoothBasisSpec::ByVariable {
+            by_col: 10,
+            kind: BySmoothKind::Numeric,
+            by: ByVariableSpec::Numeric,
+            inner: Box::new(SmoothBasisSpec::BySmooth {
+                by_kind: ByVarKind::Numeric { feature_col: 11 },
+                smooth: Box::new(SmoothBasisSpec::BSpline1D {
+                    feature_col: 12,
+                    spec: marginal(),
+                }),
+            }),
+        };
+        let spec = TermCollectionSpec {
+            // The two signed-zero spellings are the same gate under the design
+            // contract and must collapse to one representative level.
+            linear_terms: vec![linear_gate("zero+", 0, 0.0), linear_gate("zero-", 0, -0.0)],
+            random_effect_terms: vec![RandomEffectTermSpec {
+                name: "main".to_string(),
+                feature_col: 1,
+                drop_first_level: false,
+                penalized: true,
+                frozen_levels: Some(vec![2.0_f64.to_bits(), 1.0_f64.to_bits()]),
+                lenient_unseen: false,
+            }],
+            smooth_terms: vec![
+                smooth("nested", nested),
+                smooth("numeric", numeric_wrappers),
+            ],
+        };
+
+        let levels = spec.frozen_factor_levels_by_col();
+        assert_eq!(levels.get(&0), Some(&canonical_levels(&[0.0])));
+        assert_eq!(levels.get(&1), Some(&canonical_levels(&[1.0, 2.0])));
+        assert_eq!(levels.get(&2), Some(&canonical_levels(&[3.0])));
+        assert_eq!(levels.get(&3), Some(&canonical_levels(&[4.0, 5.0])));
+        assert_eq!(levels.get(&4), Some(&canonical_levels(&[6.0, 7.0])));
+        assert_eq!(levels.get(&5), Some(&canonical_levels(&[8.0, 9.0])));
+        assert_eq!(
+            levels.len(),
+            6,
+            "only categorical carriers belong in the map"
+        );
+        for numeric_col in [8, 10, 11, 12] {
+            assert!(
+                !levels.contains_key(&numeric_col),
+                "numeric feature column {numeric_col} was misclassified as categorical"
+            );
+        }
     }
 }

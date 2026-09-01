@@ -950,100 +950,6 @@ fn cross_fit_shared_precision_groups_json_impl(request_json: &str) -> Result<Str
         .map_err(|err| format!("failed to serialize shared precision result: {err}"))
 }
 
-/// Collect every column that the frozen spec treats as a CATEGORICAL FACTOR,
-/// together with the exact bit patterns of its frozen levels.
-///
-/// A factor-smooth design (`fs`/`re` → `FactorSumToZero`/`FactorSmooth`, a
-/// factor `by=` → `ByVariable`/`BySmooth`, or a categorical tensor margin) gates
-/// its per-level blocks on `canonical_level_bits(value) == level_bits` against
-/// the saved levels: a column value that is not a (signed-zero/NaN-canonical)
-/// match for a frozen level matches no block. The summary's representative data
-/// (axis-spanning midpoints) therefore
-/// fabricates illegal factor values, and rebuilding the factor design on it
-/// fails — which is why `summary().smooth_terms` came back empty for ANY model
-/// containing a factor-smooth, dragging co-fitted `s(x)` rows down with it
-/// (#1370). Returning the real frozen levels here lets the caller place valid,
-/// bit-exact levels in those columns so the design rebuilds.
-///
-/// The map is `col -> sorted, de-duplicated level bit patterns`. Only columns
-/// with at least one known frozen level are reported; numeric axes are absent.
-fn frozen_factor_levels_by_col(
-    spec: &gam::terms::smooth::TermCollectionSpec,
-) -> std::collections::BTreeMap<usize, Vec<u64>> {
-    use gam::terms::smooth::{ByVarKind, ByVariableSpec, SmoothBasisSpec};
-
-    let mut levels: std::collections::BTreeMap<usize, std::collections::BTreeSet<u64>> =
-        std::collections::BTreeMap::new();
-    let mut record = |col: usize, bits: &[u64]| {
-        if bits.is_empty() {
-            return;
-        }
-        levels.entry(col).or_default().extend(bits.iter().copied());
-    };
-
-    // Walk the (possibly nested) basis, accumulating factor columns. The DSL
-    // wraps the geometric core in `ByVariable`/`FactorSumToZero`/`BySmooth`
-    // envelopes, so recurse through them exactly like `smooth_basis_feature_cols`.
-    fn walk(basis: &SmoothBasisSpec, record: &mut dyn FnMut(usize, &[u64])) {
-        match basis {
-            SmoothBasisSpec::FactorSumToZero {
-                inner,
-                by_col,
-                levels,
-                ..
-            } => {
-                record(*by_col, levels);
-                walk(inner, record);
-            }
-            SmoothBasisSpec::ByVariable {
-                inner, by_col, by, ..
-            } => {
-                if let ByVariableSpec::Level { value_bits, .. } = by {
-                    record(*by_col, &[*value_bits]);
-                }
-                walk(inner, record);
-            }
-            SmoothBasisSpec::BySmooth { smooth, by_kind } => {
-                if let ByVarKind::Factor {
-                    feature_col,
-                    frozen_levels: Some(frozen),
-                    ..
-                } = by_kind
-                {
-                    record(*feature_col, frozen);
-                }
-                walk(smooth, record);
-            }
-            SmoothBasisSpec::FactorSmooth { spec } => {
-                if let Some(frozen) = &spec.group_frozen_levels {
-                    record(spec.group_col, frozen);
-                }
-            }
-            // Leaf geometric bases: they wrap no inner basis to recurse into
-            // and carry no frozen factor levels. Enumerated rather than left to
-            // a wildcard so a new basis variant has to be classified here.
-            SmoothBasisSpec::BSpline1D { .. }
-            | SmoothBasisSpec::ThinPlate { .. }
-            | SmoothBasisSpec::Sphere { .. }
-            | SmoothBasisSpec::ConstantCurvature { .. }
-            | SmoothBasisSpec::Matern { .. }
-            | SmoothBasisSpec::MeasureJet { .. }
-            | SmoothBasisSpec::Duchon { .. }
-            | SmoothBasisSpec::Pca { .. }
-            | SmoothBasisSpec::TensorBSpline { .. } => {}
-        }
-    }
-
-    for term in &spec.smooth_terms {
-        walk(&term.basis, &mut record);
-    }
-
-    levels
-        .into_iter()
-        .map(|(col, set)| (col, set.into_iter().collect()))
-        .collect()
-}
-
 /// Synthesize a small representative data matrix from saved per-axis training
 /// ranges, used only to rebuild the design *structure* (per-term coefficient
 /// ranges, nullspace dimensions, penalty counts) for the summary smooth-term
@@ -1052,13 +958,13 @@ fn frozen_factor_levels_by_col(
 /// reproduce the training-time block layout deterministically while remaining
 /// inside the training bounding box (no extrapolation artefacts).
 ///
-/// Columns named in `factor_levels` are categorical factors (a `by=` factor or a
-/// factor-smooth group): their values must be bit-identical to a frozen level or
-/// the design rebuild fails (#1370). Those columns are filled by cycling through
-/// the exact frozen level bit patterns instead of axis midpoints, so every level
-/// (hence every per-level deviation block) is present at least once and the
-/// `fs`/`sz` design rebuilds cleanly. The row count grows to cover the widest
-/// factor so no level is dropped.
+/// Columns named in `factor_levels` are categorical factors (main effects,
+/// factor-aware interactions, `by=` factors, or factor-smooth groups): their
+/// values must be bit-identical to a frozen level or the design rebuild fails
+/// (#1370/#2787). Those columns are filled by cycling through the exact frozen
+/// level bit patterns instead of axis midpoints, so every categorical design
+/// block is represented. The row count grows to cover the widest factor so no
+/// level is dropped.
 fn representative_data_from_ranges(
     ranges: &[(f64, f64)],
     factor_levels: &std::collections::BTreeMap<usize, Vec<u64>>,
@@ -1278,12 +1184,13 @@ fn summary_smooth_terms(
     if ranges.len() != headers.len() {
         return Vec::new();
     }
-    // Categorical columns (factor-smooth groups / factor `by=`) must carry valid
-    // frozen levels or the design rebuild fails — and that failure was being
-    // swallowed to an EMPTY table for the whole model, erasing co-fitted `s(x)`
-    // rows too (#1370). Synthesize the representative data with the real frozen
-    // levels in those columns so `fs`/`sz` designs replay cleanly.
-    let factor_levels = frozen_factor_levels_by_col(spec);
+    // Every categorical column — including a fixed main effect represented by
+    // a frozen random-effect block — must carry a valid saved level or the
+    // design rebuild fails. That failure was swallowed to an EMPTY table for
+    // the whole model, erasing co-fitted `s(x)` rows too (#1370/#2787).
+    // Synthesize representative data from the term collection's authoritative
+    // factor vocabulary so every categorical carrier replays coherently.
+    let factor_levels = spec.frozen_factor_levels_by_col();
     let data = representative_data_from_ranges(ranges, &factor_levels);
     let Ok(design) = gam::terms::smooth::build_term_collection_design(data.view(), spec) else {
         return Vec::new();
