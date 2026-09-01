@@ -95,7 +95,7 @@ gam predict model.gam new.csv --out predictions.csv --uncertainty --level 0.95
 | `--level VALUE` | Coverage for uncertainty intervals; default `0.95`. |
 | `--covariance-mode conditional|corrected` | Conditional covariance or smoothing-corrected covariance. Absent, the definition the saved fit publishes (the one `gam summary` prices its standard errors from) is used and labeled; naming one is a requirement that refuses when the fit cannot supply it. |
 | `--mode posterior-mean|map` | Point-prediction mode. |
-| `--no-bias-correction` | Disable the prediction-time `O(n^-1)` bias correction. |
+| `--no-bias-correction` | Disable the `O(n^-1)` frequentist bias correction in the survival uncertainty paths. The standard point prediction (`eta` / `mean`, the posterior mean of the response) is never moved by this flag. |
 | `--id-column COLUMN` | Carry an identifier column into the prediction CSV. |
 | `--offset-column COLUMN`, `--noise-offset-column COLUMN` | Prediction-time offsets matching the fitted model. |
 

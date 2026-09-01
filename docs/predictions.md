@@ -52,6 +52,22 @@ For model-based intervals, a dict-shaped result also carries the scalar
 | Survival (any likelihood mode) | `SurvivalPrediction` | Per-row hazard / survival evaluators. |
 | Competing-risks survival | `CompetingRisksPrediction` | Endpoint-stacked hazard, survival, CIF, and overall survival arrays. |
 
+### `linear_predictor` and `mean` are two estimands
+
+`linear_predictor` is the plug-in linear predictor `η̂ = Xβ̂` (it reproduces
+`design_matrix(data) @ summary().coefficients` exactly). `mean` is the
+**posterior mean of the response**, `E[g⁻¹(η)]` integrated over the
+conditional posterior `η ~ N(η̂, Var(η̂))` — the default SPEC mandates for
+every point prediction (never the plug-in mode). For a curved inverse link
+the two are related by Jensen's inequality rather than by `g⁻¹`: `mean`
+differs from `g⁻¹(linear_predictor)` by an `O(Var(η̂)) = O(1/n)` term whose
+sign follows the curvature of `g⁻¹` — positive for `exp` (Poisson, Gamma),
+zero at `p = 0.5` and negative above it for the logit. For the identity link
+the two coincide exactly. The gap is largest for small `n` and far from the
+data (up to tens of percent relative at `n = 100` in the tails), which is the
+posterior-mean estimate doing its job, not a discrepancy to reconcile; a
+caller who wants the plug-in transform applies `g⁻¹` to `linear_predictor`.
+
 For all point-payload classes, passing `return_type=`, `id_column=`, or
 numeric `interval=` switches output to a table. Transformation-normal
 uses `"z"` as the value column; bernoulli marginal-slope uses `"mean"`
