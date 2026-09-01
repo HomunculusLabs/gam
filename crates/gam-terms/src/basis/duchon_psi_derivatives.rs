@@ -1495,7 +1495,7 @@ pub fn build_duchon_basis_log_kappa_aniso_derivativeswith_collocationwithworkspa
         p_order,
         s_order,
         dim,
-        Some(&eta),
+        Some(eta.as_slice()),
         Some(&coeffs),
         None,
     )

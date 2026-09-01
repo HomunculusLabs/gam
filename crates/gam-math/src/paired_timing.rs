@@ -172,13 +172,16 @@
 //!
 //! # Using it as a gate
 //!
-//! Assert on [`PairedTiming::median_ratio`] together with
-//! [`PairedTiming::wins_fraction`], and print [`PairedTiming::summary`] whatever
-//! the outcome. A median ratio that clears the bar while `wins_fraction` sits
-//! near 0.5 means the margin is inside the measurement's resolution and the
-//! claim is not established, however good the point estimate looks.
+//! Open a [`SpeedGate`] (release profile only — the test decides), record one
+//! paired cell per contract with [`SpeedGate::faster`] or
+//! [`SpeedGate::not_slower`], and [`SpeedGate::finish`]. The gate prints
+//! [`PairedTiming::summary`] for every cell whatever the outcome and asserts on
+//! [`PairedTiming::median_ratio`] alone; `wins_fraction` and
+//! `ratio_resolution` travel on the same line as evidence (see above for why
+//! `wins` must not be a bar). Arms of a few tens of nanoseconds go through
+//! [`batched`], so the harness's own per-call cost is not what is measured.
 //!
-//! **Lead with `wins_fraction`, not the ratio.** It is the statistic that
+//! **Lead a report with `wins_fraction`, not the ratio.** It is the statistic that
 //! survives someone disbelieving the rest of the output. `wins == 1.0` over `n`
 //! repetitions is a sign test at `2⁻ⁿ` — 15 repetitions is `≈3e-5` — and it is
 //! **distribution-free**: it does not depend on [`PairedTiming::ratio_resolution`]
