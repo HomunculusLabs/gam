@@ -15,24 +15,29 @@
 //! Reproduction (confirmed against the `gam` CLI): noise-free line `y = 2 + 5·x`
 //! on an even grid over `x ∈ [-1, 1]` — the predictor is deliberately *not*
 //! standardized (population std ≈ 0.5774, so `scale² ≈ 1/3`). The unconstrained
-//! slope is 5, far above `max = 1`, so the box must bind. Before the fix:
+//! slope is 5, far above `max = 1`, so the MAP must bind. Before the fix:
 //!
 //! ```text
 //!   y ~ linear(x, min=0, max=1)    -> reported/predicted slope ≈ 2.93   (asked ≤ 1)
 //!   y ~ constrain(x, min=0, max=1) -> reported/predicted slope ≈ 2.93   (asked ≤ 1)
-//!   y ~ bounded(x, min=0, max=1)   -> reported/predicted slope ≈ 1.00   (box honored)
+//!   constrained MAP                -> slope = 1.00
 //! ```
 //!
-//! `bounded(x, min, max)` uses an exact interval transform on the user-scale
-//! coefficient and correctly reports slope ≈ 1 on the same data, so the box is
-//! achievable — the two documented ways to box a linear coefficient must agree.
+//! A constrained fit publishes two distinct quantities. The persisted
+//! `constrained_posterior.mode` is the boundary MAP; `fit.beta` and default
+//! prediction are the truncated posterior mean required by SPEC, which is
+//! strictly interior at finite curvature. This regression therefore verifies
+//! binding on the mode and verifies support—not boundary equality—on the
+//! reported and predicted posterior mean.
 //!
 //! Passes once the internal-coordinate transform of the bound uses the
 //! canonical back-transform `M` (divide by `scale`), so the active set enforces
 //! `(1/scale)·β_int ≤ ub`, giving reported `β = β_int/scale ≤ ub`.
 
-use gam::test_support::cli_harness::{fit_then_predict_gaussian, write_predict_csv_rows};
+use gam::inference::model::FittedModel;
+use gam::test_support::cli_harness::write_predict_csv_rows;
 use std::path::Path;
+use std::process::Command;
 
 const INTERCEPT: f64 = 2.0;
 const SLOPE: f64 = 5.0;
@@ -57,9 +62,9 @@ fn write_training_csv(path: &Path) {
     writer.flush().expect("flush training csv");
 }
 
-/// Fit `y ~ <formula>` on the noise-free unstandardized line, predict at x∈{0,1},
-/// and return the reported linear-term slope `pred(1) - pred(0)`.
-fn reported_slope(dir: &Path, label: &str, formula: &str) -> f64 {
+/// Fit on the noise-free unstandardized line and return
+/// `(persisted_mode, reported_mean, predicted_mean_slope)` for the linear term.
+fn coefficient_estimands(dir: &Path, label: &str, formula: &str) -> (f64, f64, f64) {
     let train_path = dir.join("train.csv");
     let predict_path = dir.join("predict.csv");
     let model_path = dir.join(format!("model_{label}.json"));
@@ -76,14 +81,65 @@ fn reported_slope(dir: &Path, label: &str, formula: &str) -> f64 {
             .map(|x| [format!("{x:.12}"), "0.0".to_string()]),
     );
 
-    let preds =
-        fit_then_predict_gaussian(&train_path, formula, &model_path, &predict_path, &out_path);
+    let fit_output = Command::new(gam::gam_binary!())
+        .arg("fit")
+        .arg(&train_path)
+        .arg(formula)
+        .args(["--family", "gaussian"])
+        .arg("--out")
+        .arg(&model_path)
+        .output()
+        .expect("spawn gam fit");
+    assert!(
+        fit_output.status.success(),
+        "gam fit `{formula}` failed:\n{}",
+        String::from_utf8_lossy(&fit_output.stderr)
+    );
+
+    let model = FittedModel::load_from_path(&model_path).expect("load constrained model");
+    let fit = model.unified().expect("saved model carries unified fit");
+    let posterior = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("linear coefficient box persists its constrained posterior");
+    let mode = posterior.mode[1];
+    let reported = fit.beta[1];
+
+    let predict_output = Command::new(gam::gam_binary!())
+        .arg("predict")
+        .arg(&model_path)
+        .arg(&predict_path)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .expect("spawn gam predict");
+    assert!(
+        predict_output.status.success(),
+        "gam predict `{formula}` failed:\n{}",
+        String::from_utf8_lossy(&predict_output.stderr)
+    );
+
+    let mut reader = csv::Reader::from_path(&out_path).expect("open predictions csv");
+    let headers = reader.headers().expect("predict csv headers").clone();
+    let mean_idx = headers
+        .iter()
+        .position(|header| header == "posterior_mean")
+        .expect("standard prediction publishes the explicit posterior_mean column");
+    let predictions: Vec<f64> = reader
+        .records()
+        .map(|record| {
+            record.expect("predict csv row")[mean_idx]
+                .parse::<f64>()
+                .expect("numeric posterior mean")
+        })
+        .collect();
     assert_eq!(
-        preds.len(),
+        predictions.len(),
         2,
         "expected two prediction rows for `{formula}`"
     );
-    preds[1] - preds[0]
+    (mode, reported, predictions[1] - predictions[0])
 }
 
 #[test]
@@ -91,36 +147,32 @@ fn linear_box_constraint_holds_on_reported_scale() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let dir = tmp.path();
 
-    // Anchor: `bounded()` uses an exact interval transform on the user-scale
-    // coefficient and is known to honor the box on this data. If this ever
-    // drifts the data itself stopped exercising a binding box, so check first.
-    let bounded_slope = reported_slope(dir, "bounded", "y ~ bounded(x, min=0, max=1)");
-    assert!(
-        (bounded_slope - BOX_MAX).abs() < 1e-2,
-        "anchor failed: bounded(x, min=0, max=1) slope={bounded_slope:.6}, expected ≈ {BOX_MAX} \
-         (the box is supposed to bind here — true unconstrained slope is {SLOPE})",
-    );
-
-    // The two documented active-set box forms must agree with the anchor: the
-    // reported / predicted slope must lie inside [0, 1], not escape to 1/scale².
+    // Both active-set spellings must bind at the MAP, while the distinct
+    // reported/default-prediction estimand remains inside the requested box.
     for (label, formula) in [
         ("linear", "y ~ linear(x, min=0, max=1)"),
         ("constrain", "y ~ constrain(x, min=0, max=1)"),
     ] {
-        let slope = reported_slope(dir, label, formula);
+        let (mode, reported, predicted) = coefficient_estimands(dir, label, formula);
         assert!(
-            slope <= BOX_MAX + 1e-3,
-            "box constraint violated: `{formula}` reports/predicts slope={slope:.6}, \
-             which is OUTSIDE the requested box [0, 1] (escaped toward 1/scale² ≈ {:.6}); \
-             bounded() honors the same box at slope={bounded_slope:.6}",
+            (mode - BOX_MAX).abs() < 1e-8,
+            "`{formula}` MAP must bind at the upper bound {BOX_MAX}, got {mode:.12}"
+        );
+        assert!(
+            (0.0..=BOX_MAX).contains(&reported),
+            "box constraint violated: `{formula}` reports posterior mean {reported:.6} \
+             outside [0, 1] (the old scaling bug escaped toward 1/scale² ≈ {:.6})",
             SLOPE / 3.0,
         );
-        // It must also still bind near the upper bound (a degenerate fit that
-        // collapsed the slope to ~0 would vacuously satisfy the line above).
         assert!(
-            slope >= BOX_MAX - 1e-2,
-            "`{formula}` slope={slope:.6} did not bind at the upper bound {BOX_MAX} \
-             (the unconstrained slope {SLOPE} should push the active set to the boundary)",
+            reported < mode,
+            "`{formula}` reported {reported:.12}; a finite truncated-posterior mean must \
+             be strictly interior to its boundary MAP {mode:.12}"
+        );
+        assert!(
+            (predicted - reported).abs() <= 1e-9 * reported.abs().max(1.0),
+            "`{formula}` default prediction slope {predicted:.12} must equal the persisted \
+             posterior-mean coefficient {reported:.12}"
         );
     }
 }

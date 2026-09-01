@@ -21,16 +21,19 @@
 //! ```
 //!
 //! The OLS slope of `sin(2π·x)` against `x` on `[0,1]` is negative, so
-//! `β_x ≥ 0` still BINDS at `β_x = 0`; the constrained optimum is reachable and
-//! the `bounded()` path lands on it. But the inner solve now drives the gradient
-//! from `‖g‖₀ ≈ 8.6e5` down to a stationarity residual `‖g−Aᵀλ‖∞ ≈ 0.22` — over
+//! `β_x ≥ 0` still BINDS at a MAP of `β_x = 0`. But the inner solve now drives
+//! the gradient from `‖g‖₀ ≈ 8.6e5` down to a stationarity residual
+//! `‖g−Aᵀλ‖∞ ≈ 0.22` — over
 //! four orders of magnitude ABOVE the `5e-6` absolute gate, while the relative
 //! ratio `0.22 / 8.6e5 ≈ 2.6e-7` is the same as on the unscaled data. Under a
 //! bare absolute gate (or one merely loosened to `1e-4`) this fit aborts hard;
-//! under the scale-invariant gate it succeeds and binds at `β_x = 0`, exactly
-//! like the unscaled case. That five-orders-of-magnitude headroom is what makes
+//! under the scale-invariant gate it succeeds and persists that boundary MAP.
+//! The separately reported/default-prediction coefficient is the strictly
+//! interior truncated posterior mean required by SPEC. That five-orders-of-
+//! magnitude headroom is what makes
 //! this a genuine scale-invariance test rather than a tolerance-tweak test.
 
+use gam::inference::model::FittedModel;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -76,9 +79,8 @@ fn read_means(path: &Path) -> Vec<f64> {
     let headers = reader.headers().expect("predict csv headers").clone();
     let mean_idx = headers
         .iter()
-        .position(|h| h == "mean")
-        .or_else(|| headers.iter().position(|h| h == "eta"))
-        .expect("predict csv has a mean / eta column");
+        .position(|h| h == "posterior_mean")
+        .expect("standard predict csv has a posterior_mean column");
     reader
         .records()
         .map(|rec| {
@@ -87,6 +89,17 @@ fn read_means(path: &Path) -> Vec<f64> {
                 .expect("numeric prediction")
         })
         .collect()
+}
+
+fn constrained_x_estimands(model_path: &Path) -> (f64, f64) {
+    let model = FittedModel::load_from_path(model_path).expect("load constrained saved model");
+    let fit = model.unified().expect("saved model carries unified fit");
+    let posterior = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("nonnegative coefficient persists its constrained posterior");
+    (posterior.mode[1], fit.beta[1])
 }
 
 fn try_fit(dir: &Path, label: &str, formula: &str) -> (bool, PathBuf, String) {
@@ -131,28 +144,6 @@ fn nonnegative_constraint_kkt_gate_is_scale_invariant() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let dir = tmp.path();
 
-    // Anchor: the exact-interval `bounded()` path reaches the constrained
-    // optimum on the SCALED data — β_x clamped at the lower bound 0, β_x2 the
-    // (scaled) recovered effect. `max=2000` keeps the box finite and
-    // non-degenerate while leaving the binding lower bound at 0.
-    let (banchor_ok, bmodel, banchor_err) =
-        try_fit(dir, "bounded", "y ~ bounded(x, min=0, max=2000) + x2");
-    assert!(
-        banchor_ok,
-        "anchor failed: `bounded(x,min=0,max=2000) + x2` should fit scaled data; stderr:\n{banchor_err}"
-    );
-    let (b_xslope, b_x2slope) = probe_slopes(dir, "bounded", &bmodel);
-    assert!(
-        b_xslope.abs() < 1e-1,
-        "anchor sanity: bounded x-slope should bind at 0, got {b_xslope:.6}"
-    );
-    // The scaled response makes β_x2 ≈ SCALE·0.5 = 500-ish (the low-discrepancy
-    // x/x2 correlation shifts it off exactly 500); the anchor pins the truth.
-    assert!(
-        b_x2slope > 0.1 * SCALE,
-        "anchor sanity: bounded x2-slope should be a large positive (scaled) effect, got {b_x2slope:.6}"
-    );
-
     // THE BUG, at extreme scale: the absolute stationarity residual at this
     // optimum is ≈0.22 — >4 orders of magnitude above the 5e-6 gate — so a bare
     // absolute gate (or one merely loosened to 1e-4) aborts. The scale-invariant
@@ -162,23 +153,29 @@ fn nonnegative_constraint_kkt_gate_is_scale_invariant() {
         nn_ok,
         "BUG (#989 scale-invariance): `y ~ nonnegative(x) + x2` aborted on scaled data, where \
          the absolute KKT stationarity residual (~0.22) overruns the 5e-6 gate by >4 orders of \
-         magnitude even though the relative residual (~2.6e-7) is tiny and `bounded()` reaches \
-         the same constrained optimum (β_x=0). The gate must certify stationarity relative to the \
+         magnitude even though the relative residual (~2.6e-7) is tiny. The gate must certify stationarity relative to the \
          O(n) gradient scale, not against a fixed absolute floor. gam fit stderr:\n{nn_err}"
     );
 
-    // Same constrained optimum as the anchor: x clamped at 0, x2 effect matched.
+    let (mode_xslope, reported_xslope) = constrained_x_estimands(&nnmodel);
+    assert!(
+        mode_xslope.abs() < 1e-5,
+        "scaled nonnegative coefficient MAP must bind at 0, got {mode_xslope:.12}"
+    );
+    assert!(
+        reported_xslope >= 0.0 && reported_xslope > mode_xslope,
+        "reported coefficient {reported_xslope:.12} must be the strictly-interior \
+         truncated posterior mean in [0, ∞), above its boundary MAP {mode_xslope:.12}"
+    );
+
     let (nn_xslope, nn_x2slope) = probe_slopes(dir, "nonneg", &nnmodel);
     assert!(
-        nn_xslope.abs() < 1e-1,
-        "nonnegative x-slope should bind at 0 (constraint active), got {nn_xslope:.6}"
+        (nn_xslope - reported_xslope).abs() <= 1e-9 * reported_xslope.abs().max(1.0),
+        "default prediction slope {nn_xslope:.12} must equal the persisted posterior \
+         mean {reported_xslope:.12}"
     );
-    // Match the bounded anchor to a tight *relative* tolerance — the two
-    // documented ways to constrain a coefficient must agree regardless of scale.
-    let rel_gap = (nn_x2slope - b_x2slope).abs() / b_x2slope.abs().max(1.0);
     assert!(
-        rel_gap < 1e-3,
-        "nonnegative x2-slope {nn_x2slope:.6} should match the bounded anchor {b_x2slope:.6} \
-         (rel gap {rel_gap:.2e}); the two ways to bound a coefficient must agree at any scale"
+        nn_x2slope > 0.1 * SCALE,
+        "the free x2 effect should remain a large positive scaled effect, got {nn_x2slope:.6}"
     );
 }

@@ -4,19 +4,21 @@
 //!
 //! These bounds are enforced at fit time as KKT inequality rows
 //! (`src/terms/smooth/design_construction.rs` reads
-//! `LinearTermSpec.coefficient_min` / `coefficient_max`), so the point estimate
-//! pins to the active boundary. The posterior must live in the same admissible
-//! region — a coefficient that is not allowed to be negative cannot have ~half
-//! its posterior mass below zero. Before the fix, `sample_standard` drew a plain
-//! unconstrained Gaussian `N(mode, φ·H⁻¹)` centred on the boundary and returned
-//! it with `rhat ≈ 1` / `converged = true` — a confidently-wrong posterior with
-//! roughly half the draws on the forbidden side. The sampler now routes box
-//! constraints (and shape constraints, #1509) through a truncated-Gaussian Gibbs
-//! sampler whose every draw is feasible by construction.
+//! `LinearTermSpec.coefficient_min` / `coefficient_max`). The constrained MAP
+//! pins to the active boundary, while the reported `fit.beta` is the strictly
+//! interior truncated posterior mean mandated by SPEC. The posterior must live
+//! in the same admissible region — a coefficient that is not allowed to be
+//! negative cannot have ~half its posterior mass below zero. Before the fix,
+//! `sample_standard` drew a plain unconstrained Gaussian `N(mode, φ·H⁻¹)` and
+//! returned it with `rhat ≈ 1` / `converged = true` — a confidently-wrong
+//! posterior with roughly half the draws on the forbidden side. The sampler now
+//! routes box constraints (and shape constraints, #1509) through a
+//! truncated-Gaussian sampler whose every draw is feasible by construction.
 //!
 //! Both subtests fit a strongly-negative true slope so the bound is *active*
-//! (the fitted slope pins to the boundary), then sample and assert essentially
-//! all draws of that coefficient stay inside the constraint.
+//! (the persisted mode pins to the boundary), distinguish that mode from the
+//! reported posterior mean, then assert essentially all draws stay inside the
+//! constraint.
 
 use gam::hmc::NutsConfig;
 use gam::inference::model::{
@@ -117,6 +119,16 @@ fn slope_draws(
     result.samples.column(1).to_vec()
 }
 
+fn constrained_mode_and_reported_slope(model: &FittedModel) -> (f64, f64) {
+    let fit = model.unified().expect("saved model carries unified fit");
+    let posterior = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("coefficient bound persists its constrained posterior");
+    (posterior.mode[1], fit.beta[1])
+}
+
 #[test]
 fn posterior_respects_nonnegative_coefficient_bound() {
     init_parallelism();
@@ -129,11 +141,17 @@ fn posterior_respects_nonnegative_coefficient_bound() {
 
     let (model, p) = saved_standard_gaussian_model("y ~ nonnegative(x)", &ds);
 
-    // Sanity: the constraint is active — the fitted slope pins to ~0.
-    let fitted_slope = model.unified.as_ref().expect("unified fit").beta[1];
+    // The MAP binds at zero, while the default reported coefficient is the
+    // strictly-interior mean of the truncated posterior.
+    let (mode_slope, reported_slope) = constrained_mode_and_reported_slope(&model);
     assert!(
-        fitted_slope.abs() < 1e-4,
-        "expected an active nonnegative bound (slope≈0); got {fitted_slope}"
+        mode_slope.abs() < 1e-8,
+        "expected an active nonnegative MAP at zero; got {mode_slope}"
+    );
+    assert!(
+        reported_slope > mode_slope,
+        "reported slope {reported_slope} must be the interior posterior mean above \
+         its boundary MAP {mode_slope}"
     );
 
     let draws = slope_draws(&model, &ds, p);
@@ -159,12 +177,17 @@ fn posterior_respects_two_sided_linear_coefficient_bounds() {
 
     let (model, p) = saved_standard_gaussian_model("y ~ linear(x, min=-1, max=1)", &ds);
 
-    // True slope -3 < lower bound -1, so the box constraint is active and the
-    // fitted slope pins to ~-1.
-    let fitted_slope = model.unified.as_ref().expect("unified fit").beta[1];
+    // True slope -3 < lower bound -1, so the box MAP binds at -1. The reported
+    // posterior mean remains strictly inside the finite box.
+    let (mode_slope, reported_slope) = constrained_mode_and_reported_slope(&model);
     assert!(
-        (fitted_slope - (-1.0)).abs() < 1e-4,
-        "expected an active lower bound (slope≈-1); got {fitted_slope}"
+        (mode_slope + 1.0).abs() < 1e-8,
+        "expected an active lower-bound MAP at -1; got {mode_slope}"
+    );
+    assert!(
+        (-1.0..1.0).contains(&reported_slope),
+        "reported slope {reported_slope} must be the strictly-interior posterior mean \
+         above its boundary MAP {mode_slope}"
     );
 
     let draws = slope_draws(&model, &ds, p);
