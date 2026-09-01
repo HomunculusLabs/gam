@@ -312,11 +312,20 @@ impl MarkedPointProcessModel {
         Ok(self.observation_matrix().dot(&state_response))
     }
 
-    /// Disease covariance `A A'`, the rotation-invariant loading estimand when
-    /// factor values have identity covariance.
+    /// Stationary mark-level covariance induced by the latent factor values.
+    ///
+    /// This is `A diag(sigma_j^2) A'`. It reduces to `A A'` under the usual
+    /// unit-variance factor convention and is invariant to a simultaneous
+    /// rescaling of a factor and the inverse rescaling of its loading column.
     pub fn loading_covariance(&self) -> Result<Array2<f64>, MarkedPointProcessError> {
         self.validate()?;
-        Ok(self.loadings.dot(&self.loadings.t()))
+        let factor_variances = Array1::from_iter(
+            self.factors
+                .iter()
+                .map(|factor| factor.marginal_variance),
+        );
+        let variance_weighted_loadings = &self.loadings * &factor_variances.insert_axis(Axis(0));
+        Ok(variance_weighted_loadings.dot(&self.loadings.t()))
     }
 }
 

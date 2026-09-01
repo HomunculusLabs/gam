@@ -171,6 +171,15 @@ fn gaussian_intensity_includes_jensen_correction() {
 }
 
 #[test]
+fn loading_covariance_includes_factor_variance() {
+    let model = model(MaternMarkovOrder::Half);
+    let covariance = model.loading_covariance().unwrap();
+    assert_abs_diff_eq!(covariance[[0, 0]], 1.7 * 0.8 * 0.8);
+    assert_abs_diff_eq!(covariance[[0, 1]], 1.7 * 0.8 * -0.35);
+    assert_abs_diff_eq!(covariance[[1, 1]], 1.7 * 0.35 * 0.35);
+}
+
+#[test]
 fn forecast_integrates_paths_and_preserves_probability_mass() {
     let model = model(MaternMarkovOrder::Half);
     let landmark = filter_laplace(&model, &history(), control())
