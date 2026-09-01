@@ -4447,20 +4447,37 @@ impl SurvivalLocationScaleFamily {
         fpp: f64,
         fppp: f64,
     ) -> (f64, f64, f64, f64, f64) {
-        let mut survival = gam_math::jet_tower::Tower4::<1>::zero();
-        survival.v = s;
-        survival.g[0] = -f;
-        survival.h[0][0] = -fp;
-        survival.t3[0][0][0] = -fpp;
-        survival.t4[0][0][0][0] = -fppp;
-        let (log_s, d1, d2, d3, d4) = Self::logwith_derivatives_positive(s);
-        let log_survival = survival.compose_unary([log_s, d1, d2, d3, d4]);
+        let (log_s, d1, d2, d3, d4) = Self::log_stack_from_jet(s, -f, -fp, -fpp, -fppp);
+        (log_s, -d1, -d2, -d3, -d4)
+    }
+
+    /// The `(ln x, (ln x)', (ln x)'', (ln x)''', (ln x)'''')` stack of the
+    /// logarithm of a positive one-variable jet `x = (v, x', x'', x''', x'''')`:
+    /// the jet composed with the `ln` unary stack at `v`. Both generic-link
+    /// scalar stacks of this kernel (`-ln S`, `ln f`) are this composition and
+    /// share it, so their fourth-order towers are never spelled by hand.
+    #[inline]
+    pub(crate) fn log_stack_from_jet(
+        v: f64,
+        d1: f64,
+        d2: f64,
+        d3: f64,
+        d4: f64,
+    ) -> (f64, f64, f64, f64, f64) {
+        let mut argument = gam_math::jet_tower::Tower4::<1>::zero();
+        argument.v = v;
+        argument.g[0] = d1;
+        argument.h[0][0] = d2;
+        argument.t3[0][0][0] = d3;
+        argument.t4[0][0][0][0] = d4;
+        let (log_v, l1, l2, l3, l4) = Self::logwith_derivatives_positive(v);
+        let log_argument = argument.compose_unary([log_v, l1, l2, l3, l4]);
         (
-            log_survival.v,
-            -log_survival.g[0],
-            -log_survival.h[0][0],
-            -log_survival.t3[0][0][0],
-            -log_survival.t4[0][0][0][0],
+            log_argument.v,
+            log_argument.g[0],
+            log_argument.h[0][0],
+            log_argument.t3[0][0][0],
+            log_argument.t4[0][0][0][0],
         )
     }
 
@@ -4529,13 +4546,9 @@ impl SurvivalLocationScaleFamily {
                         format!("inverse link third-derivative evaluation failed at eta={eta}: {e}")
                     })?;
                 let fpppp = inverse_link_pdffourth_derivative(inverse_link, eta)?;
-                let d1 = fp / f;
-                let d2 = fpp / f - d1 * d1;
-                let d3 = fppp / f - 3.0 * fp * fpp / (f * f) + 2.0 * fp.powi(3) / f.powi(3);
-                let d4 = fpppp / f - 4.0 * fp * fppp / f.powi(2) - 3.0 * fpp * fpp / f.powi(2)
-                    + 12.0 * fp.powi(2) * fpp / f.powi(3)
-                    - 6.0 * fp.powi(4) / f.powi(4);
-                Ok((f.ln(), d1, d2, d3, d4))
+                // `ln f` composed on the pdf jet; the hand Bell-polynomial
+                // expansion this replaces was the same tower spelled out.
+                Ok(Self::log_stack_from_jet(f, fp, fpp, fppp, fpppp))
             }
         }
     }
