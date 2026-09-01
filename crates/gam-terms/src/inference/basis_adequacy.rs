@@ -104,15 +104,23 @@
 //! alternative is for.
 //!
 //! What is scale-free is the fraction of a direction's own energy the
-//! projection left behind. Those fractions are the eigenvalues `ν` of the
-//! generalized pair `(V, E)` with `E = ZᵀW_F Z` — `sin²` of the principal angle
-//! between each enrichment direction and `span(X)`, and a pure number in
-//! `[0, 1]`. A direction the design cannot reach keeps `ν ≈ 1` no matter how
-//! little absolute energy it carries; one the design spans exactly keeps
-//! `(ε·cond(X))²`. `ESTIMABLE_DIRECTION_FLOOR` is the floor on `ν`, and the
-//! only other truncation is the ordinary numerical rank of `E` itself — the
-//! directions the enrichment does not realize in double precision, which cannot
-//! be a denominator.
+//! projection left behind. Those fractions are the generalized eigenvalues of
+//! `(V, E)` with `E = ZᵀW_F Z` — `sin²` of the principal angles when the two
+//! row metrics agree, and still the relevant retained-energy ratios when they do
+//! not. A direction the design cannot reach keeps a finite ratio no matter how
+//! little absolute energy it carries; one the design spans exactly has only
+//! projection roundoff left.
+//!
+//! The computation is deliberately whitened from `V`, not from `E`. Whitening
+//! `E` first must decide the numerical rank of the RAW radial-kernel Gram against
+//! its largest, low-frequency direction. That silently discards the fine tail
+//! before asking whether the fitted design represents it — the same shared-scale
+//! error as #2788/#2789 in another coordinate system. Whitening `V` first uses
+//! the numerical rank of the covariance the score statistic actually inverts;
+//! the raw Gram then serves only to reject projection dust through a reciprocal
+//! generalized-energy test. Both tolerances are derived from matrix dimension
+//! and `f64::EPSILON`, so widening the alternative cannot move an unrelated
+//! hard-coded floor through its spectrum.
 //!
 //!
 //!
@@ -152,44 +160,6 @@ use gam_math::probability::{chi_square_sf, fisher_snedecor_sf};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 pub use crate::inference::smooth_test::SmoothTestScale;
-
-/// Floor for calling an enrichment direction *estimable*, as a fraction of that
-/// direction's OWN unprojected energy.
-///
-/// `V = Z̃ᵀW_F Z̃` is a Gram matrix, so its eigenvalues are non-negative and an
-/// enrichment direction that lies inside the fitted span produces a
-/// numerically-zero one. But what separates "inside the span" from "outside it
-/// and small" is not the eigenvalue's absolute size. It is the FRACTION of that
-/// direction's own weighted energy the projection left behind:
-///
-/// ```text
-///     V w = μ · E w,      E = ZᵀW_F Z,      μ = (wᵀVw)/(wᵀEw)
-/// ```
-///
-/// The `μ` that answers it are the eigenvalues of the GENERALIZED pair
-/// `(V, E)`: `sin²` of the principal angle between each enrichment direction
-/// and `span(X)` in the fit's own metric, and DIMENSIONLESS — unchanged by
-/// rescaling `Z`, and independent of how much energy the enrichment carries in
-/// its other directions. A direction the design cannot represent has `μ ≈ 1`
-/// however small its residual eigenvalue is; a direction the design spans
-/// exactly has `μ ≈ (ε·cond(X))²`, which is roundoff over signal.
-///
-/// `1e-9` sits several orders above that roundoff — the projection is accurate
-/// to `ε·cond(X)` in amplitude, so the energy fraction it can manufacture is
-/// that squared — and directions below it contribute `u²/λ` ratios that are
-/// noise over noise.
-///
-/// Taking this floor against a scale SHARED across the enrichment is what it
-/// replaced (#2788, #2789), and any shared scale fails the same way: the
-/// residual spectrum of a smooth radial kernel is a Karhunen–Loève tail that
-/// decays geometrically with no gap, while a shared scale does not decay with
-/// it, so the floor truncates HARDER the wider — and therefore the more
-/// informative — the alternative gets. Against `max_j (ZᵀW_F Z)_jj`
-/// specifically, every 1-D `s()` 18 or more columns wide had its ENTIRE residual
-/// spectrum below the floor: `rank = 0`, no statistic, and a diagnostic that
-/// runs on every fit reporting `statistic_unavailable` for every one of them, on
-/// every dataset and at every `n`.
-const ESTIMABLE_DIRECTION_FLOOR: f64 = 1.0e-9;
 
 /// Inputs to [`basis_adequacy_score_test`].
 ///
@@ -281,13 +251,13 @@ pub fn basis_adequacy_score_test(input: BasisAdequacyInput<'_>) -> Option<BasisA
     // `m = 50_000, q = 92`, and a diagnostic may not be the peak-memory term of
     // the fit it is diagnosing.
     //
-    // `E` is the denominator of the estimability test: a direction is kept when
-    // it retains a non-roundoff fraction of ITS OWN energy, not when it clears
-    // some bar shared with the rest of the enrichment (see
-    // [`ESTIMABLE_DIRECTION_FLOOR`]). Accumulating the whole Gram rather than
-    // its diagonal costs one more `O(m·q²)` product on top of the two the second
-    // pass already runs — a third more of the report's dominant term, which the
-    // caller's row cap bounds independently of `n`.
+    // `E` is the denominator of the geometric estimability test: a direction is
+    // kept when it retains a numerically resolvable fraction of ITS OWN energy,
+    // not when it clears some bar shared with the rest of the enrichment.
+    // Accumulating the whole Gram rather than its diagonal costs one more
+    // `O(m·q²)` product on top of the two the second pass already runs — a third
+    // more of the report's dominant term, which the caller's row cap bounds
+    // independently of `n`.
     const ROW_BLOCK: usize = 4096;
     let mut cross = Array2::<f64>::zeros((p, q));
     let mut raw_information = Array2::<f64>::zeros((q, q));
@@ -392,69 +362,76 @@ pub fn basis_adequacy_score_test(input: BasisAdequacyInput<'_>) -> Option<BasisA
     // symmetric on the nose rather than silently repairing it.
     let symmetric = 0.5 * (&information + &information.t());
 
-    // The estimable directions are the PRINCIPAL ANGLES between the enrichment
-    // and the fitted design, so they are read off the generalized pair `(V, E)`
-    // rather than off `V` alone. `E = ZᵀW_F Z` is whitened first: its own
-    // eigendecomposition supplies `B` with `BᵀEB = I` over the directions `Z`
-    // numerically realizes, and the eigenvalues of `M = BᵀVB` are then the
-    // dimensionless retained-energy fractions `ν ∈ [0, 1]` — `sin²` of the
-    // angle between each enrichment direction and `span(X)`.
-    //
-    // Doing this on `V`'s own eigenbasis instead is cheaper and WRONG: `V`'s
-    // eigenvectors are orthonormal in the coefficient metric, not in `E`'s, so
-    // `v_iᵀEv_i` picks up whatever overlap `v_i` has with the enrichment's
-    // high-energy directions and the ratio is crushed by it. Measured on the
-    // #2789 ladder, that under-counts the reference d.f. by roughly a third at
-    // 36 enrichment columns and by four fifths at 156.
-    let symmetric_energy = 0.5 * (&raw_information + &raw_information.t());
-    let (energy_values, energy_vectors) =
-        strict_symmetric_eigh(&symmetric_energy, Side::Lower).ok()?;
-    let energy_max = energy_values.iter().cloned().fold(0.0_f64, f64::max);
-    if !(energy_max > 0.0) {
+    // `V` is the covariance the score statistic actually pseudo-inverts. Its
+    // numerical rank must therefore be decided against ITS OWN leading
+    // eigenvalue: the ordinary backward-error bound for a `q × q` symmetric
+    // eigenproblem. This ordering is load-bearing. Whitening `E` first, as the
+    // initial #2788/#2789 fix did, made the numerical rank of the raw
+    // radial-kernel Gram a prerequisite. Its low-frequency spectrum is much
+    // larger than the fine tail, so that version still plateaued at about 32
+    // d.f. while the alternative grew from 60 to 156 columns.
+    let (information_values, information_vectors) =
+        strict_symmetric_eigh(&symmetric, Side::Lower).ok()?;
+    let information_max = information_values.iter().cloned().fold(0.0_f64, f64::max);
+    if !(information_max > 0.0) {
         return None;
     }
-    // Directions the enrichment does not numerically span. `E` is accumulated
-    // over `m` rows, so its entries carry an `m·ε` relative error and an
-    // eigenvalue below `λ_max(E)·m·ε` is indistinguishable from the arithmetic
-    // that produced it. Whitening by such a direction would divide by noise and
-    // hand `M` an `ν` that is not a fraction of anything — a radial kernel Gram
-    // at a few hundred centers has plenty of them.
-    let span_floor = energy_max * (m as f64) * f64::EPSILON;
+    let information_floor = information_max * (q as f64) * f64::EPSILON;
     let realized: Vec<usize> = (0..q)
-        .filter(|&column| energy_values[column] > span_floor)
+        .filter(|&column| information_values[column] > information_floor)
         .collect();
     if realized.is_empty() {
         return None;
     }
     let mut whitening = Array2::<f64>::zeros((q, realized.len()));
     for (slot, &column) in realized.iter().enumerate() {
-        let scale = 1.0 / energy_values[column].sqrt();
+        let scale = 1.0 / information_values[column].sqrt();
         if !scale.is_finite() {
             return None;
         }
         for row in 0..q {
-            whitening[(row, slot)] = energy_vectors[(row, column)] * scale;
+            whitening[(row, slot)] = information_vectors[(row, column)] * scale;
         }
     }
-    let retained = whitening.t().dot(&symmetric).dot(&whitening);
+
+    // Whitening from `V` gives `BᵀVB = I`. In that metric the eigenvalues `τ`
+    // of `BᵀEB` are the RECIPROCALS of the retained-energy fractions: large
+    // `τ` is a direction whose residual is only projection dust, finite `τ` is
+    // genuinely new resolution. This generalized test is still necessary:
+    // using only `V`'s relative rank would promote roundoff when the enrichment
+    // lies entirely in `span(X)`, because roundoff would then be `V`'s largest
+    // direction as well.
+    let symmetric_energy = 0.5 * (&raw_information + &raw_information.t());
+    let retained = whitening.t().dot(&symmetric_energy).dot(&whitening);
     let retained = 0.5 * (&retained + &retained.t());
     if retained.iter().any(|value| !value.is_finite()) {
         return None;
     }
-    let (fractions, rotation) = strict_symmetric_eigh(&retained, Side::Lower).ok()?;
-    // `W = B·P` diagonalizes BOTH forms: `WᵀEW = I` and `WᵀVW = diag(ν)`. So
-    // `Ũ = WᵀU` has `Var(Ũ) = φ·diag(ν)` and `Σ Ũ_k²/ν_k` over any subset of
-    // its coordinates is `χ²` on that subset's size — the same reference law the
-    // untruncated statistic has, for the same reason, and not a consequence of
-    // `W` being an eigenbasis of `V`.
-    let directions = whitening.dot(&rotation);
-    let projected: Array1<f64> = directions.t().dot(&u);
+    let (raw_energy_per_residual, rotation) = strict_symmetric_eigh(&retained, Side::Lower).ok()?;
+    let raw_energy_scale = raw_energy_per_residual
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let psd_roundoff = raw_energy_scale * (realized.len() as f64) * f64::EPSILON;
+    if raw_energy_per_residual
+        .iter()
+        .any(|value| *value < -psd_roundoff)
+    {
+        return None;
+    }
+    let projected: Array1<f64> = rotation.t().dot(&whitening.t().dot(&u));
+    // A symmetric generalized eigenproblem of this size cannot resolve an
+    // energy fraction below `dimension · ε`; deriving the boundary from the
+    // arithmetic removes the production `1e-9` knob that caused these issues.
+    // Since `τ = raw/residual`, retain exactly `τ · floor < 1`.
+    let geometry_floor = (p.max(q) as f64) * f64::EPSILON;
     let mut statistic = 0.0_f64;
     let mut rank = 0usize;
-    for (index, &fraction) in fractions.iter().enumerate() {
-        if fraction > ESTIMABLE_DIRECTION_FLOOR {
+    for (index, &raw_energy) in raw_energy_per_residual.iter().enumerate() {
+        let raw_energy = raw_energy.max(0.0);
+        if raw_energy * geometry_floor < 1.0 {
             let component = projected[index];
-            statistic += component * component / fraction;
+            statistic += component * component;
             rank += 1;
         }
     }
@@ -618,7 +595,7 @@ impl DesignGramFactor {
         if !(largest > 0.0) {
             return None;
         }
-        let floor = largest * GRAM_RANK_FLOOR;
+        let floor = largest * (dimension as f64) * f64::EPSILON;
         let mut scaled = eigenvectors.clone();
         for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
             let factor = if eigenvalue > floor {
@@ -657,11 +634,6 @@ impl DesignGramFactor {
             .then_some(solved)
     }
 }
-
-/// Relative eigenvalue floor for the rank-deficient-Gram fallback in
-/// [`solve_symmetric_psd`]. Directions of the weighted design Gram below
-/// `λ_max · 1e-12` are treated as outside the design's realized span.
-const GRAM_RANK_FLOOR: f64 = 1.0e-12;
 
 #[cfg(test)]
 mod tests {
@@ -1173,6 +1145,60 @@ mod tests {
                 width - DESIGN_WIDTH
             );
         }
+    }
+
+    /// Fine residual directions are ranked in the covariance the statistic
+    /// inverts, not against the absorbed low-frequency head of the raw kernel.
+    ///
+    /// This is the part the first principal-angle fix for #2788/#2789 still
+    /// missed. Its `E`-first whitening discarded every tail column below
+    /// `lambda_max(E) * n * EPSILON` before it formed the generalized problem.
+    /// Here all eight tail columns are mutually orthogonal and wholly outside
+    /// the design, but their common scale puts them below that old global floor.
+    /// Their residual Gram is perfectly conditioned, so all eight are real
+    /// score directions and must survive together.
+    #[test]
+    fn fine_residual_subspace_is_not_ranked_against_the_absorbed_raw_head() {
+        const N: usize = 256;
+        const DESIGN_WIDTH: usize = 4;
+        const TAIL_WIDTH: usize = 8;
+        const TAIL_SCALE: f64 = 1.0e-8;
+        let mode = |row: usize, index: usize| {
+            let angle = std::f64::consts::PI * (row as f64 + 0.5) * index as f64 / N as f64;
+            angle.cos()
+        };
+
+        let mut design = Array2::<f64>::zeros((N, DESIGN_WIDTH));
+        let mut enrichment = Array2::<f64>::zeros((N, DESIGN_WIDTH + TAIL_WIDTH));
+        let mut y = Array1::<f64>::zeros(N);
+        let mut rng = Lcg(2_788_2_789_2_788);
+        for row in 0..N {
+            for index in 0..DESIGN_WIDTH {
+                let value = mode(row, index);
+                design[(row, index)] = value;
+                enrichment[(row, index)] = value;
+            }
+            for tail in 0..TAIL_WIDTH {
+                enrichment[(row, DESIGN_WIDTH + tail)] =
+                    TAIL_SCALE * mode(row, DESIGN_WIDTH + tail);
+            }
+            y[row] = 2.0 * enrichment[(row, DESIGN_WIDTH)] + 0.1 * rng.next_normal();
+        }
+
+        let raw = enrichment.t().dot(&enrichment);
+        let head = raw[(0, 0)];
+        let tail = raw[(DESIGN_WIDTH, DESIGN_WIDTH)];
+        assert!(
+            tail < head * (N as f64) * f64::EPSILON,
+            "fixture must sit below the obsolete raw-Gram floor: tail={tail:e}, head={head:e}"
+        );
+        let out =
+            basis_adequacy_score_test(GaussianHarness::new(design, enrichment, y, 0.0).input())
+                .expect("the well-conditioned residual tail supports a verdict");
+        assert_eq!(
+            out.rank, TAIL_WIDTH,
+            "every orthogonal tail mode is new resolution, irrespective of its scale"
+        );
     }
 
     /// Row-selected `XᵀWX` matches the direct product, including the weights.
