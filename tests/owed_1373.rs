@@ -37,8 +37,7 @@
 //!     match-or-beat arm: gam recovers the surface (passes the absolute bar) but
 //!     selects fewer effective df than mgcv (edf ≈ 6.9 vs 10.8) and loses the
 //!     head-to-head by ~2×. This is a genuine REML λ-precision gap in the
-//!     GLM-family path (a diagnostic probe lives at
-//!     `examples/probe_poisson_tensor_oversmooth.rs`), with no isolated one-line
+//!     GLM-family path, with no isolated one-line
 //!     defect and broad collateral risk to the sibling tensor tests — it needs a
 //!     focused, human-supervised λ-calibration pass, not a blind autonomous
 //!     patch, and an R-enabled runner to measure.

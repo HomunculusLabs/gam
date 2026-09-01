@@ -236,12 +236,11 @@ fn profile_thinplate_2d_n1200() {
 /// replica + the non-monotonic issue timings (n1220=408s > n2000=261s) already
 /// point to outer-loop; this confirms it in-gam and post-ROOT-1 (the initial.sp
 /// seed that replaced the banned grid prepass, c9e1fba/ddd8af9). n=500 only:
-/// n=1220 is ~400s pre-fix, too slow for the standard suite — use
-/// `examples/repro1757_duchon_perf.rs` for the larger sizes.
+/// n=1220 is ~400s pre-fix, too slow for the standard suite.
 #[test]
 fn profile_duchon_2d_n500() {
     init_parallelism();
-    // Mirror examples/repro1757_duchon_perf.rs (the issue's repro): n=500,
+    // Mirror the #1757 repro: n=500,
     // x1,x2 ~ U(-1,1), y = sin(2 x1) + cos(1.5 x2) + N(0, 0.1).
     let n = 500usize;
     let mut rng = StdRng::seed_from_u64(42);

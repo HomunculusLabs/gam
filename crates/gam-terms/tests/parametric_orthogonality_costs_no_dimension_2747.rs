@@ -393,7 +393,7 @@ fn the_residualization_chart_replays_bit_for_bit_on_a_row_subset_2747() {
 /// This arm exists to localize a SECOND gap rather than to re-test the first.
 /// Through `fit_from_formula`, a Matern smooth measures `4.15e-1` against the
 /// intercept even with the projection arm landed
-/// (`examples/probe_2747_parametric_orthogonality`), and this test says why that
+/// (measured under #2747), and this test says why that
 /// cannot be the arm's fault: from an unfrozen spec the same basis comes out
 /// orthogonal at the shipped bar. What differs is the route —
 /// `freeze_geometry_from_metadata` (`spatial_optimization.rs:4849`) freezes the

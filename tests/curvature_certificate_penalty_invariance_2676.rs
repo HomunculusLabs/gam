@@ -20,7 +20,7 @@
 //! The premise "the `geo_disease_*_matern` penalty map carries an exact
 //! redundancy" came from a screen that printed `cos` to six decimals, and
 //! `1 - cos = delta²/2` — the cosine is the DEFECT SQUARED. Measured
-//! (`examples/probe2676_penalty_map_defect`, centers=10, n=1500, n_pcs=16):
+//! (#2676 penalty-map probe, centers=10, n=1500, n_pcs=16):
 //!
 //! ```text
 //!     length_scale      relative defect   certified nullity
@@ -55,7 +55,7 @@ use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{FitRequest, FitResult, StandardFitRequest, StandardFitResult};
 use ndarray::{Array1, Array2};
 
-// Chosen by sweeping `examples/repro2676_geo_disease_matern` over
+// Chosen by sweeping the #2676 `geo_disease_matern` repro over
 // `(centers, n, n_pcs)`: the smallest cell measured that BOTH reaches the
 // #2676 code paths and completes (a few seconds in release). The exact
 // redundancy is a property of the `(centers, n_pcs)` pair and of the geometry —

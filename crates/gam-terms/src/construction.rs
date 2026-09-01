@@ -1290,7 +1290,7 @@ impl CanonicalPenalty {
 /// `1.9e-5` apart — five orders above any arithmetic — prints as
 /// `cos = 1.000000` and reads as an exact identity. #2676 ran on that reading
 /// for its whole life. Measured on `geo_disease_matern` (centers=10, n=1500,
-/// n_pcs=16, `examples/probe2676_penalty_map_defect`):
+/// n_pcs=16, the #2676 penalty-map probe):
 ///
 /// ```text
 ///     length_scale   delta       certified nullity

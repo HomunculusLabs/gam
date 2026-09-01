@@ -18,7 +18,7 @@
 //!   ...on the SAME 10 centers, the same extent, the same band floor 1.0807.
 //! ```
 //!
-//! (Those digits are from `examples/probe_2754_bms_length_scale_sweep.rs` on the
+//! (Those digits are from the #2754 length-scale sweep on the
 //! #1041 parity fixture, which is where the defect was found. This file's own
 //! fixture is smaller and prints its own numbers; what it asserts is the
 //! equality, not the value.)

@@ -251,18 +251,6 @@ harness = false
 name = "arrow_schur_hill_climb"
 path = "examples/perf/arrow_schur_hill_climb.rs"
 
-[[example]]
-name = "sae_perf_harness"
-path = "examples/sae_perf_harness.rs"
-
-[[example]]
-name = "cyl_family_repro"
-path = "examples/cyl_family_repro.rs"
-
-[[example]]
-name = "binomial_pspline_perf_1575"
-path = "examples/binomial_pspline_perf_1575.rs"
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -435,43 +423,3 @@ panic = "unwind"
 debug = false
 strip = true
 
-[[example]]
-name = "probe_2596_lognormal_locscale_recovery"
-path = "examples/probe_2596_lognormal_locscale_recovery.rs"
-
-[[example]]
-name = "probe_2623_sampled_marginal_channel_fd"
-path = "examples/probe_2623_sampled_marginal_channel_fd.rs"
-
-[[example]]
-name = "probe_2751_bms_logslope_decomposition"
-path = "examples/probe_2751_bms_logslope_decomposition.rs"
-
-[[example]]
-name = "probe_2761_ell_profile"
-path = "examples/probe_2761_ell_profile.rs"
-
-[[example]]
-name = "probe_2750_lambda_path"
-path = "examples/probe_2750_lambda_path.rs"
-
-[[example]]
-name = "probe_2714_frailty_trust_ladder"
-path = "examples/probe_2714_frailty_trust_ladder.rs"
-
-[[example]]
-name = "probe_2735_aniso_axis"
-path = "examples/probe_2735_aniso_axis.rs"
-
-
-[[example]]
-name = "probe_2747_range_normalization"
-path = "examples/probe_2747_range_normalization.rs"
-
-[[example]]
-name = "probe_2747_pipeline_vs_profile"
-path = "examples/probe_2747_pipeline_vs_profile.rs"
-
-[[example]]
-name = "probe_2747_kappa_range_grid"
-path = "examples/probe_2747_kappa_range_grid.rs"

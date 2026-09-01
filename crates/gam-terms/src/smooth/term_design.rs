@@ -1584,7 +1584,7 @@ fn apply_global_smooth_identifiability(
         //
         // `76a520c45` withheld the deletion in that case and left NOTHING in
         // its place, which drops the invariant this whole step exists for.
-        // Measured (`examples/probe_2747_parametric_orthogonality`): every
+        // Measured under #2747: every
         // Matérn and constant-curvature block then sits at
         // `‖XᵀC‖/(‖X‖‖C‖) = 3e-1 … 5e-1` against the `1e-8` bar asserted twenty
         // lines below whenever a transform IS applied, and — because an owner
@@ -2358,7 +2358,7 @@ fn maybe_smooth_identifiability_transform(
 /// The text here used to justify the whole class with *"their realized column
 /// span contains the constant … a structural rank-1 collision"*, and that
 /// sentence is measured false for half of it
-/// (`examples/probe_2747_containment_registry`, `‖1 − P_X 1‖/‖1‖` on the
+/// (the #2747 containment probe: `‖1 − P_X 1‖/‖1‖` on the
 /// realized design against the `√ε` bar the deletion is licensed at):
 ///
 /// ```text

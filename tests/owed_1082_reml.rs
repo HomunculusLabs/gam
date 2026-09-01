@@ -24,8 +24,7 @@ use ndarray::Array2;
 use std::f64::consts::PI;
 
 /// Deterministic LCG + Box-Muller / count sampler so the data are reproducible
-/// without an external RNG crate dependency drift. Same shape as the bug-hunt
-/// probe `examples/probe_poisson_tensor_oversmooth.rs`.
+/// without an external RNG crate dependency drift.
 struct Lcg {
     state: u64,
 }

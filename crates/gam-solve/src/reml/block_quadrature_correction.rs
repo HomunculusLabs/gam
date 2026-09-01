@@ -736,8 +736,8 @@ impl<'a> RemlState<'a> {
         // splice declines and trace_j and mode_j are never exercised at all.
         //
         // MEASURED (#2623), and the answer is NEITHER SIGN. The channel record
-        // published below drives examples/probe_2623_sampled_marginal_channel_fd,
-        // which finite-differences Delta_b itself on fixtures where the splice
+        // published below drove the #2623 probe, which finite-differenced Delta_b
+        // itself on fixtures where the splice
         // engages. On two well-conditioned cells whose importance sampler is
         // essentially exact (ESS 507.9/512 and 500.1/512) the FD reference is
         // stable to six digits over h from 3e-4 to 3e-3, and the envelope

@@ -3016,7 +3016,7 @@ pub struct ParametricResidualization {
 /// `col(X)`, the deleted function IS the parametric column and the parametric
 /// block keeps it. When it is not, the deleted direction is a genuine function
 /// nothing else carries. That fix withheld the deletion, and left nothing in its
-/// place — measured (gam#2747, `examples/probe_2747_parametric_orthogonality`),
+/// place — measured (gam#2747),
 /// the shipped smooth block then sits at `‖XᵀC‖/(‖X‖‖C‖) = 1.6e-1 … 4.9e-1`
 /// against the `1e-8` bar the same step asserts whenever a transform IS applied,
 /// and `analyze_smooth_ownership`'s hierarchy is inert for every dependent

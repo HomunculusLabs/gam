@@ -52,7 +52,7 @@
 //! lands on is decided by the disagreement between the gradient evaluation and
 //! the Hessian evaluation.
 //!
-//! Measured on `geo_disease_matern` (`examples/repro2676_geo_disease_matern.rs`):
+//! Measured on `geo_disease_matern` (the #2676 repro):
 //! `sigma = 2.0930992e-5`, `sum_k g_k v_k^2 = 2.0946774e-5`, intrinsic
 //! `-1.578e-8` — the identity holding to `7.5e-4` relative, with the gate's
 //! whole verdict riding on the sign of that residual.
@@ -64,7 +64,7 @@
 //! criterion carries genuine curvature of order `delta^2` along the lift, the
 //! residual of `t'H_rho t - sum_k g_k t_k^2` is that curvature and NOT the
 //! assembly's error, and deflating the direction hides a measurement instead of
-//! a rounding. Measured (`examples/probe2676_penalty_map_defect`): the
+//! a rounding. Measured (#2676 penalty-map probe): the
 //! `geo_disease_*_matern` cells' redundancy is a small-length-scale limit —
 //! `delta = 2.079e-15` below `4e-2`, `1.874e-5` at the cold `Auto` geometry,
 //! `3.396e-1` at the geometry the fit settles on — so on those cells there is
@@ -120,7 +120,7 @@ use ndarray::{Array1, Array2};
 ///
 /// and every penalty map within `1.5e-8` of a linear dependency reads as
 /// EXACTLY dependent. Measured on `geo_disease_matern` (centers=24, n=4000,
-/// `examples/probe2676_penalty_map_defect`): pair defect `1.238e-8`, certified
+/// #2676 penalty-map probe): pair defect `1.238e-8`, certified
 /// nullity 1, the direction deflated, and the invariance residual the deflation
 /// then feeds into the curvature resolution read `1.170e-8` — a number that was
 /// reported as the ASSEMBLY'S ERROR and is in fact the criterion's own genuine

@@ -48,7 +48,7 @@
 //!   ℓ (1× median spacing) is already the BEST — every explicit ℓ is worse, so
 //!   ℓ cannot close the gap"*. That test is **not in the tree**; `grep` finds
 //!   only the citation. Rebuilt as
-//!   `examples/probe_2754_bms_length_scale_sweep.rs` on this fixture's own data
+//!   the #2754 length-scale sweep on this fixture's own data
 //!   law and this file's own held-out score, the claim inverts — the auto range
 //!   was the WORST of the eleven measured (`0.04441`, against `0.03788` at 68×
 //!   and `0.03985` at 25×). ℓ was never inert here; it was frozen at the one
