@@ -270,6 +270,13 @@ pub(crate) struct RadialLatentCoordLocalDesignJacobian {
     pub(crate) full_ident_transform: Option<Array2<f64>>,
     pub(crate) n_poly: usize,
     pub(crate) polynomial_order: Option<DuchonNullspaceOrder>,
+    /// The kernel chart amplitude `α` the forward design ships its kernel
+    /// block under (gam#979): the realized design is `α·φ(||t/σ − c||)`, so
+    /// every coordinate derivative carries `α` too. The amplitude depends on
+    /// the centers and the range only, never on `t`, so for a latent-coordinate
+    /// Jacobian it is a pure scalar. Matérn/thin-plate ship an identity chart
+    /// (`1.0`); the Duchon constructor computes it exactly as the forward does.
+    pub(crate) chart_scale: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +486,7 @@ impl LatentCoordDesignDerivative {
                 full_ident_transform: None,
                 n_poly: usize::from(include_intercept),
                 polynomial_order: None,
+                chart_scale: 1.0,
             },
         )))
     }
@@ -513,25 +521,57 @@ impl LatentCoordDesignDerivative {
                 .to_standardized_units(ell)
                 .standardized_value()
         });
-        let radial_kind = if let Some(length_scale) = length_scale {
-            RadialScalarKind::Duchon {
-                length_scale,
+        // gam#979: the forward design ships `α·K` with `α = 1/max|K|` over
+        // the center cloud (`duchon_kernel_chart`), so the coordinate Jacobian
+        // must carry the same amplitude; it is computed from the same
+        // standardized centers, range and kernel coefficients the forward uses.
+        let (radial_kind, chart_scale) = if let Some(length_scale) = length_scale {
+            let coeffs =
+                duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale.max(1e-300));
+            let chart_scale = duchon_kernel_chart(
+                centers.view(),
+                Some(length_scale),
                 p_order,
                 s_order,
-                dim: centers.ncols(),
-                coeffs: duchon_partial_fraction_coeffs(
+                centers.ncols(),
+                None,
+                Some(&coeffs),
+                None,
+            )
+            .amplification;
+            (
+                RadialScalarKind::Duchon {
+                    length_scale,
                     p_order,
                     s_order,
-                    1.0 / length_scale.max(1e-300),
-                ),
-            }
+                    dim: centers.ncols(),
+                    coeffs,
+                },
+                chart_scale,
+            )
         } else {
-            RadialScalarKind::PureDuchon {
-                block_order: pure_duchon_block_order(p_order, power).max(1.0) as usize,
+            let pure_poly_coeff =
+                PolyharmonicBlockCoeff::new(pure_duchon_block_order(p_order, power), centers.ncols());
+            let chart_scale = duchon_kernel_chart(
+                centers.view(),
+                None,
                 p_order,
                 s_order,
-                dim: centers.ncols(),
-            }
+                centers.ncols(),
+                None,
+                None,
+                Some(&pure_poly_coeff),
+            )
+            .amplification;
+            (
+                RadialScalarKind::PureDuchon {
+                    block_order: pure_duchon_block_order(p_order, power).max(1.0) as usize,
+                    p_order,
+                    s_order,
+                    dim: centers.ncols(),
+                },
+                chart_scale,
+            )
         };
         let mut workspace = BasisWorkspace::default();
         let ident_transform =
@@ -547,6 +587,7 @@ impl LatentCoordDesignDerivative {
                 full_ident_transform,
                 n_poly,
                 polynomial_order: Some(effective_order),
+                chart_scale,
             },
         )))
     }
@@ -743,10 +784,14 @@ impl RadialLatentCoordLocalDesignJacobian {
             });
         }
         let (_, q, _) = self.radial_kind.eval_design_triplet(r)?;
-        // d/dt phi(||t/sigma - c||) = q * (t/sigma - c)_axis * (1/sigma):
-        // the axis component is standardized like the radius, and the trailing
-        // `reciprocal` is the chain factor for the standardization itself.
-        Ok(q * (t_row[axis] * reciprocal - self.centers[[center, axis]]) * reciprocal)
+        // d/dt α·phi(||t/sigma - c||) = α · q · (t/sigma - c)_axis · (1/sigma):
+        // the axis component is standardized like the radius, the trailing
+        // `reciprocal` is the chain factor for the standardization itself, and
+        // `α` is the kernel chart the shipped design carries (gam#979).
+        Ok(self.chart_scale
+            * q
+            * (t_row[axis] * reciprocal - self.centers[[center, axis]])
+            * reciprocal)
     }
 
     pub(crate) fn polynomial_axis_values(&self, row: usize, axis: usize) -> Array1<f64> {

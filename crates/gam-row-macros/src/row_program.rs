@@ -4235,8 +4235,10 @@ mod tests {
             },
             "repeated_order2",
         );
-        assert_eq!(rust.matches("let out_stack0").count(), 1);
-        assert_eq!(rust.matches("let out_stack1").count(), 1);
+        // `let out_stack0 =` (the leaf call), not `let out_stack0_c0` (the
+        // hoisted curvature coefficient that follows it).
+        assert_eq!(rust.matches("let out_stack0 =").count(), 1);
+        assert_eq!(rust.matches("let out_stack1 =").count(), 1);
         assert_eq!(rust.matches("log_stack (out_v)").count(), 2);
     }
 

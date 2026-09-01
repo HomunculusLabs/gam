@@ -2368,11 +2368,12 @@ fn iso_kappa_duchon_outer_gradient_matches_centered_fd() {
 }
 #[test]
 fn iso_kappa_duchon_dx_dpsi_matches_fd() {
-    // Compare the production frozen-spec dX/dψ path against centered FD
-    // of X(ψ+h) - X(ψ-h). This intentionally goes through
-    // `try_build_spatial_term_log_kappa_derivative`: the formula layer owns
-    // the frozen centers, length-scale compensation, and composed
-    // identifiability transform.
+    // Compare the production frozen-spec design jets against centered FD in
+    // the collection's invariant LOCAL chart.  The collection may choose a
+    // different RRQR/whitened coefficient basis at every ψ, but differentiating
+    // those arbitrary basis vectors is not statistical geometry.  Freeze the
+    // current coefficient chart and apply the fixed row projector P_C to both
+    // the analytic jet and the FD value path (gam#2760).
     let n = 80usize;
     let mut data = Array2::<f64>::zeros((n, 1));
     for i in 0..n {
@@ -2434,11 +2435,32 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
     let p = op.p_out();
     assert_eq!(p_total, design.design.ncols());
     assert_eq!(global_range.end - global_range.start, p);
+    let smooth_start = global_range.start;
+    let gauge = design.smooth.terms[0]
+        .collection_gauge
+        .as_ref()
+        .expect("the intrinsic Duchon term must carry its collection gauge");
+    let projector = FixedRowSpaceProjector::from_constraint_block(
+        gauge.constraint_block.view(),
+    )
+    .expect("collection row-space projector");
+    assert!(projector.rank() > 0, "the regression must arm a nonempty row gauge");
+    let project_frozen_chart = |mut full: Array2<f64>| -> Array2<f64> {
+        let mut smooth = full
+            .slice(s![.., smooth_start..(smooth_start + p)])
+            .to_owned();
+        projector
+            .project_matrix_in_place(&mut smooth)
+            .expect("fixed-chart value projection");
+        full.slice_mut(s![.., smooth_start..(smooth_start + p)])
+            .assign(&smooth);
+        full
+    };
 
     // FD reference.
     let h = 1e-4_f64;
-    let x_plus = build_design_at(psi_eval + h);
-    let x_minus = build_design_at(psi_eval - h);
+    let x_plus = project_frozen_chart(build_design_at(psi_eval + h));
+    let x_minus = project_frozen_chart(build_design_at(psi_eval - h));
     eprintln!(
         "[DXDPSI_FD] X(+h)[0,0..3]={:?} X(-h)[0,0..3]={:?}",
         x_plus.row(0).iter().take(3).copied().collect::<Vec<_>>(),
@@ -2451,7 +2473,7 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
         p,
     );
     // Also build at psi_eval to compare cols.
-    let x_at = build_design_at(psi_eval);
+    let x_at = project_frozen_chart(build_design_at(psi_eval));
     let orig_design = build_term_collection_design(data.view(), &spec_orig).unwrap_or_else(|e| panic!("{} failed: {:?}", "rebuild orig", e));
     eprintln!(
         "[DXDPSI_FD] X(psi_eval) shape={:?} orig_design.ncols={}",
@@ -2468,10 +2490,37 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
         analytic.column_mut(j).assign(&col);
         basisv[j] = 0.0;
     }
+    let mut analytic_second = Array2::<f64>::zeros((n, p));
+    for j in 0..p {
+        basisv[j] = 1.0;
+        let col = op
+            .forward_mul_second_diag(0, &basisv.view())
+            .unwrap_or_else(|e| panic!("second forward_mul failed: {e:?}"));
+        analytic_second.column_mut(j).assign(&col);
+        basisv[j] = 0.0;
+    }
+
+    let relative_cross_residual = |jet: &Array2<f64>| -> f64 {
+        let cross = gauge.constraint_block.t().dot(jet);
+        let cross_norm = cross.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let constraint_norm = gauge
+            .constraint_block
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let jet_norm = jet.iter().map(|value| value * value).sum::<f64>().sqrt();
+        cross_norm / (constraint_norm * jet_norm).max(f64::MIN_POSITIVE)
+    };
+    let first_orthogonality = relative_cross_residual(&analytic);
+    let second_orthogonality = relative_cross_residual(&analytic_second);
+    assert!(
+        first_orthogonality <= 1e-8 && second_orthogonality <= 1e-8,
+        "collection-gauged design jets must stay orthogonal to C: first={first_orthogonality:.3e}, second={second_orthogonality:.3e}"
+    );
 
     // Also check transpose_mul: X_tau^T v for v of length n.
     // FD reference: X_tau^T v should be (X(+h)^T - X(-h)^T)/(2h) · v.
-    let smooth_start = global_range.start;
     let v_test = Array1::<f64>::from_shape_fn(n, |i| (i as f64 * 0.07).sin());
     let analytic_tv = op.transpose_mul(0, &v_test.view()).unwrap_or_else(|e| panic!("{} failed: {:?}", "transpose_mul", e));
     let fd_tv_full = (&x_plus.t() - &x_minus.t()) / (2.0 * h);
@@ -2500,6 +2549,10 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
     let fd = fd_full
         .slice(s![.., smooth_start..(smooth_start + p)])
         .to_owned();
+    let fd_second_full = (&x_plus - &(2.0 * &x_at) + &x_minus) / (h * h);
+    let fd_second = fd_second_full
+        .slice(s![.., smooth_start..(smooth_start + p)])
+        .to_owned();
     let mut max_diff = 0.0_f64;
     let mut max_abs = 0.0_f64;
     for i in 0..n {
@@ -2526,6 +2579,19 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
         fd.row(0).iter().take(p).copied().collect::<Vec<_>>(),
     );
     assert!(max_diff < 5e-3 * max_abs.max(1e-3), "dX/dψ mismatch");
+    let max_second_diff = analytic_second
+        .iter()
+        .zip(fd_second.iter())
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max);
+    let max_second_abs = analytic_second
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_second_diff < 2e-2 * max_second_abs.max(1e-3),
+        "d²X/dψ² mismatch: max_diff={max_second_diff:.3e}, scale={max_second_abs:.3e}"
+    );
 }
 
 /// #2454 MEASUREMENT (reports, never fails): put the MONOTONE fixture's own spec
