@@ -219,6 +219,20 @@ row_program! {
 type Channels = (f64, [f64; K], [[f64; K]; K]);
 
 #[inline(always)]
+/// The activity flag and stack of a plan slot the planner may leave absent.
+///
+/// The hand arm reads the `Option` discriminant (`if let Some(u1) = plan.u1`);
+/// the generated arm must read the same bit, not flatten the slot to zeros
+/// and rediscover its absence with a five-way compare scan. Both arms then
+/// do the same scaffolding on the same plan, and the timing compares the
+/// kernels.
+fn presence(slot: Option<[f64; 5]>) -> (f64, [f64; 5]) {
+    match slot {
+        Some(stack) => (1.0, stack),
+        None => (0.0, [0.0; 5]),
+    }
+}
+
 fn stack_active(stack: &[f64; 5]) -> f64 {
     if stack.iter().all(|value| *value == 0.0) {
         0.0
@@ -230,8 +244,8 @@ fn stack_active(stack: &[f64; 5]) -> f64 {
 #[inline(never)]
 fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
     let plan = outer_plan_order2(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let (value, gradient, hessian, []) = generated_sls_order2(
         p[0],
         p[1],
@@ -248,13 +262,13 @@ fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -267,8 +281,8 @@ fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
 #[inline(never)]
 fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; K] {
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     generated_sls_third_contracted(
         p[0],
         p[1],
@@ -285,13 +299,13 @@ fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -309,8 +323,8 @@ fn generated_fourth(
     direction_v: &[f64; K],
 ) -> [[f64; K]; K] {
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     generated_sls_fourth_contracted(
         p[0],
         p[1],
@@ -327,13 +341,13 @@ fn generated_fourth(
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -349,8 +363,8 @@ fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; 
     use gam_math::jet_scalar::OneSeed;
 
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let vars: [OneSeed<K>; K] =
         std::array::from_fn(|axis| OneSeed::seed_direction(p[axis], axis, direction[axis]));
     let (value, []) = generated_sls(
@@ -369,13 +383,13 @@ fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; 
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
@@ -395,8 +409,8 @@ fn jet_fourth(
     use gam_math::jet_scalar::TwoSeed;
 
     let plan = outer_plan(kernel);
-    let u1 = plan.u1.unwrap_or([0.0; 5]);
-    let g = plan.g.unwrap_or([0.0; 5]);
+    let (u1_active, u1) = presence(plan.u1);
+    let (g_active, g) = presence(plan.g);
     let vars: [TwoSeed<K>; K] = std::array::from_fn(|axis| {
         TwoSeed::seed(p[axis], axis, direction_u[axis], direction_v[axis])
     });
@@ -416,13 +430,13 @@ fn jet_fourth(
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        stack_active(&u1),
+        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        stack_active(&g),
+        g_active,
         g[0],
         g[1],
         g[2],
