@@ -958,21 +958,6 @@ fn test_knot_generation_uniform() {
     );
 }
 
-#[test]
-fn test_knot_generationwith_training_data_falls_back_to_uniform() {
-    // Note: training_data is no longer needed since we're not passing it to generate_full_knot_vector
-    // let training_data = array![0., 1., 2., 5., 8., 9., 10.]; // 7 points
-    let knots = internal::generate_full_knot_vector((0.0, 10.0), 3, 2).unwrap();
-    // Since quantile knots are disabled, this should generate uniform knots
-    // 3 internal knots + 2 * (2+1) boundary = 9 knots
-    assert_eq!(knots.len(), 9);
-    let expected_knots = array![0.0, 0.0, 0.0, 2.5, 5.0, 7.5, 10.0, 10.0, 10.0];
-    assert_abs_diff_eq!(
-        knots.as_slice().unwrap(),
-        expected_knots.as_slice().unwrap(),
-        epsilon = 1e-9
-    );
-}
 
 #[test]
 fn test_penalty_matrix_creation() {

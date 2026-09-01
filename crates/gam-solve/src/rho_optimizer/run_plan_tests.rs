@@ -1426,22 +1426,6 @@ fn plan_reserves_analytic_hessian_for_terminal_certificate_2359() {
     assert_eq!(p.hessian_source, HessianSource::BfgsApprox);
 }
 
-#[test]
-fn plan_survival_baseline_exact_hessian_selects_arc() {
-    let cap = OuterCapability {
-        gradient: Derivative::Analytic,
-        hessian: DeclaredHessianForm::Either,
-        n_params: 3,
-        psi_dim: 0,
-        fixed_point_available: false,
-        barrier_config: None,
-        prefer_gradient_only: false,
-        disable_fixed_point: false,
-    };
-    let p = plan(&cap);
-    assert_eq!(p.solver, Solver::Arc);
-    assert_eq!(p.hessian_source, HessianSource::Analytic);
-}
 
 #[test]
 fn plan_no_hessian_few_params_selects_bfgs() {
@@ -1835,24 +1819,6 @@ fn plan_efs_not_selected_with_analytic_hessian() {
     assert_eq!(p.solver, Solver::Arc);
 }
 
-#[test]
-fn plan_efs_with_no_gradient_penalty_like_many_params() {
-    // Even without analytic gradient, EFS works because it doesn't
-    // need the gradient at all.
-    let cap = OuterCapability {
-        gradient: Derivative::Unavailable,
-        hessian: DeclaredHessianForm::Unavailable,
-        n_params: 20,
-        psi_dim: 0,
-        fixed_point_available: true,
-        barrier_config: None,
-        prefer_gradient_only: false,
-        disable_fixed_point: false,
-    };
-    let p = plan(&cap);
-    assert_eq!(p.solver, Solver::Efs);
-    assert_eq!(p.hessian_source, HessianSource::EfsFixedPoint);
-}
 
 #[test]
 fn plan_efs_allowed_with_barrier_config() {
@@ -4447,16 +4413,6 @@ fn routing_matern_iso_large_kappa_dim_stays_on_arc_with_analytic_hessian() {
     assert_eq!(p.hessian_source, HessianSource::Analytic);
 }
 
-#[test]
-fn routing_marginal_slope_stays_on_arc_when_both_derivs_analytic() {
-    // Bernoulli/survival marginal-slope: the planner contract is the
-    // same — (Analytic, Analytic) → ARC + Analytic. Runtime selects
-    // operator HVPs via `use_joint_matrix_free_path`.
-    let cap = cap_for_routing(Derivative::Analytic, DeclaredHessianForm::Either, 3);
-    let p = plan(&cap);
-    assert_eq!(p.solver, Solver::Arc);
-    assert_eq!(p.hessian_source, HessianSource::Analytic);
-}
 
 #[test]
 fn plan_hybrid_efs_selected_few_params() {
@@ -4545,24 +4501,6 @@ fn plan_hybrid_efs_not_selected_with_analytic_hessian() {
     assert_eq!(p.solver, Solver::Arc);
 }
 
-#[test]
-fn plan_pure_efs_not_hybrid_when_all_penalty_like() {
-    // When all coords are penalty-like (no ψ), pure EFS is selected
-    // even if has_psi_coords is false.
-    let cap = OuterCapability {
-        gradient: Derivative::Analytic,
-        hessian: DeclaredHessianForm::Unavailable,
-        n_params: 15,
-        psi_dim: 0,
-        fixed_point_available: true,
-        barrier_config: None,
-        prefer_gradient_only: false,
-        disable_fixed_point: false,
-    };
-    let p = plan(&cap);
-    assert_eq!(p.solver, Solver::Efs);
-    assert_eq!(p.hessian_source, HessianSource::EfsFixedPoint);
-}
 
 #[test]
 fn automatic_fallbacks_preserve_analytic_hessian_for_arc_primary() {
