@@ -1188,6 +1188,29 @@ fn symbolic_expression(
 
             let first = format!("{stack}[1]");
             let second = format!("{stack}[2]");
+            // The curvature term of the chain rule, `f''·g_a·g_b`, is emitted as
+            // `(f''·g_a)·g_b` with `f''·g_a` hoisted ONCE per present axis, so a
+            // Hessian entry costs one multiply instead of two. LLVM cannot do
+            // this itself: without fast-math it may not re-associate
+            // `f''·(g_a·g_b)`. Over a support of `s` axes this removes
+            // `s(s-1)/2` multiplies per composition; a hand kernel that writes
+            // `second * g_a * g_b` per entry carries them all.
+            let mut curvature_coefficient: Vec<Option<String>> = vec![None; dimension];
+            for axis in 0..dimension {
+                if let Some(component) = &input.gradient[axis] {
+                    let product = symbolic_multiply(&second, component);
+                    let name = format!("{stack}_c{axis}");
+                    match target {
+                        SymbolicTarget::Rust => {
+                            preludes.push(format!("let {name}: f64 = {product};"));
+                        }
+                        SymbolicTarget::Cuda => {
+                            preludes.push(format!("double {name} = {product};"));
+                        }
+                    }
+                    curvature_coefficient[axis] = Some(name);
+                }
+            }
             let mut gradient = vec![None; dimension];
             let mut hessian = vec![None; dimension * dimension];
             for axis in 0..dimension {
@@ -1195,9 +1218,10 @@ fn symbolic_expression(
                 for other in axis..dimension {
                     let index = axis * dimension + other;
                     let inherited = symbolic_scale_component(&input.hessian[index], &first);
-                    let curvature =
-                        symbolic_multiply_component(&input.gradient[axis], &input.gradient[other])
-                            .map(|component| symbolic_multiply(&second, &component));
+                    let curvature = symbolic_multiply_component(
+                        &curvature_coefficient[axis],
+                        &input.gradient[other],
+                    );
                     hessian[index] = symbolic_add_component(&inherited, &curvature);
                 }
             }
@@ -4138,11 +4162,15 @@ mod tests {
             "double product_g0 = y;",
             "double product_h0_1 = 1.0;",
             "double product_g1 = x;",
+            // The curvature coefficient `f''·g_a` is hoisted once per axis, so
+            // every Hessian entry is one multiply.
+            "double curved_stack0_c0 = (curved_stack0[2] * product_g0);",
+            "double curved_stack0_c1 = (curved_stack0[2] * product_g1);",
             "double curved_g0 = (product_g0 * curved_stack0[1]);",
-            "double curved_h0_0 = (curved_stack0[2] * (product_g0 * product_g0));",
-            "double curved_h0_1 = ((product_h0_1 * curved_stack0[1]) + (curved_stack0[2] * (product_g0 * product_g1)));",
+            "double curved_h0_0 = (curved_stack0_c0 * product_g0);",
+            "double curved_h0_1 = ((product_h0_1 * curved_stack0[1]) + (curved_stack0_c0 * product_g1));",
             "double curved_g1 = (product_g1 * curved_stack0[1]);",
-            "double curved_h1_1 = (curved_stack0[2] * (product_g1 * product_g1));",
+            "double curved_h1_1 = (curved_stack0_c1 * product_g1);",
             "double out_g0 = 1.0;",
             "double out_h0_0 = 0.0;",
             "double out_h0_1 = 0.0;",
