@@ -9,6 +9,7 @@ use crate::identifiability::{
 };
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
+use super::fit_drivers::GaugeOrbitDescent;
 
 // ── Theorem K: the rank charge is a RUNNING COMPLEXITY λ(n) ──────────────────
 //
