@@ -227,7 +227,7 @@ fn stack_active(stack: &[f64; 5]) -> f64 {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
     let plan = outer_plan_order2(kernel);
     let u1 = plan.u1.unwrap_or([0.0; 5]);
@@ -264,7 +264,7 @@ fn generated(p: &[f64; K], kernel: &Kernel) -> Channels {
     (value, gradient, hessian)
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; K] {
     let plan = outer_plan(kernel);
     let u1 = plan.u1.unwrap_or([0.0; 5]);
@@ -301,7 +301,7 @@ fn generated_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_fourth(
     p: &[f64; K],
     kernel: &Kernel,
@@ -344,7 +344,7 @@ fn generated_fourth(
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; K] {
     use gam_math::jet_scalar::OneSeed;
 
@@ -385,7 +385,7 @@ fn jet_third(p: &[f64; K], kernel: &Kernel, direction: &[f64; K]) -> [[f64; K]; 
     value.contracted_third()
 }
 
-#[inline(always)]
+#[inline(never)]
 fn jet_fourth(
     p: &[f64; K],
     kernel: &Kernel,
@@ -585,7 +585,7 @@ fn hand_analytic_term<const ORDER: usize, const N: usize>(
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 fn hand_analytic_contracted<const ORDER: usize>(
     p: &[f64; K],
     kernel: &Kernel,
@@ -700,7 +700,7 @@ fn hand_analytic_contracted<const ORDER: usize>(
     output
 }
 
-#[inline(always)]
+#[inline(never)]
 fn hand(p: &[f64; K], kernel: &Kernel) -> Channels {
     let entry_exp = (-p[7]).exp();
     let exit_exp = (-p[6]).exp();

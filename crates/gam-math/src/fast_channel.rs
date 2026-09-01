@@ -163,7 +163,7 @@ mod oracle_tests {
     //! `faa_top*` ever diverges from the universal rule these disagree.
     use super::*;
     use crate::jet_algebra::faa_di_bruno;
-    use crate::paired_timing::{SpeedGate, paired_interleaved};
+    use crate::paired_timing::{SpeedGate, batched, paired_interleaved};
     use std::hint::black_box;
 
     fn stream(seed: u64) -> impl FnMut() -> f64 {
@@ -435,36 +435,36 @@ mod oracle_tests {
                 3,
                 paired_interleaved(
                     15,
-                    200_000,
+                    3_000,
                     0x5153_9320_0C03,
-                    |nudge| {
+                    batched(64, |nudge| {
                         let mut x = order3;
                         x[0] += nudge;
                         compiled_bundle3(black_box(x)).into_iter().sum::<f64>()
-                    },
-                    |nudge| {
+                    }),
+                    batched(64, |nudge| {
                         let mut x = order3;
                         x[0] += nudge;
                         strongest_hand_bundle3(black_box(x)).into_iter().sum::<f64>()
-                    },
+                    }),
                 ),
             ),
             (
                 4,
                 paired_interleaved(
                     15,
-                    100_000,
+                    1_500,
                     0x5153_9320_0C04,
-                    |nudge| {
+                    batched(64, |nudge| {
                         let mut x = order4;
                         x[0] += nudge;
                         compiled_bundle4(black_box(x)).into_iter().sum::<f64>()
-                    },
-                    |nudge| {
+                    }),
+                    batched(64, |nudge| {
                         let mut x = order4;
                         x[0] += nudge;
                         strongest_hand_bundle4(black_box(x)).into_iter().sum::<f64>()
-                    },
+                    }),
                 ),
             ),
         ] {

@@ -3833,8 +3833,6 @@ mod moment_engine_tests {
     use crate::cubic_cell_kernel::{DenestedCubicCell, reduce_sextic_moments};
     use crate::marginal_slope_shared::eval_coeff4_at;
     use gam_math::nested_dual::Dual22;
-    use std::hint::black_box;
-    use std::time::Instant;
 
     #[test]
     fn dual2_flexjet_scales_runtime_channels_by_total_homogeneous_order() {

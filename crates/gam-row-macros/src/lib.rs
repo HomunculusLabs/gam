@@ -377,6 +377,22 @@ impl Graph {
         if self.is_zero(when_true) && self.is_zero(when_false) {
             return self.constant(0.0);
         }
+        // The inactive branch's zero has one spelling. A negation pushed
+        // through a gate yields `-0.0` there while a later derivative of the
+        // same gate yields `0.0`, and two gates that differ only in the sign of
+        // an inactive zero would intern as two nodes: two identical `phi`s
+        // after the branch merge, which LLVM does not unify, and therefore two
+        // spills and two stores of one value (measured on the cause-specific
+        // order-2 row: the entry gate's gradient and Hessian channels). The
+        // sign of an inactive contribution carries no information.
+        let when_false = if self.is_zero(when_false) {
+            self.constant(0.0)
+        } else {
+            when_false
+        };
+        if when_true == when_false {
+            return when_true;
+        }
         self.intern(Node::Select(activity, when_true, when_false))
     }
 

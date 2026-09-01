@@ -814,7 +814,7 @@ enum MarginalSlopeCovarianceStorage {
     },
 }
 
-/// Immutable, validated covariance geometry for the physical log-slope vector.
+/// Immutable, validated covariance geometry for the physical slope vector.
 ///
 /// Admission is the single validation boundary. Diagonal covariance entries
 /// remain the sole authority for their quadratic forms. Full covariances cache
@@ -1253,7 +1253,7 @@ impl SymmetricQuadraticCoefficients for MarginalSlopeCovariance {
 //
 //     c(a) = sqrt(1 + r(a)' Sigma(a) r(a)).
 //
-// `probit_scale` maps the raw log-slope surface to the observed probit
+// `probit_scale` maps the raw slope surface to the observed probit
 // gradient r(a). K=1 with diagonal variance 1 gives the original scalar
 // formula sqrt(1 + r^2); full and low-rank covariances differ only in the
 // shape-specific evaluation of the same quadratic form.
@@ -1659,7 +1659,10 @@ row_program! {
         observed_scale => rigid_observed_scale_stack => rigid_observed_scale_stack_cuda,
         signed_probit => signed_probit_neglog_unary_stack => signed_probit_neglog_unary_stack_cuda,
     }
-    witnesses [];
+    // The signed margin is the one intermediate a caller must inspect (a NaN or
+    // `-inf` margin is a domain error, not a curvature to erase), so the program
+    // reports the value it composed rather than making the caller recompute it.
+    witnesses [signed_margin];
     {
         let q = compose(
             supplied_link,
@@ -1707,9 +1710,12 @@ row_program! {
 /// margin transcendental enters by composing the certified
 /// [`signed_probit_neglog_unary_stack`] onto the assembled signed margin — the
 /// stability discipline of #932 (humans own primitive stability, the algebra
-/// owns combinatorics). The caller MUST guard the signed-margin value against a
-/// non-finite (non-`+∞`-excluded) NaN before calling; the seeded-evaluation
-/// wrappers below do that.
+/// owns combinatorics). A NaN or `-inf` signed margin is a domain error and is
+/// reported as `Err`; the program's own `signed_margin` witness is what is
+/// checked, after the evaluation, so the guard costs one compare rather than a
+/// second evaluation of the index (every leaf is total on non-finite input:
+/// the probit stack returns `NaN`/its `-inf` limits and nothing panics, and the
+/// result is discarded on that path).
 #[inline]
 pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::JetScalar<2>>(
     p: &[S; 2],
@@ -1720,14 +1726,7 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
     probit_scale: f64,
 ) -> Result<S, String> {
     let outcome_sign = 2.0 * y - 1.0;
-    let m = outcome_sign
-        * marginal_slope_standard_normal_scalar_eta(marginal.q, p[1].value(), z, probit_scale);
-    if !(m.is_finite() || m == f64::INFINITY) {
-        return Err(format!(
-            "non-finite signed margin in rigid probit row NLL: {m}"
-        ));
-    }
-    let (nll, []) = rigid_standard_normal_program(
+    let (nll, [signed_margin]) = rigid_standard_normal_program(
         &p[0],
         &p[1],
         marginal.q,
@@ -1740,10 +1739,25 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
         outcome_sign,
         w,
     );
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(non_finite_signed_margin(signed_margin));
+    }
     Ok(nll)
 }
 
-#[inline]
+/// The shipped value/gradient/Hessian kernel for one rigid standard-normal row.
+///
+/// `#[inline(always)]`: this is a per-row kernel whose whole body is the
+/// generated straight-line program plus one compare, and it is called from the
+/// per-row loops of every consumer. Left to the heuristics, the `Result`
+/// return and the error path made it an out-of-line call — measured on the
+/// release binary as a `call`, a discriminant test and a copy of all seven
+/// channels through the stack per row, while the hand kernel it is raced
+/// against inlined completely; that call boundary, not the arithmetic, was the
+/// 6% by which production lost (`median_ratio = 0.937`, unanimous over
+/// fifteen paired repetitions). The error constructor is out of line and cold
+/// for the same reason: the hot path must be small enough to inline.
+#[inline(always)]
 pub(super) fn rigid_standard_normal_row_kernel(
     marginal: BernoulliMarginalLinkMap,
     g: f64,
@@ -1753,14 +1767,7 @@ pub(super) fn rigid_standard_normal_row_kernel(
     probit_scale: f64,
 ) -> Result<(f64, [f64; 2], [[f64; 2]; 2]), String> {
     let outcome_sign = 2.0 * y - 1.0;
-    let signed_margin =
-        outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
-        return Err(format!(
-            "non-finite signed margin in rigid probit row NLL: {signed_margin}"
-        ));
-    }
-    let (value, gradient, hessian, []) = rigid_standard_normal_program_order2(
+    let (value, gradient, hessian, [signed_margin]) = rigid_standard_normal_program_order2(
         marginal.eta_value(),
         g,
         marginal.q,
@@ -1773,7 +1780,16 @@ pub(super) fn rigid_standard_normal_row_kernel(
         outcome_sign,
         w,
     );
+    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+        return Err(non_finite_signed_margin(signed_margin));
+    }
     Ok((value, gradient, hessian))
+}
+
+#[cold]
+#[inline(never)]
+fn non_finite_signed_margin(signed_margin: f64) -> String {
+    format!("non-finite signed margin in rigid probit row NLL: {signed_margin}")
 }
 
 /// Mixed `(primary, z)` second derivative of the rigid standard-normal row
@@ -2934,14 +2950,12 @@ mod jet_tower_oracle_tests {
     /// #932 release speed gate for the rigid Bernoulli row: the shipped jet
     /// value/grad/Hessian kernel must beat the original hand chain it replaced
     /// (reconstructed verbatim above as [`hand_rigid_vgh`]). One measured cell
-    /// per outcome branch; emits the harness-parsed `hand_over_production`
-    /// token that the MSI release harness fails closed on whenever any cell is
-    /// `<= 1`. (This supersedes the removed `#[ignore]`d microbench — release
-    /// gates are plain non-ignored tests, same as the other `release_measure`
-    /// cells.)
+    /// per outcome branch, each a `faster` contract on the shared
+    /// [`SpeedGate`], which is what the release lane derives and fails
+    /// closed on.
     #[test]
     fn release_measure_rigid_bernoulli_vgh_vs_hand_chain_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         // (eta, g, z, y, w): one ordinary interior row per outcome branch —
         // y=1 and y=0 are distinct live sign branches of the Mills-ratio
@@ -2958,8 +2972,11 @@ mod jet_tower_oracle_tests {
         // The local `best_ns` this replaces timed each arm to completion in a
         // fixed order and took a minimum, which is the shape that cannot
         // separate a real margin from a systematic first-versus-second offset.
+        // One arm call evaluates ROWS rows: a single row is ~90 ns, of the same
+        // order as a closure call, and the harness must not be what is measured.
+        const ROWS: usize = 64;
         let reps = 15usize;
-        let iterations = 300_000usize;
+        let iterations = 5_000usize;
         let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-BERNOULLI-VGH-932"));
 
         for (case_idx, &(eta, g, z, y, w)) in cases.iter().enumerate() {
@@ -2994,7 +3011,7 @@ mod jet_tower_oracle_tests {
                 reps,
                 iterations,
                 0x9320_0BAD ^ case_idx as u64,
-                |nudge| {
+                batched(ROWS, |nudge| {
                     let (value, gradient, hessian) = measured_production_rigid_vgh(
                         marginal,
                         g + nudge,
@@ -3004,12 +3021,12 @@ mod jet_tower_oracle_tests {
                         probit_scale,
                     );
                     value + gradient[0] + hessian[0][0]
-                },
-                |nudge| {
+                }),
+                batched(ROWS, |nudge| {
                     let (value, gradient, hessian) =
                         measured_hand_rigid_vgh(marginal, g + nudge, z, y, w, probit_scale);
                     value + gradient[0] + hessian[0][0]
-                },
+                }),
             );
 
             // `median_ratio` is `hand / production`: above 1 means the shipped

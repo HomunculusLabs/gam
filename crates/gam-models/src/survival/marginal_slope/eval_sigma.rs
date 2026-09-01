@@ -1199,14 +1199,15 @@ mod sigma_parameter_jet_release_tests {
                     },
                     |nudge| {
                         let primaries = [q0, q1, qd1, g + nudge];
-                        let channel = if second {
-                            racer_second_channel(&primaries, &scale, &inputs)
-                                .expect("sigma second-parameter dense-tower racer")
+                        if second {
+                            let channel = racer_second_channel(&primaries, &scale, &inputs)
+                                .expect("sigma second-parameter dense-tower racer");
+                            fold((channel.v, channel.g, channel.h))
                         } else {
-                            racer_first_channel(&primaries, &scale, &inputs)
-                                .expect("sigma first-parameter dense-tower racer")
-                        };
-                        fold((channel.v, channel.g, channel.h))
+                            let channel = racer_first_channel(&primaries, &scale, &inputs)
+                                .expect("sigma first-parameter dense-tower racer");
+                            fold((channel.v, channel.g, channel.h))
+                        }
                     },
                 );
                 gate.faster(

@@ -215,7 +215,7 @@ pub(crate) fn survival_rigid_pilot_eta(
 /// and freezes; seeding the block at the pilot's `g ≈ 0.3` operating point
 /// (where the slope channel carries information and the block is full-rank)
 /// breaks the chicken-and-egg and lets the inner converge to the true data
-/// optimum — preserving the log-slope estimand rather than dropping/pinning
+/// optimum — preserving the slope estimand rather than dropping/pinning
 /// it. Self-correcting: it is just a warm start, so the converged fit is the
 /// data optimum (zero bias).
 ///
@@ -3214,7 +3214,7 @@ mod tests {
     /// output and covariance scratch so timing includes row arithmetic only.
     #[test]
     fn release_measure_packed_widths_k1_to_k14_vs_strongest_hand_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         // Every width's parity is pinned in every build by the oracles this
         // module already carries; this gate is the speed contract, release
@@ -3322,10 +3322,10 @@ mod tests {
                         if let Some(gate) = gate.as_mut() {
                             let timing = paired_interleaved(
                                 15,
-                                2_000,
+                                500,
                                 0x9320_9AC4 ^ ($k as u64) ^ (event.to_bits() >> 60),
-                                |nudge| evaluate_production(-0.28 + nudge, &mut workspace),
-                                |nudge| evaluate_hand(-0.28 + nudge, &mut hand_workspace),
+                                batched(16, |nudge| evaluate_production(-0.28 + nudge, &mut workspace)),
+                                batched(16, |nudge| evaluate_hand(-0.28 + nudge, &mut hand_workspace)),
                             );
                             gate.faster(
                                 &format!("covariance={label} event={event:.0} k={} dim={}", $k, $dim),
@@ -3365,11 +3365,12 @@ mod tests {
     /// profile only (`SpeedGate::open` documents why).
     #[test]
     fn release_measure_rigid_scalar_order2_vs_strongest_hand_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         // One ordinary interior row per event branch: censored (d=0) and
         // event (d=1) evaluate different live derivative stacks, so each is
-        // its own measured cell.
+        // its own measured cell. One arm call evaluates 64 rows, so the
+        // harness's per-call cost stays far below the arm.
         let cases = [
             (-0.7, 0.4, 0.8, -0.3, 0.6, 1.0, 0.0, 0.75),
             (0.2, -0.5, 1.4, 0.9, -1.1, 0.8, 1.0, 1.0),
@@ -3398,15 +3399,15 @@ mod tests {
             // value, gradient and Hessian channels back into the checksum.
             let timing = paired_interleaved(
                 15,
-                300_000,
+                5_000,
                 0x9320_5CA1 ^ (d.to_bits() >> 60),
-                |nudge| {
+                batched(64, |nudge| {
                     let (value, gradient, hessian) =
                         row_primary_closed_form(q0, q1, qd1, g + nudge, z, w, d, 1.0e-8, scale)
                             .expect("canonical rigid row");
                     value + gradient[0] + hessian[0][0]
-                },
-                |nudge| {
+                }),
+                batched(64, |nudge| {
                     let (value, gradient, hessian) =
                         test_support::row_primary_closed_form_hand_reference(
                             q0,
@@ -3421,7 +3422,7 @@ mod tests {
                         )
                         .expect("strongest hand rigid row");
                     value + gradient[0] + hessian[0][0]
-                },
+                }),
             );
             gate.faster(&format!("event={d:.0}"), &timing, "production", "hand");
         }

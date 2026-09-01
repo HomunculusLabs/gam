@@ -292,8 +292,8 @@ fn closed_form_block_states(
             beta: Array1::zeros(0),
             eta: Array1::zeros(n),
         },
-        // Log-slope block: empty beta with per-row eta = g (constant
-        // log-slope across rows).
+        // Slope block: empty beta with per-row eta = g (constant
+        // slope across rows).
         ParameterBlockState {
             beta: Array1::zeros(0),
             eta: Array1::from_elem(n, g),
@@ -307,7 +307,7 @@ fn converged_identifiability_scalars_use_current_vector_geometry_932() {
     let mut family = make_closed_form_test_family(n);
     let design = array![[1.0], [2.0]];
     let offset = array![0.2, -0.1];
-    family.logslope_layout = LogslopeTopology::shared()
+    family.logslope_layout = SlopeTopology::shared()
         .materialize_identity(DesignMatrix::from(design.clone()), &offset)
         .unwrap();
     let beta_logslope = array![0.5];
@@ -759,7 +759,7 @@ fn exact_survival_callbacks_lock_the_family_owned_coefficient_chart() {
     let time = TimeBlockJacobian::new(Arc::clone(&one), Arc::clone(&one), Arc::clone(&one));
     let marginal = MarginalBlockJacobian::new(Arc::clone(&one));
     let family = test_family(None, None);
-    let logslope = LogslopeBlockJacobian::new(
+    let logslope = SlopeBlockJacobian::new(
         family.logslope_layout.clone(),
         Arc::clone(&family.z),
         family.score_covariance.clone(),
@@ -2820,7 +2820,7 @@ fn survival_marginal_slope_advertises_outer_hvp_at_large_psi_dim() {
 
 #[test]
 fn survival_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
-    // Rigid three-block shape: time p=12, marginal p=20, log-slope p=8.
+    // Rigid three-block shape: time p=12, marginal p=20, slope p=8.
     // The row kernel couples all three blocks, so the joint Hessian is
     // dense over (12+20+8)²=1600 entries per row. The override must
     // return n·(Σ p_b)², not the block-diagonal Σ n·p_b².
@@ -7876,6 +7876,8 @@ fn survival_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
 /// wall-clock-benchmark form is banned by the workspace hygiene scanner).
 #[test]
 fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+
     let n = 800usize;
     let z: Vec<f64> = (0..n).map(|r| ((r as f64) * 0.29).sin() * 0.9).collect();
     let weights: Vec<f64> = (0..n).map(|r| 0.6 + 0.4 * ((r % 5) as f64) / 5.0).collect();
@@ -8109,7 +8111,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         let Some(gate) = gate.as_mut() else {
             continue;
         };
-        // The nudge perturbs the log-slope primary, so no tower evaluation is
+        // The nudge perturbs the slope primary, so no tower evaluation is
         // loop-invariant across calls.
         let third = paired_interleaved(
             15,
@@ -8322,7 +8324,7 @@ fn survival_sparse_tower4_full_t4_matches_dense_oracle_979() {
 //
 // Moved from `tests/survival/misc/frailty_scale_audit_plumbing.rs` and
 // `tests/survival/survival/survival_marginal_slope_jacobian_hyperbolic_correction.rs`
-// when `LogslopeBlockJacobian` construction went crate-internal (layout +
+// when `SlopeBlockJacobian` construction went crate-internal (layout +
 // covariance record; probit scale read from the linearization state). The
 // old root-tree contract "Err when family_scalars is None at nonzero β" was
 // deliberately replaced by origin-linearization (q ≡ 0) for the pre-fit
@@ -8357,12 +8359,12 @@ fn logslope_port_z(n: usize, seed: u64) -> Vec<f64> {
 fn logslope_port_jacobian(
     design: &Array2<f64>,
     z: &[f64],
-) -> super::block_jacobians::LogslopeBlockJacobian {
+) -> super::block_jacobians::SlopeBlockJacobian {
     let n = design.nrows();
-    let layout = LogslopeLayout::shared(DesignMatrix::from(design.clone()), Array1::zeros(n));
+    let layout = SlopeLayout::shared(DesignMatrix::from(design.clone()), Array1::zeros(n));
     let z_mat = Array2::from_shape_fn((n, 1), |(i, _)| z[i]);
     let covariance = MarginalSlopeCovariance::diagonal(array![1.0]).expect("unit covariance");
-    super::block_jacobians::LogslopeBlockJacobian::new(layout, Arc::new(z_mat), covariance.into())
+    super::block_jacobians::SlopeBlockJacobian::new(layout, Arc::new(z_mat), covariance.into())
         .expect("logslope jacobian construction")
 }
 
@@ -8571,7 +8573,7 @@ const TIMEWIGGLE_TEST_NCOLS: usize = 3;
 
 /// An n-row timewiggle-active family: `p_base` linear time columns followed by
 /// `TIMEWIGGLE_TEST_NCOLS` wiggle amplitudes, `p_m` marginal columns, and a
-/// `k`-dimensional log-slope carrying `covariance`.
+/// `k`-dimensional slope carrying `covariance`.
 ///
 /// The wiggle tail columns of the three time designs are zero. A wiggle
 /// amplitude enters `q` through the B-spline composition `q = h + B(h)·β_w`,
@@ -8581,7 +8583,7 @@ fn make_timewiggle_test_family(
     n: usize,
     p_base: usize,
     p_m: usize,
-    logslope_layout: LogslopeLayout,
+    logslope_layout: SlopeLayout,
     z: Array2<f64>,
     covariance: MarginalSlopeCovariance,
 ) -> SurvivalMarginalSlopeFamily {
@@ -8640,7 +8642,7 @@ fn make_timewiggle_test_family(
 }
 
 /// The three blocks `current_identifiability_family_scalars` expects, in the
-/// order it indexes them: time, marginal, log-slope.
+/// order it indexes them: time, marginal, slope.
 ///
 /// The marginal block's `eta` is NOT a placeholder and must equal
 /// `marginal_design · beta_marginal`. `row_dynamic_q_values` reads the marginal
@@ -8712,7 +8714,7 @@ fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
 
     let logslope_design = Array2::from_shape_fn((n, 1), |(row, _)| 0.4 + 0.2 * row as f64);
     let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
-    let layout = LogslopeTopology::shared()
+    let layout = SlopeTopology::shared()
         .materialize_identity(DesignMatrix::from(logslope_design), &logslope_offset)
         .unwrap();
     let z = Array2::from_shape_fn((n, 1), |(row, _)| -0.5 + 0.3 * row as f64);
@@ -8840,7 +8842,7 @@ fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
     let z = Array2::from_shape_fn((n, 2), |(row, col)| -0.4 + 0.2 * row as f64 + 0.1 * col as f64);
     let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
     let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
-    let layout = LogslopeTopology::per_score(vec![0..1, 1..2], 2)
+    let layout = SlopeTopology::per_score(vec![0..1, 1..2], 2)
         .unwrap()
         .materialize_identity(
             DesignMatrix::from(logslope_design.clone()),
