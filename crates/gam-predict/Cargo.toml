@@ -9,6 +9,7 @@ license = "AGPL-3.0-or-later"
 [lib]
 
 [dependencies]
+faer = "0.24.4"
 gam-data = { path = "../gam-data", version = "=0.3.150" }
 gam-inference = { path = "../gam-inference", version = "=0.3.153" }
 gam-linalg = { path = "../gam-linalg", version = "=0.3.152" }
