@@ -93,7 +93,7 @@ gam predict model.gam new.csv --out predictions.csv --uncertainty --level 0.95
 | --- | --- |
 | `--uncertainty` | Include uncertainty columns where the model supports them. |
 | `--level VALUE` | Coverage for uncertainty intervals; default `0.95`. |
-| `--covariance-mode conditional|corrected` | Conditional covariance or smoothing-corrected covariance. |
+| `--covariance-mode conditional|corrected` | Conditional covariance or smoothing-corrected covariance. Absent, the definition the saved fit publishes (the one `gam summary` prices its standard errors from) is used and labeled; naming one is a requirement that refuses when the fit cannot supply it. |
 | `--mode posterior-mean|map` | Point-prediction mode. |
 | `--no-bias-correction` | Disable the prediction-time `O(n^-1)` bias correction. |
 | `--id-column COLUMN` | Carry an identifier column into the prediction CSV. |

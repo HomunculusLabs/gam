@@ -242,6 +242,24 @@ fn factorized_covariance_fallback(fit: &UnifiedFitResult) -> Option<Result<Predi
     )
 }
 
+/// The covariance definition a `gam predict` invocation uses: the explicit
+/// `--covariance-mode` when given, else the definition the saved fit
+/// publishes — the same resolution the Python bindings apply to
+/// `covariance_mode=None`, so the two front ends default identically.
+pub(crate) fn resolved_covariance_mode(
+    args: &PredictArgs,
+    model: &SavedModel,
+) -> InferenceCovarianceMode {
+    args.covariance_mode.unwrap_or_else(|| {
+        model
+            .fit_result
+            .as_ref()
+            .map_or(InferenceCovarianceMode::Conditional, |fit| {
+                fit.published_covariance_mode()
+            })
+    })
+}
+
 pub(crate) fn covariance_from_model(
     model: &SavedModel,
     mode: InferenceCovarianceMode,

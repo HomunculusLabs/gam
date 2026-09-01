@@ -4821,6 +4821,26 @@ impl UnifiedFitResult {
     /// The returned [`CoefficientCovarianceDefinition`] names what was
     /// actually selected so presenters serialize result-owned provenance —
     /// a display policy or request is never evidence of what was used.
+    /// The covariance definition this fit PUBLISHES, and therefore the one
+    /// every default uncertainty surface uses when the caller names none
+    /// (gam#2779): smoothing-corrected whenever the fit carries that matrix —
+    /// or its exact identity form for a fit with no smoothing coordinates,
+    /// where the correction is the zero matrix — and conditional otherwise.
+    /// A fit certified at an infinite-smoothing rail has a typed-unavailable
+    /// correction and publishes conditional, which is what `summary()` prices
+    /// its standard errors from; `predict`, `predict_conformal`, `diagnose`
+    /// and `partial_dependence` resolve their default through this same
+    /// method so one fitted object tells one story. An EXPLICIT request for
+    /// the corrected definition is a requirement, not a policy, and still
+    /// refuses when the matrix is absent.
+    pub fn published_covariance_mode(&self) -> InferenceCovarianceMode {
+        if self.beta_covariance_corrected().is_some() || self.lambdas.is_empty() {
+            InferenceCovarianceMode::SmoothingCorrected
+        } else {
+            InferenceCovarianceMode::Conditional
+        }
+    }
+
     pub fn display_coefficient_uncertainty(&self) -> Option<DisplayCoefficientUncertainty<'_>> {
         if let Some(standard_errors) = self.beta_standard_errors_corrected() {
             return Some(DisplayCoefficientUncertainty {

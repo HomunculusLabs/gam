@@ -194,10 +194,15 @@ class Model:
         covariance_mode : {"conditional", "smoothing"}, optional
             Posterior covariance source for the interval (CLI<->Python parity
             with ``gam predict --covariance-mode``). ``"conditional"`` uses the
-            conditional posterior ``H^{-1}`` only; ``"smoothing"`` (the
-            default when ``None``) requires the first-order smoothing-corrected
-            covariance ``H^{-1} + J Var(rho_hat) J^T`` and errors if it cannot
-            be formed. Read
+            conditional posterior ``H^{-1}`` only; ``"smoothing"`` requires the
+            first-order smoothing-corrected covariance
+            ``H^{-1} + J Var(rho_hat) J^T`` and errors if it cannot be formed.
+            ``None`` (the default) uses the covariance the fit *publishes* —
+            the one ``summary()`` prices its standard errors from: the
+            smoothing-corrected matrix whenever the fit carries it, otherwise
+            the conditional one (a fit certified at an infinite-smoothing rail,
+            for instance) — and the result names the resolved definition in
+            ``covariance_source``. Read
             whenever ``interval`` is set, for every family — including the
             curved-inverse-link families (binomial / Bernoulli) whose default
             point is the posterior mean: the mode shapes the reported SE and the
@@ -1267,9 +1272,10 @@ class Model:
         -------
         dict
             ``{"grid": array, "predicted": array, "standard_error": array,
-            "covariance_source": "smoothing-corrected"}``. Partial-dependence
-            standard errors require smoothing-corrected covariance and never
-            silently downgrade to conditional covariance.
+            "covariance_source": str}``. The standard errors are priced off
+            the covariance the fit publishes (the same one ``summary()``
+            reports), and ``covariance_source`` names it: ``"smoothing-corrected"``
+            whenever the fit carries that matrix, otherwise ``"conditional"``.
         """
         import numpy as np
 

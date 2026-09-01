@@ -68,41 +68,48 @@ def test_default_uncertainty_uses_and_reports_smoothing_corrected_covariance() -
     )
 
 
-def test_default_uncertainty_refuses_when_corrected_covariance_is_unavailable() -> None:
-    """A required corrected request cannot downgrade on a conditional-only fit."""
+def test_default_uncertainty_publishes_conditional_when_no_correction_exists() -> None:
+    """The DEFAULT resolves to the covariance the fit publishes and says so; an
+    EXPLICIT corrected request cannot downgrade on a conditional-only fit."""
     x = np.linspace(0.0, 1.0, 48)
     # The exact constant-Gaussian solution is a complete, valid fit with a
     # zero conditional covariance.  There is no smoothing-parameter correction
-    # to report, so it is the canonical reachable refusal case rather than a
-    # corrupted or hand-edited saved model.
+    # to report, so it is the canonical reachable case: the fit publishes the
+    # conditional definition (as its summary does) and every default surface
+    # follows that same choice under its own label (#2779).
     model = gamfit.fit(
         {"x": x, "y": np.full_like(x, 2.75)},
         "y ~ s(x, k=8)",
         family="gaussian",
     )
     grid = {"x": np.array([0.2, 0.5, 0.8])}
+    summary = model.summary()
 
+    default = model.predict(grid, interval=0.9, return_type="dict")
+    assert default.covariance_source == "conditional"
+    assert summary["coefficient_se_source"] == default.covariance_source, (
+        "the default band and summary() must price uncertainty off the same "
+        f"definition: {summary['coefficient_se_source']!r} vs {default.covariance_source!r}"
+    )
+    np.testing.assert_array_equal(np.asarray(default.std_error, dtype=float), np.zeros(3))
+
+    # Naming the corrected definition is a requirement, not a policy: it
+    # refuses rather than delivering the conditional band under a corrected
+    # label. The producing seam is
+    # `crates/gam-pyffi/src/manifold/geometry_ffi.rs`,
+    # `.map_err(|err| format!("prediction failed: {err}"))`.
     with pytest.raises(gamfit.GamError) as raised:
-        model.predict(grid, interval=0.9, return_type="dict")
-
+        model.predict(grid, interval=0.9, covariance_mode="smoothing", return_type="dict")
     assert type(raised.value) is gamfit.GamError
-    # The producing seam is
-    # `crates/gam-pyffi/src/manifold/geometry_ffi.rs:7942`,
-    # `.map_err(|err| format!("prediction failed: {err}"))`. The string
-    # "prediction with uncertainty failed" exists nowhere in the tree, so this
-    # equality could never hold. The refusal itself -- exact type, exact
-    # payload -- is asserted unchanged.
     assert str(raised.value) == (
         "prediction failed: Invalid input: fit result does not "
         "contain smoothing-corrected covariance"
     )
 
-    with pytest.raises(gamfit.GamError) as partial_dependence_raised:
-        model.partial_dependence("s(x, k=8)", {"x": x}, grid=grid["x"])
-    assert type(partial_dependence_raised.value) is gamfit.GamError
-    assert str(partial_dependence_raised.value) == (
-        "partial_dependence requires smoothing-corrected covariance; refit before "
-        "requesting partial-dependence standard errors"
+    partial = model.partial_dependence("s(x, k=8)", {"x": x}, grid=grid["x"])
+    assert partial["covariance_source"] == "conditional"
+    np.testing.assert_array_equal(
+        np.asarray(partial["standard_error"], dtype=float), np.zeros(3)
     )
 
     conditional = model.predict(

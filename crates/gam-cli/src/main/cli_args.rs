@@ -442,8 +442,12 @@ pub(crate) struct PredictArgs {
     pub(crate) uncertainty: bool,
     #[arg(long = "level", default_value_t = 0.95, value_parser = parse_probability_open_cli)]
     pub(crate) level: f64,
-    #[arg(long = "covariance-mode", default_value = "corrected", value_parser = parse_covariance_mode_arg)]
-    pub(crate) covariance_mode: InferenceCovarianceMode,
+    /// Covariance definition for the SE / band columns. Absent, the
+    /// invocation uses the definition the saved fit publishes (the one `gam
+    /// summary` prices its standard errors from) and labels it; naming a mode
+    /// is a requirement that refuses when the fit cannot supply it (#2779).
+    #[arg(long = "covariance-mode", value_parser = parse_covariance_mode_arg)]
+    pub(crate) covariance_mode: Option<InferenceCovarianceMode>,
     #[arg(long = "mode", value_enum, default_value_t = PredictModeArg::PosteriorMean)]
     pub(crate) mode: PredictModeArg,
     /// Disable the O(n⁻¹) frequentist bias correction in the survival

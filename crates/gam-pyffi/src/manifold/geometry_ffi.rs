@@ -7501,8 +7501,12 @@ fn predict_columns(
     // was absent, emitting a dimensionally different quantity under the
     // documented response-scale `std_error` column. The shared table refuses
     // instead, which is the CLI's rule and the correct one.
+    // No mode named means the definition the fit PUBLISHES (the one
+    // `summary()` prices its SEs from), never a silent substitution: the
+    // result carries the resolved source (#2296, #2779). An explicit mode is
+    // a requirement and refuses when the fit cannot supply it.
     let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
-        .unwrap_or(gam_predict::InferenceCovarianceMode::SmoothingCorrected);
+        .unwrap_or_else(|| fit.published_covariance_mode());
     let request = gam_predict::interval_policy::PredictionRequest {
         interval: options.interval,
         covariance_mode,
@@ -7665,7 +7669,7 @@ fn predict_columns_conformal(
     let family = model_likelihood_spec(model);
 
     let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
-        .unwrap_or(gam_predict::InferenceCovarianceMode::SmoothingCorrected);
+        .unwrap_or_else(|| fit.published_covariance_mode());
     let uncertainty_options = gam_predict::PredictUncertaintyOptions {
         confidence_level: level,
         covariance_mode,
@@ -8362,8 +8366,17 @@ fn model_partial_dependence_encoded_impl(
     let x = standard_mean_design_dense(&model, dataset)?;
     let fit = fit_result_from_saved_model_for_prediction(&model)?;
     let beta = &fit.beta;
-    let cov = fit.beta_covariance_corrected().ok_or_else(|| {
-        "partial_dependence requires smoothing-corrected covariance; refit before requesting \
+    // The partial-effect band prices its SEs off the covariance the fit
+    // publishes — the same choice `summary()` makes — and names it in the
+    // result (#2779). A fit with no corrected matrix reports the conditional
+    // band under the `conditional` label, never an empty table.
+    let covariance_source = fit.published_covariance_mode();
+    let cov = match covariance_source {
+        gam_predict::InferenceCovarianceMode::SmoothingCorrected => fit.beta_covariance_corrected(),
+        gam_predict::InferenceCovarianceMode::Conditional => fit.beta_covariance(),
+    }
+    .ok_or_else(|| {
+        "partial_dependence requires a persisted coefficient covariance; refit before requesting \
          partial-dependence standard errors"
             .to_string()
     })?;
@@ -8395,7 +8408,7 @@ fn model_partial_dependence_encoded_impl(
         }
         se[i] = var.max(0.0).sqrt();
     }
-    Ok((predicted, se, "smoothing-corrected".to_string()))
+    Ok((predicted, se, covariance_source.as_str().to_string()))
 }
 
 /// Per-term variance share: `cov(X_t β_t, X β) / var(X β)` for each

@@ -1013,7 +1013,7 @@ pub(crate) fn run_predict_unified(
     // had in fact diverged (issue #2470).
     let request = gam_predict::interval_policy::PredictionRequest {
         interval: args.uncertainty.then_some(args.level),
-        covariance_mode: args.covariance_mode,
+        covariance_mode: resolved_covariance_mode(args, model),
         // The CLI cannot request the observation (prediction) band yet: it has
         // no `--observation-interval` switch and its CSV writers carry no
         // observation columns, while `predict(observation_interval=True)` from
@@ -1189,7 +1189,8 @@ pub(crate) fn run_predict_spline_scan(
     let col = *col_map.get(column).ok_or_else(|| {
         format!("prediction data is missing the model's feature column '{column}'")
     })?;
-    if args.uncertainty && args.covariance_mode == InferenceCovarianceMode::SmoothingCorrected {
+    if args.uncertainty && args.covariance_mode == Some(InferenceCovarianceMode::SmoothingCorrected)
+    {
         return Err(format!(
             "{} uncertainty carries only the conditional-on-\u{3bb}\u{302} posterior \
              variance; a smoothing-corrected (Vp) band is not persisted for this \
@@ -1263,7 +1264,8 @@ pub(crate) fn run_predict_residual_cascade(
             })
         })
         .collect::<Result<_, _>>()?;
-    if args.uncertainty && args.covariance_mode == InferenceCovarianceMode::SmoothingCorrected {
+    if args.uncertainty && args.covariance_mode == Some(InferenceCovarianceMode::SmoothingCorrected)
+    {
         return Err(
             "residual-cascade uncertainty carries only the conditional-on-\u{3bb}\u{302} \
              posterior variance; a smoothing-corrected (Vp) band is not persisted for \
@@ -1887,8 +1889,9 @@ pub(crate) fn run_predict_saved_latent_window_impl(
     );
 
     let need_covariance = args.mode == PredictModeArg::PosteriorMean || args.uncertainty;
+    let covariance_mode = resolved_covariance_mode(args, model);
     let local_covariances = if need_covariance {
-        let backend = prediction_backend_from_model(model, args.covariance_mode)?;
+        let backend = prediction_backend_from_model(model, covariance_mode)?;
         if backend.nrows() != state.fit.beta.len() {
             return Err(format!(
                 "{} covariance/backend mismatch: got dimension {}, expected {}",
@@ -2048,9 +2051,8 @@ pub(crate) fn run_predict_saved_latent_window_impl(
         // backend here.
         covariance_provenance_note(
             (args.mode == PredictModeArg::PosteriorMean && need_covariance)
-                .then(|| args.covariance_mode),
-            (args.uncertainty && need_covariance)
-                .then(|| args.covariance_mode),
+                .then_some(covariance_mode),
+            (args.uncertainty && need_covariance).then_some(covariance_mode),
         )
     );
     Ok(())
@@ -2107,6 +2109,7 @@ pub(crate) fn run_predict_survival(
     // paths all agree on the same fallback contract.
     let time_cols = resolve_saved_survival_time_columns(model, col_map)?;
     let exit_col = time_cols.exit_col;
+    let covariance_mode = resolved_covariance_mode(args, model);
     let termspec = resolve_termspec_for_prediction(
         &model.resolved_termspec,
         training_headers,
@@ -2419,7 +2422,7 @@ pub(crate) fn run_predict_survival(
         let include_survival_location_scale_intervals =
             args.mode == PredictModeArg::PosteriorMean || args.uncertainty;
         let posterior_or_uncertainty = if include_survival_location_scale_intervals {
-            let cov_mat = covariance_from_model(model, args.covariance_mode)?;
+            let cov_mat = covariance_from_model(model, covariance_mode)?;
             Some(
                 gam::families::survival::location_scale::predict_survival_location_scalewith_uncertainty(
                     &pred_input,
@@ -2488,10 +2491,8 @@ pub(crate) fn run_predict_survival(
             // requested definition is absent), consumed for both the
             // posterior-mean point and the SE/bounds surfaces.
             covariance_provenance_note(
-                (args.mode == PredictModeArg::PosteriorMean)
-                    .then(|| args.covariance_mode),
-                include_survival_location_scale_intervals
-                    .then(|| args.covariance_mode),
+                (args.mode == PredictModeArg::PosteriorMean).then_some(covariance_mode),
+                include_survival_location_scale_intervals.then_some(covariance_mode),
             )
         );
         return Ok(());
@@ -2564,7 +2565,7 @@ pub(crate) fn run_predict_survival(
                 } else {
                     None
                 },
-                covariance_mode: args.covariance_mode,
+                covariance_mode,
                 include_observation_interval: false,
             };
             let pred = predictor
@@ -2596,7 +2597,7 @@ pub(crate) fn run_predict_survival(
                     &predictor_fit,
                     &PredictUncertaintyOptions {
                         confidence_level: args.level,
-                        covariance_mode: args.covariance_mode,
+                        covariance_mode,
                         mean_interval_method: MeanIntervalMethod::TransformEta,
                         includeobservation_interval: false,
                         apply_bias_correction: !args.no_bias_correction,
@@ -2633,9 +2634,9 @@ pub(crate) fn run_predict_survival(
             mean.len(),
             covariance_provenance_note(
                 (args.mode == PredictModeArg::PosteriorMean)
-                    .then(|| args.covariance_mode),
+                    .then_some(covariance_mode),
                 (args.mode == PredictModeArg::PosteriorMean || args.uncertainty)
-                    .then(|| args.covariance_mode),
+                    .then_some(covariance_mode),
             )
         );
         return Ok(());
@@ -2710,7 +2711,7 @@ pub(crate) fn run_predict_survival(
         ));
     }
     let (eta, mean) = if args.mode == PredictModeArg::PosteriorMean {
-        let backend = prediction_backend_from_model(model, args.covariance_mode)?;
+        let backend = prediction_backend_from_model(model, covariance_mode)?;
         let pred = predict_gam_posterior_meanwith_backend(
             x_exit.view(),
             beta.view(),
@@ -2743,7 +2744,7 @@ pub(crate) fn run_predict_survival(
             &fit_saved,
             &PredictUncertaintyOptions {
                 confidence_level: args.level,
-                covariance_mode: args.covariance_mode,
+                covariance_mode,
                 mean_interval_method: MeanIntervalMethod::TransformEta,
                 includeobservation_interval: false,
                 apply_bias_correction: !args.no_bias_correction,
@@ -2781,9 +2782,9 @@ pub(crate) fn run_predict_survival(
         mean.len(),
         covariance_provenance_note(
             (args.mode == PredictModeArg::PosteriorMean)
-                .then(|| args.covariance_mode),
+                .then_some(covariance_mode),
             (args.mode == PredictModeArg::PosteriorMean || args.uncertainty)
-                .then(|| args.covariance_mode),
+                .then_some(covariance_mode),
         )
     );
     Ok(())
