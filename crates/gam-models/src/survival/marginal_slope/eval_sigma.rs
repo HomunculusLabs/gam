@@ -638,7 +638,7 @@ mod sigma_parameter_jet_release_tests {
     use gam_math::jet_scalar::JetScalar;
     use gam_math::jet_tower::{Tower3, Tower4};
     use gam_math::nested_dual::Dual2;
-    use std::time::Instant;
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
     // One synthetic interior row: finite signed margins and a strictly-positive
     // raw time derivative so the monotonicity guard admits. `probit_scale = 1.0`
@@ -1046,62 +1046,12 @@ mod sigma_parameter_jet_release_tests {
             }
         }
 
-        fn best_ns<F>(iterations: usize, base_g: f64, mut evaluate: F) -> f64
-        where
-            F: FnMut(f64) -> HandBundle,
-        {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    let (objective, grad, hess) = evaluate(base_g + checksum * 1e-18);
-                    checksum += objective;
-                    for axis in 0..4 {
-                        checksum += grad[axis] * (axis + 1) as f64;
-                        for other in 0..4 {
-                            checksum += hess[axis][other] * (axis * 4 + other + 1) as f64;
-                        }
-                    }
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "sigma-parameter release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
-
-        fn sample_bundle_ns<F>(iterations: usize, base_g: f64, mut evaluate: F) -> f64
-        where
-            F: FnMut(f64) -> HandBundle,
-        {
-            let mut checksum = 0.0_f64;
-            let started = Instant::now();
-            for _ in 0..iterations {
-                let (objective, grad, hess) = evaluate(base_g + checksum * 1e-18);
-                checksum += objective;
-                for axis in 0..4 {
-                    checksum += grad[axis] * (axis + 1) as f64;
-                    for other in 0..4 {
-                        checksum += hess[axis][other] * (axis * 4 + other + 1) as f64;
-                    }
-                }
-            }
-            assert!(
-                checksum.is_finite(),
-                "sigma-parameter strongest-hand checksum must stay finite"
-            );
-            started.elapsed().as_secs_f64() * 1e9 / iterations as f64
-        }
-
-        fn median(mut samples: [f64; 7]) -> f64 {
-            samples.sort_by(f64::total_cmp);
-            samples[3]
-        }
-
-        let iterations = 100_000usize;
+        // Parity below runs in every build; the speed contract only when the
+        // gate is open (release profile -- `SpeedGate::open` documents why).
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("SIGMA-PARAM-932"));
+        let fold = |(objective, grad, hess): HandBundle| -> f64 {
+            objective + grad.iter().sum::<f64>() + hess.iter().flatten().sum::<f64>()
+        };
         for &(q0, q1, qd1, g, wi, di, z_sum) in &cases {
             let inputs = synthetic_inputs(wi, di, z_sum);
             let primaries = [q0, q1, qd1, g];
@@ -1198,86 +1148,77 @@ mod sigma_parameter_jet_release_tests {
                 }
             }
 
-            // Time each order through the same fixed-size 21-scalar bundle.
-            let production_first_ns = best_ns(iterations, g, |perturbed_g| {
-                production_sigma_bundle([q0, q1, qd1, perturbed_g], scale, &inputs, false)
-            });
-            let racer_first_ns = best_ns(iterations, g, |perturbed_g| {
-                let primaries = [q0, q1, qd1, perturbed_g];
-                let channel = racer_first_channel(&primaries, &scale, &inputs)
-                    .expect("sigma first-parameter dense-tower racer");
-                (channel.v, channel.g, channel.h)
-            });
-            eprintln!(
-                "SIGMA-PARAM-JET-932 order=1 event={di:.0} production={production_first_ns:.2} \
-                 ns/row dense_tower={racer_first_ns:.2} ns/row dense_tower_over_production={:.6}",
-                racer_first_ns / production_first_ns,
-            );
-
-            let production_second_ns = best_ns(iterations, g, |perturbed_g| {
-                production_sigma_bundle([q0, q1, qd1, perturbed_g], scale, &inputs, true)
-            });
-            let racer_second_ns = best_ns(iterations, g, |perturbed_g| {
-                let primaries = [q0, q1, qd1, perturbed_g];
-                let channel = racer_second_channel(&primaries, &scale, &inputs)
-                    .expect("sigma second-parameter dense-tower racer");
-                (channel.v, channel.g, channel.h)
-            });
-            eprintln!(
-                "SIGMA-PARAM-JET-932 order=2 event={di:.0} production={production_second_ns:.2} \
-                 ns/row dense_tower={racer_second_ns:.2} ns/row dense_tower_over_production={:.6}",
-                racer_second_ns / production_second_ns,
-            );
-
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // Each order is timed through the same fixed-size 21-scalar bundle
+            // against BOTH opponents: the strongest analytic schedule (the
+            // binding contract) and the dense generic tower (the specialisation
+            // must also beat the substrate it specialises). The nudge perturbs
+            // the observed-slope primary.
             for second in [false, true] {
-                let mut production_samples = [0.0; 7];
-                let mut hand_samples = [0.0; 7];
-                for round in 0..7 {
-                    let measure_production = || {
-                        sample_bundle_ns(iterations, g, |perturbed_g| {
-                            production_sigma_bundle(
-                                [q0, q1, qd1, perturbed_g],
-                                scale,
-                                &inputs,
-                                second,
-                            )
-                        })
-                    };
-                    let measure_hand = || {
-                        sample_bundle_ns(iterations, g, |perturbed_g| {
-                            strongest_hand_sigma_bundle(
-                                [q0, q1, qd1, perturbed_g],
-                                scale,
-                                &inputs,
-                                second,
-                            )
-                        })
-                    };
-                    if round % 2 == 0 {
-                        production_samples[round] = measure_production();
-                        hand_samples[round] = measure_hand();
-                    } else {
-                        hand_samples[round] = measure_hand();
-                        production_samples[round] = measure_production();
-                    }
-                }
-                let production_ns = median(production_samples);
-                let hand_ns = median(hand_samples);
-                let ratio = hand_ns / production_ns;
-                eprintln!(
-                    "SIGMA-PARAM-HAND-932 order={} event={di:.0} production={production_ns:.2} \
-                     ns/row strongest_hand={hand_ns:.2} ns/row \
-                     strongest_hand_over_production={ratio:.6}",
-                    usize::from(second) + 1,
+                let order = usize::from(second) + 1;
+                let hand = paired_interleaved(
+                    15,
+                    20_000,
+                    0x9320_51_6A ^ order as u64 ^ (di.to_bits() >> 60),
+                    |nudge| {
+                        fold(production_sigma_bundle(
+                            [q0, q1, qd1, g + nudge],
+                            scale,
+                            &inputs,
+                            second,
+                        ))
+                    },
+                    |nudge| {
+                        fold(strongest_hand_sigma_bundle(
+                            [q0, q1, qd1, g + nudge],
+                            scale,
+                            &inputs,
+                            second,
+                        ))
+                    },
                 );
-                assert!(
-                    ratio > 1.0,
-                    "sigma-parameter compiler path must strictly beat strongest hand schedule: \
-                     order={} event={di:.0} production={production_ns:.2} ns/row \
-                     strongest_hand={hand_ns:.2} ns/row ratio={ratio:.6}",
-                    usize::from(second) + 1,
+                gate.faster(
+                    &format!("order={order} event={di:.0} opponent=strongest_hand"),
+                    &hand,
+                    "production",
+                    "strongest_hand",
+                );
+                let dense = paired_interleaved(
+                    15,
+                    20_000,
+                    0x9320_D3_6A ^ order as u64 ^ (di.to_bits() >> 60),
+                    |nudge| {
+                        fold(production_sigma_bundle(
+                            [q0, q1, qd1, g + nudge],
+                            scale,
+                            &inputs,
+                            second,
+                        ))
+                    },
+                    |nudge| {
+                        let primaries = [q0, q1, qd1, g + nudge];
+                        let channel = if second {
+                            racer_second_channel(&primaries, &scale, &inputs)
+                                .expect("sigma second-parameter dense-tower racer")
+                        } else {
+                            racer_first_channel(&primaries, &scale, &inputs)
+                                .expect("sigma first-parameter dense-tower racer")
+                        };
+                        fold((channel.v, channel.g, channel.h))
+                    },
+                );
+                gate.faster(
+                    &format!("order={order} event={di:.0} opponent=dense_tower"),
+                    &dense,
+                    "production",
+                    "dense_tower",
                 );
             }
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 }

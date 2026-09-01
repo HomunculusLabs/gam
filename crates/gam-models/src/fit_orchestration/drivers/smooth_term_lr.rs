@@ -1499,22 +1499,6 @@ impl SmoothLrSelectionReplay {
         Self::mean(&self.conditional_sample)
     }
 
-    /// The Monte-Carlo standard error of [`Self::selection_mean`], from the
-    /// sample's own spread rather than from an assumed shape.
-    pub fn selection_mean_standard_error(&self) -> f64 {
-        let draws = self.selection_sample.len();
-        if draws < 2 {
-            return f64::NAN;
-        }
-        let mean = self.selection_mean();
-        let variance = self
-            .selection_sample
-            .iter()
-            .map(|value| (value - mean) * (value - mean))
-            .sum::<f64>()
-            / draws as f64;
-        (variance / draws as f64).sqrt()
-    }
 
     fn mean(sample: &[f64]) -> f64 {
         if sample.is_empty() {

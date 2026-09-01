@@ -2339,7 +2339,7 @@ pub(crate) fn gaussian_location_scale_joint_hessian_is_observed_and_psi_layers_m
 pub(crate) fn release_measure_bls_wiggle_order2_rows_vs_per_column_tower_932() {
     use super::super::binomial_q_derivs::binomial_neglog_q_derivatives_dispatch;
     use gam_math::jet_tower::Tower2;
-    use std::time::Instant;
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
     let (family, states, _specs, _xt, _xls, _wd) = bls_wiggle_workspace_fixture();
 
@@ -2416,42 +2416,32 @@ pub(crate) fn release_measure_bls_wiggle_order2_rows_vs_per_column_tower_932() {
     assert!(production_batch(&states).is_finite());
     assert!(generic_batch(&states).is_finite());
 
-    // Feedback-coupled timing barrier (no `std::hint::black_box`): the first
-    // threshold eta is nudged by a negligible multiple of the running
-    // checksum, so neither whole-batch call can be hoisted or dropped.
+    // Speed contract, release profile only (`SpeedGate::open` documents why):
+    // the typed-probe lowering must beat the naive per-(row, column) tower
+    // assembly. One arm call is one whole-batch evaluation; the nudge perturbs
+    // the first threshold eta so no batch is loop-invariant across calls.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("BLS-WIGGLE-ORDER2-932");
     let base_eta = states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0];
-    let best_ns = |use_generic: bool| -> f64 {
-        let iterations = 60usize;
-        let mut work = states.clone();
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let mut checksum = 0.0_f64;
-            let started = Instant::now();
-            for _ in 0..iterations {
-                work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] =
-                    base_eta + checksum * 1e-18;
-                checksum += if use_generic {
-                    generic_batch(&work)
-                } else {
-                    production_batch(&work)
-                };
-            }
-            assert!(
-                checksum.is_finite(),
-                "wiggle order-two release-measure checksum must stay finite"
-            );
-            best = best.min(started.elapsed().as_secs_f64());
-        }
-        best * 1e9 / iterations as f64
-    };
-
-    let production_ns = best_ns(false);
-    let generic_ns = best_ns(true);
-    eprintln!(
-        "BLS-WIGGLE-ORDER2-932 production={production_ns:.2} ns/batch \
-         per_column_tower={generic_ns:.2} ns/batch per_column_tower_over_production={:.6}",
-        generic_ns / production_ns,
+    let mut production_work = states.clone();
+    let mut generic_work = states.clone();
+    let timing = paired_interleaved(
+        15,
+        10,
+        0x9320_B15B,
+        |nudge| {
+            production_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
+            production_batch(&production_work)
+        },
+        |nudge| {
+            generic_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
+            generic_batch(&generic_work)
+        },
     );
+    gate.faster("order2", &timing, "production", "per_column_tower");
+    gate.finish();
 }
 
 /// #932 exact-tower oracle for the canonical binomial location-scale WIGGLE

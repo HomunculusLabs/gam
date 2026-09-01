@@ -222,6 +222,7 @@ pub(crate) fn blockwise_fit_from_parts_accepts_stacked_solver_eta_with_canonical
         BlockwiseFitResultParts {
             block_states: vec![state],
             log_likelihood: -1.0,
+            deviance: None,
             log_lambdas: Array1::zeros(0),
             lambdas: Array1::zeros(0),
             covariance_conditional: Some(Array2::eye(1)),

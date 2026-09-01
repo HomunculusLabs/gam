@@ -149,6 +149,24 @@ impl CustomFamily for BinomialLocationScaleWiggleFamily {
         Ok(beta)
     }
 
+    /// The classical binomial deviance at the wiggled location-scale fitted
+    /// probabilities (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        let (_, eta_t, eta_ls, etaw) = self.validated_block_etas(block_states)?;
+        let core = binomial_location_scale_core(
+            &self.y,
+            &self.weights,
+            eta_t,
+            eta_ls,
+            Some(etaw),
+            &self.link_kind,
+        )?;
+        super::kernel::binomial_classical_deviance(&self.y, &self.weights, &core.mu).map(Some)
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let (n, eta_t, eta_ls, etaw) = self.validated_block_etas(block_states)?;
 

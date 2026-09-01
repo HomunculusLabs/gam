@@ -509,15 +509,6 @@ impl SaeManifoldRho {
         Some(prefix + k + ard_len + self.log_lambda_block.len() + curvature_index)
     }
 
-    /// Raw sectional curvature attached to `atom`, when that atom owns a
-    /// curvature coordinate.
-    #[must_use]
-    pub fn kappa_for_atom(&self, atom: usize) -> Option<f64> {
-        self.kappa_atoms
-            .binary_search(&atom)
-            .ok()
-            .map(|index| self.kappa[index])
-    }
 
     pub fn ard_flat_index(&self, atom: usize, axis: usize) -> usize {
         let k = self.log_lambda_smooth.len();

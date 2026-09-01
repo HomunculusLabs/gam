@@ -1,5 +1,5 @@
 use gam_row_macros::row_atom;
-use gam_math::paired_timing::paired_interleaved;
+use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
 row_atom! {
     fn generated_cause_specific [order2, third, fourth](
@@ -237,13 +237,24 @@ fn generated_cause_specific_matches_strongest_hand_932() {
         assert_matrix(generated_fourth(*row), hand_fourth(*row));
     }
 
-    // One paired, interleaved, order-RANDOMISED measurement per channel. The
+    // Everything above is parity and runs in every build. The gate below opens
+    // only in the release profile (`SpeedGate::open` documents why) and takes
+    // one paired, interleaved, order-RANDOMISED measurement per channel: the
     // arms are timed adjacent within each repetition and the per-repetition
-    // ratios are kept, so the pairing the old alternation created survives all
-    // the way to the statistic.
+    // ratios are kept, so the pairing survives all the way to the statistic.
+    //
+    // CONTRACT: a bare "generated must be faster", with no margin, on every
+    // channel. Two semantically identical kernels compared by `<` decide a
+    // coin flip when the true difference is near zero; measured, it is not
+    // near zero on any channel here, and the order-2 deficit this gate kept
+    // red was a real compiler defect (one activity gate scheduling its shared
+    // reciprocal once per channel), fixed in the `row_atom!` scheduler.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("CAUSE-SPECIFIC-HAND-932");
     let reps = 15usize;
     let passes = 256usize;
-    let mut losses: Vec<String> = Vec::new();
     for (channel, timing) in [
         (
             "order2",
@@ -276,39 +287,16 @@ fn generated_cause_specific_matches_strongest_hand_932() {
             ),
         ),
     ] {
-        // `ns/iter` here is nanoseconds per PASS over `rows.len()` rows, not the
+        // `ns/iter` is nanoseconds per PASS over `rows.len()` rows, not the
         // historical `ns/row`; the ratio the verdict rests on is unit-free
         // either way. `median_ratio` is hand / generated, so above 1 means the
-        // generated kernel is faster -- the same orientation as the
-        // `hand_over_generated` token this test has always printed.
-        eprintln!(
-            "CAUSE-SPECIFIC-HAND-932 channel={channel} rows={} {}",
-            rows.len(),
-            timing.summary("generated", "strongest_hand"),
+        // generated kernel is faster.
+        gate.faster(
+            &format!("channel={channel} rows={}", rows.len()),
+            &timing,
+            "generated",
+            "strongest_hand",
         );
-        // CONTRACT UNCHANGED: still a bare "generated must be faster", with no
-        // margin. That bar is the open question on this test -- two semantically
-        // identical kernels compared by `<` decide a coin flip when the true
-        // difference is near zero -- and `ratio_resolution` in the line above is
-        // the quantity a margin would have to be derived from. Deriving it in
-        // the same commit that first measures it would fit the tolerance to the
-        // numbers meant to validate it, so that is a separate change (#2469).
-        if timing.median_ratio() <= 1.0 {
-            losses.push(format!(
-                "{channel}: {}",
-                timing.summary("generated", "strongest_hand")
-            ));
-        }
     }
-
-    // Collect every channel, THEN assert. Asserting inside the loop meant the
-    // first failing channel aborted the test and the remaining two were never
-    // measured -- so a report of "order2 is slower" could not say whether third
-    // and fourth were fine, and a fix for one channel would surface the next as
-    // a fresh surprise. A gate should say everything it objected to in one run.
-    assert!(
-        losses.is_empty(),
-        "generated kernels must beat the strongest semantically identical hand kernel:\n{}",
-        losses.join("\n"),
-    );
+    gate.finish();
 }

@@ -4201,9 +4201,9 @@ mod tests {
         /// likewise not ignored.
         #[test]
         fn release_measure_multinomial_fisher_vs_strongest_hand_932() {
-            use gam_math::paired_timing::paired_interleaved;
+            use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
-            fn measure<const M: usize>(seed: u64, repetitions: usize) {
+            fn measure<const M: usize>(gate: Option<&mut SpeedGate>, seed: u64, repetitions: usize) {
                 const ROWS: usize = 256;
                 let mut rng = Lcg(seed);
                 let probability: Vec<[f64; M]> = (0..ROWS)
@@ -4274,9 +4274,11 @@ mod tests {
                 // evaluations per width, and a hand-vs-compiled ratio measured
                 // without optimization would gate on noise, so debug stops
                 // here rather than asserting something it cannot observe.
-                if cfg!(debug_assertions) {
+                // Parity above runs in every build; the speed contract only when
+                // the gate is open (release profile).
+                let Some(gate) = gate else {
                     return;
-                }
+                };
 
                 let compiled_first_sweep = |nudge: f64, buffers: &mut FirstFisherBuffers| {
                     let mut checksum = nudge;
@@ -4360,37 +4362,35 @@ mod tests {
                 // `hand_over_compiled` token this gate has always printed. The
                 // unit is ns per SWEEP over ROWS rows, not the historical
                 // ns/row; the ratio the verdict rests on is unit-free either way.
-                eprintln!(
-                    "MULTINOMIAL-HAND-932 M={M} rows={ROWS} first {}",
-                    first.summary("compiled", "strongest_hand"),
-                );
-                eprintln!(
-                    "MULTINOMIAL-HAND-932 M={M} rows={ROWS} second {}",
-                    second.summary("compiled", "strongest_hand"),
-                );
                 // CONTRACT UNCHANGED: the compiled lowering must beat the
                 // strongest hand restatement, on both channels. The bar is
                 // `median_ratio` ALONE: `wins_fraction` is a within-run
                 // confidence statement at the host's noise level, so as a
                 // gating conjunct it can only manufacture failures on a busy
                 // runner. It stays on the summary lines above as evidence.
-                assert!(
-                    first.median_ratio() > 1.0,
-                    "M={M} first canonical lowering must beat strongest hand: {}",
-                    first.summary("compiled", "strongest_hand"),
+                gate.faster(
+                    &format!("M={M} rows={ROWS} channel=first"),
+                    &first,
+                    "compiled",
+                    "strongest_hand",
                 );
-                assert!(
-                    second.median_ratio() > 1.0,
-                    "M={M} second canonical lowering must beat strongest hand: {}",
-                    second.summary("compiled", "strongest_hand"),
+                gate.faster(
+                    &format!("M={M} rows={ROWS} channel=second"),
+                    &second,
+                    "compiled",
+                    "strongest_hand",
                 );
             }
 
-            measure::<2>(0x9322_0002_face_cafe, 2_000);
-            measure::<3>(0x9323_0003_face_cafe, 2_000);
-            measure::<8>(0x9328_0008_face_cafe, 600);
-            measure::<32>(0x9332_0032_face_cafe, 80);
-            measure::<64>(0x9364_0064_face_cafe, 24);
+            let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("MULTINOMIAL-HAND-932"));
+            measure::<2>(gate.as_mut(), 0x9322_0002_face_cafe, 2_000);
+            measure::<3>(gate.as_mut(), 0x9323_0003_face_cafe, 2_000);
+            measure::<8>(gate.as_mut(), 0x9328_0008_face_cafe, 600);
+            measure::<32>(gate.as_mut(), 0x9332_0032_face_cafe, 80);
+            measure::<64>(gate.as_mut(), 0x9364_0064_face_cafe, 24);
+            if let Some(gate) = gate {
+                gate.finish();
+            }
         }
 
         /// #932 release speed gate for the multinomial-logit row. Production
@@ -4412,9 +4412,9 @@ mod tests {
         /// without `std::hint::black_box`.
         #[test]
         fn release_measure_multinomial_specialized_vs_generic_tower_932() {
-            fn measure<const M: usize>(seed: u64) {
-                use std::time::Instant;
+            use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
+            fn measure<const M: usize>(gate: Option<&mut SpeedGate>, seed: u64) {
                 const ROWS: usize = 512;
                 let mut rng = Lcg(seed);
                 let mut etas: Vec<[f64; M]> = Vec::with_capacity(ROWS);
@@ -4475,58 +4475,55 @@ mod tests {
                     }
                 }
 
-                let best_secs = |sweep: &mut dyn FnMut() -> f64| -> f64 {
-                    let mut best = f64::INFINITY;
-                    for _ in 0..5 {
-                        let started = Instant::now();
-                        let checksum = sweep();
-                        assert!(
-                            checksum.is_finite(),
-                            "multinomial release-measure checksum must stay finite"
-                        );
-                        best = best.min(started.elapsed().as_secs_f64());
-                    }
-                    best
+                // Parity above runs in every build; the speed contract below only
+                // when the gate is open (release profile). One arm call is one
+                // sweep over the batch of distinct rows; the nudge enters the
+                // fold, since the programs hold their rows immutably.
+                let Some(gate) = gate else {
+                    return;
                 };
-
-                let mut production_sweep = || {
-                    let mut checksum = 0.0_f64;
-                    for program in &programs {
-                        let value = program.value_gradient_hessian_into(
-                            &mut probabilities,
-                            &mut gradient,
-                            &mut hessian,
-                        );
-                        checksum += value + gradient[0] + hessian[0];
-                    }
-                    checksum
-                };
-                let production_secs = best_secs(&mut production_sweep);
-
-                let mut tower_sweep = || {
-                    let mut checksum = 0.0_f64;
-                    for program in &programs {
-                        let (value, tower_gradient, tower_hessian) =
-                            program_row_kernel::<M, _>(program, 0).expect("tower kernel");
-                        checksum += value + tower_gradient[0] + tower_hessian[0][0];
-                    }
-                    checksum
-                };
-                let tower_secs = best_secs(&mut tower_sweep);
-
-                let production_ns = production_secs * 1e9 / ROWS as f64;
-                let tower_ns = tower_secs * 1e9 / ROWS as f64;
-                eprintln!(
-                    "MULTINOMIAL-RELEASE-932 M={M} rows={ROWS} production_ns={production_ns:.3} \
-                     generic_tower_ns={tower_ns:.3} generic_tower_over_production={:.6}",
-                    tower_ns / production_ns,
+                let timing = paired_interleaved(
+                    15,
+                    20,
+                    seed ^ 0x9320_0000,
+                    |nudge| {
+                        let mut checksum = nudge;
+                        for program in &programs {
+                            let value = program.value_gradient_hessian_into(
+                                &mut probabilities,
+                                &mut gradient,
+                                &mut hessian,
+                            );
+                            checksum += value + gradient[0] + hessian[0];
+                        }
+                        checksum
+                    },
+                    |nudge| {
+                        let mut checksum = nudge;
+                        for program in &programs {
+                            let (value, tower_gradient, tower_hessian) =
+                                program_row_kernel::<M, _>(program, 0).expect("tower kernel");
+                            checksum += value + tower_gradient[0] + tower_hessian[0][0];
+                        }
+                        checksum
+                    },
+                );
+                gate.faster(
+                    &format!("M={M} rows={ROWS}"),
+                    &timing,
+                    "production",
+                    "generic_tower",
                 );
             }
 
-            measure::<2>(0x9322_2020_0715_face);
-            measure::<3>(0x0bad_c0de_0715_2020);
-            measure::<4>(0x5eed_4444_0722_beef);
-            measure::<8>(0x1234_5678_0715_abcd);
+            let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("MULTINOMIAL-RELEASE-932"));
+            measure::<2>(gate.as_mut(), 0x9322_2020_0715_face);
+            measure::<3>(gate.as_mut(), 0x0bad_c0de_0715_2020);
+            measure::<4>(gate.as_mut(), 0x5eed_4444_0722_beef);
+            measure::<8>(gate.as_mut(), 0x1234_5678_0715_abcd);
+            if let Some(gate) = gate {
+                gate.finish();
+            }
         }
     }
 

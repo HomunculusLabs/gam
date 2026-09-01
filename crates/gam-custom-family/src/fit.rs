@@ -316,6 +316,9 @@ fn fixed_lambda_warm_start_for_reduced_specs<'a>(
 
 pub(crate) struct BlockwiseFitAssembly<'a> {
     pub(crate) rho_physical: Array1<f64>,
+    /// `CustomFamily::classical_deviance` at the converged mode; `None` when
+    /// the family declares none (see `BlockwiseFitResultParts::deviance`).
+    pub(crate) deviance: Option<f64>,
     pub(crate) covariance_conditional: Option<Array2<f64>>,
     pub(crate) geometry: Option<FitGeometry>,
     /// EDF derived in the reduced coefficient frame before a non-square gauge
@@ -344,12 +347,25 @@ pub(crate) struct BlockwiseFitAssembly<'a> {
     )>,
 }
 
+/// The family's classical deviance at the converged mode, as a typed
+/// `CustomFamilyError` so the four assembly sites share one mapping.
+fn classical_deviance_at_mode<F: CustomFamily + ?Sized>(
+    family: &F,
+    block_states: &[ParameterBlockState],
+    context: &'static str,
+) -> Result<Option<f64>, CustomFamilyError> {
+    family
+        .classical_deviance(block_states)
+        .map_err(|reason| CustomFamilyError::Optimization { context, reason })
+}
+
 pub(crate) fn assemble_custom_family_fit_result(
     inner: BlockwiseInnerResult,
     assembly: BlockwiseFitAssembly<'_>,
 ) -> Result<gam_solve::model_types::UnifiedFitResult, CustomFamilyError> {
     let BlockwiseFitAssembly {
         rho_physical,
+        deviance,
         covariance_conditional,
         geometry,
         precomputed_edf,
@@ -398,6 +414,7 @@ pub(crate) fn assemble_custom_family_fit_result(
         BlockwiseFitResultParts {
             block_states,
             log_likelihood: inner.log_likelihood,
+            deviance,
             log_lambdas,
             lambdas,
             covariance_conditional,
@@ -2866,10 +2883,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             context: "fit_custom_family no-smoothing reported posterior mean",
             reason: reason.to_string(),
         })?;
+        let deviance = classical_deviance_at_mode(
+            family,
+            &inner.block_states,
+            "fit_custom_family no-smoothing classical deviance",
+        )?;
         return assemble_custom_family_fit_result(
             inner,
             BlockwiseFitAssembly {
                 rho_physical: physical_rho0,
+                deviance,
                 covariance_conditional,
                 geometry,
                 precomputed_edf: None,
@@ -3970,10 +3993,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         reason: reason.to_string(),
     })?;
     let geometry = Some(geometry);
+    let deviance = classical_deviance_at_mode(
+        family,
+        &inner.block_states,
+        "fit_custom_family classical deviance",
+    )?;
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
             rho_physical: rho_star_physical,
+            deviance,
             covariance_conditional,
             geometry,
             precomputed_edf,
@@ -4214,10 +4243,16 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         reason: reason.to_string(),
     })?;
     let geometry = Some(geometry);
+    let deviance = classical_deviance_at_mode(
+        family,
+        &inner.block_states,
+        "fit_custom_family_fixed_log_lambdas classical deviance",
+    )?;
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
             rho_physical: rho,
+            deviance,
             covariance_conditional,
             geometry,
             precomputed_edf: None,
@@ -4438,10 +4473,16 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     })?;
     let geometry = Some(geometry);
 
+    let deviance = classical_deviance_at_mode(
+        family,
+        &inner.block_states,
+        "fit_custom_family_fixed_log_lambdas classical deviance",
+    )?;
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
             rho_physical: rho,
+            deviance,
             covariance_conditional,
             geometry,
             precomputed_edf: None,

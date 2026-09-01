@@ -2941,7 +2941,7 @@ mod jet_tower_oracle_tests {
     /// cells.)
     #[test]
     fn release_measure_rigid_bernoulli_vgh_vs_hand_chain_932() {
-        use gam_math::paired_timing::paired_interleaved;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         // (eta, g, z, y, w): one ordinary interior row per outcome branch —
         // y=1 and y=0 are distinct live sign branches of the Mills-ratio
@@ -2960,6 +2960,7 @@ mod jet_tower_oracle_tests {
         // separate a real margin from a systematic first-versus-second offset.
         let reps = 15usize;
         let iterations = 300_000usize;
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-BERNOULLI-VGH-932"));
 
         for (case_idx, &(eta, g, z, y, w)) in cases.iter().enumerate() {
             let marginal = bernoulli_marginal_link_map(
@@ -2982,6 +2983,9 @@ mod jet_tower_oracle_tests {
                 "y={y:.0} value: jet {jet_value:+.15e} vs hand {hand_value:+.15e}"
             );
 
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
             // The harness perturbs by a negligible multiple of the running
             // checksum; each arm folds value, gradient and Hessian channels back
             // into it, so the row call can be neither hoisted nor dropped while
@@ -3008,39 +3012,12 @@ mod jet_tower_oracle_tests {
                 },
             );
 
-            // `median_ratio` is `hand / production`, the same orientation as the
-            // `hand_over_production` token this gate has always printed.
-            eprintln!(
-                "RIGID-BERNOULLI-VGH-932 y={y:.0} {}",
-                timing.summary("production", "hand"),
-            );
-
-            // #932: release-only -- but NOT because the test lane is unoptimized.
-            // It is not: [profile.test] sets opt-level = 2. The difference is
-            // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
-            // codegen-units = 16 and the test profile carries no LTO, while
-            // [profile.release] is codegen-units = 1 + lto = "thin".
-            // Cargo.toml's own note records that CGU splitting is what blocks LLVM
-            // from inlining hot accessors into the per-row loops, and that
-            // "release is unaffected: it already carries thin-LTO +
-            // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
-            // cross-CGU inlining therefore measures a different thing here than in
-            // the shipped profile. The parity check above is build-independent
-            // and still runs in every build.
-            //
-            // The contract is UNCHANGED -- production must beat hand -- but it is
-            // now stated over the paired distribution rather than a ratio of two
-            // separately-minimised blocks. The bar is `median_ratio` ALONE:
-            // `wins_fraction` is a within-run confidence statement at THIS
-            // host's noise level (one 1.6% effect read `wins=0.00` on a quiet
-            // node and `0.27 / 0.40 / 0.27` on a node ~30x noisier), so ANDed
-            // into the gate it could only manufacture failures on a busy
-            // runner. It stays on the summary line above as evidence.
-            assert!(
-                cfg!(debug_assertions) || timing.median_ratio() > 1.0,
-                "generated rigid BMS y={y:.0} must beat strongest hand: {}",
-                timing.summary("production", "hand"),
-            );
+            // `median_ratio` is `hand / production`: above 1 means the shipped
+            // jet kernel is the faster arm.
+            gate.faster(&format!("y={y:.0}"), &timing, "production", "hand");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 }

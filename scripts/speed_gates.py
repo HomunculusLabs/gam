@@ -14,51 +14,43 @@ Why the release profile: `[profile.test.package.gam-models]` sets
 `codegen-units = 16` and the test profile carries no LTO, while the shipped
 profile is `codegen-units = 1` + thin-LTO. A compiled-vs-hand ratio whose margin
 is cross-CGU inlining measures a different program in the test profile, which is
-why every gate's test returns before opening it outside the release profile and
-why this runner always passes `--release`.
+why `SpeedGate::open` returns `None` outside the release profile and why this
+runner always passes `--release`.
 """
 
-from __future__ import annotations
-
+# Runs under the oldest python3 a build host may carry (3.6): no dataclasses,
+# no `from __future__ import annotations`, no `capture_output=`.
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from collections import namedtuple
 from pathlib import Path
 
 MARKER = "SpeedGate::open("
 TEST_ATTR = re.compile(r"#\[test\]")
 FN_HEAD = re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\(")
 
-
-@dataclass(frozen=True)
-class Gate:
-    package: str
-    target_args: tuple[str, ...]
-    name: str
-    path: str
-
-    @property
-    def target_key(self) -> tuple[str, tuple[str, ...]]:
-        return (self.package, self.target_args)
+# package, target_args (tuple), bare test name, repo-relative source path.
+Gate = namedtuple("Gate", "package target_args name path")
 
 
-def repo_root() -> Path:
-    out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True)
+def repo_root():
+    out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], encoding="utf-8")
     return Path(out.strip())
 
 
-def package_name(crate_dir: Path) -> str:
-    manifest = (crate_dir / "Cargo.toml").read_text()
+def package_name(crate_dir):
+    manifest = (crate_dir / "Cargo.toml").read_text(encoding="utf-8")
     match = re.search(r'^\s*name\s*=\s*"([^"]+)"', manifest, re.M)
     if not match:
         raise SystemExit(f"no package name in {crate_dir / 'Cargo.toml'}")
     return match.group(1)
 
 
-def target_for(crate_dir: Path, file: Path) -> tuple[str, ...] | None:
+def target_for(crate_dir, file):
     relative = file.relative_to(crate_dir)
     parts = relative.parts
     if parts[0] == "src":
@@ -71,7 +63,7 @@ def target_for(crate_dir: Path, file: Path) -> tuple[str, ...] | None:
     return None
 
 
-def test_fns_with_marker(source: str):
+def test_fns_with_marker(source):
     """Yield the name of every `#[test]` fn whose body contains MARKER."""
     for attr in TEST_ATTR.finditer(source):
         head = FN_HEAD.search(source, attr.end())
@@ -101,33 +93,54 @@ def test_fns_with_marker(source: str):
             yield head.group(1)
 
 
-def derive(root: Path) -> list[Gate]:
-    gates: list[Gate] = []
-    for crate_dir in sorted((root / "crates").iterdir()):
+def tracked_rust_sources(root):
+    """Every tracked `.rs` file under `crates/`, from git -- not a directory walk.
+
+    A gate is a tracked test; an untracked file in a checkout (a build artifact,
+    an editor's or a foreign filesystem's metadata file) can never be one, and
+    walking the directory would let such a file break or pollute the derivation.
+    """
+    listing = subprocess.check_output(["git", "ls-files", "--", "crates"], cwd=str(root), encoding="utf-8")
+    return sorted(Path(root, line) for line in listing.splitlines() if line.endswith(".rs"))
+
+
+def derive(root):
+    gates = []
+    packages = {}
+    for file in tracked_rust_sources(root):
+        crate_dir = Path(root, *file.relative_to(root).parts[:2])
         if not (crate_dir / "Cargo.toml").is_file():
             continue
-        package = package_name(crate_dir)
-        for file in sorted(crate_dir.rglob("*.rs")):
-            if "target" in file.parts:
-                continue
-            source = file.read_text()
-            if MARKER not in source:
-                continue
-            target = target_for(crate_dir, file)
-            if target is None:
-                raise SystemExit(f"{file}: a speed gate must live under src/ or tests/")
-            for name in test_fns_with_marker(source):
-                gates.append(Gate(package, target, name, str(file.relative_to(root))))
+        source = file.read_text(encoding="utf-8")
+        if MARKER not in source:
+            continue
+        if crate_dir not in packages:
+            packages[crate_dir] = package_name(crate_dir)
+        target = target_for(crate_dir, file)
+        if target is None:
+            raise SystemExit(f"{file}: a speed gate must live under src/ or tests/")
+        for name in test_fns_with_marker(source):
+            gates.append(Gate(packages[crate_dir], target, name, str(file.relative_to(root))))
     return gates
 
 
-def cargo_test(package: str, target_args: tuple[str, ...], extra: list[str], root: Path):
-    command = ["cargo", "test", "--release", "-p", package, *target_args, *extra]
+def cargo_test(package, target_args, extra, root):
+    command = ["cargo", "test", "--release", "-p", package] + list(target_args) + list(extra)
     print("$", " ".join(command), flush=True)
-    return subprocess.run(command, cwd=root, text=True, capture_output=True)
+    # Explicit UTF-8: a build host under the C locale would otherwise decode
+    # cargo's output (and this file's sources) as ASCII and abort on the first
+    # non-ASCII byte.
+    return subprocess.run(
+        command,
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
-def resolve_exact(package: str, target_args: tuple[str, ...], names: list[str], root: Path):
+def resolve_exact(package, target_args, names, root):
     """Map each bare gate name to its exact test path in the compiled binary."""
     listing = cargo_test(package, target_args, ["--", "--list", "--format", "terse"], root)
     if listing.returncode != 0:
@@ -150,12 +163,12 @@ def resolve_exact(package: str, target_args: tuple[str, ...], names: list[str], 
 RESULT_LINE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed", re.M)
 
 
-def run(gates: list[Gate], root: Path, summary_path: str | None) -> int:
-    failures: list[str] = []
-    rows: list[str] = []
-    by_target: dict[tuple[str, tuple[str, ...]], list[Gate]] = {}
+def run(gates, root, summary_path):
+    failures = []
+    rows = []
+    by_target = {}
     for gate in gates:
-        by_target.setdefault(gate.target_key, []).append(gate)
+        by_target.setdefault((gate.package, gate.target_args), []).append(gate)
     for (package, target_args), members in by_target.items():
         build = cargo_test(package, target_args, ["--no-run"], root)
         sys.stdout.write("\n".join(line for line in build.stderr.splitlines() if not line.lstrip().startswith(("Compiling", "Checking"))) + "\n")
@@ -203,15 +216,24 @@ def run(gates: list[Gate], root: Path, summary_path: str | None) -> int:
     return 0
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", action="store_true", help="build in release and run every derived gate")
     parser.add_argument("--package", action="append", help="restrict to these packages (repeatable)")
     parser.add_argument("--summary", help="append a markdown table of cell verdicts to this file")
     parser.add_argument("--expect", type=int, help="fail unless exactly this many gates are derived")
+    parser.add_argument(
+        "--packages-json",
+        action="store_true",
+        help="print only the JSON list of packages carrying gates (the CI matrix is derived from this)",
+    )
     args = parser.parse_args()
     root = repo_root()
     gates = derive(root)
+    if args.packages_json:
+        packages = sorted({g.package for g in gates})
+        print(json.dumps(packages))
+        return 0 if packages else 1
     if args.package:
         gates = [g for g in gates if g.package in set(args.package)]
     if not gates:

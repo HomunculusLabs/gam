@@ -107,6 +107,46 @@ pub(crate) fn log1mexp_neg_positive(z: f64) -> f64 {
     }
 }
 
+/// Classical binomial deviance `2·Σ wᵢ [y ln(y/μ) + (1−y) ln((1−y)/(1−μ))]` at
+/// the fitted probabilities `mu` — the number every standard binomial fit
+/// reports, shared by the location-scale family, its link-wiggle form, and
+/// the mean-wiggle family (#2786). For a 0/1 response it equals `−2·log L`;
+/// for a grouped proportion with trial weights it does not, because the
+/// saturated log-likelihood is then non-zero.
+pub(crate) fn binomial_classical_deviance(
+    y: &Array1<f64>,
+    weights: &Array1<f64>,
+    mu: &Array1<f64>,
+) -> Result<f64, String> {
+    fn xlogy(x: f64, y: f64) -> f64 {
+        if x == 0.0 { 0.0 } else { x * y.ln() }
+    }
+    if y.len() != weights.len() || y.len() != mu.len() {
+        return Err(format!(
+            "binomial classical deviance size mismatch: y={}, weights={}, mu={}",
+            y.len(),
+            weights.len(),
+            mu.len()
+        ));
+    }
+    let mut half = 0.0_f64;
+    for i in 0..y.len() {
+        let w = weights[i];
+        if w == 0.0 {
+            continue;
+        }
+        let (yi, mui) = (y[i], mu[i]);
+        let unit = xlogy(yi, yi / mui) + xlogy(1.0 - yi, (1.0 - yi) / (1.0 - mui));
+        half += w * unit;
+        if !half.is_finite() {
+            return Err(format!(
+                "binomial classical deviance is non-finite at row {i}: y={yi}, mu={mui}, weight={w}"
+            ));
+        }
+    }
+    Ok(2.0 * half)
+}
+
 #[inline]
 pub(crate) fn bernoulli_log_likelihood_from_probability(
     y: f64,
@@ -1007,10 +1047,12 @@ mod packed_scalar_oracle_tests {
         }
     }
 
+    /// The order-1 gradient lowering must be bit-identical to the `Tower4`
+    /// gradient (every build) and faster than it (release profile, where the
+    /// codegen layout is the shipped one -- `SpeedGate::open` documents why).
     #[test]
     fn measure_gradient_order1_vs_tower4_932() {
-        use std::hint::black_box;
-        use std::time::Instant;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let links = [
             InverseLink::Standard(StandardLink::Logit),
@@ -1023,7 +1065,7 @@ mod packed_scalar_oracle_tests {
         let eta_ls = 0.5;
         let SigmaJet1 { sigma, .. } = exp_sigma_jet1_scalar(eta_ls);
         let q = binomial_location_scale_q0(eta_t, sigma);
-        let iterations = if cfg!(debug_assertions) { 4 } else { 250_000 };
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("BINOMIAL-LS-GRAD-932"));
         for link in &links {
             let jet = inverse_link_jet_for_inverse_link(link, q).expect("inverse-link jet");
             let gradient = binomial_location_scale_nll_gradient(
@@ -1038,63 +1080,53 @@ mod packed_scalar_oracle_tests {
                 gradient, tower.g,
                 "Order1 must be bit-identical to Tower4 gradient"
             );
-
-            let mut order1_best = f64::INFINITY;
-            let mut tower_best = f64::INFINITY;
-            for _ in 0..5 {
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    black_box(
-                        binomial_location_scale_nll_gradient(
-                            black_box(y),
-                            black_box(weight),
-                            black_box(eta_t),
-                            black_box(eta_ls),
-                            black_box(q),
-                            black_box(jet.mu),
-                            black_box(jet.d1),
-                            black_box(jet.d2),
-                            black_box(jet.d3),
-                            black_box(link),
-                        )
-                        .expect("order1 timing"),
-                    );
-                }
-                order1_best = order1_best.min(start.elapsed().as_secs_f64());
-
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    black_box(
-                        binomial_location_scale_nll_tower(
-                            black_box(y),
-                            black_box(weight),
-                            black_box(eta_t),
-                            black_box(eta_ls),
-                            black_box(q),
-                            black_box(jet.mu),
-                            black_box(jet.d1),
-                            black_box(jet.d2),
-                            black_box(jet.d3),
-                            black_box(link),
-                            false,
-                        )
-                        .expect("tower timing"),
-                    );
-                }
-                tower_best = tower_best.min(start.elapsed().as_secs_f64());
-            }
-            let order1_ns = order1_best * 1e9 / iterations as f64;
-            let tower_ns = tower_best * 1e9 / iterations as f64;
-            eprintln!(
-                "BINOMIAL-LS-GRAD-932 link={link:?} tower4={tower_ns:.2} ns/row order1={order1_ns:.2} ns/row speedup={:.3}x",
-                tower_ns / order1_ns,
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The nudge perturbs the threshold predictor, so consecutive
+            // iterations cannot be folded; both arms fold the same gradient
+            // channel back into the harness checksum.
+            let timing = paired_interleaved(
+                15,
+                250_000,
+                0x9320_B1A5,
+                |nudge| {
+                    binomial_location_scale_nll_gradient(
+                        y,
+                        weight,
+                        eta_t + nudge,
+                        eta_ls,
+                        q,
+                        jet.mu,
+                        jet.d1,
+                        jet.d2,
+                        jet.d3,
+                        link,
+                    )
+                    .expect("order1 timing")[0]
+                },
+                |nudge| {
+                    binomial_location_scale_nll_tower(
+                        y,
+                        weight,
+                        eta_t + nudge,
+                        eta_ls,
+                        q,
+                        jet.mu,
+                        jet.d1,
+                        jet.d2,
+                        jet.d3,
+                        link,
+                        false,
+                    )
+                    .expect("tower timing")
+                    .g[0]
+                },
             );
-            if !cfg!(debug_assertions) {
-                assert!(
-                    order1_ns < tower_ns,
-                    "Order1 gradient must beat Tower4 for {link:?}: {order1_ns} vs {tower_ns} ns/row"
-                );
-            }
+            gate.faster(&format!("link={link:?}"), &timing, "order1", "tower4");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 }

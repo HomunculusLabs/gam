@@ -1323,10 +1323,6 @@ impl PsiGramTensor {
         psi.is_finite() && psi >= self.psi_lo && psi <= self.psi_hi
     }
 
-    /// The certified value window `[psi_lo, psi_hi]` (#1033 instrumentation).
-    pub fn psi_window(&self) -> (f64, f64) {
-        (self.psi_lo, self.psi_hi)
-    }
 
     /// True when `psi` lies inside the certified gradient window where the
     /// analytic ψ-derivative is bit-tight against the exact design derivative

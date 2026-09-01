@@ -1411,17 +1411,6 @@ pub fn feasible_step_fraction(
     Ok(apply_feasible_step_boundary_backoff(&limit))
 }
 
-/// The same barrier-hook rule against a [`gam_problem::ConstraintSet`] carrier
-/// rather than a bare dense system, for blocks whose declared constraints are
-/// held in that form.
-pub fn feasible_step_fraction_in_set(
-    constraints: &gam_problem::ConstraintSet,
-    beta: &Array1<f64>,
-    direction: &Array1<f64>,
-) -> Result<f64, gam_problem::ContractFeasibleStepError> {
-    let limit = constraints.max_contract_feasible_step(beta.view(), direction.view())?;
-    Ok(apply_feasible_step_boundary_backoff(&limit))
-}
 
 /// Backoff applied when a binding constraint clipped the step, keeping the new
 /// iterate off the face by enough that round-off cannot leave it balanced on

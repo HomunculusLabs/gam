@@ -59,12 +59,6 @@ pub trait FamilyStrategy: std::fmt::Debug + Send + Sync {
         gaussian_scale: Option<f64>,
     ) -> Result<NoiseModel, EstimationError>;
 
-    fn integrated_moments(
-        &self,
-        quadctx: &QuadratureContext,
-        eta: f64,
-        se_eta: f64,
-    ) -> Result<IntegratedMomentsJet, EstimationError>;
 }
 
 /// Default `FamilyStrategy` implementation: stores a `LikelihoodSpec`
@@ -430,33 +424,6 @@ impl FamilyStrategy for ResolvedFamilyStrategy {
         NoiseModel::from_likelihood(&self.spec, mean.len(), gaussian_scale)
     }
 
-    fn integrated_moments(
-        &self,
-        quadctx: &QuadratureContext,
-        eta: f64,
-        se_eta: f64,
-    ) -> Result<IntegratedMomentsJet, EstimationError> {
-        if let Some(state) = self.latent_cloglog_state() {
-            let jet = latent_cloglog_inverse_link_jet(quadctx, eta, se_eta.hypot(state.latent_sd))?;
-            let mean = jet.mean;
-            return Ok(IntegratedMomentsJet {
-                mean,
-                variance: (mean * (1.0 - mean)).max(PROB_VARIANCE_FLOOR),
-                d1: jet.d1,
-                d2: jet.d2,
-                d3: jet.d3,
-                mode: jet.mode,
-            });
-        }
-        // The observation-model variance for Tweedie/Gamma depends on the
-        // exponential-dispersion metadata (Tweedie φ, Gamma shape). The strategy
-        // carries the (response, link) spec, so supply that spec's scale metadata
-        // — for Gamma/Tweedie this is the estimated-dispersion variant (seeded at
-        // the unit value, refined during fitting), never a silent hardcoded φ = 1
-        // baked into the integrator (issue #953).
-        let likelihood = gam_problem::GlmLikelihoodSpec::canonical(self.spec.clone());
-        integrated_family_moments_jet(quadctx, &likelihood, eta, se_eta)
-    }
 }
 
 #[cfg(test)]

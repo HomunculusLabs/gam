@@ -4308,6 +4308,7 @@ mod moment_engine_tests {
     #[test]
     fn measure_base_moment_instantiated_order_vs_forced_four_932() {
         use crate::cubic_cell_kernel::evaluate_cell_moments;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let cell = DenestedCubicCell {
             left: -1.2,
@@ -4435,74 +4436,62 @@ mod moment_engine_tests {
             }
         }
 
-        let iterations = if cfg!(debug_assertions) { 4 } else { 5_000 };
-        let mut native1_best = f64::INFINITY;
-        let mut historical1_best = f64::INFINITY;
-        let mut native2_best = f64::INFINITY;
-        let mut historical2_best = f64::INFINITY;
-        for _ in 0..5 {
-            let start = Instant::now();
-            for _ in 0..iterations {
-                black_box(base_moment_jets(
-                    black_box(&c1),
-                    black_box(&left1),
-                    true,
-                    black_box(&right1),
-                    true,
-                    black_box(&numeric),
-                ));
-            }
-            native1_best = native1_best.min(start.elapsed().as_secs_f64());
-
-            let start = Instant::now();
-            for _ in 0..iterations {
-                black_box(base_moment_jets(
-                    black_box(&forced_c1),
-                    black_box(&forced_left1),
-                    true,
-                    black_box(&forced_right1),
-                    true,
-                    black_box(&numeric),
-                ));
-            }
-            historical1_best = historical1_best.min(start.elapsed().as_secs_f64());
-
-            let start = Instant::now();
-            for _ in 0..iterations {
-                black_box(base_moment_jets(
-                    black_box(&c2),
-                    black_box(&left2),
-                    true,
-                    black_box(&right2),
-                    true,
-                    black_box(&numeric),
-                ));
-            }
-            native2_best = native2_best.min(start.elapsed().as_secs_f64());
-
-            let start = Instant::now();
-            for _ in 0..iterations {
-                black_box(base_moment_jets(
-                    black_box(&forced_c2),
-                    black_box(&forced_left2),
-                    true,
-                    black_box(&forced_right2),
-                    true,
-                    black_box(&numeric),
-                ));
-            }
-            historical2_best = historical2_best.min(start.elapsed().as_secs_f64());
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why): the order-aware schedule must beat the forced order-four
+        // execution of the identical arithmetic, at both instantiated orders.
+        // The nudge perturbs the left cell edge so no evaluation is
+        // loop-invariant across calls.
+        if cfg!(debug_assertions) {
+            return;
         }
-        let to_ns = |seconds: f64| seconds * 1e9 / iterations as f64;
-        let native1_ns = to_ns(native1_best);
-        let historical1_ns = to_ns(historical1_best);
-        let native2_ns = to_ns(native2_best);
-        let historical2_ns = to_ns(historical2_best);
-        eprintln!(
-            "FLEX-MOMENT-ORDER-932 jet1={native1_ns:.2} ns historical-order4-jet1={historical1_ns:.2} ns speedup1={:.3}x jet2={native2_ns:.2} ns historical-order4-jet2={historical2_ns:.2} ns speedup2={:.3}x",
-            historical1_ns / native1_ns,
-            historical2_ns / native2_ns,
+        let mut gate = SpeedGate::open("FLEX-MOMENT-ORDER-932");
+        let jet1 = paired_interleaved(
+            15,
+            2_000,
+            0x9320_F1E1,
+            |nudge| {
+                let mut left = left1.clone();
+                left.v += nudge;
+                base_moment_jets(&c1, &left, true, &right1, true, &numeric)
+                    .iter()
+                    .map(|moment| moment.v + moment.g[0])
+                    .sum::<f64>()
+            },
+            |nudge| {
+                let mut left = left1.clone();
+                left.v += nudge;
+                let left = ForcedOrder4(left);
+                base_moment_jets(&forced_c1, &left, true, &forced_right1, true, &numeric)
+                    .iter()
+                    .map(|moment| moment.0.v + moment.0.g[0])
+                    .sum::<f64>()
+            },
         );
+        gate.faster("jet1", &jet1, "instantiated_order", "forced_order4");
+        let jet2 = paired_interleaved(
+            15,
+            2_000,
+            0x9320_F1E2,
+            |nudge| {
+                let mut left = left2.clone();
+                left.v += nudge;
+                base_moment_jets(&c2, &left, true, &right2, true, &numeric)
+                    .iter()
+                    .map(|moment| moment.v + moment.g[0] + moment.h[0])
+                    .sum::<f64>()
+            },
+            |nudge| {
+                let mut left = left2.clone();
+                left.v += nudge;
+                let left = ForcedOrder4(left);
+                base_moment_jets(&forced_c2, &left, true, &forced_right2, true, &numeric)
+                    .iter()
+                    .map(|moment| moment.0.v + moment.0.g[0] + moment.0.h[0])
+                    .sum::<f64>()
+            },
+        );
+        gate.faster("jet2", &jet2, "instantiated_order", "forced_order4");
+        gate.finish();
     }
 
     /// #932 item-2 Phase B-base: the base-moment jet builder `base_moment_jets`
@@ -6167,35 +6156,13 @@ mod compiled_order2_oracle_tests {
     /// representative flex width.
     #[test]
     fn release_measure_flex_compiled_order2_vs_generic_plan_932() {
-        use std::time::Instant;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let p = 12usize;
         let qax = p - 2;
         let qdax = p - 1;
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): the
-        // entry-eta value channel is nudged by a negligible multiple of the
-        // running checksum, so the pure row evaluation can be neither hoisted
-        // nor dropped while the measured regime stays bit-adjacent to the
-        // fixture.
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "flex order-2 release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
-
-        let iterations = 20_000usize;
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("FLEX-ORDER2-932"));
         for di in [0.0_f64, 1.0] {
             let mut st = 0xA5F0_3C11_9D2E_7B41u64 ^ di.to_bits();
             let wi = (xorshift(&mut st) + 1.5).abs() + 0.1;
@@ -6261,57 +6228,71 @@ mod compiled_order2_oracle_tests {
                 generic.v,
             );
 
-            let production_ns = best_ns(iterations, e0v, |perturbed_e0v| {
-                let (value, gradient, hessian) = lower_flex_outer_plan_order2(
-                    &plan,
-                    FlexOrder2Inputs {
-                        eta0: FlexOrder2View {
-                            value: perturbed_e0v,
-                            gradient: ndarray::ArrayView1::from(&e0g),
-                            hessian: ndarray::ArrayView2::from_shape((p, p), &e0h).unwrap(),
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The nudge perturbs the entry-eta value channel, so no row
+            // evaluation is loop-invariant across calls.
+            let timing = paired_interleaved(
+                15,
+                5_000,
+                0x9320_F1E5 ^ (di.to_bits() >> 60),
+                |nudge| {
+                    let (value, gradient, hessian) = lower_flex_outer_plan_order2(
+                        &plan,
+                        FlexOrder2Inputs {
+                            eta0: FlexOrder2View {
+                                value: e0v + nudge,
+                                gradient: ndarray::ArrayView1::from(&e0g),
+                                hessian: ndarray::ArrayView2::from_shape((p, p), &e0h).unwrap(),
+                            },
+                            eta1: FlexOrder2View {
+                                value: e1v,
+                                gradient: ndarray::ArrayView1::from(&e1g),
+                                hessian: ndarray::ArrayView2::from_shape((p, p), &e1h).unwrap(),
+                            },
+                            q1: (q1v, qax),
+                            chi1: FlexOrder2View {
+                                value: cv,
+                                gradient: ndarray::ArrayView1::from(&cg),
+                                hessian: ndarray::ArrayView2::from_shape((p, p), &ch).unwrap(),
+                            },
+                            d1: FlexOrder2View {
+                                value: dv,
+                                gradient: ndarray::ArrayView1::from(&dg),
+                                hessian: ndarray::ArrayView2::from_shape((p, p), &dh).unwrap(),
+                            },
+                            qd1: (qd1v, qdax),
                         },
-                        eta1: FlexOrder2View {
-                            value: e1v,
-                            gradient: ndarray::ArrayView1::from(&e1g),
-                            hessian: ndarray::ArrayView2::from_shape((p, p), &e1h).unwrap(),
-                        },
-                        q1: (q1v, qax),
-                        chi1: FlexOrder2View {
-                            value: cv,
-                            gradient: ndarray::ArrayView1::from(&cg),
-                            hessian: ndarray::ArrayView2::from_shape((p, p), &ch).unwrap(),
-                        },
-                        d1: FlexOrder2View {
-                            value: dv,
-                            gradient: ndarray::ArrayView1::from(&dg),
-                            hessian: ndarray::ArrayView2::from_shape((p, p), &dh).unwrap(),
-                        },
-                        qd1: (qd1v, qdax),
-                    },
-                    p,
-                );
-                value + gradient[0] + hessian[0]
-            });
-            let generic_ns = best_ns(iterations, e0v, |perturbed_e0v| {
-                let out = flex_row_nll(
-                    &Jet2::from_parts(perturbed_e0v, &e0g, &e0h),
-                    &Jet2::from_parts(e1v, &e1g, &e1h),
-                    &Jet2::from_parts(cv, &cg, &ch),
-                    &Jet2::from_parts(dv, &dg, &dh),
-                    &Jet2::primary(q1v, qax, p),
-                    &Jet2::primary(qd1v, qdax, p),
-                    surv0,
-                    surv1,
-                    wi,
-                    di,
-                );
-                out.v + out.g[0] + out.h[0]
-            });
-            eprintln!(
-                "FLEX-ORDER2-932 p={p} event={di:.0} production={production_ns:.2} ns/row \
-                 generic_plan={generic_ns:.2} ns/row generic_plan_over_production={:.6}",
-                generic_ns / production_ns,
+                        p,
+                    );
+                    value + gradient[0] + hessian[0]
+                },
+                |nudge| {
+                    let out = flex_row_nll(
+                        &Jet2::from_parts(e0v + nudge, &e0g, &e0h),
+                        &Jet2::from_parts(e1v, &e1g, &e1h),
+                        &Jet2::from_parts(cv, &cg, &ch),
+                        &Jet2::from_parts(dv, &dg, &dh),
+                        &Jet2::primary(q1v, qax, p),
+                        &Jet2::primary(qd1v, qdax, p),
+                        surv0,
+                        surv1,
+                        wi,
+                        di,
+                    );
+                    out.v + out.g[0] + out.h[0]
+                },
             );
+            gate.faster(
+                &format!("p={p} event={di:.0}"),
+                &timing,
+                "production",
+                "generic_plan",
+            );
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 }

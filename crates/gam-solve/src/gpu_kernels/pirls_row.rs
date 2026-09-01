@@ -1120,63 +1120,6 @@ impl PirlsRowBackend {
         self.module_for_kind(family, curvature, KernelMode::AlphaLadder, "ladder ")
     }
 
-    /// Stage 6: JIT-compile and cache a custom-family row module.
-    ///
-    /// The kernel name is `pirls_row_jit_{spec.spec_id}` so multiple
-    /// distinct JIT specs in the same process get distinct cached
-    /// modules. The cache key is `(spec_id, curvature)` which mirrors
-    /// the built-in `(family, curvature)` cache and reuses the same
-    /// HashMap-of-`Arc<CudaModule>` (but with a synthetic `ModuleKey`
-    /// derived from the spec_id).
-    ///
-    /// Note: a fresh `(spec_id, curvature)` recompiles via NVRTC the
-    /// first time; subsequent fits in the same process hit the cache.
-    /// Spec changes (different body) must use a different `spec_id` so
-    /// that the cache does NOT return a stale module.
-    #[cfg(target_os = "linux")]
-    pub fn module_for_jit(
-        &self,
-        spec: &JitFamilySpec,
-        curvature: CurvatureMode,
-    ) -> Result<Arc<CudaModule>, GpuError> {
-        // Reuse the built-in ModuleKey by mapping `spec_id` to a
-        // synthetic family slot. We piggy-back on the cache by keying
-        // off a hashed family enum value won't fit cleanly; instead
-        // use a separate JIT cache HashMap.
-        let key = JitKey {
-            spec_id: spec.spec_id,
-            curvature,
-        };
-        if let Some(existing) = self
-            .inner
-            .jit_modules
-            .lock()
-            .gpu_ctx("pirls_row jit cache poisoned")?
-            .get(&key)
-        {
-            return Ok(existing.clone());
-        }
-        let source = spec.cuda_source(curvature);
-        // #1551: device-arch-pinned compile (double-atomic objective_out kernel).
-        let ptx = gam_gpu::device_cache::compile_ptx_arch(&source).gpu_ctx_with(|err| {
-            format!(
-                "pirls_row JIT NVRTC compile failed for spec_id={} curvature={}: {err}",
-                spec.spec_id,
-                curvature.as_str(),
-            )
-        })?;
-        let module = self
-            .inner
-            .ctx
-            .load_module(ptx)
-            .gpu_ctx("pirls_row JIT module load failed")?;
-        self.inner
-            .jit_modules
-            .lock()
-            .gpu_ctx("pirls_row jit cache poisoned (insert)")?
-            .insert(key, module.clone());
-        Ok(module)
-    }
 }
 
 /// Stage 6 cache key for JIT-compiled family modules.

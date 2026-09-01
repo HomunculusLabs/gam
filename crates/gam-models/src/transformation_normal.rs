@@ -120,4 +120,6 @@ pub use scop_density::*;
 pub(crate) use warm_start::*;
 
 #[cfg(test)]
+mod kappa_exact_joint_fd_tests;
+#[cfg(test)]
 mod tests;

@@ -7592,7 +7592,7 @@ mod unit_tests {
     /// the Faà di Bruno composition.
     #[test]
     fn runtime_shaped_value_primitives_are_exact_and_skip_constant_composition_932() {
-        use std::time::Instant;
+        use crate::paired_timing::{SpeedGate, paired_interleaved};
 
         const K: usize = 48;
         let arena = DynamicJetArena::new();
@@ -7609,46 +7609,37 @@ mod unit_tests {
         assert_eq!(replaced.g(), variable.g());
         assert_eq!(replaced.h(), variable.h());
 
-        fn best_ns(mut evaluate: impl FnMut(f64) -> f64, iterations: usize) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(0.75 + checksum * 1e-18);
-                }
-                assert!(checksum.is_finite());
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
+        // The exactness pins above run in every build; the speed contract
+        // below opens only in the release profile. Both arms allocate the same
+        // runtime-width output shape from a warm-reset arena and return the same
+        // quantity; the only intended difference is whether known-zero channels
+        // are written directly or computed by walking the composition, so the
+        // direct primitive must be the faster arm.
+        if cfg!(debug_assertions) {
+            return;
         }
-
-        let iterations = if cfg!(debug_assertions) { 200 } else { 20_000 };
+        let mut gate = SpeedGate::open("RUNTIME-CONSTANT-932");
         let mut direct_arena = DynamicJetArena::new();
-        let direct_ns = best_ns(
-            |value| {
+        let mut composed_arena = DynamicJetArena::new();
+        let timing = paired_interleaved(
+            15,
+            20_000,
+            0x9320_C057,
+            |nudge| {
                 direct_arena.reset();
-                let variable = DynamicOrder2::variable(value, 7, K, &direct_arena);
+                let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &direct_arena);
                 let constant = variable.constant_like(1.25);
                 constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
             },
-            iterations,
-        );
-        let mut composed_arena = DynamicJetArena::new();
-        let composed_ns = best_ns(
-            |value| {
+            |nudge| {
                 composed_arena.reset();
-                let variable = DynamicOrder2::variable(value, 7, K, &composed_arena);
+                let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &composed_arena);
                 let constant = variable.compose_unary([1.25, 0.0, 0.0, 0.0, 0.0]);
                 constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
             },
-            iterations,
         );
-        eprintln!(
-            "RUNTIME-CONSTANT-932 dimension={K} direct={direct_ns:.2} ns \
-             composed={composed_ns:.2} ns composed_over_direct={:.6}",
-            composed_ns / direct_ns,
-        );
+        gate.faster(&format!("dimension={K}"), &timing, "direct", "composed");
+        gate.finish();
     }
 
     /// The outer first/second channels carry the family derivative while each

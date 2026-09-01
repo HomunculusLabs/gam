@@ -1,0 +1,125 @@
+name: Speed Gates
+
+# The #932 contract -- every compiled (Taylor-jet) row lowering that ships must
+# be at least as fast as the strongest hand path or generic tower it replaced
+# -- is asserted by wall-clock gates that only MEASURE anything in the release
+# profile: `[profile.test.package.gam-models]` splits codegen into 16 units with
+# no LTO, while the shipped profile is one unit plus thin-LTO, and the whole
+# margin of a compiled-vs-hand row kernel can be cross-CGU inlining. Until this
+# workflow existed, `cargo test --release` ran in NO workflow, so those gates
+# were never executed by CI: they were not failing, they were not running.
+#
+# Two things make this lane fail-closed rather than name-matched:
+#
+#   * The population is DERIVED. `scripts/speed_gates.py` walks the crates for
+#     every `#[test]` whose body opens a `gam_math::paired_timing::SpeedGate`,
+#     resolves each to an exact test path in the compiled release binary, runs
+#     each alone, and refuses success unless every derived gate executed and
+#     printed a cell verdict. A name-prefix filter found 5 of 13 gates the
+#     last time anyone counted; a derivation cannot miss one.
+#   * The matrix is derived too. The `derive` job lists the packages that
+#     carry gates and the `gates` job fans out over exactly those, so a gate
+#     added in a crate this file has never heard of is still run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/speed_gates.py"
+      - ".github/workflows/speed-gates.yml"
+      - ".github/actions/setup-rust-ci/**"
+  schedule:
+    # Nightly, so a host-image or toolchain change that moves a fine margin is
+    # seen within a day even when nothing in the tree changed.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: speed-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
+
+jobs:
+  derive:
+    name: Derive the gate population
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      packages: ${{ steps.derive.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Derive gates from SpeedGate::open call sites
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/speed_gates.py
+          packages=$(python3 scripts/speed_gates.py --packages-json)
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          echo "packages carrying speed gates: ${packages}"
+
+  gates:
+    name: Speed gates (${{ matrix.package }})
+    needs: derive
+    runs-on: ubuntu-latest
+    # The release test target of gam-models is a thin-LTO, single-CGU build;
+    # the focused proof lane budgets 3000s for it. The gates themselves take
+    # a few minutes. This cap only has to stay clear of both.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.derive.outputs.packages) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # build.rs's human-author gate needs real history.
+          fetch-depth: 0
+
+      - name: Set up warm Rust toolchain
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          free-disk-space: "false"
+          cache-targets: "false"
+
+      - name: Record execution host and compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          rustc -vV
+
+      - name: Build and run every derived gate in the release profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p speed-gate-logs
+          python3 scripts/speed_gates.py --run --package "${{ matrix.package }}" \
+            --summary "$GITHUB_STEP_SUMMARY" 2>&1 | tee "speed-gate-logs/${{ matrix.package }}.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Report compiler-cache evidence
+        if: ${{ always() }}
+        shell: bash
+        run: sccache --show-stats || true
+
+      - name: Upload gate logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: speed-gates-${{ matrix.package }}-${{ github.run_id }}
+          path: speed-gate-logs
+          if-no-files-found: ignore

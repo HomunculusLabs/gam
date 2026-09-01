@@ -323,6 +323,19 @@ impl Graph {
         if let Node::Neg(inner) = self.nodes[value] {
             return inner;
         }
+        // A sign belongs INSIDE an activity gate, on the branch that computes
+        // something. Left outside, the gate's Hessian channel is negated in
+        // the branch (the derivative of a reciprocal is negative) and negated
+        // back at the seam -- two `xorpd` on a value that needs none -- and
+        // its gradient channel is negated at the seam instead of folding into
+        // the coefficient the branch already multiplies by, which is what the
+        // hand kernel does. Pushing through lets the double negation cancel
+        // here and lets LLVM fold the remaining sign into a coefficient.
+        if let Node::Select(activity, when_true, when_false) = self.nodes[value] {
+            let when_true = self.neg(when_true);
+            let when_false = self.neg(when_false);
+            return self.select(activity, when_true, when_false);
+        }
         self.intern(Node::Neg(value))
     }
 
@@ -1145,36 +1158,6 @@ fn jet_expression(
     }
 }
 
-fn topological_order(id: usize, graph: &Graph, seen: &mut HashSet<usize>, order: &mut Vec<usize>) {
-    if !seen.insert(id) {
-        return;
-    }
-    match graph.nodes[id] {
-        Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => {}
-        Node::Neg(value)
-        | Node::Exp(value)
-        | Node::Ln(value)
-        | Node::Sqrt(value)
-        | Node::Recip(value) => {
-            topological_order(value, graph, seen, order);
-        }
-        Node::Select(_, _, _) => {}
-        Node::Add(left, right)
-        | Node::Sub(left, right)
-        | Node::Mul(left, right)
-        | Node::Div(left, right) => {
-            topological_order(left, graph, seen, order);
-            topological_order(right, graph, seen, order);
-        }
-    }
-    if !matches!(
-        graph.nodes[id],
-        Node::Constant(_) | Node::Variable(_) | Node::Parameter(_)
-    ) {
-        order.push(id);
-    }
-}
-
 fn node_reference(
     id: usize,
     graph: &Graph,
@@ -1201,7 +1184,9 @@ fn node_reference(
     }
 }
 
-fn node_definition(
+/// Rust expression defining one plain (non-leaf, non-`Select`) node from the
+/// references of its children.
+fn node_expression(
     id: usize,
     graph: &Graph,
     primaries: &[Ident],
@@ -1245,28 +1230,265 @@ fn node_definition(
             let value = reference(value);
             Ok(quote!(#value.recip()))
         }
-        Node::Select(activity, when_true, when_false) => {
-            let activity = &constants[activity];
-            let when_true_definitions =
-                schedule_definitions(std::iter::once(when_true), graph, primaries, constants)?;
-            let when_false_definitions =
-                schedule_definitions(std::iter::once(when_false), graph, primaries, constants)?;
-            let when_true = reference(when_true);
-            let when_false = reference(when_false);
-            Ok(quote! {
-                if #activity {
-                    #(#when_true_definitions)*
-                    #when_true
-                } else {
-                    #(#when_false_definitions)*
-                    #when_false
-                }
-            })
-        }
+        Node::Select(..) => Err(syn::Error::new(
+            Span::call_site(),
+            "row_atom internal schedule error: a Select is defined by its activity group, not as \
+             a plain node",
+        )),
         Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => Err(syn::Error::new(
             Span::call_site(),
             "row_atom internal schedule error: a leaf node has no temporary definition",
         )),
+    }
+}
+
+fn is_leaf(graph: &Graph, id: usize) -> bool {
+    matches!(
+        graph.nodes[id],
+        Node::Constant(_) | Node::Variable(_) | Node::Parameter(_)
+    )
+}
+
+fn children(graph: &Graph, id: usize) -> Vec<usize> {
+    match graph.nodes[id] {
+        Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => Vec::new(),
+        Node::Neg(value)
+        | Node::Exp(value)
+        | Node::Ln(value)
+        | Node::Sqrt(value)
+        | Node::Recip(value) => vec![value],
+        Node::Add(left, right)
+        | Node::Sub(left, right)
+        | Node::Mul(left, right)
+        | Node::Div(left, right) => vec![left, right],
+        Node::Select(_, when_true, when_false) => vec![when_true, when_false],
+    }
+}
+
+/// One lexical level of the generated schedule: the function body, or the
+/// inside of one `if activity { ... }` branch.
+///
+/// Every node `roots` need is defined exactly once at the innermost level that
+/// may evaluate it. A `Select` is an activity gate — its branch may only be
+/// evaluated when the flag is set, because an inactive row's guarded term may
+/// be non-finite and `0 * NaN` is `NaN` — so its branch work is defined inside
+/// the branch. Every `Select` on ONE activity that is ready at the same point
+/// is lowered into ONE `if` block binding every selected value at once, so
+/// work shared by several channels of that activity is done once.
+///
+/// Before this, each `Select` scheduled its branch from a fresh visited set
+/// inside its own `if`, so a subexpression shared by two channels of one
+/// activity was defined once per channel. Measured on the cause-specific
+/// Royston–Parmar row (release profile, EPYC Milan): the event branch carried
+/// two `divsd` — the spline-derivative reciprocal once for the gradient and
+/// once, negated, for the Hessian — against the hand kernel's one, and the
+/// generated order-2 kernel lost to the hand kernel unanimously over fifteen
+/// paired repetitions (`median_ratio=0.9787`, `resolution=0.0031`) while the
+/// third and fourth channels, which share nothing across a gate, won.
+struct Scheduler<'a> {
+    graph: &'a Graph,
+    primaries: &'a [Ident],
+    constants: &'a [Ident],
+    /// Nodes already bound to a name at this level or an enclosing one.
+    defined: HashSet<usize>,
+    /// Nodes reachable from this level's roots without crossing a `Select`
+    /// branch: evaluated unconditionally here, so a branch that also needs one
+    /// of them references it instead of recomputing it inside the gate.
+    unconditional: HashSet<usize>,
+    /// The `Select`s this level lowers, in first-visit order.
+    selects: Vec<usize>,
+    /// Activities whose group is currently being assembled.
+    groups_in_progress: HashSet<usize>,
+    /// Plain nodes currently being visited; a re-entry would be a cycle.
+    nodes_in_progress: HashSet<usize>,
+    out: Vec<TokenStream2>,
+}
+
+impl<'a> Scheduler<'a> {
+    fn new(
+        graph: &'a Graph,
+        primaries: &'a [Ident],
+        constants: &'a [Ident],
+        defined: HashSet<usize>,
+    ) -> Self {
+        Self {
+            graph,
+            primaries,
+            constants,
+            defined,
+            unconditional: HashSet::new(),
+            selects: Vec::new(),
+            groups_in_progress: HashSet::new(),
+            nodes_in_progress: HashSet::new(),
+            out: Vec::new(),
+        }
+    }
+
+    fn run(mut self, roots: &[usize]) -> Result<Vec<TokenStream2>> {
+        for &root in roots {
+            self.survey(root);
+        }
+        for &root in roots {
+            self.visit(root)?;
+        }
+        Ok(self.out)
+    }
+
+    fn gate(&self, select: usize) -> Result<(usize, usize, usize)> {
+        match self.graph.nodes[select] {
+            Node::Select(activity, when_true, when_false) => Ok((activity, when_true, when_false)),
+            _ => Err(syn::Error::new(
+                Span::call_site(),
+                "row_atom internal schedule error: only a Select has an activity gate",
+            )),
+        }
+    }
+
+    /// Record what this level evaluates unconditionally, stopping at every
+    /// `Select` (whose branches belong to the level inside the gate).
+    fn survey(&mut self, id: usize) {
+        if self.defined.contains(&id) || !self.unconditional.insert(id) {
+            return;
+        }
+        if matches!(self.graph.nodes[id], Node::Select(..)) {
+            self.selects.push(id);
+            return;
+        }
+        for child in children(self.graph, id) {
+            self.survey(child);
+        }
+    }
+
+    fn visit(&mut self, id: usize) -> Result<()> {
+        if self.defined.contains(&id) || is_leaf(self.graph, id) {
+            return Ok(());
+        }
+        if matches!(self.graph.nodes[id], Node::Select(..)) {
+            let (activity, _, _) = self.gate(id)?;
+            return self.emit_group(activity, id);
+        }
+        if !self.nodes_in_progress.insert(id) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "row_atom internal schedule error: the expression graph has a cycle",
+            ));
+        }
+        for child in children(self.graph, id) {
+            self.visit(child)?;
+        }
+        self.nodes_in_progress.remove(&id);
+        // A child's activity group may already have defined this node while
+        // resolving a dependency of a sibling gate.
+        if self.defined.contains(&id) {
+            return Ok(());
+        }
+        let temporary = format_ident!("__row_atom_{id}");
+        let expression = node_expression(id, self.graph, self.primaries, self.constants)?;
+        self.out.push(quote!(let #temporary: f64 = #expression;));
+        self.defined.insert(id);
+        Ok(())
+    }
+
+    /// Define, at this level, every unconditional node a gate's branch reads,
+    /// so the branch references it rather than recomputing it inside the gate.
+    fn visit_outside_dependencies(&mut self, id: usize, seen: &mut HashSet<usize>) -> Result<()> {
+        if !seen.insert(id) || is_leaf(self.graph, id) {
+            return Ok(());
+        }
+        if self.defined.contains(&id) || self.unconditional.contains(&id) {
+            return self.visit(id);
+        }
+        for child in children(self.graph, id) {
+            self.visit_outside_dependencies(child, seen)?;
+        }
+        Ok(())
+    }
+
+    /// Lower every pending `Select` on `activity` as one `if` block. `first`
+    /// is the gate whose visit requested the group; if the group is already
+    /// being assembled further up the stack, that gate is on a dependency path
+    /// of its own group and is lowered alone.
+    fn emit_group(&mut self, activity: usize, first: usize) -> Result<()> {
+        if !self.groups_in_progress.insert(activity) {
+            return self.emit_selects(activity, vec![first]);
+        }
+        let mut members = Vec::new();
+        for &select in &self.selects {
+            if !self.defined.contains(&select) && self.gate(select)?.0 == activity {
+                members.push(select);
+            }
+        }
+        if !members.contains(&first) {
+            members.push(first);
+        }
+        let mut seen = HashSet::new();
+        for &select in &members {
+            let (_, when_true, when_false) = self.gate(select)?;
+            self.visit_outside_dependencies(when_true, &mut seen)?;
+            self.visit_outside_dependencies(when_false, &mut seen)?;
+        }
+        // A member lowered alone while its dependencies were resolved is
+        // already bound.
+        members.retain(|select| !self.defined.contains(select));
+        let result = self.emit_selects(activity, members);
+        self.groups_in_progress.remove(&activity);
+        result
+    }
+
+    fn emit_selects(&mut self, activity: usize, members: Vec<usize>) -> Result<()> {
+        if members.is_empty() {
+            return Ok(());
+        }
+        let mut true_roots = Vec::with_capacity(members.len());
+        let mut false_roots = Vec::with_capacity(members.len());
+        for &select in &members {
+            let (_, when_true, when_false) = self.gate(select)?;
+            true_roots.push(when_true);
+            false_roots.push(when_false);
+        }
+        let true_definitions =
+            Scheduler::new(self.graph, self.primaries, self.constants, self.defined.clone())
+                .run(&true_roots)?;
+        let false_definitions =
+            Scheduler::new(self.graph, self.primaries, self.constants, self.defined.clone())
+                .run(&false_roots)?;
+        let reference = |id| node_reference(id, self.graph, self.primaries, self.constants);
+        let true_values: Vec<TokenStream2> = true_roots.iter().map(|&id| reference(id)).collect();
+        let false_values: Vec<TokenStream2> =
+            false_roots.iter().map(|&id| reference(id)).collect();
+        let names: Vec<Ident> = members
+            .iter()
+            .map(|select| format_ident!("__row_atom_{select}"))
+            .collect();
+        let flag = &self.constants[activity];
+        let binding = if members.len() == 1 {
+            let name = &names[0];
+            let true_value = &true_values[0];
+            let false_value = &false_values[0];
+            quote! {
+                let #name: f64 = if #flag {
+                    #(#true_definitions)*
+                    #true_value
+                } else {
+                    #(#false_definitions)*
+                    #false_value
+                };
+            }
+        } else {
+            let types = std::iter::repeat_n(quote!(f64), members.len());
+            quote! {
+                let (#(#names),*): (#(#types),*) = if #flag {
+                    #(#true_definitions)*
+                    (#(#true_values),*)
+                } else {
+                    #(#false_definitions)*
+                    (#(#false_values),*)
+                };
+            }
+        };
+        self.out.push(binding);
+        self.defined.extend(members);
+        Ok(())
     }
 }
 
@@ -1276,20 +1498,8 @@ fn schedule_definitions(
     primaries: &[Ident],
     constants: &[Ident],
 ) -> Result<Vec<TokenStream2>> {
-    let mut seen = HashSet::new();
-    let mut order = Vec::new();
     let roots = roots.into_iter().collect::<Vec<_>>();
-    for root in roots.into_iter().rev() {
-        topological_order(root, graph, &mut seen, &mut order);
-    }
-    order
-        .into_iter()
-        .map(|id| -> Result<TokenStream2> {
-            let temporary = format_ident!("__row_atom_{id}");
-            let expression = node_definition(id, graph, primaries, constants)?;
-            Ok(quote!(let #temporary: f64 = #expression;))
-        })
-        .collect()
+    Scheduler::new(graph, primaries, constants, HashSet::new()).run(&roots)
 }
 
 fn constant_parameters(

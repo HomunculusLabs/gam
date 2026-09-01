@@ -932,7 +932,7 @@ mod tests {
     /// this is not evidence against an optimized hand-written opponent.
     #[test]
     fn release_measure_binomial_q_closed_forms_vs_generic_jet_932() {
-        use std::time::Instant;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let y = 0.7_f64;
         let w = 1.3_f64;
@@ -957,47 +957,36 @@ mod tests {
         close("m3", closed.2, jet.2);
         close("m4", closed_m4, jet_m4);
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): the
-        // latent coordinate is nudged by a negligible multiple of the running
-        // checksum, so the pure tower call can be neither hoisted nor dropped
-        // while the measured regime stays bit-adjacent to the fixture.
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base_q: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base_q + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "binomial q-dispatch release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
+        // Speed contract, release profile only: the closed-form stack that
+        // wins the dispatch must actually beat the generic jet it out-dispatches,
+        // or the dispatch priority is wrong and the jet should be production.
+        if cfg!(debug_assertions) {
+            return;
         }
-
-        let iterations = 2_000_000usize;
-        let closed_ns = best_ns(iterations, q0, |q| {
-            let (m1, m2, m3) = binomial_neglog_q_derivatives_logit_closed_form(y, w, q);
-            let m4 = binomial_neglog_q_fourth_derivative_logit_closed_form(y, w, q);
-            m1 + m2 + m3 + m4
-        });
-        let jet_ns = best_ns(iterations, q0, |q| {
-            let (jet_mu, jet_d1, jet_d2, jet_d3, jet_d4) = logit_jet(q);
-            let (m1, m2, m3) =
-                binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
-            let m4 = binomial_neglog_q_fourth_derivative_from_jet(
-                y, w, jet_mu, jet_d1, jet_d2, jet_d3, jet_d4,
-            );
-            m1 + m2 + m3 + m4
-        });
-        eprintln!(
-            "BINOMIAL-Q-DISPATCH-932 link=logit production_closed={closed_ns:.2} ns/row \
-             generic_jet={jet_ns:.2} ns/row generic_jet_over_closed_form={:.6}",
-            jet_ns / closed_ns,
+        let mut gate = SpeedGate::open("BINOMIAL-Q-DISPATCH-932");
+        let timing = paired_interleaved(
+            15,
+            300_000,
+            0x9320_D15B,
+            |nudge| {
+                let q = q0 + nudge;
+                let (m1, m2, m3) = binomial_neglog_q_derivatives_logit_closed_form(y, w, q);
+                let m4 = binomial_neglog_q_fourth_derivative_logit_closed_form(y, w, q);
+                m1 + m2 + m3 + m4
+            },
+            |nudge| {
+                let q = q0 + nudge;
+                let (jet_mu, jet_d1, jet_d2, jet_d3, jet_d4) = logit_jet(q);
+                let (m1, m2, m3) =
+                    binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
+                let m4 = binomial_neglog_q_fourth_derivative_from_jet(
+                    y, w, jet_mu, jet_d1, jet_d2, jet_d3, jet_d4,
+                );
+                m1 + m2 + m3 + m4
+            },
         );
+        gate.faster("link=logit", &timing, "production_closed", "generic_jet");
+        gate.finish();
     }
 
     /// #932 parity + not-slower pin for the #1591 order prune: the production
@@ -1016,7 +1005,7 @@ mod tests {
     fn release_measure_binomial_q_tower3_prune_vs_tower4_932() {
         // `std::time::Instant` was imported here for the local `best_ns`; the
         // paired harness owns the clock now.
-        use gam_math::paired_timing::paired_interleaved;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let y = 0.7_f64;
         let w = 1.3_f64;
@@ -1052,12 +1041,16 @@ mod tests {
             "m3 prune bit-identity"
         );
 
-        // One paired, interleaved, order-randomised measurement
-        // (`gam_math::paired_timing`, #932), replacing this file's copy of the
-        // `best_ns` min-of-5-per-arm pattern. Both arms are timed adjacent in
-        // time within each repetition, in an order chosen per repetition, so a
-        // first-versus-second offset cannot masquerade as a margin — which is
-        // the failure mode a 5% "timing noise" allowance cannot detect.
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why). The prune does strictly less arithmetic than the full `Tower4`
+        // it prunes -- it drops the fourth-order channel and its cross terms --
+        // so the contract is "faster", not "not slower": measured 1.56x
+        // (`wins=1.00`, 34x its own resolution) when the paired instrument
+        // first replaced a min-of-N harness that had called it a dead tie.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut gate = SpeedGate::open("BINOMIAL-Q-PRUNE-932");
         let timing = paired_interleaved(
             15,
             300_000,
@@ -1073,36 +1066,7 @@ mod tests {
                 m1 + m2 + m3
             },
         );
-
-        // `median_ratio` is tower4 / tower3, so above 1 means the prune is
-        // faster — the same orientation as the token below.
-        //
-        // The prune must never be a measurable pessimization. THE 1.05 IS
-        // UNCHANGED HERE ON PURPOSE: it is a chosen constant ("allow only timing
-        // noise (5%)"), and this commit migrates the instrument without moving
-        // the bar, so a change in verdict can only come from the measurement.
-        // What is new is that the line below now reports `resolution` — the
-        // measurement's own noise floor — which is the quantity 5% was standing
-        // in for and was never compared against. Deriving the tolerance from it
-        // is the follow-up (#2469: derived in form, unsupported in value); doing
-        // it in the same commit would be choosing a tolerance to fit the numbers
-        // it is being validated against.
-        //
-        // #932: release-only -- but NOT because the test lane is unoptimized.
-        // It is not: [profile.test] sets opt-level = 2. The difference is
-        // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
-        // codegen-units = 16 and the test profile carries no LTO, while
-        // [profile.release] is codegen-units = 1 + lto = "thin". The
-        // bit-identity checks above are build-independent and still run in
-        // every build.
-        assert!(
-            cfg!(debug_assertions) || timing.median_ratio() >= 1.0 / 1.05,
-            "Tower3 prune slower than the full Tower4 it prunes: {}",
-            timing.summary("tower3", "tower4"),
-        );
-        eprintln!(
-            "BINOMIAL-Q-PRUNE-932 {}",
-            timing.summary("production_tower3", "full_tower4"),
-        );
+        gate.faster("m1..m3", &timing, "production_tower3", "full_tower4");
+        gate.finish();
     }
 }

@@ -146,9 +146,9 @@ fn cauchit_binomial_geometry(y: f64, eta: f64) -> (f64, f64, f64) {
 /// important: the block-local REML correction consumes both and must never
 /// differentiate a projected/floored surrogate of the objective it sampled.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DevianceEtaRow {
-    pub(crate) half_deviance: f64,
-    pub(crate) eta_score: f64,
+pub struct DevianceEtaRow {
+    pub half_deviance: f64,
+    pub eta_score: f64,
 }
 
 #[inline]
@@ -689,7 +689,7 @@ fn beta_fitted_loglikelihood_unit_from_eta(
 /// `log_measure_scale`; the deviance unit tests exercise the `scale = 0` case
 /// through a thin local wrapper in the test module.
 #[inline]
-pub(crate) fn deviance_eta_row_with_log_measure_scale(
+pub fn deviance_eta_row_with_log_measure_scale(
     row: usize,
     y: f64,
     eta: f64,

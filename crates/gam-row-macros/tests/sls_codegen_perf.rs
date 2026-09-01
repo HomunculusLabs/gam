@@ -1,4 +1,4 @@
-use gam_math::paired_timing::paired_interleaved;
+use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 use gam_row_macros::row_program;
 
 const K: usize = 9;
@@ -972,12 +972,16 @@ fn generated_sls_vgh_matches_and_beats_inlined_strongest_hand_932() {
         hand(&nonfinite, &inactive),
     );
 
-    // #932: the arms are timed adjacent in time with a randomised order per
+    // Parity above runs in every build; the gate opens only in the release
+    // profile. The arms are timed adjacent in time with a randomised order per
     // repetition, so drift slower than one repetition divides out of the ratio
     // instead of landing in it. `median_ratio` is hand / generated, so above 1
-    // means generated is the faster arm; `wins_fraction` is the share of
-    // repetitions in which it won, which settles the verdict without depending
-    // on the resolution estimate at all.
+    // means generated is the faster arm. The bar is `median_ratio` alone:
+    // `wins_fraction` is reported as evidence, not gated on (see the harness).
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("SLS-MACRO-CODEGEN-932");
     let timing = paired_interleaved(
         15,
         5_000,
@@ -985,31 +989,8 @@ fn generated_sls_vgh_matches_and_beats_inlined_strongest_hand_932() {
         |nudge| channels_batch(&p, &kernel, nudge, generated),
         |nudge| channels_batch(&p, &kernel, nudge, hand),
     );
-    eprintln!(
-        "SLS-MACRO-CODEGEN-932 {}",
-        timing.summary("generated", "strongest_hand"),
-    );
-    // #932: the bar is `median_ratio` ALONE. `wins_fraction` was a conjunct
-    // here and is not one any more -- it is a within-run confidence
-    // statement AT THAT HOST'S NOISE LEVEL, not a statement about the
-    // effect, so it degrades in the opposite direction from the thing it
-    // was guarding. Measured: one 1.6% effect read `wins=0.00` on a quiet
-    // node and `0.27 / 0.40 / 0.27` on a node ~30x noisier, and three runs
-    // of IDENTICAL code gave `0.67 / 0.87 / 1.00`, while `median_ratio`
-    // moved 0.8%. As a gate it can therefore only manufacture FAILURES on
-    // a busy runner; dropping it cannot pass a regression, because
-    // `median_ratio() > 1.0` still requires the effect.
-    //
-    // It stays in `summary()` and stays the right thing to LEAD a report
-    // with: `wins=1.00` over fifteen reps is a distribution-free sign test
-    // that settled a cell whose margin was only 1.6x its resolution,
-    // without depending on the resolution estimate at all. Evidence and
-    // gate are different roles for one statistic.
-    assert!(
-        timing.median_ratio() > 1.0,
-        "generated must beat strongest hand: {}",
-        timing.summary("generated", "strongest_hand"),
-    );
+    gate.faster("vgh", &timing, "generated", "strongest_hand");
+    gate.finish();
 }
 
 #[test]
@@ -1051,7 +1032,10 @@ fn release_measure_generated_sls_contractions_vs_strongest_hand_932() {
     // separately removes the second minimum, and each pairing reports its own
     // `wins_fraction` and `ratio_resolution` rather than collapsing into one
     // aggregate that cannot say whether it resolved anything.
-    let mut losses: Vec<String> = Vec::new();
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("SLS-CONTRACTED-HAND-932");
     for (label, timing) in [
         (
             "order=3 opponent=hand_analytic",
@@ -1110,20 +1094,7 @@ fn release_measure_generated_sls_contractions_vs_strongest_hand_932() {
             ),
         ),
     ] {
-        eprintln!(
-            "SLS-CONTRACTED-HAND-932 {label} {}",
-            timing.summary("generated", "opponent"),
-        );
-        if timing.median_ratio() <= 1.0 {
-            losses.push(format!(
-                "{label}: {}",
-                timing.summary("generated", "opponent")
-            ));
-        }
+        gate.faster(label, &timing, "generated", "opponent");
     }
-    assert!(
-        losses.is_empty(),
-        "generated contraction must beat every opponent it is measured against:\n{}",
-        losses.join("\n"),
-    );
+    gate.finish();
 }

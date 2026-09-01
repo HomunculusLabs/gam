@@ -51,16 +51,6 @@ impl ArrowSolverMode {
         }
     }
 
-    /// Square-Root BA is the direct-solve stability mode for future f32
-    /// callers. Large `K` still routes to inexact PCG because dense Schur
-    /// storage dominates precision concerns at that scale.
-    pub const fn automatic_for_single_precision(k: usize) -> Self {
-        if k <= DIRECT_SOLVE_MAX_K {
-            Self::SqrtBA
-        } else {
-            Self::InexactPCG
-        }
-    }
 }
 
 /// Reason the Steihaug-CG loop stopped.

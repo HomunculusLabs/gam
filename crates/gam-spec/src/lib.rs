@@ -1606,10 +1606,6 @@ impl LikelihoodSpec {
         Self::new(ResponseFamily::Binomial, InverseLink::Sas(state))
     }
 
-    #[inline]
-    pub const fn binomial_beta_logistic(state: SasLinkState) -> Self {
-        Self::new(ResponseFamily::Binomial, InverseLink::BetaLogistic(state))
-    }
 
     #[inline]
     pub fn binomial_mixture(state: MixtureLinkState) -> Self {
@@ -2363,12 +2359,6 @@ impl ResolvedLikelihoodScale {
         }
     }
 
-    pub fn beta_log_precision(self) -> Result<f64, InvalidLikelihoodScale> {
-        match self {
-            Self::BetaPrecision { precision, .. } => Ok(precision.log_value()),
-            other => Err(other.wrong_family("a Beta precision")),
-        }
-    }
 
     pub fn beta_precision(self) -> Result<f64, InvalidLikelihoodScale> {
         match self {

@@ -1302,21 +1302,25 @@ mod tests {
         }
     }
 
+    /// Wall-clock corroboration of the compensated `compose_unary` schedule
+    /// against the previous partition-sum implementation, at every `K`.
+    ///
+    /// This is corroboration, not the contract. The contract is
+    /// `compose_unary_work_model_matches_the_closed_form`, which counts
+    /// operations: a count is the same on every machine, and a wall clock is
+    /// not. The speed cell is asserted only at `K = 12`, far past the
+    /// crossover the counted model reports (`K = 8` for the pointed
+    /// recurrence), where the compensated schedule does ~7x less arithmetic;
+    /// below that the multiple is printed for the record. The gate opens only
+    /// in the release profile (`SpeedGate::open` documents why).
     #[test]
     fn compose_unary_speedup_over_partition_sum() {
-        // Measure ns/call new vs. the previous partition-sum implementation.
-        // Prints the multiple at every K; the assert is placed where the win
-        // is large enough that no box can argue with it.
-        //
-        // This is corroboration, not the contract. The contract is
-        // `compose_unary_work_model_matches_the_closed_form`, which counts
-        // operations: a count is the same on every machine, and a wall clock is
-        // not. The assert used to sit at `n_dirs >= 6` and was red at main,
-        // because the schedule then in the file cost ~6x the gather's flops
-        // there and could not win however the threshold was moved. Keep any
-        // guard here far past the crossover the counted model reports (K = 8
-        // for the pointed recurrence) and let the printed line carry the rest.
-        use std::time::Instant;
+        use crate::paired_timing::{SpeedGate, paired_interleaved};
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut gate = SpeedGate::open("COMPOSE-UNARY-932");
         let mut rng = Rng(0xfeed_face_dead_beef);
         for &n_dirs in &[2usize, 4, 6, 8, 12] {
             // The per-call cost spans ~5 orders of magnitude across this K
@@ -1337,43 +1341,48 @@ mod tests {
                     )
                 })
                 .collect();
-            let iters = if n_dirs >= 12 { 3usize } else { 200 };
-            // Warm the scratch / partition tables.
-            for (j, d) in &inputs {
-                std::hint::black_box(j.compose_unary(*d));
-                std::hint::black_box(compose_unary_partition_reference(&j.coeffs, *d));
-            }
-            let t0 = Instant::now();
-            for _ in 0..iters {
-                for (j, d) in &inputs {
-                    std::hint::black_box(j.compose_unary(*d));
-                }
-            }
-            let new_ns = t0.elapsed().as_nanos() as f64 / (iters * inputs.len()) as f64;
-            let t1 = Instant::now();
-            for _ in 0..iters {
-                for (j, d) in &inputs {
-                    std::hint::black_box(compose_unary_partition_reference(&j.coeffs, *d));
-                }
-            }
-            let old_ns = t1.elapsed().as_nanos() as f64 / (iters * inputs.len()) as f64;
-            eprintln!(
-                "compose_unary K={n_dirs}: new={new_ns:.1} ns/call  old={old_ns:.1} ns/call  \
-                 speedup={:.2}x",
-                old_ns / new_ns
+            let iterations = if n_dirs >= 12 { 3usize } else { 200 };
+            // One arm call composes every input once; the nudge perturbs the
+            // outer derivative stack so no composition is loop-invariant.
+            let timing = paired_interleaved(
+                15,
+                iterations,
+                0x9320_C0DE ^ n_dirs as u64,
+                |nudge| {
+                    let mut sink = 0.0f64;
+                    for (jet, derivs) in &inputs {
+                        let mut derivs = *derivs;
+                        derivs[0] += nudge;
+                        sink += jet.compose_unary(derivs).coeffs.iter().sum::<f64>();
+                    }
+                    sink
+                },
+                |nudge| {
+                    let mut sink = 0.0f64;
+                    for (jet, derivs) in &inputs {
+                        let mut derivs = *derivs;
+                        derivs[0] += nudge;
+                        sink += compose_unary_partition_reference(&jet.coeffs, derivs)
+                            .iter()
+                            .sum::<f64>();
+                    }
+                    sink
+                },
             );
-            // Guard only in an optimised build, and only where the counted
-            // model says the compensated schedule does ~7x less arithmetic —
-            // a margin no shared box's load can invert. Debug builds are
-            // dominated by fixed per-call overhead and are not a guard either.
-            if !cfg!(debug_assertions) && n_dirs >= 12 {
-                assert!(
-                    new_ns < old_ns,
-                    "K={n_dirs} is far past the crossover the work model reports, \
-                     so the compensated schedule must win here: new={new_ns:.1}ns \
-                     old={old_ns:.1}ns"
+            if n_dirs >= 12 {
+                gate.faster(
+                    &format!("K={n_dirs}"),
+                    &timing,
+                    "compensated",
+                    "partition_sum",
+                );
+            } else {
+                eprintln!(
+                    "COMPOSE-UNARY-932 K={n_dirs} {} (below the counted crossover; not gated)",
+                    timing.summary("compensated", "partition_sum"),
                 );
             }
         }
+        gate.finish();
     }
 }

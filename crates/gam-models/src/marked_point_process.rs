@@ -310,15 +310,6 @@ impl MarkedPointProcessModel {
         Ok(self.transition(lag)?.transition.dot(&impulse))
     }
 
-    /// Change in every mark's log intensity at `lag` after one event of `mark`.
-    pub fn log_intensity_impulse_response(
-        &self,
-        mark: usize,
-        lag: f64,
-    ) -> Result<Array1<f64>, MarkedPointProcessError> {
-        let state_response = self.state_impulse_response(mark, lag)?;
-        Ok(self.observation_matrix().dot(&state_response))
-    }
 
     /// Stationary mark-level covariance induced by the latent factor values.
     ///
@@ -1069,6 +1060,8 @@ pub struct CumulativeIncidenceForecast {
 /// piecewise-constant formula. Averaging happens afterward, so this computes a
 /// Monte Carlo approximation to `E[S(t) lambda_d(t)]`, rather than substituting
 /// a posterior mean state or a mean intensity into the nonlinear survival law.
+/// Survival includes every mark declared [`MarkRole::Absorbing`], even when
+/// `competing_marks` requests CIF output for only a subset of those causes.
 pub fn forecast_cumulative_incidence(
     model: &MarkedPointProcessModel,
     landmark: &FilteredState,
@@ -1116,6 +1109,12 @@ pub fn forecast_cumulative_incidence(
         }
         selected[mark] = true;
     }
+    let absorbing_marks: Vec<usize> = model
+        .mark_roles
+        .iter()
+        .enumerate()
+        .filter_map(|(mark, role)| (*role == MarkRole::Absorbing).then_some(mark))
+        .collect();
     for (index, interval) in future.iter().enumerate() {
         if !interval.duration.is_finite() || interval.duration <= 0.0 {
             return Err(invalid(format!(
@@ -1165,11 +1164,13 @@ pub fn forecast_cumulative_incidence(
                 transitions[index].0.transition.dot(&state) + transitions[index].1.dot(&innovation);
             let eta = &future[index].fixed_log_intensity + &observation.dot(&state);
             let mut rates: Array1<f64> = Array1::zeros(causes);
-            let mut total_rate = 0.0;
             for (cause, &mark) in competing_marks.iter().enumerate() {
                 rates[cause] = eta[mark].exp();
-                total_rate += rates[cause];
             }
+            let total_rate = absorbing_marks
+                .iter()
+                .map(|&mark| eta[mark].exp())
+                .sum::<f64>();
             if !total_rate.is_finite() {
                 return Err(MarkedPointProcessError::NumericalFailure {
                     context: "forecast competing intensity",

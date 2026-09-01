@@ -2894,41 +2894,6 @@ pub fn evaluate_custom_family_joint_hyper_owned<F: CustomFamily + Clone + Send +
     Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
 }
 
-/// Shared-layout variant of
-/// [`evaluate_custom_family_joint_hyper_owned`].
-pub fn evaluate_custom_family_joint_hyper_owned_shared<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
-    family: &F,
-    specs: &[ParameterBlockSpec],
-    options: &BlockwiseFitOptions,
-    rho_current: &Array1<f64>,
-    hyper_layout: SharedCustomFamilyHyperLayout,
-    warm_start: Option<&CustomFamilyWarmStart>,
-    eval_mode: EvalMode,
-) -> Result<CustomFamilyJointHyperOwnedResult, CustomFamilyError> {
-    let penalty_counts = validate_blockspecs(specs)?;
-    let has_psi_derivatives = !hyper_layout.is_empty();
-    let (eval_options, strict_warm_start) =
-        derivative_quality_options_and_warm_start(options, warm_start, has_psi_derivatives);
-    let eval_result = evaluate_custom_family_hyper_internal_shared(
-        family,
-        specs,
-        &eval_options,
-        &penalty_counts,
-        rho_current,
-        hyper_layout,
-        strict_warm_start
-            .as_ref()
-            .map(|w| &w.inner)
-            .or_else(|| warm_start.map(|w| &w.inner)),
-        gam_problem::RhoPrior::Flat,
-        eval_mode,
-        eval_mode,
-        None,
-    )?;
-    Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
-}
 
 pub struct CustomFamilyJointHyperModeSelection {
     pub result: CustomFamilyJointHyperResult,

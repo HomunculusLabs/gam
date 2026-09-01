@@ -174,8 +174,8 @@ fn build_iso_kappa_fixture(
     // cross-axis structure when d ≥ 2). This is the fast unit-level reproduction
     // of the #1122 stall, whose end-to-end pin is
     // `matern_2d_iso_kappa_outer_gradient_matches_fd`.
-    let two_d = label.ends_with("_2d");
-    let d = if two_d { 2 } else { 1 };
+    let d = duchon_dims_from_label(label);
+    let two_d = d >= 2;
     // gam#2735: the anisotropic arm enrols `d` per-axis ψ coordinates instead
     // of one isotropic log-κ, so the same oracle differentiates every one of
     // them. Only meaningful for `d ≥ 2`.
@@ -191,9 +191,23 @@ fn build_iso_kappa_fixture(
             // signal and the cross-axis curvature blocks.
             let t2 = (i as f64 * 0.618_033_988_749_894_9).fract();
             data[[i, 1]] = t2;
+            // gam#979 — axes beyond the second are the large-scale benchmark's
+            // standardized-PC regime: a low-discrepancy fill per axis (distinct
+            // irrational multipliers, so no two axes alias), spread to the
+            // ±2 range of a standardized coordinate rather than [0, 1]. The
+            // truth picks up a mild contribution from every extra axis so no
+            // kernel direction is degenerate at the seed.
+            let mut extra = 0.0;
+            for a in 2..d {
+                let multiplier = ((a + 2) as f64 * 2.0 + 1.0).sqrt().fract();
+                let value = 4.0 * ((i as f64 * multiplier).fract() - 0.5);
+                data[[i, a]] = value;
+                extra += 0.1 * (3.0 * value + a as f64).sin();
+            }
             1.4 * (2.0 * std::f64::consts::PI * t).sin()
                 + 0.9 * (2.0 * std::f64::consts::PI * t2).cos()
                 + 0.5 * (t - 0.5)
+                + extra
         } else {
             1.4 * (2.0 * std::f64::consts::PI * t).sin() + 0.5 * (t - 0.5)
         };
@@ -250,10 +264,21 @@ fn build_iso_kappa_fixture(
             spec: DuchonBasisSpec {
                 radial_reparam: None,
                 periodic: None,
-                center_strategy: CenterStrategy::FarthestPoint { num_centers: 8 },
+                center_strategy: CenterStrategy::FarthestPoint {
+                    num_centers: duchon_centers_from_label(label),
+                },
                 length_scale: Some(1.0),
-                power: 1.0,
-                nullspace_order: DuchonNullspaceOrder::Linear,
+                // gam#979 — the label can move the hybrid's two integer orders
+                // off the historical `(Linear, 1)` pair. `bench/large_scale`'s
+                // shared CTN preprocessor ships `duchon(pc1..pc16, order=0,
+                // power=9, length_scale=1)`, i.e. `(Zero, 9)`: a Matérn-blend
+                // whose polynomial null space is the constant alone. Every
+                // Duchon ψ gate in this file and in `gam-terms` was pinned at
+                // `Linear`, so an order-Zero-only defect in the κ chain had no
+                // gate to fail; these two knobs let the same oracle walk the
+                // shipped configuration.
+                power: duchon_power_from_label(label),
+                nullspace_order: duchon_nullspace_order_from_label(label),
                 identifiability: SpatialIdentifiability::default(),
                 // gam#2735 — an `"*_aniso*"` label asks for the per-axis η the
                 // hybrid Duchon now enrols as OUTER ψ coordinates. The
@@ -324,6 +349,40 @@ fn build_iso_kappa_fixture(
         rho_dim,
         psi_dim,
     }
+}
+
+/// `"*_order0*"` selects the constant-only Duchon null space (`p = 1`);
+/// anything else keeps the historical `Linear` (`p = 2`) fixture (gam#979).
+fn duchon_nullspace_order_from_label(label: &str) -> DuchonNullspaceOrder {
+    if label.contains("_order0") {
+        DuchonNullspaceOrder::Zero
+    } else {
+        DuchonNullspaceOrder::Linear
+    }
+}
+
+/// `"*_power9*"` selects the spectral power the large-scale CTN preprocessor
+/// ships; anything else keeps the historical `s = 1` fixture (gam#979).
+fn duchon_power_from_label(label: &str) -> f64 {
+    if label.contains("_power9") { 9.0 } else { 1.0 }
+}
+
+/// `"*_16d*"` builds the benchmark's sixteen-PC cloud, `"*_2d"` the historical
+/// two-axis fixture, anything else the 1-D line (gam#979).
+fn duchon_dims_from_label(label: &str) -> usize {
+    if label.contains("_16d") {
+        16
+    } else if label.ends_with("_2d") || label.contains("_2d_") {
+        2
+    } else {
+        1
+    }
+}
+
+/// `"*_centers24*"` selects the benchmark's 24 farthest-point centers; anything
+/// else keeps the historical 8 (gam#979).
+fn duchon_centers_from_label(label: &str) -> usize {
+    if label.contains("_centers24") { 24 } else { 8 }
 }
 
 /// The `FitOptions` every iso-κ FD probe evaluates the production criterion
@@ -619,6 +678,98 @@ fn iso_kappa_fd_variant_driver_on(
         unresolved,
         analytic_by_probe,
     }
+}
+
+/// gam#979 — the shipped large-scale CTN preprocessor chart, on the standard
+/// Gaussian REML evaluator: hybrid Duchon–Matérn with the constant-only null
+/// space (`order=0` ⇒ `p = 1`) and spectral power `s = 9`. Every other Duchon
+/// ψ gate pins `(Linear, 1)`; this one differences the SAME production criterion
+/// at the orders the benchmark actually runs, so a κ-derivative term that is
+/// only wrong when the polynomial tail is a lone constant cannot hide behind
+/// the `Linear` fixtures.
+#[test]
+fn iso_kappa_duchon_order0_power9_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The 2-D twin of `iso_kappa_duchon_order0_power9_gaussian_identity_fd`: the
+/// cross-axis operator blocks only carry off-diagonal structure when `d ≥ 2`
+/// (gam#1122), and the constant-only null space leaves `d` more kernel columns
+/// than `Linear` does, so the two dimensions probe different column layouts.
+#[test]
+fn iso_kappa_duchon_order0_power9_2d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9_2d",
+        120,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) 2-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// gam#979 — the benchmark's own shape: sixteen standardized-PC axes, 24
+/// farthest-point centers, and enough rows that every row-center sweep runs
+/// through the certified radial profile rather than pairwise exact kernel
+/// evaluation (`RADIAL_PROFILE_MIN_PAIRS`). The 1-D and 2-D order-0 gates pass;
+/// the shipped `gam fit --transformation-normal` and the standard Gaussian
+/// joint search both fail their strong-Wolfe searches at THIS shape, so this is
+/// the gate that has to fail before any repair is believed.
+#[test]
+fn iso_kappa_duchon_order0_power9_16d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9_16d_centers24",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) 16-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The `Linear` null-space control at the benchmark shape: the same rows,
+/// centers, and power, with the polynomial tail the other Duchon gates pin.
+#[test]
+fn iso_kappa_duchon_linear_power9_16d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_linear_power9_16d_centers24",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=1, power=9) 16-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
 }
 
 #[test]

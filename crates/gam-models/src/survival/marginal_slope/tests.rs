@@ -7932,12 +7932,10 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
     let w = (&w_raw + &w_raw.t()).mapv(|v| v * 0.5);
 
     // ── Hook: ONE O(n·p²) family pass ────────────────────────────────────
-    let t_hook = std::time::Instant::now();
     let hook = family
         .joint_jeffreys_information_contracted_trace_hessian_with_specs(&states0, &specs, &w)
         .expect("contracted trace hessian call")
         .expect("rigid path must supply the contracted completion");
-    let hook_secs = t_hook.elapsed().as_secs_f64();
     assert_eq!(hook.dim(), (total, total));
 
     // ── Pairwise: p(p+1)/2 full second-directional passes (what the hook
@@ -7948,22 +7946,24 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
         e[a] = 1.0;
         e
     };
-    let t_pair = std::time::Instant::now();
-    let mut pairwise = Array2::<f64>::zeros((total, total));
-    for a in 0..total {
-        let ea = unit(a);
-        for b in a..total {
-            let eb = unit(b);
-            let huv = family
-                .exact_newton_joint_hessiansecond_directional_derivative(&states0, &ea, &eb)
-                .expect("second directional derivative call")
-                .expect("rigid path must supply the second directional derivative");
-            let val = (&w * &huv).sum();
-            pairwise[[a, b]] = val;
-            pairwise[[b, a]] = val;
+    let pairwise_assembly = |w: &Array2<f64>| -> Array2<f64> {
+        let mut pairwise = Array2::<f64>::zeros((total, total));
+        for a in 0..total {
+            let ea = unit(a);
+            for b in a..total {
+                let eb = unit(b);
+                let huv = family
+                    .exact_newton_joint_hessiansecond_directional_derivative(&states0, &ea, &eb)
+                    .expect("second directional derivative call")
+                    .expect("rigid path must supply the second directional derivative");
+                let val = (w * &huv).sum();
+                pairwise[[a, b]] = val;
+                pairwise[[b, a]] = val;
+            }
         }
-    }
-    let pair_secs = t_pair.elapsed().as_secs_f64();
+        pairwise
+    };
+    let pairwise = pairwise_assembly(&w);
 
     // Correctness: the cheap hook equals the expensive pairwise assembly over
     // the full p×p matrix, truncation-free.
@@ -7976,23 +7976,50 @@ fn survival_jeffreys_contracted_trace_hook_beats_pairwise_979() {
     }
     let n_pairwise_passes = total * (total + 1) / 2;
     eprintln!(
-        "[979 perf] n={n} p={total} (p_m={p_m} p_g={p_g}) | hook={hook_secs:.4}s (1 pass) | \
-         pairwise={pair_secs:.4}s ({n_pairwise_passes} passes) | speedup={:.1}× | \
-         hook-vs-pairwise max_rel={max_rel:.3e}",
-        pair_secs / hook_secs.max(1e-12)
+        "[979] n={n} p={total} (p_m={p_m} p_g={p_g}) hook (1 pass) vs pairwise \
+         ({n_pairwise_passes} passes): max_rel={max_rel:.3e}"
     );
     assert!(
         max_rel < 1e-9,
         "hook completion disagrees with pairwise assembly at large p: max_rel={max_rel:.3e}"
     );
-    // The hook must be at least as fast as the pairwise fallback it replaces.
-    // The theoretical ratio is ~p(p+1)/2; we only assert the hook is not SLOWER
-    // (a loose sanity bound robust to shared-node timing noise), and report the
-    // measured speedup above for the perf datapoint.
-    assert!(
-        hook_secs <= pair_secs,
-        "hook slower than the pairwise fallback it replaces: hook={hook_secs:.4}s pairwise={pair_secs:.4}s"
+
+    // The hook must be faster than the pairwise fallback it replaces (the
+    // theoretical ratio is ~p(p+1)/2). Release profile only, paired and
+    // interleaved: the previous form timed each side once, sequentially, and
+    // an unpaired sequential wall-clock ratio cannot tell slow code from a
+    // busy node. The nudge perturbs the trace weight so neither assembly is
+    // loop-invariant across repetitions.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("JEFFREYS-TRACE-HOOK-979");
+    let timing = paired_interleaved(
+        7,
+        1,
+        0x979_0_5EED,
+        |nudge| {
+            let mut w = w.clone();
+            w[[0, 0]] += nudge;
+            family
+                .joint_jeffreys_information_contracted_trace_hessian_with_specs(&states0, &specs, &w)
+                .expect("contracted trace hessian call")
+                .expect("rigid path must supply the contracted completion")
+                .sum()
+        },
+        |nudge| {
+            let mut w = w.clone();
+            w[[0, 0]] += nudge;
+            pairwise_assembly(&w).sum()
+        },
     );
+    gate.faster(
+        &format!("n={n} p={total} passes={n_pairwise_passes}"),
+        &timing,
+        "hook",
+        "pairwise",
+    );
+    gate.finish();
 }
 
 /// #932 release speed gate for the rigid contracted third/fourth towers: the
@@ -8009,7 +8036,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
     use super::row_kernel::{RigidRowInputs, rigid_row_nll};
     use gam_math::jet_scalar::{OneSeed, TwoSeed};
     use gam_math::jet_tower::program_full_tower;
-    use std::time::Instant;
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
     // One ordinary interior row per event branch (censored / event are
     // distinct live derivative stacks).
@@ -8020,28 +8047,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
     let dir_u = [0.7_f64, -1.3, 0.4, 0.6];
     let dir_v = [-0.4_f64, 0.6, 1.1, -0.2];
 
-    // Feedback-coupled timing barrier (no `std::hint::black_box`): each
-    // iteration nudges the log-slope primary by a negligible multiple of the
-    // running checksum, so the pure tower call can be neither hoisted nor
-    // dropped while the measured regime stays bit-adjacent to the fixture.
-    fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base_g: f64, mut evaluate: F) -> f64 {
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let mut checksum = 0.0_f64;
-            let started = Instant::now();
-            for _ in 0..iterations {
-                checksum += evaluate(base_g + checksum * 1e-18);
-            }
-            assert!(
-                checksum.is_finite(),
-                "contracted-tower release-measure checksum must stay finite"
-            );
-            best = best.min(started.elapsed().as_secs_f64());
-        }
-        best * 1e9 / iterations as f64
-    }
-
-    let iterations = 200_000usize;
+    let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-CONTRACTED-932"));
     for &[q0, q1, qd1, g, z, w, d, probit_scale] in &cases {
         let inputs = RigidRowInputs {
             row: 0,
@@ -8100,49 +8106,74 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
             }
         }
 
-        let third_production_ns = best_ns(iterations, g, |perturbed_g| {
-            let vars: [OneSeed<4>; 4] = std::array::from_fn(|a| {
-                OneSeed::seed_direction([q0, q1, qd1, perturbed_g][a], a, dir_u[a])
-            });
-            let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
+        let Some(gate) = gate.as_mut() else {
+            continue;
+        };
+        // The nudge perturbs the log-slope primary, so no tower evaluation is
+        // loop-invariant across calls.
+        let third = paired_interleaved(
+            15,
+            20_000,
+            0x9320_C0_03 ^ (d.to_bits() >> 60),
+            |perturbation| {
+                let perturbed_g = g + perturbation;
+                let vars: [OneSeed<4>; 4] = std::array::from_fn(|a| {
+                    OneSeed::seed_direction([q0, q1, qd1, perturbed_g][a], a, dir_u[a])
+                });
+                let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+                    &vars, &inputs,
+                )
                 .expect("specialized third")
                 .contracted_third();
-            t[0][0] + t[3][3]
-        });
-        let third_generic_ns = best_ns(iterations, g, |perturbed_g| {
-            program.primaries[0][3] = perturbed_g;
-            let t = program_full_tower(&program, 0)
-                .expect("dense tower")
-                .third_contracted(&dir_u);
-            t[0][0] + t[3][3]
-        });
-        eprintln!(
-            "RIGID-CONTRACTED-932 order=3 event={d:.0} production={third_production_ns:.2} ns/row \
-             generic_tower={third_generic_ns:.2} ns/row generic_tower_over_production={:.6}",
-            third_generic_ns / third_production_ns,
+                t[0][0] + t[3][3]
+            },
+            |perturbation| {
+                program.primaries[0][3] = g + perturbation;
+                let t = program_full_tower(&program, 0)
+                    .expect("dense tower")
+                    .third_contracted(&dir_u);
+                t[0][0] + t[3][3]
+            },
         );
-
-        let fourth_production_ns = best_ns(iterations, g, |perturbed_g| {
-            let vars: [TwoSeed<4>; 4] = std::array::from_fn(|a| {
-                TwoSeed::seed([q0, q1, qd1, perturbed_g][a], a, dir_u[a], dir_v[a])
-            });
-            let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(&vars, &inputs)
+        gate.faster(
+            &format!("order=3 event={d:.0}"),
+            &third,
+            "production",
+            "generic_tower",
+        );
+        let fourth = paired_interleaved(
+            15,
+            20_000,
+            0x9320_C0_04 ^ (d.to_bits() >> 60),
+            |perturbation| {
+                let perturbed_g = g + perturbation;
+                let vars: [TwoSeed<4>; 4] = std::array::from_fn(|a| {
+                    TwoSeed::seed([q0, q1, qd1, perturbed_g][a], a, dir_u[a], dir_v[a])
+                });
+                let t = rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
+                    &vars, &inputs,
+                )
                 .expect("specialized fourth")
                 .contracted_fourth();
-            t[0][0] + t[3][3]
-        });
-        let fourth_generic_ns = best_ns(iterations, g, |perturbed_g| {
-            program.primaries[0][3] = perturbed_g;
-            let t = program_full_tower(&program, 0)
-                .expect("dense tower")
-                .fourth_contracted(&dir_u, &dir_v);
-            t[0][0] + t[3][3]
-        });
-        eprintln!(
-            "RIGID-CONTRACTED-932 order=4 event={d:.0} production={fourth_production_ns:.2} ns/row \
-             generic_tower={fourth_generic_ns:.2} ns/row generic_tower_over_production={:.6}",
-            fourth_generic_ns / fourth_production_ns,
+                t[0][0] + t[3][3]
+            },
+            |perturbation| {
+                program.primaries[0][3] = g + perturbation;
+                let t = program_full_tower(&program, 0)
+                    .expect("dense tower")
+                    .fourth_contracted(&dir_u, &dir_v);
+                t[0][0] + t[3][3]
+            },
         );
+        gate.faster(
+            &format!("order=4 event={d:.0}"),
+            &fourth,
+            "production",
+            "generic_tower",
+        );
+    }
+    if let Some(gate) = gate {
+        gate.finish();
     }
 }
 

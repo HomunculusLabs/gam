@@ -3214,20 +3214,16 @@ mod tests {
     /// output and covariance scratch so timing includes row arithmetic only.
     #[test]
     fn release_measure_packed_widths_k1_to_k14_vs_strongest_hand_932() {
-        use std::hint::black_box;
-        use std::time::Instant;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
-        fn best_ns<T, F: FnMut() -> T>(iterations: usize, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    black_box(evaluate());
-                }
-                best = best.min(start.elapsed().as_nanos() as f64 / iterations as f64);
-            }
-            best
-        }
+        // Every width's parity is pinned in every build by the oracles this
+        // module already carries; this gate is the speed contract, release
+        // profile only (`SpeedGate::open` documents why): at every width, on
+        // every covariance shape and event branch, the runtime-width feature
+        // pullback must beat the reusable strongest-hand schedule. Both arms
+        // reuse derivative output and covariance scratch so the timing is row
+        // arithmetic only; the nudge perturbs the marginal predictor.
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("G932_PACKED_WIDTH_RELEASE"));
 
         macro_rules! measure_width {
             ($k:literal, $dim:literal) => {{
@@ -3282,61 +3278,22 @@ mod tests {
                                 covariance,
                             )
                             .expect("reusable strongest-hand workspace");
-                        let mut graph_workspace = Order2GraphWorkspace::new();
-                        let mut dynamic_arena = DynamicJetArena::new();
-                        let mut fixed_gradient = [0.0; $dim];
-                        let mut fixed_hessian = [0.0; $dim * $dim];
-                        let mut graph_gradient = [0.0; $dim];
-                        let mut graph_hessian = [0.0; $dim * $dim];
-                        let mut dynamic_gradient = [0.0; $dim];
-                        let mut dynamic_hessian = [0.0; $dim * $dim];
-                        let evaluate_production = |workspace: &mut RigidVectorRowWorkspace<'_>| {
-                            let value = row_primary_closed_form_vector_into(
-                                0, -0.28, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8, 0.87,
-                                workspace,
-                            )
-                            .expect("packed production width");
-                            let derivatives = workspace.derivatives();
-                            black_box(derivatives);
-                            value
-                        };
-                        let evaluate_hand = |workspace: &mut vector_hand_oracle_tests::ReusableHandVectorRowWorkspace| {
-                            let value = vector_hand_oracle_tests::row_primary_closed_form_vector_hand_reference_into(
-                                -0.28,
-                                0.53,
-                                1.18,
-                                &slopes,
-                                &scores,
-                                covariance,
-                                1.21,
-                                event,
-                                1.0e-8,
-                                0.87,
-                                workspace,
-                            )
-                            .expect("reusable strongest-hand width");
-                            let derivatives = workspace.derivatives();
-                            black_box(derivatives);
-                            value
-                        };
-                        black_box(evaluate_production(&mut workspace));
-                        black_box(evaluate_hand(&mut hand_workspace));
-
-                        let production_ns =
-                            best_ns(5_000, || evaluate_production(&mut workspace));
-                        let fixed_ns = best_ns(5_000, || {
-                            let value = row_primary_closed_form_vector_fixed_into::<$dim>(
-                                -0.28, 0.53, 1.18, &slopes, &scores, covariance, 1.21, event,
-                                1.0e-8, 0.87, &mut fixed_gradient, &mut fixed_hessian,
-                            )
-                            .expect("direct fixed width");
-                            black_box((&fixed_gradient, &fixed_hessian));
-                            value
-                        });
-                        let graph_ns = if $dim <= 16 {
-                            best_ns(5_000, || {
-                                let value = row_primary_closed_form_vector_graph_into::<$dim>(
-                                    -0.28,
+                        let evaluate_production =
+                            |q0: f64, workspace: &mut RigidVectorRowWorkspace<'_>| -> f64 {
+                                let value = row_primary_closed_form_vector_into(
+                                    0, q0, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8,
+                                    0.87, workspace,
+                                )
+                                .expect("packed production width");
+                                let (gradient, hessian) = workspace.derivatives();
+                                value + gradient[0] + hessian[[0, 0]]
+                            };
+                        let evaluate_hand =
+                            |q0: f64,
+                             workspace: &mut vector_hand_oracle_tests::ReusableHandVectorRowWorkspace|
+                             -> f64 {
+                                let value = vector_hand_oracle_tests::row_primary_closed_form_vector_hand_reference_into(
+                                    q0,
                                     0.53,
                                     1.18,
                                     &slopes,
@@ -3346,70 +3303,37 @@ mod tests {
                                     event,
                                     1.0e-8,
                                     0.87,
-                                    &mut graph_workspace,
-                                    &mut graph_gradient,
-                                    &mut graph_hessian,
+                                    workspace,
                                 )
-                                .expect("direct graph width");
-                                black_box((&graph_gradient, &graph_hessian));
-                                value
-                            })
-                        } else {
-                            f64::INFINITY
-                        };
-                        let dynamic_ns = best_ns(5_000, || {
-                            let value = row_primary_closed_form_vector_dynamic_into(
-                                -0.28,
-                                0.53,
-                                1.18,
-                                &slopes,
-                                &scores,
-                                covariance,
-                                1.21,
-                                event,
-                                1.0e-8,
-                                0.87,
-                                &mut dynamic_arena,
-                                &mut dynamic_gradient,
-                                &mut dynamic_hessian,
-                            )
-                            .expect("direct dynamic width");
-                            black_box((&dynamic_gradient, &dynamic_hessian));
-                            value
-                        });
-                        let hand_ns =
-                            best_ns(5_000, || evaluate_hand(&mut hand_workspace));
-                        let fastest_canonical_ns = fixed_ns.min(graph_ns).min(dynamic_ns);
-                        // #932: release-only -- but NOT because the test lane is unoptimized.
-                        // It is not: [profile.test] sets opt-level = 2. The difference is
-                        // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
-                        // codegen-units = 16 and the test profile carries no LTO, while
-                        // [profile.release] is codegen-units = 1 + lto = "thin".
-                        // Cargo.toml's own note records that CGU splitting is what blocks LLVM
-                        // from inlining hot accessors into the per-row loops, and that
-                        // "release is unaffected: it already carries thin-LTO +
-                        // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
-                        // cross-CGU inlining therefore measures a different thing here than in
-                        // the shipped profile. Measured: this assertion fails in the default
-                        // test lane. The parity/correctness checks around it are
-                        // build-independent and still run in every build.
+                                .expect("reusable strongest-hand width");
+                                let (gradient, hessian) = workspace.derivatives();
+                                value + gradient[0] + hessian[[0, 0]]
+                            };
+                        // Parity on the exact benchmarked inputs.
+                        let production_value = evaluate_production(-0.28, &mut workspace);
+                        let hand_value = evaluate_hand(-0.28, &mut hand_workspace);
+                        let band = 1e-9 * production_value.abs().max(hand_value.abs()).max(1.0);
                         assert!(
-                            cfg!(debug_assertions) || hand_ns > production_ns,
-                            "runtime-width feature pullback must beat the reusable strongest-hand \
-                             schedule: covariance={label} event={event:.0} k={} \
-                             production={production_ns:.3} ns hand={hand_ns:.3} ns",
+                            (production_value - hand_value).abs() <= band,
+                            "covariance={label} event={event:.0} k={}: production {production_value:+.15e} \
+                             vs hand {hand_value:+.15e}",
                             $k,
                         );
-                        eprintln!(
-                            "G932_PACKED_WIDTH_RELEASE covariance={label} event={event:.0} \
-                             k={} dim={} production_ns={production_ns:.3} fixed_ns={fixed_ns:.3} \
-                             graph_ns={graph_ns:.3} dynamic_ns={dynamic_ns:.3} hand_ns={hand_ns:.3} \
-                             production_over_fastest_canonical={:.6} hand_over_production={:.6}",
-                            $k,
-                            $dim,
-                            production_ns / fastest_canonical_ns,
-                            hand_ns / production_ns,
-                        );
+                        if let Some(gate) = gate.as_mut() {
+                            let timing = paired_interleaved(
+                                15,
+                                2_000,
+                                0x9320_9AC4 ^ ($k as u64) ^ (event.to_bits() >> 60),
+                                |nudge| evaluate_production(-0.28 + nudge, &mut workspace),
+                                |nudge| evaluate_hand(-0.28 + nudge, &mut hand_workspace),
+                            );
+                            gate.faster(
+                                &format!("covariance={label} event={event:.0} k={} dim={}", $k, $dim),
+                                &timing,
+                                "production",
+                                "hand",
+                            );
+                        }
                     }
                 }
             }};
@@ -3427,6 +3351,9 @@ mod tests {
         // representative runtime-width cell: production has no width dispatch,
         // and the same feature-pullback schedule serves every larger K.
         measure_width!(14, 17);
+        if let Some(gate) = gate {
+            gate.finish();
+        }
     }
 
     /// #932 release speed gate for the hot K=1 SCALAR rigid row (the
@@ -3434,12 +3361,11 @@ mod tests {
     /// [`row_primary_closed_form`]) against the retained strongest hand
     /// schedule [`test_support::row_primary_closed_form_hand_reference`].
     /// The packed-widths gate above times the VECTOR workspace path only, so
-    /// this is the dedicated scalar cell. Emits one harness-parsed
-    /// `hand_over_production` token per event branch; the MSI release harness
-    /// fails closed on any cell `<= 1`.
+    /// this is the dedicated scalar cell: one per event branch, release
+    /// profile only (`SpeedGate::open` documents why).
     #[test]
     fn release_measure_rigid_scalar_order2_vs_strongest_hand_932() {
-        use std::time::Instant;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         // One ordinary interior row per event branch: censored (d=0) and
         // event (d=1) evaluate different live derivative stacks, so each is
@@ -3448,36 +3374,7 @@ mod tests {
             (-0.7, 0.4, 0.8, -0.3, 0.6, 1.0, 0.0, 0.75),
             (0.2, -0.5, 1.4, 0.9, -1.1, 0.8, 1.0, 1.0),
         ];
-
-        // Feedback-coupled timing barrier (no `std::hint::black_box`): each
-        // iteration nudges the observed-slope primary by a negligible multiple
-        // of the running checksum, and the checksum folds value, gradient, and
-        // Hessian channels. The loop-carried recurrence makes iteration `n`'s
-        // input depend on iteration `n-1`'s output, so the pure row call can
-        // be neither hoisted nor dropped; the `1e-18` scale keeps the
-        // perturbed primary bit-adjacent to the fixture regime.
-        fn best_ns<F>(iterations: usize, base_g: f64, evaluate: F) -> f64
-        where
-            F: Fn(f64) -> (f64, [f64; N_PRIMARY], [[f64; N_PRIMARY]; N_PRIMARY]),
-        {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    let (value, gradient, hessian) = evaluate(base_g + checksum * 1e-18);
-                    checksum += value + gradient[0] + hessian[0][0];
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "rigid scalar release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
-
-        let iterations = 2_000_000usize;
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-SCALAR-932"));
         for &(q0, q1, qd1, g, z, w, d, scale) in &cases {
             // Parity pin on the exact benchmarked inputs (the richer sweep
             // lives in `canonical_rigid_order2_matches_strongest_hand_schedule_932`).
@@ -3494,30 +3391,42 @@ mod tests {
                 canonical.0,
                 hand.0,
             );
-
-            let production_ns = best_ns(iterations, g, |perturbed_g| {
-                row_primary_closed_form(q0, q1, qd1, perturbed_g, z, w, d, 1.0e-8, scale)
-                    .expect("canonical rigid row")
-            });
-            let hand_ns = best_ns(iterations, g, |perturbed_g| {
-                test_support::row_primary_closed_form_hand_reference(
-                    q0,
-                    q1,
-                    qd1,
-                    perturbed_g,
-                    z,
-                    w,
-                    d,
-                    1.0e-8,
-                    scale,
-                )
-                .expect("strongest hand rigid row")
-            });
-            eprintln!(
-                "RIGID-SCALAR-932 event={d:.0} production={production_ns:.2} ns/row \
-                 hand={hand_ns:.2} ns/row hand_over_production={:.6}",
-                hand_ns / production_ns,
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The nudge perturbs the observed-slope primary; each arm folds
+            // value, gradient and Hessian channels back into the checksum.
+            let timing = paired_interleaved(
+                15,
+                300_000,
+                0x9320_5CA1 ^ (d.to_bits() >> 60),
+                |nudge| {
+                    let (value, gradient, hessian) =
+                        row_primary_closed_form(q0, q1, qd1, g + nudge, z, w, d, 1.0e-8, scale)
+                            .expect("canonical rigid row");
+                    value + gradient[0] + hessian[0][0]
+                },
+                |nudge| {
+                    let (value, gradient, hessian) =
+                        test_support::row_primary_closed_form_hand_reference(
+                            q0,
+                            q1,
+                            qd1,
+                            g + nudge,
+                            z,
+                            w,
+                            d,
+                            1.0e-8,
+                            scale,
+                        )
+                        .expect("strongest hand rigid row");
+                    value + gradient[0] + hessian[0][0]
+                },
             );
+            gate.faster(&format!("event={d:.0}"), &timing, "production", "hand");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 

@@ -87,59 +87,6 @@ pub fn canonical_standard_fit_options(
     }
 }
 
-/// `FitOptions` for the programmatic blocks-forward entry point
-/// (`gaussian_reml_fit_blocks_forward` in gam-pyffi).
-///
-/// That entry documents itself as a "formula-API-bypass entry into the same
-/// joint multi-smooth REML driver" the formula path uses, but it hand-built its
-/// own 19-field `FitOptions` literal and had drifted from the canonical policy
-/// (#2630). It now derives from [`canonical_standard_fit_options`], so a new
-/// policy field reaches it automatically instead of being silently omitted, and
-/// the deviations that remain are named HERE rather than buried in the FFI.
-///
-/// Every deviation, and why:
-///
-/// * `nullspace_dims` — STRUCTURAL. This API is handed explicit per-block
-///   penalty matrices, so it needs one nullspace dimension per block, where the
-///   formula path derives them and passes an empty vector.
-/// * `skip_rho_posterior_inference: false` — DELIBERATE, and already sanctioned
-///   by the canonical policy above: "Lower-level callers that explicitly need
-///   the escalation opt in elsewhere". This is such a caller.
-/// * `persistent_warm_start_store: None` — DELIBERATE. A programmatic
-///   block-fit owns its own lifecycle and never discovers ambient storage.
-/// `tol` is NO LONGER a deviation. It was `1e-9` against the canonical `1e-10`
-/// with no stated rationale — exactly the stale-tolerance class the `1e-10`
-/// comment above was written to fix — and this is the surface where it costs
-/// the most, for two reasons:
-///
-/// * This entry is the `forward` of a `torch.autograd.Function`
-///   (`gamfit/torch/_reml.py::_GaussianRemlFitBlocksFn`) whose `backward` is an
-///   envelope-theorem / implicit-function adjoint assembled AT the implicit
-///   optimum. `tol` is not a cosmetic accuracy knob there; it bounds how far
-///   from stationarity the point is at which the analytic gradient's derivation
-///   assumes stationarity. It is the one field that bounds a PREMISE rather
-///   than an output.
-/// * `tests/torch/test_reml_blocks_backward.py::test_f1_matches_single_smooth_forward_and_backward`
-///   asserts this path agrees with `gaussian_reml_fit` at `rtol=atol=1e-10`.
-///   That path is `gaussian_reml_multi_closed_form_with_cache` — a CLOSED-FORM
-///   Gaussian REML optimum, with no outer tolerance at all. So a `1e-9`-
-///   converged iterate was being held to a `1e-10` identity against an exact
-///   one. Inheriting `1e-10` moves this path toward the thing it is asserted
-///   equal to; it does not make the assertion easier.
-///
-/// Two fields that LOOK like deviations are not: `max_iter: 200` matches
-/// `config.outer_max_iter.unwrap_or(200)`, and `ResourcePolicy::default_library()`
-/// is what `resolved_resource_policy` returns for a default config, since
-/// `for_problem` falls through to `default_library` when no marginal-slope hint
-/// is set.
-pub fn canonical_blocks_forward_fit_options(nullspace_dims: Vec<usize>) -> FitOptions {
-    let mut options =
-        canonical_standard_fit_options(&FitConfig::default(), StandardFitOptionsInputs::default());
-    options.nullspace_dims = nullspace_dims;
-    options.skip_rho_posterior_inference = false;
-    options.persistent_warm_start_store = None;
-    options
-}
 
 pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     let request = request;

@@ -1338,6 +1338,8 @@ mod tests {
     };
     use gam_terms::construction::CanonicalPenalty;
     use general_mcmc::generic_hmc::HamiltonianTarget;
+    use crate::sample::PosteriorSampler;
+    use gam_solve::model_types::InferenceCovarianceMode;
     use ndarray::{Array1, Array2, array};
     use std::sync::Arc;
 

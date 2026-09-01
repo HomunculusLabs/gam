@@ -149,9 +149,6 @@ impl GpuDispatchPolicy {
         }
     }
 
-    pub const fn dense_gemv_target_is_gpu(&self, n: usize, p: usize, resident: bool) -> bool {
-        resident || n.saturating_mul(p).saturating_mul(2) >= self.gemm_min_flops
-    }
 
     pub const fn xtwx_target_is_gpu(&self, n: usize, p: usize, materialized: bool) -> bool {
         materialized && n > 0 && p > 0 && self.xtwx_flops(n, p) >= self.dense_reduction_flops_min()

@@ -106,12 +106,6 @@ impl ChartDegeneracyReport {
         self.axes.iter().filter(|axis| axis.degenerate())
     }
 
-    /// Whether ANY chart axis has collapsed to a point. Telemetry: a `d_atom ≥
-    /// 2` atom that loses one axis is a genuine (if unannounced) dimension
-    /// selection, not necessarily a defect.
-    pub fn any_axis_degenerate(&self) -> bool {
-        self.axes.iter().any(ChartAxisDispersion::degenerate)
-    }
 
     /// Whether some atom has lost its ENTIRE chart — every one of its axes is a
     /// single point, so the "manifold atom" decodes to one point of the ambient
@@ -148,10 +142,6 @@ impl ChartDegeneracyReport {
             .collect()
     }
 
-    /// One line per collapsed atom, for a refusal message.
-    pub fn collapsed_atom_evidence(&self) -> String {
-        self.atom_evidence(&self.atoms_without_a_chart())
-    }
 
     /// One line per named atom, for a refusal message, plus the surviving atoms'
     /// dispersions — so a partial collapse reads as "atom 0 is a point WHILE

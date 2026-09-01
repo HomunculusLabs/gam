@@ -2613,7 +2613,7 @@ mod observed_single_source_oracle_tests {
         #[test]
         fn release_measure_gaussian_joint_specialized_vs_generic_tower_932() {
             use gam_math::jet_tower::program_row_kernel;
-            use std::time::Instant;
+            use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
             const ROWS: usize = 512;
             let y = Array1::from_shape_fn(ROWS, |i| {
@@ -2700,95 +2700,112 @@ mod observed_single_source_oracle_tests {
                 }
             }
 
-            let best_secs = |sweep: &mut dyn FnMut() -> f64| -> f64 {
-                let mut best = f64::INFINITY;
-                for _ in 0..5 {
-                    let started = Instant::now();
-                    let checksum = sweep();
-                    assert!(
-                        checksum.is_finite(),
-                        "Gaussian joint release-measure checksum must stay finite"
-                    );
-                    best = best.min(started.elapsed().as_secs_f64());
-                }
-                best
-            };
-
-            let mut production_order2_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let atom = program.row_order2(row);
-                    checksum += atom.value() + atom.gradient()[0] + atom.hessian_at(0, 0);
-                }
-                checksum
-            };
-            let production_order2_secs = best_secs(&mut production_order2_sweep);
-            let mut tower_order2_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let (value, gradient, hessian) =
-                        program_row_kernel(&program, row).expect("tower kernel");
-                    checksum += value + gradient[0] + hessian[0][0];
-                }
-                checksum
-            };
-            let tower_order2_secs = best_secs(&mut tower_order2_sweep);
-
-            let mut production_third_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let third = program.row_third_contracted(row, &dir_u[row]);
-                    checksum += third[0][0] + third[0][1] + third[1][1];
-                }
-                checksum
-            };
-            let production_third_secs = best_secs(&mut production_third_sweep);
-            let mut tower_third_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let third = program_third_contracted(&program, row, &dir_u[row])
-                        .expect("tower third");
-                    checksum += third[0][0] + third[0][1] + third[1][1];
-                }
-                checksum
-            };
-            let tower_third_secs = best_secs(&mut tower_third_sweep);
-
-            let mut production_fourth_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let fourth = program.row_fourth_contracted(row, &dir_u[row], &dir_v[row]);
-                    checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
-                }
-                checksum
-            };
-            let production_fourth_secs = best_secs(&mut production_fourth_sweep);
-            let mut tower_fourth_sweep = || {
-                let mut checksum = 0.0_f64;
-                for row in 0..ROWS {
-                    let fourth =
-                        program_fourth_contracted(&program, row, &dir_u[row], &dir_v[row])
-                            .expect("tower fourth");
-                    checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
-                }
-                checksum
-            };
-            let tower_fourth_secs = best_secs(&mut tower_fourth_sweep);
-
-            for (channel, production_secs, tower_secs) in [
-                ("order2", production_order2_secs, tower_order2_secs),
-                ("third", production_third_secs, tower_third_secs),
-                ("fourth", production_fourth_secs, tower_fourth_secs),
-            ] {
-                let production_ns = production_secs * 1e9 / ROWS as f64;
-                let tower_ns = tower_secs * 1e9 / ROWS as f64;
-                eprintln!(
-                    "GAUSSIAN-JOINT-RELEASE-932 channel={channel} rows={ROWS} \
-                     production_ns={production_ns:.3} generic_tower_ns={tower_ns:.3} \
-                     generic_tower_over_production={:.6}",
-                    tower_ns / production_ns,
-                );
+            // Speed contract, release profile only (`SpeedGate::open` documents
+            // why): on every channel the structure-compiled lowering must beat
+            // the generic tower it specialises. One arm call is one sweep over
+            // the batch; the batch carries distinct rows and the nudge perturbs
+            // each row's direction (or the fold, for the direction-free
+            // order-2 sweep), so no sweep is loop-invariant across calls.
+            if cfg!(debug_assertions) {
+                return;
             }
+            let mut gate = SpeedGate::open("GAUSSIAN-JOINT-RELEASE-932");
+            let reps = 15usize;
+            let sweeps = 20usize;
+            let order2 = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_6A55_0002,
+                |nudge| {
+                    let mut checksum = nudge;
+                    for row in 0..ROWS {
+                        let atom = program.row_order2(row);
+                        checksum += atom.value() + atom.gradient()[0] + atom.hessian_at(0, 0);
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = nudge;
+                    for row in 0..ROWS {
+                        let (value, gradient, hessian) =
+                            program_row_kernel(&program, row).expect("tower kernel");
+                        checksum += value + gradient[0] + hessian[0][0];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=order2 rows={ROWS}"),
+                &order2,
+                "production",
+                "generic_tower",
+            );
+            let third = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_6A55_0003,
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for row in 0..ROWS {
+                        let mut direction = dir_u[row];
+                        direction[0] += nudge;
+                        let third = program.row_third_contracted(row, &direction);
+                        checksum += third[0][0] + third[0][1] + third[1][1];
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for row in 0..ROWS {
+                        let mut direction = dir_u[row];
+                        direction[0] += nudge;
+                        let third = program_third_contracted(&program, row, &direction)
+                            .expect("tower third");
+                        checksum += third[0][0] + third[0][1] + third[1][1];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=third rows={ROWS}"),
+                &third,
+                "production",
+                "generic_tower",
+            );
+            let fourth = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_6A55_0004,
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for row in 0..ROWS {
+                        let mut direction = dir_u[row];
+                        direction[0] += nudge;
+                        let fourth = program.row_fourth_contracted(row, &direction, &dir_v[row]);
+                        checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for row in 0..ROWS {
+                        let mut direction = dir_u[row];
+                        direction[0] += nudge;
+                        let fourth =
+                            program_fourth_contracted(&program, row, &direction, &dir_v[row])
+                                .expect("tower fourth");
+                        checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=fourth rows={ROWS}"),
+                &fourth,
+                "production",
+                "generic_tower",
+            );
+            gate.finish();
         }
     }
 }

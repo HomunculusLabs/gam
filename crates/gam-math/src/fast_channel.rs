@@ -18,13 +18,27 @@
 //! where `q_B` is the inner partial over the directions in block `B`. The blocks
 //! are read out of a squarefree bitmask array `q[mask]` (`q[0]` is unused — the
 //! value channel never enters a top mixed partial). These functions write that
-//! sum out for the small fixed orders the engine actually uses (`N ∈ {2,3,4}`),
-//! so it compiles to the optimal straight-line form (LLVM CSE recovers the shared
-//! sub-products). They are the SINGLE SOURCE every family feeds — there is no
-//! hand-maintained per-family chain rule — and the `oracle_tests` below pin each
-//! one BIT-FOR-BIT against the general runtime partition walker
+//! sum out for the small fixed orders the engine actually uses (`N ∈ {2,3,4}`).
+//! They are the SINGLE SOURCE every family feeds — there is no hand-maintained
+//! per-family chain rule — and the `oracle_tests` below pin each one BIT-FOR-BIT
+//! against the general runtime partition walker
 //! ([`super::jet_algebra::faa_di_bruno`]), so the compiled form can never drift
 //! from the universal rule.
+//!
+//! # Nested, not flat
+//!
+//! The sum is NOT written as the flat enumeration of partitions. It is written
+//! in the nested form the recursion `T_{N} = ∂_{d_N} T_{N-1}` produces when the
+//! product rule is applied to the previous order and the result is regrouped by
+//! `f^{(k)}`: the `(a,b)`-block product `P = q_a·q_b` and its directional
+//! derivatives `P_u`, `P_v`, `P_uv` are named once and shared by every order they
+//! feed. The flat enumeration spells the same 15 partitions as 15 independent
+//! products, and without `fast-math` LLVM cannot re-associate `q_au·q_b·q_v` and
+//! `q_au·q_b·q_u` to recover the shared `q_au·q_b` — measured: the flat order-4
+//! form lost to the strongest hand factorization at `median_ratio = 0.728`,
+//! unanimously over fifteen paired repetitions, and the hand factorization was
+//! precisely this nested form. Both forms are the universal rule; only the
+//! nested one is also the optimal schedule.
 //!
 //! `f_stack[k]` is `f^{(k+1)}(q)` (the derivative magnitudes `m_{k+1}`); the value
 //! `f(q)` is index −1 and never appears in a top mixed partial.
@@ -37,45 +51,40 @@ pub fn faa_top2(m: [f64; 2], q: &[f64; 4]) -> f64 {
     m[1] * q[1] * q[2] + m[0] * q[3]
 }
 
-/// `N = 3`: the fully-mixed third channel `∂³(f∘q)/∂a∂b∂u`.
+/// `N = 3`: the fully-mixed third channel `∂³(f∘q)/∂a∂b∂u`, as
+/// `∂_u [m₂·q_a·q_b + m₁·q_ab]` regrouped by `f^{(k)}`.
 /// Bitmask: `a=1, b=2, u=4`. `m=[m₁,m₂,m₃]`.
 #[inline(always)]
 pub fn faa_top3(m: [f64; 3], q: &[f64; 8]) -> f64 {
     let (a, b, u) = (1usize, 2, 4);
-    // |π|=3: {a}{b}{u}
-    let p3 = q[a] * q[b] * q[u];
-    // |π|=2: one pair + one singleton (3 partitions)
-    let p2 = q[a | b] * q[u] + q[a | u] * q[b] + q[b | u] * q[a];
-    // |π|=1: {abu}
-    let p1 = q[a | b | u];
-    m[2] * p3 + m[1] * p2 + m[0] * p1
+    // P = q_a·q_b and its u-derivative.
+    let p = q[a] * q[b];
+    let p_u = q[a | u] * q[b] + q[a] * q[b | u];
+    // ∂_u(m₂·P)      = m₃·q_u·P + m₂·P_u
+    // ∂_u(m₁·q_ab)   = m₂·q_u·q_ab + m₁·q_abu
+    m[2] * (q[u] * p) + m[1] * (p_u + q[u] * q[a | b]) + m[0] * q[a | b | u]
 }
 
-/// `N = 4`: the fully-mixed fourth channel `∂⁴(f∘q)/∂a∂b∂u∂v`.
+/// `N = 4`: the fully-mixed fourth channel `∂⁴(f∘q)/∂a∂b∂u∂v`, as
+/// `∂_v` of the order-3 form regrouped by `f^{(k)}`.
 /// Bitmask: `a=1, b=2, u=4, v=8`. `m=[m₁,m₂,m₃,m₄]`.
 #[inline(always)]
 pub fn faa_top4(m: [f64; 4], q: &[f64; 16]) -> f64 {
     let (a, b, u, v) = (1usize, 2, 4, 8);
-    // |π|=4: {a}{b}{u}{v}
-    let p4 = q[a] * q[b] * q[u] * q[v];
-    // |π|=3: one pair + two singletons (6 partitions)
-    let p3 = q[a | b] * q[u] * q[v]
-        + q[a | u] * q[b] * q[v]
-        + q[a | v] * q[b] * q[u]
-        + q[b | u] * q[a] * q[v]
-        + q[b | v] * q[a] * q[u]
-        + q[u | v] * q[a] * q[b];
-    // |π|=2: three pair-pair + four triple-singleton (7 partitions)
-    let p2 = q[a | b] * q[u | v]
-        + q[a | u] * q[b | v]
-        + q[a | v] * q[b | u]
-        + q[a | b | u] * q[v]
-        + q[a | b | v] * q[u]
-        + q[a | u | v] * q[b]
-        + q[b | u | v] * q[a];
-    // |π|=1: {abuv}
-    let p1 = q[a | b | u | v];
-    m[3] * p4 + m[2] * p3 + m[1] * p2 + m[0] * p1
+    // P = q_a·q_b and its directional derivatives, each named once.
+    let p = q[a] * q[b];
+    let p_u = q[a | u] * q[b] + q[a] * q[b | u];
+    let p_v = q[a | v] * q[b] + q[a] * q[b | v];
+    let p_uv = q[a | u | v] * q[b] + q[a | u] * q[b | v] + q[a | v] * q[b | u] + q[a] * q[b | u | v];
+    let uv = q[u] * q[v];
+    // ∂_v of the order-3 terms:
+    //   m₃·q_u·P        → m₄·q_v·q_u·P + m₃·(q_uv·P + q_u·P_v)
+    //   m₂·(P_u + q_u·q_ab) → m₃·q_v·(P_u + q_u·q_ab) + m₂·(P_uv + q_uv·q_ab + q_u·q_abv)
+    //   m₁·q_abu        → m₂·q_v·q_abu + m₁·q_abuv
+    m[3] * (uv * p)
+        + m[2] * (q[u | v] * p + q[u] * p_v + q[v] * p_u + uv * q[a | b])
+        + m[1] * (p_uv + q[u | v] * q[a | b] + q[u] * q[a | b | v] + q[v] * q[a | b | u])
+        + m[0] * q[a | b | u | v]
 }
 
 /// Compile several order-three top channels as one output schedule.
@@ -154,7 +163,7 @@ mod oracle_tests {
     //! `faa_top*` ever diverges from the universal rule these disagree.
     use super::*;
     use crate::jet_algebra::faa_di_bruno;
-    use crate::paired_timing::paired_interleaved;
+    use crate::paired_timing::{SpeedGate, paired_interleaved};
     use std::hint::black_box;
 
     fn stream(seed: u64) -> impl FnMut() -> f64 {
@@ -404,37 +413,23 @@ mod oracle_tests {
         }
 
         // Everything above is correctness parity (both orders, the canonical
-        // route, and 500 random argument pairs) and holds in any build.
+        // route, and 500 random argument pairs) and holds in any build. The
+        // timing gate below opens only in the release profile (`SpeedGate::open`
+        // documents why: a debug build measures fixed per-call overhead, and
+        // the test profile's codegen layout is not the shipped one -- measured
+        // twice in a debug build, this gate picked a DIFFERENT order as the
+        // loser each run, 9% then 3%).
         //
-        // The timing gate below does NOT. Measured twice on the same tree, in a
-        // debug build, this assertion failed at a DIFFERENT order each time:
-        //
-        //   run 1: order-3  compiled=15.858 ns/row  hand=14.598 ns/row  (~9%)
-        //   run 2: order-4  compiled=18.728 ns/row  hand=18.192 ns/row  (~3%)
-        //
-        // A gate that picks a different loser on consecutive runs is sampling
-        // noise, not detecting a regression: without optimization the compiled
-        // lowering's whole advantage -- the thing this test exists to protect --
-        // is not generated. It also costs 1.5M timed iterations per run.
-        //
-        // So debug stops here, and the ratio is asserted only under `--release`,
-        // matching `release_measure_multinomial_fisher_vs_strongest_hand_932`
-        // (#932, `14395b5d7`), which reaches its timing assertion the same way.
-        //
-        // The "different loser each run" symptom above was the harness, not the
-        // lowering. This gate interleaved its arms per round, but it alternated
-        // them DETERMINISTICALLY across SEVEN rounds, so `compiled` ran first
-        // four times and second three -- a systematic first-versus-second
-        // advantage cannot cancel over an odd number of alternating rounds, it
-        // accrues 4:3. It then paired two per-arm medians, which discards the
-        // pairing that would have divided the drift out. `paired_interleaved`
-        // randomises the order, reports the realised imbalance as
-        // `first_position_bias`, and takes the median of the paired RATIOS.
+        // The measurement is paired, interleaved and order-randomised: the
+        // previous form alternated the arms deterministically across SEVEN
+        // rounds, so `compiled` ran first four times and second three, and a
+        // systematic first-versus-second advantage accrued 4:3 instead of
+        // cancelling; it then paired two per-arm medians, discarding the
+        // pairing that would have divided the drift out.
         if cfg!(debug_assertions) {
             return;
         }
-
-        let mut losses: Vec<String> = Vec::new();
+        let mut gate = SpeedGate::open("CURVE-WIGGLE-BUNDLE-932");
         for (order, timing) in [
             (
                 3,
@@ -473,37 +468,8 @@ mod oracle_tests {
                 ),
             ),
         ] {
-            eprintln!(
-                "CURVE-WIGGLE-BUNDLE-932 order={order} {}",
-                timing.summary("compiled", "strongest_hand"),
-            );
-            // #932: the bar is `median_ratio` ALONE. `wins_fraction` was a conjunct
-            // here and is not one any more -- it is a within-run confidence
-            // statement AT THAT HOST'S NOISE LEVEL, not a statement about the
-            // effect, so it degrades in the opposite direction from the thing it
-            // was guarding. Measured: one 1.6% effect read `wins=0.00` on a quiet
-            // node and `0.27 / 0.40 / 0.27` on a node ~30x noisier, and three runs
-            // of IDENTICAL code gave `0.67 / 0.87 / 1.00`, while `median_ratio`
-            // moved 0.8%. As a gate it can therefore only manufacture FAILURES on
-            // a busy runner; dropping it cannot pass a regression, because
-            // `median_ratio() > 1.0` still requires the effect.
-            //
-            // It stays in `summary()` and stays the right thing to LEAD a report
-            // with: `wins=1.00` over fifteen reps is a distribution-free sign test
-            // that settled a cell whose margin was only 1.6x its resolution,
-            // without depending on the resolution estimate at all. Evidence and
-            // gate are different roles for one statistic.
-            if timing.median_ratio() <= 1.0 {
-                losses.push(format!(
-                    "order-{order}: {}",
-                    timing.summary("compiled", "strongest_hand")
-                ));
-            }
+            gate.faster(&format!("order={order}"), &timing, "compiled", "strongest_hand");
         }
-        assert!(
-            losses.is_empty(),
-            "compiled curve/wiggle bundle must beat strongest hand:\n{}",
-            losses.join("\n"),
-        );
+        gate.finish();
     }
 }

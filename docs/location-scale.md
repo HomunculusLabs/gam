@@ -62,6 +62,21 @@ gamfit.fit(
 `--predict-noise` cannot be combined with `--logslope-formula` /
 `--z-column`, with `--transformation-normal`, or with `--firth`.
 
+## Deviance and log-likelihood
+
+`summary().deviance` on a location-scale fit is the classical family
+deviance at the fitted mean, `D = 2·Σ w·d(y, μ̂)`, in the same unscaled
+convention every standard fit reports: no dispersion factor and no
+normalizing constants. `noise_formula="1"` is therefore the identical model
+to the standard fit and reports the identical deviance (#2786). The
+fitted precision channel enters only where the unit deviance depends on
+it — per-row `θ̂ᵢ` for the negative binomial, per-row `φ̂ᵢ` for beta — and
+not at all for the Gaussian (weighted residual sum of squares), gamma, or
+Tweedie forms. `summary().extras["log_likelihood"]` is the fully
+normalized log-likelihood (`log_likelihood_normalization == "UserProvided"`),
+so `-2 * log_likelihood` and `deviance` differ by the saturated
+log-likelihood and the constants, exactly as they do for a standard fit.
+
 ## Prediction
 
 A Gaussian location-scale fit returns the same Python prediction columns

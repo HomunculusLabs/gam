@@ -5597,7 +5597,7 @@ mod patterned_order2_perf_tests {
     }
 
     type SlsOrder2 = gam_math::jet_scalar::PatternedOrder2<SlsHessianPattern, SLS_ROW_K, 24>;
-    use std::time::Instant;
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
     fn fixture() -> ([f64; SLS_ROW_K], SurvivalExactRowKernel) {
         (
@@ -5945,80 +5945,59 @@ mod patterned_order2_perf_tests {
             }
         }
 
-        let iterations = 2_000_000usize;
-
-        // Feedback-coupled timing barrier. Perturb entry log-scale `p[7]`, force
-        // the complete V/G/H tuple across `black_box`, and fold channels that
-        // genuinely depend on the perturbation.
-        // The former recurrence perturbed `p[0]` but folded only value, g[0],
-        // and H[0,0]; because this racer intentionally freezes the outer stacks,
-        // those outputs are invariant to p[0], so an inlined generated lowering
-        // could be hoisted while an outlined hand function still paid its call.
-        // This loop-carried dependency is algebraically live in every arm.
-        fn best_secs<F>(
-            iterations: usize,
-            p: &[f64; SLS_ROW_K],
-            kernel: &SurvivalExactRowKernel,
-            evaluate: F,
-        ) -> f64
-        where
-            F: Fn(&[f64; SLS_ROW_K], &SurvivalExactRowKernel) -> (f64, [f64; 9], [[f64; 9]; 9]),
-        {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    let mut perturbed = *p;
-                    perturbed[7] += checksum * 1e-18;
-                    let (value, gradient, hessian) =
-                        std::hint::black_box(evaluate(&perturbed, kernel));
-                    checksum += value + gradient[4] + hessian[4][4] + hessian[4][7];
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why). One arm call evaluates a batch of rows: a single SLS row is
+        // ~40 ns, and the harness's per-call cost must stay far below the arm
+        // (see `paired_timing`). Each row perturbs entry log-scale `p[7]` by
+        // the nudge and feeds the running fold back into `p[3]`, and folds
+        // channels that genuinely depend on both, so nothing is hoisted.
+        // Production must beat the strongest fused hand schedule it replaced,
+        // and the dense generic tower it specialises.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut gate = SpeedGate::open("SLS-ROW-VGH-932");
+        const ROWS_PER_ARM: usize = 64;
+        let batch = |evaluate: fn(&[f64; SLS_ROW_K], &SurvivalExactRowKernel) -> (f64, [f64; 9], [[f64; 9]; 9])| {
+            move |nudge: f64| {
+                let mut accumulated = 0.0_f64;
+                let mut perturbed = p;
+                perturbed[7] += nudge;
+                for _ in 0..ROWS_PER_ARM {
+                    perturbed[3] += accumulated * 1e-18;
+                    let (value, gradient, hessian) = evaluate(&perturbed, &kernel);
+                    accumulated += value + gradient[4] + hessian[4][4] + hessian[4][7];
                 }
-                assert!(
-                    checksum.is_finite(),
-                    "SLS release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
+                accumulated
             }
-            best
-        }
-
-        let hand_ns = best_secs(iterations, &p, &kernel, hand) * 1e9 / iterations as f64;
-        let dense_ns = best_secs(iterations, &p, &kernel, dense) * 1e9 / iterations as f64;
-        let patterned_ns = best_secs(iterations, &p, &kernel, patterned) * 1e9 / iterations as f64;
-        let literal_seeds_ns =
-            best_secs(iterations, &p, &kernel, patterned_literal_seeds) * 1e9 / iterations as f64;
-        let compiled_ns = best_secs(iterations, &p, &kernel, compiled) * 1e9 / iterations as f64;
-        // Interleave the acceptance pair so CPU frequency, cache warmth, and
-        // measurement order cannot systematically favor production or hand.
-        let mut hand_fused_ns = f64::INFINITY;
-        let mut generated_full_ns = f64::INFINITY;
-        for round in 0..7 {
-            if round % 2 == 0 {
-                generated_full_ns = generated_full_ns.min(
-                    best_secs(iterations, &p, &kernel, sls_row_vgh_generated) * 1e9
-                        / iterations as f64,
-                );
-                hand_fused_ns = hand_fused_ns
-                    .min(best_secs(iterations, &p, &kernel, hand_fused) * 1e9 / iterations as f64);
-            } else {
-                hand_fused_ns = hand_fused_ns
-                    .min(best_secs(iterations, &p, &kernel, hand_fused) * 1e9 / iterations as f64);
-                generated_full_ns = generated_full_ns.min(
-                    best_secs(iterations, &p, &kernel, sls_row_vgh_generated) * 1e9
-                        / iterations as f64,
-                );
-            }
-        }
-        eprintln!(
-            "SLS-PATTERNED-932 hand-generic={hand_ns:.2} ns/row strongest-hand-fused={hand_fused_ns:.2} ns/row production-generated-full={generated_full_ns:.2} ns/row dense={dense_ns:.2} ns/row patterned={patterned_ns:.2} ns/row literal-seeds={literal_seeds_ns:.2} ns/row atom-compiled={compiled_ns:.2} ns/row compiled/production={:.3} patterned/production={:.3} literal-seeds/production={:.3} compiled/dense={:.3} hand_over_production={:.6}",
-            compiled_ns / generated_full_ns,
-            patterned_ns / generated_full_ns,
-            literal_seeds_ns / generated_full_ns,
-            compiled_ns / dense_ns,
-            hand_fused_ns / generated_full_ns,
+        };
+        let hand = paired_interleaved(
+            15,
+            5_000,
+            0x9320_5150,
+            batch(sls_row_vgh_generated),
+            batch(hand_fused),
         );
+        gate.faster(
+            &format!("rows_per_call={ROWS_PER_ARM} opponent=strongest_hand_fused"),
+            &hand,
+            "production",
+            "strongest_hand_fused",
+        );
+        let generic = paired_interleaved(
+            15,
+            5_000,
+            0x9320_5151,
+            batch(sls_row_vgh_generated),
+            batch(dense),
+        );
+        gate.faster(
+            &format!("rows_per_call={ROWS_PER_ARM} opponent=dense_tower"),
+            &generic,
+            "production",
+            "dense_tower",
+        );
+        gate.finish();
     }
 
     /// #932 parity gate for the compiler-emitted contracted third/fourth
@@ -6090,81 +6069,11 @@ mod patterned_order2_perf_tests {
             }
         }
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`), same
-        // recurrence as the compiled-vs-hand gate above.
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "SLS contracted release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
-        }
-
-        let iterations = 100_000usize;
-        let third_production_ns = best_ns(iterations, p[0], |p0| {
-            let mut perturbed = p;
-            perturbed[0] = p0;
-            let vars: [OneSeed<SLS_ROW_K>; SLS_ROW_K] =
-                std::array::from_fn(|a| OneSeed::seed_direction(perturbed[a], a, dir_u[a]));
-            let t = sls_row_nll(&vars, &kernel)
-                .expect("specialized third")
-                .contracted_third();
-            t[0][0] + t[8][8]
-        });
-        let third_generic_ns = best_ns(iterations, p[0], |p0| {
-            let mut perturbed = p;
-            perturbed[0] = p0;
-            let vars: [Tower3<SLS_ROW_K>; SLS_ROW_K] =
-                std::array::from_fn(|a| Tower3::variable(perturbed[a], a));
-            let dense = sls_row_nll(&vars, &kernel).expect("dense Tower3");
-            let mut t00 = 0.0;
-            let mut t88 = 0.0;
-            for c in 0..SLS_ROW_K {
-                t00 += dense.t3[0][0][c] * dir_u[c];
-                t88 += dense.t3[8][8][c] * dir_u[c];
-            }
-            t00 + t88
-        });
-        eprintln!(
-            "SLS-CONTRACTED-932 order=3 production={third_production_ns:.2} ns/row \
-             generic_tower={third_generic_ns:.2} ns/row hand_over_production={:.6}",
-            third_generic_ns / third_production_ns,
-        );
-
-        let fourth_production_ns = best_ns(iterations, p[0], |p0| {
-            let mut perturbed = p;
-            perturbed[0] = p0;
-            let vars: [TwoSeed<SLS_ROW_K>; SLS_ROW_K] =
-                std::array::from_fn(|a| TwoSeed::seed(perturbed[a], a, dir_u[a], dir_v[a]));
-            let t = sls_row_nll(&vars, &kernel)
-                .expect("specialized fourth")
-                .contracted_fourth();
-            t[0][0] + t[8][8]
-        });
-        let fourth_generic_ns = best_ns(iterations, p[0], |p0| {
-            let mut perturbed = p;
-            perturbed[0] = p0;
-            let vars: [Tower4<SLS_ROW_K>; SLS_ROW_K] =
-                std::array::from_fn(|a| Tower4::variable(perturbed[a], a));
-            let t = sls_row_nll(&vars, &kernel)
-                .expect("dense Tower4")
-                .fourth_contracted(&dir_u, &dir_v);
-            t[0][0] + t[8][8]
-        });
-        eprintln!(
-            "SLS-CONTRACTED-932 order=4 production={fourth_production_ns:.2} ns/row \
-             generic_tower={fourth_generic_ns:.2} ns/row hand_over_production={:.6}",
-            fourth_generic_ns / fourth_production_ns,
-        );
+        // The speed contract for these contracted orders lives in
+        // `gam-row-macros/tests/sls_codegen_perf.rs`, which races the generated
+        // schedules against both the analytic hand schedule and these
+        // specialized jets under the shared paired harness; this test is the
+        // parity oracle only.
     }
 
     /// #932 release speed gate for the runtime-width SLS link/time-wiggle kernel
@@ -6201,7 +6110,6 @@ mod patterned_order2_perf_tests {
     #[test]
     fn release_measure_sls_wiggle_dynamic_jets_vs_padded_static_tower_932() {
         use gam_math::jet_scalar::{FixedRuntimeJet, OneSeed, TwoSeed};
-        use std::time::Instant;
 
         // Small runtime wiggle width so the padded static parity tower is a
         // clean fixed `KW`; production runs this same expression at runtime `pw`.
@@ -6320,111 +6228,97 @@ mod patterned_order2_perf_tests {
             }
         }
 
-        // Feedback-coupled timing barrier (no `std::hint::black_box`), the same
-        // loop-carried recurrence as the sibling release gates: iteration `n`'s
-        // input depends on iteration `n-1`'s folded output, so the compiler can
-        // neither hoist the row call out of the loop nor drop it, and the `1e-18`
-        // scale keeps the perturbed primary bit-adjacent to the fixture.
-        fn best_ns<F: FnMut(f64) -> f64>(iterations: usize, base: f64, mut evaluate: F) -> f64 {
-            let mut best = f64::INFINITY;
-            for _ in 0..5 {
-                let mut checksum = 0.0_f64;
-                let started = Instant::now();
-                for _ in 0..iterations {
-                    checksum += evaluate(base + checksum * 1e-18);
-                }
-                assert!(
-                    checksum.is_finite(),
-                    "SLS wiggle release-measure checksum must stay finite"
-                );
-                best = best.min(started.elapsed().as_secs_f64());
-            }
-            best * 1e9 / iterations as f64
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why): at every order the amortised reused arena (production) must beat
+        // a fresh arena per row. The nudge perturbs the first primary.
+        if cfg!(debug_assertions) {
+            return;
         }
+        let mut gate = SpeedGate::open("SLS-WIGGLE-DYN-932");
+        let iterations = 5_000usize;
 
-        let iterations = 30_000usize;
-
-        // Order 2: amortized reused arena (production) vs fresh arena per row.
         let mut prod_arena2 = DynamicJetArena::new();
-        let reused2_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            prod_arena2.reset();
-            let vars = prod_arena2
-                .alloc_slice_fill_with(KW, |a| DynamicOrder2::variable(pp[a], a, KW, &prod_arena2));
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.g()[0] + out.h()[0]
-        });
-        let fresh2_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            let fresh = DynamicJetArena::new();
-            let vars =
-                fresh.alloc_slice_fill_with(KW, |a| DynamicOrder2::variable(pp[a], a, KW, &fresh));
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.g()[0] + out.h()[0]
-        });
-        eprintln!(
-            "SLS-WIGGLE-DYN-932 order=2 production={reused2_ns:.2} ns/row \
-             fresh_arena={fresh2_ns:.2} ns/row fresh_arena_over_reused={:.6}",
-            fresh2_ns / reused2_ns,
+        let order2 = paired_interleaved(
+            15,
+            iterations,
+            0x9320_D1_02,
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                prod_arena2.reset();
+                let vars = prod_arena2
+                    .alloc_slice_fill_with(KW, |a| DynamicOrder2::variable(pp[a], a, KW, &prod_arena2));
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.g()[0] + out.h()[0]
+            },
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                let fresh = DynamicJetArena::new();
+                let vars =
+                    fresh.alloc_slice_fill_with(KW, |a| DynamicOrder2::variable(pp[a], a, KW, &fresh));
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.g()[0] + out.h()[0]
+            },
         );
+        gate.faster("order=2", &order2, "reused_arena", "fresh_arena");
 
-        // Order 3: directional third.
         let mut prod_arena3 = DynamicJetArena::new();
-        let reused3_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            prod_arena3.reset();
-            let vars = prod_arena3.alloc_slice_fill_with(KW, |a| {
-                DynamicOneSeed::seed_direction(pp[a], a, dir_u[a], KW, &prod_arena3)
-            });
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.contracted_third()[0]
-        });
-        let fresh3_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            let fresh = DynamicJetArena::new();
-            let vars = fresh.alloc_slice_fill_with(KW, |a| {
-                DynamicOneSeed::seed_direction(pp[a], a, dir_u[a], KW, &fresh)
-            });
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.contracted_third()[0]
-        });
-        eprintln!(
-            "SLS-WIGGLE-DYN-932 order=3 production={reused3_ns:.2} ns/row \
-             fresh_arena={fresh3_ns:.2} ns/row fresh_arena_over_reused={:.6}",
-            fresh3_ns / reused3_ns,
+        let order3 = paired_interleaved(
+            15,
+            iterations,
+            0x9320_D1_03,
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                prod_arena3.reset();
+                let vars = prod_arena3.alloc_slice_fill_with(KW, |a| {
+                    DynamicOneSeed::seed_direction(pp[a], a, dir_u[a], KW, &prod_arena3)
+                });
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.contracted_third()[0]
+            },
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                let fresh = DynamicJetArena::new();
+                let vars = fresh.alloc_slice_fill_with(KW, |a| {
+                    DynamicOneSeed::seed_direction(pp[a], a, dir_u[a], KW, &fresh)
+                });
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.contracted_third()[0]
+            },
         );
+        gate.faster("order=3", &order3, "reused_arena", "fresh_arena");
 
-        // Order 4: second-directional fourth.
         let mut prod_arena4 = DynamicJetArena::new();
-        let reused4_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            prod_arena4.reset();
-            let vars = prod_arena4.alloc_slice_fill_with(KW, |a| {
-                DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &prod_arena4)
-            });
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.contracted_fourth()[0]
-        });
-        let fresh4_ns = best_ns(iterations, p[0], |p0| {
-            let mut pp = p;
-            pp[0] = p0;
-            let fresh = DynamicJetArena::new();
-            let vars = fresh.alloc_slice_fill_with(KW, |a| {
-                DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &fresh)
-            });
-            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-            out.value() + out.contracted_fourth()[0]
-        });
-        eprintln!(
-            "SLS-WIGGLE-DYN-932 order=4 production={reused4_ns:.2} ns/row \
-             fresh_arena={fresh4_ns:.2} ns/row fresh_arena_over_reused={:.6}",
-            fresh4_ns / reused4_ns,
+        let order4 = paired_interleaved(
+            15,
+            iterations,
+            0x9320_D1_04,
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                prod_arena4.reset();
+                let vars = prod_arena4.alloc_slice_fill_with(KW, |a| {
+                    DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &prod_arena4)
+                });
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.contracted_fourth()[0]
+            },
+            |nudge| {
+                let mut pp = p;
+                pp[0] += nudge;
+                let fresh = DynamicJetArena::new();
+                let vars = fresh.alloc_slice_fill_with(KW, |a| {
+                    DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &fresh)
+                });
+                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+                out.value() + out.contracted_fourth()[0]
+            },
         );
+        gate.faster("order=4", &order4, "reused_arena", "fresh_arena");
+        gate.finish();
     }
 }
 

@@ -460,12 +460,11 @@ mod oracle_tests {
     /// (`generic_tower_ns / faa_top_ns`); this is not a strongest-hand gate.
     #[test]
     fn release_measure_binomial_q_coeffs_faa_top_vs_generic_tower_932() {
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
-        // The feedback-coupled timing barrier lives in the shared harness now:
-        // it nudges the perturbed input by a negligible multiple of the running
-        // checksum, so neither racer can be hoisted or dropped while the
-        // measured regime stays bit-adjacent to the parity-pinned fixture.
-        use gam_math::paired_timing::paired_interleaved;
+        // Parity pins run in every build; the cells below are recorded only in
+        // the release profile (`SpeedGate::open` documents why).
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("BINOMIAL-Q-COEFFS-932"));
 
         let close = |label: &str, a: f64, b: f64| {
             let band = 1e-12 + 1e-9 * a.abs().max(b.abs());
@@ -487,42 +486,23 @@ mod oracle_tests {
                 hessian_coeff_fromobjective_q_terms(m1, m2, q_a, q_b, q_ab),
                 hessian_via_tower(m1, m2, q_a, q_b, q_ab),
             );
-            let timing = paired_interleaved(
-                15,
-                200_000,
-                0x9320_0002,
-                |nudge| hessian_coeff_fromobjective_q_terms(m1, m2, q_a + nudge, q_b, q_ab),
-                |nudge| hessian_via_tower(m1, m2, q_a + nudge, q_b, q_ab),
-            );
-            // At order 2 the top-coefficient extraction and the tiny
-            // `Tower2<2>` are the same handful of fused multiplies — measured
-            // identical to ±0.2% on every acceptance host — so there is no
-            // genuine speed claim to fail closed on. Pin parity plus a
-            // noise-bounded not-slower contract and report the ratio as a
-            // DIAGNOSTIC token; the real specialization wins live at orders 3
-            // and 4 below, which keep the fail-closed token.
-            // #932: release-only -- but NOT because the test lane is unoptimized.
-            // It is not: [profile.test] sets opt-level = 2. The difference is
-            // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
-            // codegen-units = 16 and the test profile carries no LTO, while
-            // [profile.release] is codegen-units = 1 + lto = "thin".
-            // Cargo.toml's own note records that CGU splitting is what blocks LLVM
-            // from inlining hot accessors into the per-row loops, and that
-            // "release is unaffected: it already carries thin-LTO +
-            // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
-            // cross-CGU inlining therefore measures a different thing here than in
-            // the shipped profile. Measured: this assertion fails in the default
-            // test lane. The parity/correctness checks around it are
-            // build-independent and still run in every build.
-            assert!(
-                cfg!(debug_assertions) || timing.median_ratio() >= 1.0 / 1.05,
-                "order-2 faa_top slower than the Tower2 it specializes: {}",
-                timing.summary("faa_top", "tower"),
-            );
-            eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=2 {}",
-                timing.summary("production_faatop", "generic_tower"),
-            );
+            if let Some(gate) = gate.as_mut() {
+                let timing = paired_interleaved(
+                    15,
+                    200_000,
+                    0x9320_0002,
+                    |nudge| hessian_coeff_fromobjective_q_terms(m1, m2, q_a + nudge, q_b, q_ab),
+                    |nudge| hessian_via_tower(m1, m2, q_a + nudge, q_b, q_ab),
+                );
+                // At order 2 the top-coefficient extraction and the tiny
+                // `Tower2<2>` are the same handful of fused multiplies -- measured
+                // a coin flip (`median_ratio=1.000114`, `wins=0.53`) -- so there is
+                // no speed claim to make; the contract is that the production
+                // spelling is not measurably slower than the tower, "measurably"
+                // being the paired measurement's own resolution rather than a
+                // chosen tolerance.
+                gate.not_slower("order=2", &timing, "production_faatop", "generic_tower");
+            }
         }
 
         // ----- order 3: D_u H_ab = faa_top3 vs Tower4<3> -----
@@ -539,21 +519,22 @@ mod oracle_tests {
                 ),
                 tower_order3(m1, m2, m3, dq, q_a, q_b, q_ab, dq_a, dq_b, dq_ab),
             );
-            let timing = paired_interleaved(
-                15,
-                60_000,
-                0x9320_0003,
-                |nudge| {
-                    directionalhessian_coeff_fromobjective_q_terms(
-                        m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab,
-                    )
-                },
-                |nudge| tower_order3(m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab),
-            );
-            eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=3 {}",
-                timing.summary("production_faatop", "generic_tower"),
-            );
+            if let Some(gate) = gate.as_mut() {
+                let timing = paired_interleaved(
+                    15,
+                    60_000,
+                    0x9320_0003,
+                    |nudge| {
+                        directionalhessian_coeff_fromobjective_q_terms(
+                            m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab,
+                        )
+                    },
+                    |nudge| {
+                        tower_order3(m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab)
+                    },
+                );
+                gate.faster("order=3", &timing, "production_faatop", "generic_tower");
+            }
         }
 
         // ----- order 4: D²_{uv} H_ab = faa_top4 vs Tower4<4> -----
@@ -588,27 +569,29 @@ mod oracle_tests {
                     dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
                 ),
             );
-            let timing = paired_interleaved(
-                15,
-                20_000,
-                0x9320_0004,
-                |nudge| {
-                    second_directionalhessian_coeff_fromobjective_q_terms(
-                        m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u, dq_av,
-                        dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
-                    )
-                },
-                |nudge| {
-                    tower_order4(
-                        m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u, dq_av,
-                        dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
-                    )
-                },
-            );
-            eprintln!(
-                "BINOMIAL-Q-COEFFS-932 order=4 {}",
-                timing.summary("production_faatop", "generic_tower"),
-            );
+            if let Some(gate) = gate.as_mut() {
+                let timing = paired_interleaved(
+                    15,
+                    20_000,
+                    0x9320_0004,
+                    |nudge| {
+                        second_directionalhessian_coeff_fromobjective_q_terms(
+                            m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u,
+                            dq_av, dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
+                        )
+                    },
+                    |nudge| {
+                        tower_order4(
+                            m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u,
+                            dq_av, dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
+                        )
+                    },
+                );
+                gate.faster("order=4", &timing, "production_faatop", "generic_tower");
+            }
+        }
+        if let Some(gate) = gate {
+            gate.finish();
         }
     }
 
@@ -659,13 +642,18 @@ mod oracle_tests {
                 + m1 * d2q_ab_uv
         }
 
-        use gam_math::paired_timing::paired_interleaved;
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         let mut next = stream(0x9320_0bad);
         let input = std::array::from_fn(|_| next());
         let production_value = production_order4(input);
         let hand_value = hand_order4(input);
         close("order4 strongest hand", production_value, hand_value);
+
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut gate = SpeedGate::open("BINOMIAL-Q-HAND-932");
 
         // This gate ALREADY interleaved (median-of-7 with alternating order), so
         // the migration is not about ordering here -- it is about what the old
@@ -683,32 +671,7 @@ mod oracle_tests {
             x[0] += nudge;
             hand_order4(x)
         });
-        // #932: release-only -- but NOT because the test lane is unoptimized.
-        // It is not: [profile.test] sets opt-level = 2. The difference is
-        // CODEGEN LAYOUT. [profile.test.package.gam-models] sets
-        // codegen-units = 16 and the test profile carries no LTO, while
-        // [profile.release] is codegen-units = 1 + lto = "thin".
-        // Cargo.toml's own note records that CGU splitting is what blocks LLVM
-        // from inlining hot accessors into the per-row loops, and that
-        // "release is unaffected: it already carries thin-LTO +
-        // codegen-units = 1". A compiled-vs-hand ratio whose whole margin is
-        // cross-CGU inlining therefore measures a different thing here than in
-        // the shipped profile. Measured: this assertion fails in the default
-        // test lane. The parity/correctness checks around it are
-        // build-independent and still run in every build.
-        // The bar is `median_ratio` ALONE (#932): `wins_fraction` is a within-run
-        // confidence statement at the host's noise level, not a second check of
-        // the effect, and as a gating conjunct it can only manufacture failures
-        // on a busy runner. It stays on the summary line as evidence.
-        assert!(
-            cfg!(debug_assertions) || timing.median_ratio() > 1.0,
-            "order-four universal partition lowering must beat the strongest historical hand \
-             factorization: {}",
-            timing.summary("production", "strongest_hand"),
-        );
-        eprintln!(
-            "BINOMIAL-Q-HAND-932 order=4 {}",
-            timing.summary("production", "strongest_hand"),
-        );
+        gate.faster("order=4", &timing, "production", "strongest_hand");
+        gate.finish();
     }
 }

@@ -1264,9 +1264,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         Self::log_likelihood_only_with_options(self, block_states, options)
     }
 
-    fn supports_log_likelihood_early_exit(&self) -> bool {
-        true
-    }
 
     fn has_explicit_joint_hessian(&self) -> bool {
         true

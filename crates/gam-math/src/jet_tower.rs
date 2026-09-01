@@ -3190,15 +3190,9 @@ mod tests {
     }
 }
 
-/// Stable derivative stack for `log Phi(x)` through fourth order.
-#[inline]
-pub fn unary_derivatives_normal_logcdf(x: f64) -> [f64; 5] {
     crate::probability::normal_logcdf_derivatives(x)
 }
 
-/// Stable derivative stack for `log(1 - exp(-x))`, `x > 0`, through fourth order.
-#[inline]
-pub fn unary_derivatives_log1mexp_positive(x: f64) -> [f64; 5] {
     let r = 1.0 / x.exp_m1();
     [
         crate::probability::log1mexp_positive(x),
@@ -3492,13 +3486,18 @@ mod contraction_symmetry_tests {
         assert_eq!(checks, 8000 + 14400 + 19200 + 48600);
     }
 
-    /// Measure the wall-clock of the output-symmetric contraction vs the full
-    /// nest at `K = 9` (it does ~2× fewer inner contractions; the bit-identity
-    /// test is the correctness gate). Informational — wall-clock is noisy — with
-    /// only a PATHOLOGICAL-regression guard (the symmetric form does strictly
-    /// fewer inner contractions, so it must not be materially slower).
+    /// The output-symmetric contraction at `K = 9` does strictly fewer inner
+    /// contractions than the full nest (~2x), so it must be the faster arm.
+    /// The bit-identity test above is the correctness gate; this is the speed
+    /// contract, and it opens only in the release profile (`SpeedGate::open`
+    /// documents why -- this gate once PASSED on a quiet node and FAILED at
+    /// 1.62x on a loaded one, because its two arms were timed in separate
+    /// windows in a fixed order; the paired harness times them adjacent, in a
+    /// randomised order, and reports its own resolution).
     #[test]
     fn contraction_symmetry_speedup_is_reported() {
+        use crate::paired_timing::{SpeedGate, paired_interleaved};
+
         const K: usize = 9;
         let mut r = Rng(0xC0FF_EE99_1234_5678);
         let towers: Vec<Tower4<K>> = (0..512).map(|_| rand_sym4::<K>(&mut r)).collect();
@@ -3506,77 +3505,49 @@ mod contraction_symmetry_tests {
         let u: [f64; K] = std::array::from_fn(|_| r.s());
         let w: [f64; K] = std::array::from_fn(|_| r.s());
 
-        let reps = 400usize;
-        let t_sym = {
-            let start = std::time::Instant::now();
-            let mut sink = 0.0f64;
-            for _ in 0..reps {
-                for t in &towers {
-                    let o3 = std::hint::black_box(t).third_contracted(std::hint::black_box(&dir));
-                    let o4 = std::hint::black_box(t)
-                        .fourth_contracted(std::hint::black_box(&u), std::hint::black_box(&w));
-                    sink += o3[0][K - 1] + o4[0][K - 1];
-                }
-            }
-            std::hint::black_box(sink);
-            start.elapsed().as_secs_f64()
-        };
-        let t_full = {
-            let start = std::time::Instant::now();
-            let mut sink = 0.0f64;
-            for _ in 0..reps {
-                for t in &towers {
-                    let o3 = third_full(std::hint::black_box(t), std::hint::black_box(&dir));
-                    let o4 = fourth_full(
-                        std::hint::black_box(t),
-                        std::hint::black_box(&u),
-                        std::hint::black_box(&w),
-                    );
-                    sink += o3[0][K - 1] + o4[0][K - 1];
-                }
-            }
-            std::hint::black_box(sink);
-            start.elapsed().as_secs_f64()
-        };
-        let calls = (reps * towers.len()) as f64;
-        eprintln!(
-            "[contraction-symmetry speedup K=9] sym={:.1}ns/call full={:.1}ns/call \
-             wall_speedup={:.2}x",
-            t_sym / calls * 1e9,
-            t_full / calls * 1e9,
-            t_full / t_sym
-        );
-        // The report above is what this test's name promises and it always
-        // runs. The wall-clock ASSERTION below is release-only, for two
-        // independent reasons (#932).
-        //
-        // 1. It is an unpaired, sequential A/B. `t_sym` and `t_full` are each
-        //    timed exactly once, in fixed order, so any load change between the
-        //    two blocks lands entirely in the ratio. The house pattern for this
-        //    comparison elsewhere in the workspace is paired medians with
-        //    ALTERNATING order -- `paired_medians` in `fast_channel.rs`, and the
-        //    `(round + side) % 2` interleave in `multinomial_reml.rs` -- which
-        //    exists precisely to cancel drift this shape cannot see.
-        //
-        // 2. Measured on two nodes on the same tree: PASSED on n11 where the
-        //    whole 256-test suite took 5.1s, FAILED on cn1037 at
-        //    `sym=16.1469s full=9.9498s` (1.62x against the 1.5x bar) where the
-        //    same suite took 219.1s -- a 43x slowdown, with a sibling timing
-        //    test alone accounting for 219.0s of it. Under that much drift the
-        //    assertion cannot distinguish "pathologically slower" from "the node
-        //    was busy", which is the only thing it is supposed to detect.
-        //
-        // Debug therefore reports and stops. Nothing above this point is
-        // skipped: the towers are still built and both contraction paths are
-        // still executed and consumed, so any panic, NaN or shape error in
-        // `third_contracted`/`fourth_contracted` is still caught in every build.
         if cfg!(debug_assertions) {
             return;
         }
-        assert!(
-            t_sym <= t_full * 1.5,
-            "output-symmetric contraction pathologically slower: \
-             sym={t_sym:.4}s full={t_full:.4}s"
+        let mut gate = SpeedGate::open("CONTRACTION-SYMMETRY-932");
+        // One arm call contracts every tower once; the nudge perturbs both
+        // directions so neither contraction is loop-invariant across calls.
+        let timing = paired_interleaved(
+            15,
+            20,
+            0x9320_5E11,
+            |nudge| {
+                let mut dir = dir;
+                dir[0] += nudge;
+                let mut u = u;
+                u[0] += nudge;
+                let mut sink = 0.0f64;
+                for t in &towers {
+                    let o3 = t.third_contracted(&dir);
+                    let o4 = t.fourth_contracted(&u, &w);
+                    sink += o3[0][K - 1] + o4[0][K - 1];
+                }
+                sink
+            },
+            |nudge| {
+                let mut dir = dir;
+                dir[0] += nudge;
+                let mut u = u;
+                u[0] += nudge;
+                let mut sink = 0.0f64;
+                for t in &towers {
+                    let o3 = third_full(t, &dir);
+                    let o4 = fourth_full(t, &u, &w);
+                    sink += o3[0][K - 1] + o4[0][K - 1];
+                }
+                sink
+            },
         );
+        gate.faster(
+            &format!("K={K} towers={}", towers.len()),
+            &timing,
+            "symmetric",
+            "full_nest",
+        );
+        gate.finish();
     }
 }

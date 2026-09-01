@@ -1816,31 +1816,6 @@ fn hermite_he(n: usize, x: f64) -> f64 {
     current
 }
 
-/// `σ^j ∂^j S/∂μ^j` in signed-log coordinates, off the same panel that
-/// [`log_survival_jet`] uses for `ln S`.
-///
-/// Kept as a scalar entry point for callers that want one order; it evaluates
-/// the whole tower up to `order` because the panel is shared and the extra
-/// Hermite weights are the cheap part of the sum.
-///
-/// Returns `(ln|·|, sign)` with `(−∞, 0)` for an exact zero, so the magnitude
-/// survives value-space underflow exactly as the `ln S` path does (#798).
-/// `order` must be at least 1; order 0 is `ln S` itself.
-pub fn log_survival_scaled_mu_derivative(
-    ctx: &QuadratureContext,
-    mu: f64,
-    sigma: f64,
-    order: usize,
-) -> (f64, f64) {
-    assert!(
-        order >= 1,
-        "the log-space survival mu-derivative tower starts at order 1; \
-         order 0 is ln S, which log_survival_jet returns"
-    );
-    let jet = log_survival_jet(ctx, mu, sigma, order);
-    let entry = jet.scaled_mu_derivatives[order.min(jet.order)];
-    (entry.log_abs, entry.sign)
-}
 
 /// Canonical log-space survival evaluator: returns `ln S(μ,σ)` with its routing
 /// mode. This is the log-domain twin of [`cloglog_survival_term_controlled`].

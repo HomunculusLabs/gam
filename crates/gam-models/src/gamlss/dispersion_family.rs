@@ -1296,6 +1296,79 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
         true
     }
 
+    /// The unscaled family deviance `2·Σ wᵢ d(yᵢ, μ̂ᵢ; θ̂ᵢ)` evaluated row by row
+    /// through the SAME per-row oracle the standard PIRLS path reports from,
+    /// with each row's fitted precision channel (`θᵢ`, `φᵢ`) supplied where the
+    /// unit deviance depends on it (negative-binomial, beta) and none where it
+    /// does not (gamma, Tweedie). One definition, two paths (#2786).
+    fn classical_deviance(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<f64>, String> {
+        use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+        validate_block_count::<GamlssError>(self.kind.family_tag(), 2, block_states.len())?;
+        let eta_mu = &block_states[Self::BLOCK_MEAN].eta;
+        let eta_d = &block_states[Self::BLOCK_DISP].eta;
+        let n = self.y.len();
+        if eta_mu.len() != n || eta_d.len() != n || self.weights.len() != n {
+            return Err(GamlssError::DimensionMismatch {
+                reason: format!(
+                    "{} deviance row-count mismatch: y={n}, eta_mu={}, eta_d={}, weights={}",
+                    self.kind.family_tag(),
+                    eta_mu.len(),
+                    eta_d.len(),
+                    self.weights.len()
+                ),
+            }
+            .into());
+        }
+        let mut half = 0.0_f64;
+        for i in 0..n {
+            let (response, link) = match self.kind {
+                DispersionFamilyKind::NegativeBinomial => (
+                    ResponseFamily::NegativeBinomial {
+                        theta: eta_d[i].exp(),
+                        theta_fixed: true,
+                    },
+                    StandardLink::Log,
+                ),
+                DispersionFamilyKind::Gamma => (ResponseFamily::Gamma, StandardLink::Log),
+                DispersionFamilyKind::Beta => (
+                    ResponseFamily::Beta {
+                        phi: eta_d[i].exp(),
+                    },
+                    StandardLink::Logit,
+                ),
+                DispersionFamilyKind::Tweedie { p } => {
+                    (ResponseFamily::Tweedie { p }, StandardLink::Log)
+                }
+            };
+            let inverse_link = InverseLink::Standard(link);
+            let likelihood = gam_spec::GlmLikelihoodSpec::canonical(LikelihoodSpec::new(
+                response,
+                inverse_link.clone(),
+            ));
+            let row = gam_solve::pirls::deviance_eta_row_with_log_measure_scale(
+                i,
+                self.y[i],
+                eta_mu[i],
+                &likelihood,
+                &inverse_link,
+                self.weights[i],
+                0.0,
+            )
+            .map_err(|error| error.to_string())?;
+            half += row.half_deviance;
+        }
+        if !half.is_finite() {
+            return Err(format!(
+                "{} classical deviance is non-finite ({half})",
+                self.kind.family_tag()
+            ));
+        }
+        Ok(Some(2.0 * half))
+    }
+
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         validate_block_count::<GamlssError>(self.kind.family_tag(), 2, block_states.len())?;
         let eta_mu = &block_states[Self::BLOCK_MEAN].eta;

@@ -90,6 +90,10 @@ pub(crate) fn fit_reduced_parametric_aft(
         crate::custom_family::BlockwiseFitResultParts {
             block_states: states,
             log_likelihood,
+            // A censored continuous law has no finite saturated point, so the
+            // survival location-scale fit keeps `−2·log_likelihood` as its
+            // reported deviance (#2786).
+            deviance: None,
             log_lambdas: Array1::<f64>::zeros(0),
             lambdas: Array1::<f64>::zeros(0),
             covariance_conditional,

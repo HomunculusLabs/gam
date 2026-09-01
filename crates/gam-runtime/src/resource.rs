@@ -193,9 +193,6 @@ impl MemoryAvailability {
         self.capacity_bytes
     }
 
-    pub fn capacity_bytes_usize(&self) -> usize {
-        usize::try_from(self.capacity_bytes).unwrap_or(usize::MAX)
-    }
 
     pub const fn cgroup(&self) -> &CgroupMemoryObservation {
         &self.cgroup

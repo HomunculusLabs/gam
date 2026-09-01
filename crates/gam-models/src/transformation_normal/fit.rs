@@ -39,6 +39,50 @@ impl TransformationExactGeometryCache {
     }
 }
 
+/// The exact-joint geometry the transformation-normal outer criterion is
+/// evaluated on at one hyper-coordinate point: the covariate design rebuilt
+/// from its frozen chart at these length scales, the family over it, the
+/// coefficient block at `rho`, and the tensor ψ-derivative layout the
+/// analytic outer gradient is assembled from.
+///
+/// This is the ONE constructor of that object. The κ-optimizer's geometry
+/// cache calls it on every rebuild, and the finite-difference gate in
+/// `kappa_exact_joint_fd_tests` calls it at `ψ ± h` — so the gate differences
+/// exactly the criterion the optimizer follows, not a re-implementation of it
+/// (gam#979: the analytic ψ gradient had no gate at this level, and the
+/// large-scale CTN preprocessor spent every line search fighting a gradient
+/// that pointed uphill).
+pub(crate) fn build_transformation_exact_geometry(
+    covariate_data: ArrayView2<'_, f64>,
+    effective_spec: TermCollectionSpec,
+    key: Vec<u64>,
+    rho: &Array1<f64>,
+    hyper_values: &Array1<f64>,
+    make_family: &dyn Fn(&TermCollectionDesign) -> Result<TransformationNormalFamily, String>,
+) -> Result<TransformationExactGeometryCache, String> {
+    let exact_design = build_term_collection_design(covariate_data, &effective_spec)
+        .map_err(|e| format!("failed to rebuild frozen transformation geometry: {e}"))?;
+    let family = make_family(&exact_design)?;
+    let cov_psi_derivs =
+        build_block_spatial_psi_derivatives(covariate_data, &effective_spec, &exact_design)?
+            .ok_or_else(|| {
+                "missing covariate spatial psi derivatives for transformation model".to_string()
+            })?;
+    let tensor_derivs = build_tensor_psi_derivatives(&family, &cov_psi_derivs)?;
+    Ok(TransformationExactGeometryCache {
+        key,
+        covariate_spec_resolved: effective_spec,
+        covariate_design: exact_design,
+        blocks: vec![family.block_spec(rho)?],
+        family,
+        hyper_layout: Arc::new(CustomFamilyHyperLayout::new(
+            vec![tensor_derivs],
+            Vec::new(),
+            hyper_values.clone(),
+        )?),
+    })
+}
+
 pub(crate) fn transformation_spatial_geometry_key(
     spec: &TermCollectionSpec,
     spatial_terms: &[usize],
@@ -453,15 +497,14 @@ pub fn fit_transformation_normal(
         }
 
         let geom_start = std::time::Instant::now();
-        let exact_design = build_term_collection_design(covariate_data, &effective_spec)
-            .map_err(|e| format!("failed to rebuild frozen transformation geometry: {e}"))?;
-        let family = make_family(&exact_design)?;
-        let cov_psi_derivs =
-            build_block_spatial_psi_derivatives(covariate_data, &effective_spec, &exact_design)?
-                .ok_or_else(|| {
-                    "missing covariate spatial psi derivatives for transformation model".to_string()
-                })?;
-        let tensor_derivs = build_tensor_psi_derivatives(&family, &cov_psi_derivs)?;
+        let geometry = build_transformation_exact_geometry(
+            covariate_data,
+            effective_spec,
+            key,
+            rho,
+            hyper_values,
+            &make_family,
+        )?;
 
         log::debug!(
             "[transformation-normal] rebuilt exact geometry cache for {} spatial terms in {:.3}s",
@@ -469,18 +512,7 @@ pub fn fit_transformation_normal(
             geom_start.elapsed().as_secs_f64(),
         );
 
-        exact_geometry_cache.replace(Some(TransformationExactGeometryCache {
-            key,
-            covariate_spec_resolved: effective_spec,
-            covariate_design: exact_design,
-            blocks: vec![family.block_spec(rho)?],
-            family,
-            hyper_layout: Arc::new(CustomFamilyHyperLayout::new(
-                vec![tensor_derivs],
-                Vec::new(),
-                hyper_values.clone(),
-            )?),
-        }));
+        exact_geometry_cache.replace(Some(geometry));
         Ok(())
     };
 

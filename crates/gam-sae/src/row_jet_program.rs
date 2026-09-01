@@ -2635,7 +2635,7 @@ mod tests {
     /// Debug builds run one repetition and skip the timing assertion.
     #[test]
     fn jet_hoist_and_order1_border_beat_redundant_baselines_932() {
-        use std::time::{Duration, Instant};
+        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
         const K: usize = 8;
         let prog = softmax_fixture_k(4, 1, 3, 16, 1.1);
@@ -2649,81 +2649,56 @@ mod tests {
         }
         let n_chans = chans.len();
 
-        #[cfg(debug_assertions)]
-        let (repetitions, trials) = (1usize, 1usize);
-        #[cfg(not(debug_assertions))]
-        let (repetitions, trials) = (2_000usize, 5usize);
-
-        let hoisted = || {
-            let cols = prog.reconstruction_all_columns_packed::<K>();
-            cols[0].value() + cols[out_dim - 1].g()[0]
-        };
-        let per_column = || {
-            let mut sum = 0.0_f64;
-            for c in 0..out_dim {
-                let col = prog.reconstruction_column_packed::<K>(c);
-                sum += col.value() + col.g()[0];
-            }
-            sum
-        };
-        let order1_border = || {
-            let jets = prog.beta_border_order1_packed::<K>(&chans);
-            jets[0].value() + jets[n_chans - 1].g()[0]
-        };
-        let order2_border = || {
-            let jets = prog.beta_border_towers_packed::<K>(&chans);
-            jets[0].value() + jets[n_chans - 1].g()[0]
-        };
-
-        let time_lane = |body: &dyn Fn() -> f64| -> (Duration, f64) {
-            let start = Instant::now();
-            let mut sum = 0.0_f64;
-            for _ in 0..repetitions {
-                sum += body();
-            }
-            (start.elapsed(), sum)
-        };
-
-        let mut best = [Duration::MAX; 4];
-        let mut accumulated = 0.0_f64;
-        for trial in 0..trials {
-            // Rotate the lane order each trial so warm caches and frequency
-            // ramps cannot systematically favor one lane.
-            for offset in 0..4 {
-                let lane = (trial + offset) % 4;
-                let (elapsed, sum) = match lane {
-                    0 => time_lane(&hoisted),
-                    1 => time_lane(&per_column),
-                    2 => time_lane(&order1_border),
-                    _ => time_lane(&order2_border),
-                };
-                best[lane] = best[lane].min(elapsed);
-                accumulated += sum;
-            }
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why). The program holds its rows immutably, so the nudge enters the
+        // fold; every lane allocates its output batch, which is not
+        // loop-invariant across calls.
+        if cfg!(debug_assertions) {
+            return;
         }
-        assert!(accumulated.is_finite(), "timed jet checksum must be finite");
-        let per_rep = |lane: usize| best[lane].as_nanos() as f64 / repetitions as f64;
-        let hoisted_ns = per_rep(0);
-        let per_column_ns = per_rep(1);
-        let order1_ns = per_rep(2);
-        let order2_ns = per_rep(3);
-        eprintln!(
-            "[SAE-JET-932] K={K} P={out_dim} hoisted={hoisted_ns:.1} ns/row \
-             per-column={per_column_ns:.1} ns/row order1-border={order1_ns:.1} ns/row \
-             order2-border={order2_ns:.1} ns/row"
+        let mut gate = SpeedGate::open("SAE-JET-932");
+        let hoisted = paired_interleaved(
+            15,
+            200,
+            0x9320_5AE1,
+            |nudge| {
+                let cols = prog.reconstruction_all_columns_packed::<K>();
+                cols[0].value() + cols[out_dim - 1].g()[0] + nudge
+            },
+            |nudge| {
+                let mut sum = nudge;
+                for c in 0..out_dim {
+                    let col = prog.reconstruction_column_packed::<K>(c);
+                    sum += col.value() + col.g()[0];
+                }
+                sum
+            },
         );
-        #[cfg(not(debug_assertions))]
-        {
-            assert!(
-                hoisted_ns <= per_column_ns,
-                "K={K} hoisted all-columns {hoisted_ns:.1} ns/row must beat \
-                 per-column {per_column_ns:.1} ns/row"
-            );
-            assert!(
-                order1_ns <= order2_ns,
-                "K={K} Order1 beta-border batch {order1_ns:.1} ns/row must beat \
-                 Order2 {order2_ns:.1} ns/row"
-            );
-        }
+        gate.faster(
+            &format!("K={K} P={out_dim} reconstruction"),
+            &hoisted,
+            "hoisted_all_columns",
+            "per_column",
+        );
+        let border = paired_interleaved(
+            15,
+            200,
+            0x9320_5AE2,
+            |nudge| {
+                let jets = prog.beta_border_order1_packed::<K>(&chans);
+                jets[0].value() + jets[n_chans - 1].g()[0] + nudge
+            },
+            |nudge| {
+                let jets = prog.beta_border_towers_packed::<K>(&chans);
+                jets[0].value() + jets[n_chans - 1].g()[0] + nudge
+            },
+        );
+        gate.faster(
+            &format!("K={K} P={out_dim} beta_border"),
+            &border,
+            "order1",
+            "order2",
+        );
+        gate.finish();
     }
 }
