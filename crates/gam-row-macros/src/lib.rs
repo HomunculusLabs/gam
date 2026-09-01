@@ -268,6 +268,16 @@ impl Graph {
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left - right);
         }
+        // A gated term enters a sum with its sign INSIDE the gate. `x - S` and
+        // `x + (-S)` are the same IEEE operation, but the derivative channels of
+        // a subtracted gate all carry the negated gate, so keeping the positive
+        // one for the value channel alone makes the same quantity live in two
+        // `Select`s: two `phi`s after the branch merge, two spills, two stores.
+        // The hand kernels keep one signed `entry` and add it everywhere.
+        if matches!(self.nodes[right], Node::Select(..)) {
+            let negated = self.neg(right);
+            return self.add(left, negated);
+        }
         self.intern(Node::Sub(left, right))
     }
 
