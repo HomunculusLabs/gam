@@ -11,10 +11,8 @@
 //! Architecture: all tests are self-contained — no survival family construction,
 //! no cargo --release, no parallel cargo.
 
-use gam::families::custom_family::ParameterBlockSpec;
 use gam::identifiability::audit::{IdentifiabilityAudit, maybe_log_audit_drift};
-use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 use gam_problem::test_support::spec_from_dense;
 
 // ── helpers ────────────────────────────────────────────────────────────────

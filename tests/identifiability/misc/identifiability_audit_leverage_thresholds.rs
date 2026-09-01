@@ -19,10 +19,8 @@
 //! 4. Cosine = 0.7 with n_eff = 5 → below the null scale → should NOT halt.
 //!    Same cosine with n_eff = 10000 → way outside the null → SHOULD halt.
 
-use gam::families::custom_family::ParameterBlockSpec;
 use gam::identifiability::audit::audit_identifiability;
-use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 use gam_problem::test_support::spec_from_dense;
 
 /// Compute S2_k = Σ_i (φ_i²/‖φ‖²)² for a column slice.

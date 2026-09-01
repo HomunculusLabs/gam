@@ -1965,7 +1965,7 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     })
@@ -2251,7 +2251,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     })
@@ -2914,7 +2914,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     };
@@ -2955,7 +2955,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         id_column: None,
         uncertainty: true,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     };
@@ -3229,7 +3229,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     };
@@ -3270,7 +3270,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         id_column: None,
         uncertainty: true,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     };
@@ -3542,7 +3542,7 @@ fn posterior_mean_prediction_for_model(model: &SavedModel) -> f64 {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::PosteriorMean,
         no_bias_correction: false,
     };
@@ -5009,7 +5009,7 @@ fn saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::Map,
         no_bias_correction: false,
     })
@@ -6795,7 +6795,7 @@ fn run_predict_survival_supports_saved_baseline_timewiggle_model() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::Map,
         no_bias_correction: false,
     };
@@ -6954,7 +6954,7 @@ fn run_predict_survival_supports_saved_latent_survival_model() {
         id_column: None,
         uncertainty: false,
         level: 0.95,
-        covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+        covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
         mode: PredictModeArg::Map,
         no_bias_correction: false,
     };

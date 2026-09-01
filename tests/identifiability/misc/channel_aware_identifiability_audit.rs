@@ -17,8 +17,8 @@
 use gam::families::custom_family::ParameterBlockSpec;
 use gam::identifiability::audit::{audit_identifiability, audit_identifiability_channel_aware};
 use gam::identifiability::families::compiler::{IdentityRowHessian, RowJacobianOperator};
-use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
-use ndarray::{Array1, Array2, Array3};
+use gam::linalg::matrix::DesignMatrix;
+use ndarray::{Array2, Array3};
 use std::sync::Arc;
 use gam_problem::test_support::spec_from_dense;
 
