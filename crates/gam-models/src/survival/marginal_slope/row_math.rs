@@ -63,10 +63,11 @@ use gam_row_macros::row_program;
 /// log-likelihood, the preserving scale `c` and the index `η` all unchanged to
 /// round-off.
 ///
-/// The block, its formula keyword and its on-disk fields keep the `slope`
-/// spelling: renaming a public keyword and a saved-model contract is a breaking
-/// change and belongs to whoever owns that decision, not to this function. What
-/// is fixed here is the name at the point where the mathematics is STATED.
+/// The name was fixed here first, at the point where the mathematics is
+/// STATED (`rigid_observed_logslope` → `rigid_observed_slope`, 169627a45). The
+/// block, the `slope_formula=` keyword, the CLI flag and the on-disk fields
+/// followed in the deliberately breaking rename (c88fc0a62, fcd01e90b); no
+/// `logslope` alias or persisted fallback is retained.
 #[inline]
 pub(crate) fn rigid_observed_slope(g: f64, probit_scale: f64) -> f64 {
     probit_scale * g
