@@ -86,12 +86,8 @@ fn matern_three_halves_transition_preserves_stationary_covariance() {
 
 #[test]
 fn poisson_interval_derivatives_are_exact() {
-    let evaluation = evaluate_poisson_interval(
-        array![2_u32, 0].view(),
-        array![0.3, -0.7].view(),
-        0.4,
-    )
-    .unwrap();
+    let evaluation =
+        evaluate_poisson_interval(array![2_u32, 0].view(), array![0.3, -0.7].view(), 0.4).unwrap();
     for mark in 0..2 {
         let mean = 0.4 * [0.3_f64, -0.7][mark].exp();
         assert_abs_diff_eq!(evaluation.gradient[mark], [2.0, 0.0][mark] - mean);
@@ -148,16 +144,21 @@ fn online_filter_is_recursive_and_finite() {
     let filtered = filter_laplace(&model, &history(), control()).unwrap();
     assert_eq!(filtered.len(), 3);
     assert_eq!(filtered[2].mean.len(), 2);
-    assert!(filtered
-        .iter()
-        .flat_map(|state| state.mean.iter())
-        .all(|value| value.is_finite()));
+    assert!(
+        filtered
+            .iter()
+            .flat_map(|state| state.mean.iter())
+            .all(|value| value.is_finite())
+    );
 }
 
 #[test]
 fn impulse_response_is_the_transition_times_impulse() {
     let mut model = model(MaternMarkovOrder::ThreeHalves);
-    model.mark_impulses.slice_mut(s![.., 0]).assign(&array![1.2, -0.4]);
+    model
+        .mark_impulses
+        .slice_mut(s![.., 0])
+        .assign(&array![1.2, -0.4]);
     let lag = 0.9;
     let expected = model
         .transition(lag)
@@ -175,13 +176,9 @@ fn gaussian_intensity_includes_jensen_correction() {
     let model = model(MaternMarkovOrder::Half);
     let mean = array![0.2];
     let covariance = array![[0.7]];
-    let marginal = gaussian_mean_intensity(
-        &model,
-        array![-1.0, 0.1].view(),
-        mean.view(),
-        &covariance,
-    )
-    .unwrap();
+    let marginal =
+        gaussian_mean_intensity(&model, array![-1.0, 0.1].view(), mean.view(), &covariance)
+            .unwrap();
     let plugin = (-1.0_f64 + 0.8 * 0.2).exp();
     assert!(marginal[0] > plugin);
     assert_abs_diff_eq!(

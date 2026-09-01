@@ -237,7 +237,9 @@ impl MarkedPointProcessModel {
     pub fn transition(&self, elapsed: f64) -> Result<StateTransition, MarkedPointProcessError> {
         self.validate()?;
         if !elapsed.is_finite() || elapsed <= 0.0 {
-            return Err(invalid("transition elapsed time must be finite and positive"));
+            return Err(invalid(
+                "transition elapsed time must be finite and positive",
+            ));
         }
         let dimension = self.state_dimension();
         let mut transition = Array2::zeros((dimension, dimension));
@@ -256,14 +258,13 @@ impl MarkedPointProcessModel {
                     let decay = (-scaled_time).exp();
                     transition[[offset, offset]] = decay * (1.0 + scaled_time);
                     transition[[offset, offset + 1]] = decay * elapsed;
-                    transition[[offset + 1, offset]] =
-                        -decay * rate * rate * elapsed;
+                    transition[[offset + 1, offset]] = -decay * rate * rate * elapsed;
                     transition[[offset + 1, offset + 1]] = decay * (1.0 - scaled_time);
 
                     let decay2 = decay * decay;
                     let scaled_time2 = scaled_time * scaled_time;
-                    innovation[[offset, offset]] = variance
-                        * (1.0 - decay2 * (1.0 + 2.0 * scaled_time + 2.0 * scaled_time2));
+                    innovation[[offset, offset]] =
+                        variance * (1.0 - decay2 * (1.0 + 2.0 * scaled_time + 2.0 * scaled_time2));
                     let cross = 2.0 * variance * decay2 * rate * scaled_time2;
                     innovation[[offset, offset + 1]] = cross;
                     innovation[[offset + 1, offset]] = cross;
@@ -292,7 +293,9 @@ impl MarkedPointProcessModel {
             return Err(invalid(format!("mark index {mark} is out of bounds")));
         }
         if !lag.is_finite() || lag < 0.0 {
-            return Err(invalid("impulse-response lag must be finite and non-negative"));
+            return Err(invalid(
+                "impulse-response lag must be finite and non-negative",
+            ));
         }
         self.validate()?;
         let impulse = self.mark_impulses.column(mark).to_owned();
@@ -319,11 +322,8 @@ impl MarkedPointProcessModel {
     /// rescaling of a factor and the inverse rescaling of its loading column.
     pub fn loading_covariance(&self) -> Result<Array2<f64>, MarkedPointProcessError> {
         self.validate()?;
-        let factor_variances = Array1::from_iter(
-            self.factors
-                .iter()
-                .map(|factor| factor.marginal_variance),
-        );
+        let factor_variances =
+            Array1::from_iter(self.factors.iter().map(|factor| factor.marginal_variance));
         let variance_weighted_loadings = &self.loadings * &factor_variances.insert_axis(Axis(0));
         Ok(variance_weighted_loadings.dot(&self.loadings.t()))
     }
@@ -394,7 +394,11 @@ impl SubjectHistory {
                     interval.fixed_log_intensity.len()
                 )));
             }
-            if interval.fixed_log_intensity.iter().any(|value| !value.is_finite()) {
+            if interval
+                .fixed_log_intensity
+                .iter()
+                .any(|value| !value.is_finite())
+            {
                 return Err(invalid(format!(
                     "subject {:?} interval {index} has a non-finite fixed predictor",
                     self.subject
@@ -424,10 +428,14 @@ pub fn evaluate_poisson_interval(
     exposure: f64,
 ) -> Result<PoissonIntervalEvaluation, MarkedPointProcessError> {
     if counts.len() != log_intensity.len() || counts.is_empty() {
-        return Err(invalid("counts and log_intensity must have equal non-zero length"));
+        return Err(invalid(
+            "counts and log_intensity must have equal non-zero length",
+        ));
     }
     if !exposure.is_finite() || exposure <= 0.0 {
-        return Err(invalid("Poisson interval exposure must be finite and positive"));
+        return Err(invalid(
+            "Poisson interval exposure must be finite and positive",
+        ));
     }
     if log_intensity.iter().any(|value| !value.is_finite()) {
         return Err(invalid("log_intensity must contain only finite values"));
@@ -444,9 +452,8 @@ pub fn evaluate_poisson_interval(
             });
         }
         let count = f64::from(counts[mark]);
-        log_likelihood += count * (log_intensity[mark] + exposure.ln())
-            - mean
-            - ln_gamma(count + 1.0);
+        log_likelihood +=
+            count * (log_intensity[mark] + exposure.ln()) - mean - ln_gamma(count + 1.0);
         gradient[mark] = count - mean;
         negative_hessian[mark] = mean;
         expected_counts[mark] = mean;
@@ -489,16 +496,19 @@ impl LaplaceControl {
             || self.armijo_fraction <= 0.0
             || self.armijo_fraction >= 1.0
         {
-            return Err(invalid("armijo_fraction must lie strictly between zero and one"));
+            return Err(invalid(
+                "armijo_fraction must lie strictly between zero and one",
+            ));
         }
         if !self.step_shrink.is_finite() || self.step_shrink <= 0.0 || self.step_shrink >= 1.0 {
-            return Err(invalid("step_shrink must lie strictly between zero and one"));
+            return Err(invalid(
+                "step_shrink must lie strictly between zero and one",
+            ));
         }
-        if !self.minimum_step.is_finite()
-            || self.minimum_step <= 0.0
-            || self.minimum_step >= 1.0
-        {
-            return Err(invalid("minimum_step must lie strictly between zero and one"));
+        if !self.minimum_step.is_finite() || self.minimum_step <= 0.0 || self.minimum_step >= 1.0 {
+            return Err(invalid(
+                "minimum_step must lie strictly between zero and one",
+            ));
         }
         Ok(())
     }
@@ -551,10 +561,8 @@ fn prior_chain(
     history: &SubjectHistory,
 ) -> Result<PriorChain, MarkedPointProcessError> {
     let initial_covariance = model.stationary_covariance()?;
-    let (initial_precision, initial_logdet) = inverse_and_logdet_spd(
-        &initial_covariance,
-        "stationary state covariance",
-    )?;
+    let (initial_precision, initial_logdet) =
+        inverse_and_logdet_spd(&initial_covariance, "stationary state covariance")?;
     let mut transitions = Vec::with_capacity(history.intervals.len().saturating_sub(1));
     for index in 1..history.intervals.len() {
         let elapsed = history.intervals[index].exit - history.intervals[index - 1].exit;
@@ -569,9 +577,7 @@ fn prior_chain(
             &state_transition.innovation_covariance,
             "Matérn innovation covariance",
         )?;
-        let previous_counts = history.intervals[index - 1]
-            .counts
-            .mapv(f64::from);
+        let previous_counts = history.intervals[index - 1].counts.mapv(f64::from);
         let immediate_impulse = model.mark_impulses.dot(&previous_counts);
         let shift = state_transition.transition.dot(&immediate_impulse);
         transitions.push(PriorTransition {
@@ -604,10 +610,10 @@ fn evaluate_log_joint(
 ) -> Result<PosteriorEvaluation, MarkedPointProcessError> {
     let interval_count = history.intervals.len();
     let state_dimension = model.state_dimension();
-    if states.len() != interval_count
-        || states.iter().any(|state| state.len() != state_dimension)
-    {
-        return Err(invalid("latent state trajectory has incompatible dimensions"));
+    if states.len() != interval_count || states.iter().any(|state| state.len() != state_dimension) {
+        return Err(invalid(
+            "latent state trajectory has incompatible dimensions",
+        ));
     }
     let observation = model.observation_matrix();
     let mut gradient = vec![Array1::zeros(state_dimension); interval_count];
@@ -615,22 +621,19 @@ fn evaluate_log_joint(
     let mut lower = Vec::with_capacity(interval_count.saturating_sub(1));
 
     let initial_quadratic = states[0].dot(&prior.initial_precision.dot(&states[0]));
-    let mut log_joint = -0.5
-        * (initial_quadratic + prior.initial_logdet + state_dimension as f64 * LOG_TWO_PI);
+    let mut log_joint =
+        -0.5 * (initial_quadratic + prior.initial_logdet + state_dimension as f64 * LOG_TWO_PI);
     gradient[0] -= &prior.initial_precision.dot(&states[0]);
     diagonal[0] += &prior.initial_precision;
 
     for index in 1..interval_count {
         let transition = &prior.transitions[index - 1];
-        let residual = &states[index]
-            - &transition.transition.dot(&states[index - 1])
-            - &transition.shift;
+        let residual =
+            &states[index] - &transition.transition.dot(&states[index - 1]) - &transition.shift;
         let precision_residual = transition.innovation_precision.dot(&residual);
         let quadratic = residual.dot(&precision_residual);
-        log_joint -= 0.5
-            * (quadratic
-                + transition.innovation_logdet
-                + state_dimension as f64 * LOG_TWO_PI);
+        log_joint -=
+            0.5 * (quadratic + transition.innovation_logdet + state_dimension as f64 * LOG_TWO_PI);
         gradient[index] -= &precision_residual;
         gradient[index - 1] += &transition.transition.t().dot(&precision_residual);
         diagonal[index] += &transition.innovation_precision;
@@ -644,15 +647,11 @@ fn evaluate_log_joint(
 
     for (index, interval) in history.intervals.iter().enumerate() {
         let eta = &interval.fixed_log_intensity + &observation.dot(&states[index]);
-        let likelihood = evaluate_poisson_interval(
-            interval.counts.view(),
-            eta.view(),
-            interval.exposure(),
-        )?;
+        let likelihood =
+            evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
         log_joint += likelihood.log_likelihood;
         gradient[index] += &observation.t().dot(&likelihood.gradient);
-        let weighted_observation =
-            &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
+        let weighted_observation = &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
         diagonal[index] += &observation.t().dot(&weighted_observation);
     }
     if !log_joint.is_finite() {
@@ -715,8 +714,7 @@ pub fn smooth_laplace(
             // A trial point that fails the Armijo test and one at which the
             // joint is not numerically evaluable are rejected the same way:
             // the step shrinks. Any other error is the caller's.
-            let sufficient_ascent = match evaluate_log_joint(model, history, &prior, &candidate)
-            {
+            let sufficient_ascent = match evaluate_log_joint(model, history, &prior, &candidate) {
                 Ok(candidate_evaluation) => {
                     candidate_evaluation.log_joint
                         >= evaluation.log_joint
@@ -849,11 +847,11 @@ pub fn filter_laplace(
         if index > 0 {
             let elapsed = interval.exit - history.intervals[index - 1].exit;
             let transition = model.transition(elapsed)?;
-            let previous_counts = history.intervals[index - 1]
-                .counts
-                .mapv(f64::from);
+            let previous_counts = history.intervals[index - 1].counts.mapv(f64::from);
             let impulse = model.mark_impulses.dot(&previous_counts);
-            predicted_mean = transition.transition.dot(&(&filtered[index - 1].mean + &impulse));
+            predicted_mean = transition
+                .transition
+                .dot(&(&filtered[index - 1].mean + &impulse));
             predicted_covariance = transition
                 .transition
                 .dot(&filtered[index - 1].covariance)
@@ -867,35 +865,26 @@ pub fn filter_laplace(
         let mut posterior_covariance = None;
         for _ in 0..control.max_iterations {
             let eta = &interval.fixed_log_intensity + &observation.dot(&mode);
-            let likelihood = evaluate_poisson_interval(
-                interval.counts.view(),
-                eta.view(),
-                interval.exposure(),
-            )?;
+            let likelihood =
+                evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
             let displacement = &mode - &predicted_mean;
-            let gradient = observation.t().dot(&likelihood.gradient)
-                - prior_precision.dot(&displacement);
+            let gradient =
+                observation.t().dot(&likelihood.gradient) - prior_precision.dot(&displacement);
             let weighted_observation =
                 &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
-            let negative_hessian = &prior_precision
-                + &observation.t().dot(&weighted_observation);
+            let negative_hessian = &prior_precision + &observation.t().dot(&weighted_observation);
             let stationarity = vector_infinity_norm(&gradient);
             let threshold = control.absolute_stationarity_tolerance
-                + control.relative_stationarity_tolerance
-                    * vector_infinity_norm(&mode).max(1.0);
+                + control.relative_stationarity_tolerance * vector_infinity_norm(&mode).max(1.0);
             if stationarity <= threshold {
-                posterior_covariance = Some(inverse_and_logdet_spd(
-                    &negative_hessian,
-                    "filtered posterior precision",
-                )?.0);
+                posterior_covariance = Some(
+                    inverse_and_logdet_spd(&negative_hessian, "filtered posterior precision")?.0,
+                );
                 converged = true;
                 break;
             }
-            let direction = solve_spd_vector(
-                &negative_hessian,
-                &gradient,
-                "filtered Newton Hessian",
-            )?;
+            let direction =
+                solve_spd_vector(&negative_hessian, &gradient, "filtered Newton Hessian")?;
             let directional_derivative = gradient.dot(&direction);
             let current = one_state_log_posterior(
                 interval,
@@ -938,11 +927,8 @@ pub fn filter_laplace(
         }
         if !converged {
             let eta = &interval.fixed_log_intensity + &observation.dot(&mode);
-            let likelihood = evaluate_poisson_interval(
-                interval.counts.view(),
-                eta.view(),
-                interval.exposure(),
-            )?;
+            let likelihood =
+                evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
             let gradient = observation.t().dot(&likelihood.gradient)
                 - prior_precision.dot(&(&mode - &predicted_mean));
             return Err(MarkedPointProcessError::NonConvergence {
@@ -967,14 +953,11 @@ fn one_state_log_posterior(
     state: &Array1<f64>,
 ) -> Result<f64, MarkedPointProcessError> {
     let eta = &interval.fixed_log_intensity + &observation.dot(state);
-    let likelihood = evaluate_poisson_interval(
-        interval.counts.view(),
-        eta.view(),
-        interval.exposure(),
-    )?;
+    let likelihood =
+        evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
     let displacement = state - prior_mean;
-    let value = likelihood.log_likelihood
-        - 0.5 * displacement.dot(&prior_precision.dot(&displacement));
+    let value =
+        likelihood.log_likelihood - 0.5 * displacement.dot(&prior_precision.dot(&displacement));
     if !value.is_finite() {
         return Err(MarkedPointProcessError::NumericalFailure {
             context: "filtered log posterior",
@@ -998,7 +981,9 @@ pub fn gaussian_mean_intensity(
         || state_mean.len() != model.state_dimension()
         || state_covariance.dim() != (model.state_dimension(), model.state_dimension())
     {
-        return Err(invalid("Gaussian intensity inputs have incompatible dimensions"));
+        return Err(invalid(
+            "Gaussian intensity inputs have incompatible dimensions",
+        ));
     }
     if fixed_log_intensity.iter().any(|value| !value.is_finite())
         || state_mean.iter().any(|value| !value.is_finite())
@@ -1069,7 +1054,9 @@ pub fn forecast_cumulative_incidence(
         || landmark.covariance.dim() != (model.state_dimension(), model.state_dimension())
         || !landmark.time.is_finite()
     {
-        return Err(invalid("landmark state has incompatible dimensions or time"));
+        return Err(invalid(
+            "landmark state has incompatible dimensions or time",
+        ));
     }
     if future.is_empty() {
         return Err(invalid("forecast requires at least one future interval"));
@@ -1085,10 +1072,14 @@ pub fn forecast_cumulative_incidence(
     let mut selected = vec![false; model.mark_count()];
     for &mark in competing_marks {
         if mark >= model.mark_count() {
-            return Err(invalid(format!("competing mark index {mark} is out of bounds")));
+            return Err(invalid(format!(
+                "competing mark index {mark} is out of bounds"
+            )));
         }
         if selected[mark] {
-            return Err(invalid(format!("competing mark index {mark} is duplicated")));
+            return Err(invalid(format!(
+                "competing mark index {mark} is duplicated"
+            )));
         }
         if model.mark_roles[mark] != MarkRole::Absorbing {
             return Err(invalid(format!(
@@ -1143,8 +1134,8 @@ pub fn forecast_cumulative_incidence(
         let mut cif: Array1<f64> = Array1::zeros(causes);
         for index in 0..intervals {
             let innovation = normals.vector(model.state_dimension());
-            state = transitions[index].0.transition.dot(&state)
-                + transitions[index].1.dot(&innovation);
+            state =
+                transitions[index].0.transition.dot(&state) + transitions[index].1.dot(&innovation);
             let eta = &future[index].fixed_log_intensity + &observation.dot(&state);
             let mut rates: Array1<f64> = Array1::zeros(causes);
             let mut total_rate = 0.0;
@@ -1181,16 +1172,15 @@ pub fn forecast_cumulative_incidence(
     for index in 0..intervals {
         for cause in 0..causes {
             let mean = cumulative_incidence[[index, cause]];
-            let sample_variance: f64 =
-                (cif_square_sum[[index, cause]] - trajectories * mean * mean)
-                    / (trajectories - 1.0);
+            let sample_variance: f64 = (cif_square_sum[[index, cause]]
+                - trajectories * mean * mean)
+                / (trajectories - 1.0);
             cumulative_incidence_monte_carlo_se[[index, cause]] =
                 (sample_variance.max(0.0) / trajectories).sqrt();
         }
         let mean = survival[index];
         let sample_variance: f64 =
-            (survival_square_sum[index] - trajectories * mean * mean)
-                / (trajectories - 1.0);
+            (survival_square_sum[index] - trajectories * mean * mean) / (trajectories - 1.0);
         survival_monte_carlo_se[index] = (sample_variance.max(0.0) / trajectories).sqrt();
     }
     let mut elapsed = 0.0;
@@ -1232,7 +1222,9 @@ fn factor_block_tridiagonal(
             .iter()
             .any(|block| block.dim() != (dimension, dimension))
     {
-        return Err(invalid("block-tridiagonal blocks must be equally sized square matrices"));
+        return Err(invalid(
+            "block-tridiagonal blocks must be equally sized square matrices",
+        ));
     }
     let mut schur = Vec::with_capacity(diagonal.len());
     let mut lower_multipliers = Vec::with_capacity(lower.len());
@@ -1285,12 +1277,11 @@ fn solve_block_tridiagonal(
     )?;
     for index in (0..last).rev() {
         let rhs = &transformed[index]
-            - &factorization.lower_original[index].t().dot(&solution[index + 1]);
-        solution[index] = solve_spd_vector(
-            &factorization.schur[index],
-            &rhs,
-            "block Newton backsolve",
-        )?;
+            - &factorization.lower_original[index]
+                .t()
+                .dot(&solution[index + 1]);
+        solution[index] =
+            solve_spd_vector(&factorization.schur[index], &rhs, "block Newton backsolve")?;
     }
     Ok(solution)
 }
@@ -1304,15 +1295,14 @@ fn inverse_diagonal_blocks(
     covariance[count - 1] = inverse_and_logdet_spd(
         &factorization.schur[count - 1],
         "Laplace terminal Schur complement",
-    )?.0;
+    )?
+    .0;
     for index in (0..count - 1).rev() {
-        let schur_inverse = inverse_and_logdet_spd(
-            &factorization.schur[index],
-            "Laplace Schur complement",
-        )?.0;
+        let schur_inverse =
+            inverse_and_logdet_spd(&factorization.schur[index], "Laplace Schur complement")?.0;
         let multiplier = &factorization.lower_multipliers[index];
-        covariance[index] = &schur_inverse
-            + &multiplier.t().dot(&covariance[index + 1]).dot(multiplier);
+        covariance[index] =
+            &schur_inverse + &multiplier.t().dot(&covariance[index + 1]).dot(multiplier);
     }
     Ok(covariance)
 }
@@ -1322,7 +1312,9 @@ fn cholesky(
     context: &'static str,
 ) -> Result<Array2<f64>, MarkedPointProcessError> {
     if matrix.nrows() == 0 || matrix.nrows() != matrix.ncols() {
-        return Err(invalid(format!("{context} must be a non-empty square matrix")));
+        return Err(invalid(format!(
+            "{context} must be a non-empty square matrix"
+        )));
     }
     ensure_finite_matrix(matrix, context)?;
     let dimension = matrix.nrows();
@@ -1377,7 +1369,9 @@ fn solve_spd_vector(
     context: &'static str,
 ) -> Result<Array1<f64>, MarkedPointProcessError> {
     if matrix.nrows() != rhs.len() {
-        return Err(invalid(format!("{context} right-hand side has incompatible length")));
+        return Err(invalid(format!(
+            "{context} right-hand side has incompatible length"
+        )));
     }
     Ok(solve_cholesky_vector(&cholesky(matrix, context)?, rhs))
 }
@@ -1388,14 +1382,17 @@ fn solve_spd_matrix(
     context: &'static str,
 ) -> Result<Array2<f64>, MarkedPointProcessError> {
     if matrix.nrows() != rhs.nrows() {
-        return Err(invalid(format!("{context} right-hand side has incompatible rows")));
+        return Err(invalid(format!(
+            "{context} right-hand side has incompatible rows"
+        )));
     }
     let lower = cholesky(matrix, context)?;
     let mut solution = Array2::zeros(rhs.dim());
     for column in 0..rhs.ncols() {
-        solution
-            .column_mut(column)
-            .assign(&solve_cholesky_vector(&lower, &rhs.column(column).to_owned()));
+        solution.column_mut(column).assign(&solve_cholesky_vector(
+            &lower,
+            &rhs.column(column).to_owned(),
+        ));
     }
     Ok(solution)
 }
@@ -1418,10 +1415,7 @@ fn inverse_and_logdet_spd(
     Ok((inverse, logdet))
 }
 
-fn logdet_spd(
-    matrix: &Array2<f64>,
-    context: &'static str,
-) -> Result<f64, MarkedPointProcessError> {
+fn logdet_spd(matrix: &Array2<f64>, context: &'static str) -> Result<f64, MarkedPointProcessError> {
     let lower = cholesky(matrix, context)?;
     Ok(2.0 * lower.diag().iter().map(|value| value.ln()).sum::<f64>())
 }
@@ -1438,7 +1432,10 @@ fn vector_infinity_norm(vector: &Array1<f64>) -> f64 {
 }
 
 fn block_dot(left: &[Array1<f64>], right: &[Array1<f64>]) -> f64 {
-    left.iter().zip(right).map(|(left, right)| left.dot(right)).sum()
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left.dot(right))
+        .sum()
 }
 
 fn add_scaled_blocks(
