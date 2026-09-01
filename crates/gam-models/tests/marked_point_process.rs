@@ -97,6 +97,11 @@ fn poisson_interval_derivatives_are_exact() {
         assert_abs_diff_eq!(evaluation.gradient[mark], [2.0, 0.0][mark] - mean);
         assert_abs_diff_eq!(evaluation.negative_hessian[mark], mean);
     }
+    let first_mean = 0.4 * 0.3_f64.exp();
+    let second_mean = 0.4 * (-0.7_f64).exp();
+    let expected_log_likelihood =
+        2.0 * (0.3 + 0.4_f64.ln()) - first_mean - 2.0_f64.ln() - second_mean;
+    assert_abs_diff_eq!(evaluation.log_likelihood, expected_log_likelihood);
 }
 
 #[test]

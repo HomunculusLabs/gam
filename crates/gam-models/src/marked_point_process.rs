@@ -444,7 +444,7 @@ pub fn evaluate_poisson_interval(
             });
         }
         let count = f64::from(counts[mark]);
-        log_likelihood += count * log_intensity[mark]
+        log_likelihood += count * (log_intensity[mark] + exposure.ln())
             - mean
             - ln_gamma(count + 1.0);
         gradient[mark] = count - mean;
