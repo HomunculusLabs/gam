@@ -302,8 +302,7 @@ fn poisson_derivatives_match_central_differences_across_scales() {
         )
         .unwrap();
         let numerical_gradient =
-            (gradient_upper.log_likelihood - gradient_lower.log_likelihood)
-                / (2.0 * gradient_step);
+            (gradient_upper.log_likelihood - gradient_lower.log_likelihood) / (2.0 * gradient_step);
         let hessian_upper = evaluate_poisson_interval(
             array![count].view(),
             array![eta + hessian_step].view(),
@@ -316,8 +315,7 @@ fn poisson_derivatives_match_central_differences_across_scales() {
             exposure,
         )
         .unwrap();
-        let numerical_hessian = (hessian_upper.log_likelihood
-            - 2.0 * center.log_likelihood
+        let numerical_hessian = (hessian_upper.log_likelihood - 2.0 * center.log_likelihood
             + hessian_lower.log_likelihood)
             / hessian_step.powi(2);
         assert_close(center.gradient[0], numerical_gradient, 2.0e-6, 2.0e-7);
