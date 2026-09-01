@@ -35,7 +35,12 @@ from ._survival import (
     extract_row_ids,
     term_blocks_for_model,
 )
-from ._tables import normalize_table, response_column_name, restore_output_table
+from ._tables import (
+    normalize_table,
+    response_column_name,
+    restore_output_table,
+    table_columns,
+)
 
 
 AffineCoefficientFrame = Literal["full", "link_wiggle_joint"]
@@ -1280,10 +1285,16 @@ class Model:
         names = [str(c.get("name")) for c in schema_cols]
 
         template: dict[str, Any] = {}
-        data_headers, data_rows, _ = normalize_table(data)
-        if data_rows:
-            first = data_rows[0]
-            template.update({h: first[i] for i, h in enumerate(data_headers)})
+        # A partial-dependence template is user-facing table data, not an FFI
+        # payload.  Reading it back from ``normalize_table`` consumed the
+        # encoded representation: categorical cells retained the native
+        # sentinel/type encoding and were then encoded a second time below,
+        # producing a level the fitted schema had never seen (#2780).  Keep the
+        # raw cells until the completed grid crosses the native boundary once.
+        data_columns, _ = table_columns(data)
+        if not data_columns or not next(iter(data_columns.values()), []):
+            raise ValueError("table data cannot be empty")
+        template.update({name: values[0] for name, values in data_columns.items()})
         for idx, col in enumerate(schema_cols):
             name = str(col.get("name"))
             if name in template:
