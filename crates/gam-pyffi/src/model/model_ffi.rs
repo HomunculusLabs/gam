@@ -466,6 +466,10 @@ struct SamplePayload {
     /// Whether `method` targets the model's exact posterior (the MCMC routes)
     /// rather than a Gaussian approximation of it (every Laplace form).
     exact: bool,
+    /// Which coefficient covariance the draws describe, in the same
+    /// vocabulary `predict()` reports (`"conditional"` or
+    /// `"smoothing-corrected"`).
+    covariance_source: String,
 }
 
 #[derive(Serialize)]
@@ -2293,6 +2297,7 @@ fn sample_table(
     out.set_item("link_spec", payload.link_spec)?;
     out.set_item("method", payload.method)?;
     out.set_item("exact", payload.exact)?;
+    out.set_item("covariance_source", payload.covariance_source)?;
     Ok(out.unbind())
 }
 

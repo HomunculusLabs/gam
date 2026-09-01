@@ -139,6 +139,7 @@ class PosteriorSamples:
     converged: bool
     method: str
     exact: bool
+    covariance_source: str
     model_class: str
     family_kind: str
     config: SamplingConfig
@@ -172,6 +173,7 @@ class PosteriorSamples:
                    std=np.asarray(p.get("posterior_std", []), dtype=float),
                    rhat=float(p["rhat"]), ess=float(p["ess"]), converged=bool(p["converged"]),
                    method=str(p["method"]), exact=bool(p["exact"]),
+                   covariance_source=str(p["covariance_source"]),
                    model_class=str(p.get("model_class", "standard")),
                    family_kind=str(p.get("family_kind", "identity")),
                    link_spec=(str(p["link_spec"]) if p.get("link_spec") is not None else None),
@@ -232,6 +234,7 @@ class PosteriorSamples:
             "kind": "posterior_samples",
             "method": self.method,
             "exact": self.exact,
+            "covariance_source": self.covariance_source,
             "model_class": self.model_class,
             "family_kind": self.family_kind,
             "n_draws": self.n_draws,
@@ -326,7 +329,7 @@ class PosteriorSamples:
         if out.suffix != ".npz":
             out = out.with_name(out.name + ".npz")
         md = {"coefficient_names": list(self.coefficient_names), "method": self.method,
-              "exact": self.exact,
+              "exact": self.exact, "covariance_source": self.covariance_source,
               "model_class": self.model_class, "family_kind": self.family_kind,
               "link_spec": self.link_spec, "config": self.config.to_dict()}
         np.savez(out, samples=np.asarray(self.samples, dtype=float),
@@ -357,6 +360,7 @@ class PosteriorSamples:
                    rhat=float(npz["rhat"].item()), ess=float(npz["ess"].item()),
                    converged=bool(npz["converged"].item()),
                    method=str(md["method"]), exact=bool(md["exact"]),
+                   covariance_source=str(md["covariance_source"]),
                    model_class=str(md.get("model_class", "standard")),
                    family_kind=str(md.get("family_kind", "identity")),
                    link_spec=(str(md["link_spec"]) if md.get("link_spec") is not None else None),

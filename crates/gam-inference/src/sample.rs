@@ -19,6 +19,7 @@ use super::hmc_io::{
     run_nuts_sampling_flattened_family, run_survival_nuts_sampling_flattened, validate_nuts_config,
 };
 pub use super::hmc_io::{NutsConfig, NutsResult, PosteriorSampler};
+use gam_solve::model_types::InferenceCovarianceMode;
 use crate::formula_dsl::{LinkWiggleFormulaSpec, parse_formula};
 use crate::model::{
     FittedModel as SavedModel, PredictModelClass, load_survival_time_basis_config_from_model,
@@ -337,15 +338,17 @@ pub fn sample_saved_model(
     }
 }
 
-/// Draw iid samples from `N(mode, H^{-1})` using the saved penalised
-/// Hessian `H = L L^T`.
+/// Draw iid samples from the fit's PUBLISHED Gaussian posterior
+/// approximation `N(mode, V)`, where `V` is the smoothing-corrected `Vp`
+/// whenever the fit carries one and the conditional `Vb = cov_scale·H⁻¹`
+/// otherwise — the same choice `summary()` and the default
+/// `predict(interval=...)` make, so one fitted object publishes one
+/// posterior (gam#2777).
 ///
-/// We solve `L^T δ = ε` for each iid `ε ~ N(0, I)` and report
-/// `β = mode + δ`. The resulting draws are unbiased samples of the
-/// Laplace-Gaussian approximation: their finite-sample mean / std
-/// converge to `(mode, diag(H^{-1})^{1/2})` and the implied credible
-/// bands match the surface that closed-form posterior tooling in
-/// `mgcv` and `gam` itself uses for prediction intervals.
+/// With `Vp = L Lᵀ` the draw is `mode + L ε`; with only the penalised
+/// Hessian `H = L Lᵀ` it is `mode + √cov_scale · L⁻ᵀ ε`. Either way the
+/// finite-sample mean / std converge to `(mode, diag(V)^{1/2})`, and the
+/// result records which `V` was used.
 ///
 /// `rationale` is a short label appearing in error messages so callers
 /// can tell which class fell back to this path. We mark `rhat = 1.0`
@@ -368,42 +371,77 @@ pub fn laplace_gaussian_fallback(
             "{rationale}: cannot sample from an empty coefficient vector"
         ));
     }
-    let h = fit.penalized_hessian().ok_or_else(|| {
-        format!(
-            "{rationale}: posterior fallback requires the explicit penalised Hessian; \
-             refit with exact geometry export to enable posterior sampling for this class."
-        )
-    })?;
-    // `penalized_hessian` is stored unscaled. To draw Laplace
-    // approximations of `N(mode, cov_scale·H⁻¹)` we solve `Lᵀ δ = ε` (so
-    // `Var(δ) = H⁻¹`) and then rescale by `√cov_scale`, where `cov_scale`
-    // is the *coefficient-covariance* scale the fit uses for `Vb` — exactly
-    // the quantity `summary()`'s Wald SE is built from. This is `σ̂²` for a
-    // profiled Gaussian and `1.0` for every family whose IRLS working weight
-    // already folds the dispersion / full Fisher information into the stored
-    // `H` (Binomial / Poisson / Gamma / Beta / Negative-Binomial / Tweedie),
-    // so `Vb = H⁻¹` needs no extra dispersion factor. Using the dispersion's
-    // `√φ` here instead would double-count the dispersion for Beta, whose
-    // `dispersion()` is `Known(1/(1+φ))` even though its `cov_scale` is `1.0`,
-    // shrinking every posterior SD by `√(1/(1+φ))` (gam#1722). For the
-    // profiled Gaussian `cov_scale == σ̂² == φ`, so this matches the previous
-    // `√φ` behaviour exactly; it only changes (fixes) Beta. This keeps the
-    // draw spread identical to the reported `summary().std_error`, like the
-    // sibling bounded-coefficient path (gam#1514).
-    let sqrt_cov_scale = sampling_sqrt_covariance_scale(&fit, rationale)?;
-    if h.nrows() != p || h.ncols() != p {
-        return Err(format!(
-            "{rationale}: penalised Hessian is {}x{}, expected {}x{}",
-            h.nrows(),
-            h.ncols(),
-            p,
-            p
-        ));
-    }
-    let chol = h.cholesky(Side::Lower).map_err(|err| {
-        format!("{rationale}: Cholesky factorisation of the penalised Hessian failed: {err:?}")
-    })?;
-    let l = chol.lower_triangular();
+    // The draws must describe the SAME posterior that `summary()` and the
+    // default `predict(interval=...)` publish (gam#2777). A REML fit with a
+    // smoothing correction publishes `Vp = Vb + J·Var(ρ̂)·Jᵀ`; drawing from
+    // the ρ̂-conditional `Vb = cov_scale·H⁻¹` instead put the posterior SDs up
+    // to 43% below the SEs printed for the same coefficients. So: when the
+    // fit carries the corrected covariance, factor it directly (`Vp = L Lᵀ`,
+    // draw `mode + L ε`; the coefficient-covariance scale is already inside
+    // `Vp`), and only otherwise fall back to the conditional precision route.
+    // Either way the provenance is stamped on the result.
+    let factor = match fit.beta_covariance_corrected() {
+        Some(covariance) => {
+            if covariance.nrows() != p || covariance.ncols() != p {
+                return Err(format!(
+                    "{rationale}: smoothing-corrected covariance is {}x{}, expected {}x{}",
+                    covariance.nrows(),
+                    covariance.ncols(),
+                    p,
+                    p
+                ));
+            }
+            let chol = covariance.cholesky(Side::Lower).map_err(|err| {
+                format!(
+                    "{rationale}: Cholesky factorisation of the smoothing-corrected \
+                     covariance failed: {err:?}"
+                )
+            })?;
+            LaplaceDrawFactor::Covariance(chol.lower_triangular())
+        }
+        None => {
+            let h = fit.penalized_hessian().ok_or_else(|| {
+                format!(
+                    "{rationale}: posterior fallback requires the explicit penalised Hessian; \
+                     refit with exact geometry export to enable posterior sampling for this class."
+                )
+            })?;
+            // `penalized_hessian` is stored unscaled. To draw Laplace
+            // approximations of `N(mode, cov_scale·H⁻¹)` we solve `Lᵀ δ = ε`
+            // (so `Var(δ) = H⁻¹`) and then rescale by `√cov_scale`, where
+            // `cov_scale` is the *coefficient-covariance* scale the fit uses
+            // for `Vb` — exactly the quantity `summary()`'s conditional Wald
+            // SE is built from. This is `σ̂²` for a profiled Gaussian and
+            // `1.0` for every family whose IRLS working weight already folds
+            // the dispersion / full Fisher information into the stored `H`
+            // (Binomial / Poisson / Gamma / Beta / Negative-Binomial /
+            // Tweedie), so `Vb = H⁻¹` needs no extra dispersion factor. Using
+            // the dispersion's `√φ` here instead would double-count the
+            // dispersion for Beta, whose `dispersion()` is `Known(1/(1+φ))`
+            // even though its `cov_scale` is `1.0`, shrinking every posterior
+            // SD by `√(1/(1+φ))` (gam#1722). Like the sibling
+            // bounded-coefficient path (gam#1514).
+            let sqrt_cov_scale = sampling_sqrt_covariance_scale(&fit, rationale)?;
+            if h.nrows() != p || h.ncols() != p {
+                return Err(format!(
+                    "{rationale}: penalised Hessian is {}x{}, expected {}x{}",
+                    h.nrows(),
+                    h.ncols(),
+                    p,
+                    p
+                ));
+            }
+            let chol = h.cholesky(Side::Lower).map_err(|err| {
+                format!(
+                    "{rationale}: Cholesky factorisation of the penalised Hessian failed: {err:?}"
+                )
+            })?;
+            LaplaceDrawFactor::Precision {
+                lower: chol.lower_triangular(),
+                sqrt_cov_scale,
+            }
+        }
+    };
 
     // `validate_nuts_config` above guarantees `n_chains >= 1` and
     // `n_samples >= 4`, so the draw grid is always non-empty and densely
@@ -423,13 +461,9 @@ pub fn laplace_gaussian_fallback(
             for i in 0..p {
                 eps[i] = sample_standard_normal(&mut rng);
             }
-            back_substitution_lower_transpose_guarded_into(&l, &eps, &mut delta);
+            factor.apply(&eps, &mut delta);
             for i in 0..p {
-                // `delta` has covariance H⁻¹; multiplying by `√cov_scale`
-                // produces a draw with covariance `cov_scale·H⁻¹`, matching
-                // the coefficient covariance `Vb` the rest of inference (and
-                // `summary()`'s Wald SE) assumes.
-                samples[(k, i)] = mode[i] + sqrt_cov_scale * delta[i];
+                samples[(k, i)] = mode[i] + delta[i];
             }
         }
     }
@@ -447,7 +481,53 @@ pub fn laplace_gaussian_fallback(
         ess: n_total as f64,
         converged: true,
         sampler: PosteriorSampler::Laplace,
+        covariance: factor.covariance_source(),
     })
+}
+
+/// The linear map that turns a standard-normal vector into a zero-mean draw
+/// with the Laplace posterior's covariance, together with the provenance of
+/// that covariance.
+enum LaplaceDrawFactor {
+    /// `Vp = L Lᵀ` factored directly: `δ = L ε`.
+    Covariance(Array2<f64>),
+    /// `Vb = cov_scale·H⁻¹` through the precision's factor `H = L Lᵀ`:
+    /// `δ = √cov_scale · L⁻ᵀ ε`.
+    Precision {
+        lower: Array2<f64>,
+        sqrt_cov_scale: f64,
+    },
+}
+
+impl LaplaceDrawFactor {
+    fn apply(&self, eps: &Array1<f64>, delta: &mut Array1<f64>) {
+        match self {
+            Self::Covariance(lower) => {
+                let p = eps.len();
+                for i in 0..p {
+                    let mut acc = 0.0;
+                    for j in 0..=i {
+                        acc += lower[(i, j)] * eps[j];
+                    }
+                    delta[i] = acc;
+                }
+            }
+            Self::Precision {
+                lower,
+                sqrt_cov_scale,
+            } => {
+                back_substitution_lower_transpose_guarded_into(lower, eps, delta);
+                delta.mapv_inplace(|value| value * sqrt_cov_scale);
+            }
+        }
+    }
+
+    fn covariance_source(&self) -> InferenceCovarianceMode {
+        match self {
+            Self::Covariance(_) => InferenceCovarianceMode::SmoothingCorrected,
+            Self::Precision { .. } => InferenceCovarianceMode::Conditional,
+        }
+    }
 }
 
 /// Draw constrained transformation-normal posterior samples by rejection from
@@ -607,6 +687,7 @@ fn sample_transformation_normal_constrained(
         ess: n_total as f64,
         converged: true,
         sampler: PosteriorSampler::Laplace,
+        covariance: InferenceCovarianceMode::Conditional,
     })
 }
 
@@ -1006,6 +1087,7 @@ fn sample_standard_bounded(
         ess: n_total as f64,
         converged: true,
         sampler: PosteriorSampler::Laplace,
+        covariance: InferenceCovarianceMode::Conditional,
     })
 }
 
@@ -1121,6 +1203,7 @@ fn sample_standard_truncated(
         ess,
         converged,
         sampler: PosteriorSampler::TruncatedLaplaceHmc,
+        covariance: InferenceCovarianceMode::Conditional,
     })
 }
 

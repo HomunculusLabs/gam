@@ -27,6 +27,7 @@ def _draws() -> PosteriorSamples:
         converged=True,
         method="nuts",
         exact=True,
+        covariance_source="conditional",
         model_class="standard",
         family_kind="identity",
         config=SamplingConfig(

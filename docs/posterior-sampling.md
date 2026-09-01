@@ -1,10 +1,16 @@
 # Posterior sampling
 
 `gamfit` fits smoothing parameters by REML / LAML (a point estimate)
-and then draws from the posterior of the coefficients conditional on
-those smoothing parameters. The sampler dispatches among NUTS,
-Polya-Gamma Gibbs, and a Gaussian Laplace approximation based on model
-class; see [Sampler dispatch](#sampler-dispatch) below.
+and then draws from the posterior of the coefficients. The sampler
+dispatches among NUTS, Polya-Gamma Gibbs, and a Gaussian Laplace
+approximation based on model class; see
+[Sampler dispatch](#sampler-dispatch) below. The MCMC routes sample the
+exact likelihood conditional on the fitted smoothing parameters; the
+Laplace route draws from the covariance the fit *publishes* — the
+smoothing-corrected `Vp` whenever the fit carries one — so its draw spread
+agrees with `summary().std_error` and with the default
+`predict(interval=...)` band on the same object. Every draw set reports
+which covariance it describes in `covariance_source`.
 
 ## Quick start
 
@@ -117,9 +123,12 @@ The dispatch is in `crates/gam-inference/src/sample.rs::sample_saved_model`:
 Royston-Parmar above refers to the transformation survival
 likelihood; it is unrelated to the transformation-normal class.
 
-The Laplace path draws iid samples from `N(beta_hat, phi * H_penalized^{-1})`
-using the saved penalized Hessian's Cholesky factor and the saved dispersion
-scale. Every Laplace draw set reports `rhat == 1.0`,
+The Laplace path draws iid samples from `N(beta_hat, V)`, where `V` is the
+smoothing-corrected covariance `Vp` when the fit carries one and otherwise
+the conditional `phi * H_penalized^{-1}` from the saved penalized Hessian's
+Cholesky factor and the saved dispersion scale — the same choice
+`summary()` makes, reported in `covariance_source`. Every Laplace draw set
+reports `rhat == 1.0`,
 `ess == chains * samples`, and `converged == True` by construction: no chain
 ran, so those numbers diagnose nothing. The `PosteriorSamples` API is
 identical either way.
@@ -171,6 +180,7 @@ Frozen dataclass holding the draws and convergence diagnostics.
 | `converged` | `bool` | Sampler convergence flag. Laplace draws set this to `True`; most NUTS / Gibbs paths require `rhat < 1.1` and enough ESS. |
 | `method` | `str` | `"nuts"`, `"polya-gamma"`, `"laplace"`, or `"truncated-laplace"` — the sampler that ran (table above). |
 | `exact` | `bool` | Whether `method` targets the exact posterior; the value behind `is_exact`. |
+| `covariance_source` | `str` | `"conditional"` (MCMC routes, and Laplace draws on a fit without a smoothing correction) or `"smoothing-corrected"` (Laplace draws from the published `Vp`). Same vocabulary as `predict()`. |
 | `model_class` | `str` | Saved-model predictive class. |
 | `family_kind` | `str` | Inverse-link tag (`"identity"`, `"logit"`, `"probit"`, `"cloglog"`, `"log"`, ...). |
 | `config` | `SamplingConfig` | Echo of the sampler configuration. |

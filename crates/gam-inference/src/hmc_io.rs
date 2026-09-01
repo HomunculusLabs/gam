@@ -37,6 +37,7 @@ use gam_problem::types::{
 use gam_solve::estimate::reml::FirthDenseOperator;
 use gam_solve::estimate::reml::penalty_logdet::PenaltyPseudologdet;
 use gam_solve::estimate::{UnifiedFitResult, validate_explicit_dense_hessian_for_whitening};
+use gam_solve::model_types::InferenceCovarianceMode;
 use gam_solve::mixture_link::{
     InverseLinkKernel, LinkParamPartials, inverse_link_jet_for_inverse_link, softmax_last_fixedzero,
 };
@@ -1350,6 +1351,7 @@ mod tests {
             ess: 4.0,
             converged: true,
             sampler: PosteriorSampler::Nuts,
+            covariance: InferenceCovarianceMode::Conditional,
         };
 
         let (lower, upper) = result.posterior_interval_of(|row| row[0], 25.0, 75.0);
@@ -4409,6 +4411,11 @@ pub struct NutsResult {
     pub converged: bool,
     /// Which sampler produced the draws.
     pub sampler: PosteriorSampler,
+    /// Which coefficient covariance the draws describe. MCMC on the exact
+    /// likelihood is conditional on the fitted smoothing parameters; the
+    /// Laplace path draws from the fit's PUBLISHED covariance, which is the
+    /// smoothing-corrected `Vp` whenever the fit carries one (gam#2777).
+    pub covariance: InferenceCovarianceMode,
 }
 
 #[derive(Clone, Copy)]
@@ -4500,6 +4507,7 @@ fn summarize_unwhitened_nuts_samples(
         ess,
         converged,
         sampler: PosteriorSampler::Nuts,
+        covariance: InferenceCovarianceMode::Conditional,
     }
 }
 
@@ -4738,6 +4746,7 @@ pub fn run_logit_polya_gamma_gibbs(
         ess,
         converged,
         sampler: PosteriorSampler::PolyaGammaGibbs,
+        covariance: InferenceCovarianceMode::Conditional,
     })
 }
 

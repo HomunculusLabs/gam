@@ -326,6 +326,7 @@ fn build_sample_payload(model: &FittedModel, nuts: NutsResult, cfg: &NutsConfig)
         // model class.
         method: nuts.sampler.label().to_string(),
         exact: nuts.sampler.targets_exact_posterior(),
+        covariance_source: nuts.covariance.as_str().to_string(),
     }
 }
 
