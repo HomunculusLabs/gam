@@ -4170,13 +4170,25 @@ fn survival_ratio_derivatives_prefer_correct_signs() {
 }
 
 #[test]
-fn survival_ratio_helper_matches_closed_form_identities() {
+fn neglog_survival_stack_matches_closed_form_ratio_identities() {
+    // The jet-composed `-ln S` stack must reproduce the classical quotient-rule
+    // identities for `r = f/S` — `r' = r² + f'/S`, `r'' = 2rr' + f''/S + f'f/S²` —
+    // and, at fourth order, a central difference of that closed-form `r''`.
     let dists = [
         ResidualDistribution::Gaussian,
         ResidualDistribution::Gumbel,
         ResidualDistribution::Logistic,
     ];
     let zs = [-1.4, -0.7, -0.1, 0.3, 0.9, 1.4];
+    let closed_ddr = |dist: &ResidualDistribution, z: f64| -> f64 {
+        let f = dist.pdf(z);
+        let s = 1.0 - dist.cdf(z);
+        let fp = dist.pdf_derivative(z);
+        let fpp = dist.pdfsecond_derivative(z);
+        let r = f / s;
+        let dr = r * r + fp / s;
+        2.0 * r * dr + (fpp / s + fp * f / (s * s))
+    };
 
     for &dist in &dists {
         for &z in &zs {
@@ -4184,38 +4196,37 @@ fn survival_ratio_helper_matches_closed_form_identities() {
             let s = 1.0 - dist.cdf(z);
             let fp = dist.pdf_derivative(z);
             let fpp = dist.pdfsecond_derivative(z);
+            let fppp = dist.pdfthird_derivative(z);
 
-            let (r, dr) = SurvivalLocationScaleFamily::survival_ratio_first_derivative(f, fp, s);
-            let ddr =
-                SurvivalLocationScaleFamily::survival_ratiosecond_derivative(r, dr, f, fp, fpp, s);
+            let (log_s, r, dr, ddr, dddr) =
+                SurvivalLocationScaleFamily::neglog_survival_stack_from_pdf_jet(s, f, fp, fpp, fppp);
 
             let r_expected = f / s;
             let dr_expected = (r_expected * r_expected) + fp / s;
-            let ddr_expected = (2.0 * r_expected * dr_expected) + (fpp / s + fp * f / (s * s));
+            let ddr_expected = closed_ddr(&dist, z);
+            let h = 1e-4;
+            let dddr_expected = (closed_ddr(&dist, z + h) - closed_ddr(&dist, z - h)) / (2.0 * h);
 
             assert!(
-                (r - r_expected).abs() <= 1e-14,
-                "r mismatch for {:?} at z={}: got {}, expected {}",
-                dist,
-                z,
-                r,
-                r_expected
+                (log_s - s.ln()).abs() <= 1e-14 * s.ln().abs().max(1.0),
+                "log S mismatch for {dist:?} at z={z}: got {log_s}, expected {}",
+                s.ln()
             );
             assert!(
-                (dr - dr_expected).abs() <= 1e-12,
-                "dr mismatch for {:?} at z={}: got {}, expected {}",
-                dist,
-                z,
-                dr,
-                dr_expected
+                (r - r_expected).abs() <= 1e-14 * r_expected.abs().max(1.0),
+                "r mismatch for {dist:?} at z={z}: got {r}, expected {r_expected}"
             );
             assert!(
-                (ddr - ddr_expected).abs() <= 1e-10,
-                "ddr mismatch for {:?} at z={}: got {}, expected {}",
-                dist,
-                z,
-                ddr,
-                ddr_expected
+                (dr - dr_expected).abs() <= 1e-12 * dr_expected.abs().max(1.0),
+                "dr mismatch for {dist:?} at z={z}: got {dr}, expected {dr_expected}"
+            );
+            assert!(
+                (ddr - ddr_expected).abs() <= 1e-10 * ddr_expected.abs().max(1.0),
+                "ddr mismatch for {dist:?} at z={z}: got {ddr}, expected {ddr_expected}"
+            );
+            assert!(
+                (dddr - dddr_expected).abs() <= 1e-6 * dddr_expected.abs().max(1.0),
+                "dddr mismatch for {dist:?} at z={z}: got {dddr}, central difference {dddr_expected}"
             );
         }
     }
@@ -4320,10 +4331,15 @@ fn residual_pdffourth_derivative_matches_independent_fd_witness() {
 /// over a range of eta, and a planted sign flip must be rejected.
 #[test]
 fn survival_log_survival_and_pdf_stacks_match_independent_fd_witness() {
+    // LogLog and Cauchit reach the generic (jet-composed) arm of both stacks,
+    // which the closed-form links never exercise; without them that arm had
+    // no independent witness at all.
     let links = [
         InverseLink::Standard(StandardLink::Probit),
         InverseLink::Standard(StandardLink::Logit),
         InverseLink::Standard(StandardLink::CLogLog),
+        InverseLink::Standard(StandardLink::LogLog),
+        InverseLink::Standard(StandardLink::Cauchit),
     ];
     let etas = [-0.8_f64, -0.2, 0.4, 1.0];
 

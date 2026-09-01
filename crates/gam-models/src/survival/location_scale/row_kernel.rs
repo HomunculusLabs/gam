@@ -4426,88 +4426,42 @@ impl SurvivalLocationScaleFamily {
         Ok(None)
     }
 
-    /// Hazard-like survival ratio and its first derivative.
+    /// The `(ln S, r, r', r'', r''')` stack of the negative log-survival
+    /// `-ln S(η)` from the survival value `S` and the pdf jet
+    /// `f = -S', f', f'', f'''`, for any inverse link.
     ///
-    /// Let `F` be the CDF, `f = F'` the PDF, and `S = 1 - F` the survival
-    /// function so `S' = -f`.
-    ///
-    /// Define `r = f / S`. By quotient rule:
-    /// `r' = (f' S - f S') / S^2`.
-    /// Since `S' = -f`, this becomes:
-    /// `r' = f'/S + f^2/S^2 = f'/S + r^2`.
-    ///
-    /// Sign note: the `f'/S` term is strictly additive. A minus here is wrong.
-    pub(crate) fn survival_ratio_first_derivative(f: f64, fp: f64, s: f64) -> (f64, f64) {
-        let r = f / s;
-        let dr = (r * r) + fp / s;
-        (r, dr)
-    }
-
-    /// Second derivative of the survival ratio `r = f/S`.
-    ///
-    /// Starting from `r' = f'/S + r^2`:
-    /// `r'' = d/du[f'/S] + 2 r r'`.
-    /// With `S' = -f`, we get:
-    /// `d/du[f'/S] = f''/S + f' f / S^2`.
-    /// Therefore:
-    /// `r'' = 2 r r' + f''/S + f' f / S^2`.
-    ///
-    /// Equivalent expanded form:
-    /// `r'' = f''/S + 3 f f' / S^2 + 2 f^3 / S^3`.
-    pub(crate) fn survival_ratiosecond_derivative(
-        r: f64,
-        dr: f64,
-        f: f64,
-        fp: f64,
-        fpp: f64,
+    /// This is a one-variable composition, so it comes from the jet algebra:
+    /// `S` as a `Tower4<1>` (its derivatives are the negated pdf jet) composed
+    /// with the `ln` unary stack, negated. The hand quotient-rule chain it
+    /// replaces (`r = f/S`, `r' = r² + f'/S`, `r'' = 2rr' + f''/S + f'f/S²`,
+    /// and a third derivative whose own derivation comment contained the word
+    /// "wait") served every non-closed-form link — LogLog, Cauchit, SAS,
+    /// beta-logistic, mixture — with no independent witness: exactly the
+    /// desync genus of #736/#932. Combinatorics belongs to the algebra;
+    /// humans own the primitive stacks (`logwith_derivatives_positive`).
+    #[inline]
+    pub(crate) fn neglog_survival_stack_from_pdf_jet(
         s: f64,
-    ) -> f64 {
-        (2.0 * r * dr) + (fpp / s + fp * f / (s * s))
-    }
-
-    /// Third derivative of the survival ratio `r = f/S`.
-    ///
-    /// Starting from `r'' = 2 r r' + f''/S + f' f / S²`:
-    ///
-    /// ```text
-    /// r''' = d/du[2 r r'] + d/du[f''/S + f'f/S²]
-    ///      = 2(r')² + 2 r r'' + f'''/S + f''f/S² + f'²/S² + 2f'f²/S³ + f''f/S²
-    ///      = 2(r')² + 2 r r'' + f'''/S + 2f''f/S² + (f')²/S² + 2f(f')²/S³ ... wait
-    /// ```
-    ///
-    /// More carefully: let A = f''/S, B = f'f/S². Then r'' = 2rr' + A + B.
-    ///
-    /// ```text
-    /// d/du[A] = f'''/S + f''f/S²   (using S' = -f)
-    /// d/du[B] = (f''f + f'²)/S² + 2f'f²/S³
-    /// ```
-    ///
-    /// So:
-    /// ```text
-    /// r''' = 2(r')² + 2rr'' + f'''/S + 2f''f/S² + (f')²/S² + 2f'f²/S³
-    /// ```
-    ///
-    /// This is needed for d⁴ℓ/dq0⁴ (the entry-side 4th likelihood derivative)
-    /// and d⁴ℓ/dq1⁴ (the exit-side 4th likelihood derivative), which enter the
-    /// outer REML Hessian's Q[v_k, v_l] term via the Arbogast formula.
-    pub(crate) fn survival_ratio_third_derivative(
-        r: f64,
-        dr: f64,
-        ddr: f64,
         f: f64,
         fp: f64,
         fpp: f64,
         fppp: f64,
-        s: f64,
-    ) -> f64 {
-        let s2 = s * s;
-        let s3 = s2 * s;
-        2.0 * dr * dr
-            + 2.0 * r * ddr
-            + fppp / s
-            + 2.0 * fpp * f / s2
-            + fp * fp / s2
-            + 2.0 * fp * f * f / s3
+    ) -> (f64, f64, f64, f64, f64) {
+        let mut survival = gam_math::jet_tower::Tower4::<1>::zero();
+        survival.v = s;
+        survival.g[0] = -f;
+        survival.h[0][0] = -fp;
+        survival.t3[0][0][0] = -fpp;
+        survival.t4[0][0][0][0] = -fppp;
+        let (log_s, d1, d2, d3, d4) = Self::logwith_derivatives_positive(s);
+        let log_survival = survival.compose_unary([log_s, d1, d2, d3, d4]);
+        (
+            log_survival.v,
+            -log_survival.g[0],
+            -log_survival.h[0][0],
+            -log_survival.t3[0][0][0],
+            -log_survival.t4[0][0][0][0],
+        )
     }
 
     /// Like [`Self::exact_log_pdf_derivatives_rescaled`] but with a log-scale shift
@@ -4654,12 +4608,9 @@ impl SurvivalLocationScaleFamily {
                     .map_err(|e| {
                         format!("inverse link third-derivative evaluation failed at eta={eta}: {e}")
                     })?;
-                let (r, dr) = Self::survival_ratio_first_derivative(jet.d1, jet.d2, s);
-                let ddr = Self::survival_ratiosecond_derivative(r, dr, jet.d1, jet.d2, jet.d3, s);
-                let dddr = Self::survival_ratio_third_derivative(
-                    r, dr, ddr, jet.d1, jet.d2, jet.d3, fppp, s,
-                );
-                Ok((s.ln(), r, dr, ddr, dddr))
+                Ok(Self::neglog_survival_stack_from_pdf_jet(
+                    s, jet.d1, jet.d2, jet.d3, fppp,
+                ))
             }
         }
     }
