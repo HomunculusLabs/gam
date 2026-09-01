@@ -13,7 +13,6 @@
 //! unit-test churn in the shared lib-test binary. It uses the public API only.
 //! Off-device (CPU CI / non-Linux) the gates skip cleanly.
 
-#![cfg(target_os = "linux")]
 
 use ndarray::{Array1, Array2};
 
