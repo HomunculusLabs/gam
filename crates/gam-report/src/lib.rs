@@ -1508,6 +1508,7 @@ mod tests {
             diagnostics: None,
             smooth_plots: vec![],
             alo: None,
+            basis_checks: vec![],
             notes: vec![],
         }
     }

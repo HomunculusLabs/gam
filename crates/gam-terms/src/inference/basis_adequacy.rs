@@ -109,7 +109,7 @@
 //! between each enrichment direction and `span(X)`, and a pure number in
 //! `[0, 1]`. A direction the design cannot reach keeps `ν ≈ 1` no matter how
 //! little absolute energy it carries; one the design spans exactly keeps
-//! `(ε·cond(X))²`. [`ESTIMABLE_DIRECTION_FLOOR`] is the floor on `ν`, and the
+//! `(ε·cond(X))²`. `ESTIMABLE_DIRECTION_FLOOR` is the floor on `ν`, and the
 //! only other truncation is the ordinary numerical rank of `E` itself — the
 //! directions the enrichment does not realize in double precision, which cannot
 //! be a denominator.
