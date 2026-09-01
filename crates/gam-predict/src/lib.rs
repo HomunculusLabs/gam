@@ -43,6 +43,8 @@ use gam_inference::probability::{
     negative_binomial_moment_matched_interval, poisson_moment_matched_interval,
     tweedie_moment_matched_interval,
 };
+use faer::Side;
+use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_linalg::matrix::{DesignMatrix, SymmetricMatrix};
 use gam_linalg::utils::predict_gam_dimension_mismatch_message;
 use gam_math::probability::{normal_cdf, standard_normal_quantile};
@@ -57,7 +59,10 @@ use gam_models::inference::model::{
 };
 use gam_problem::{BlockRole, EstimationError};
 use gam_runtime::resource::prediction_chunk_rows;
-use gam_solve::constrained_posterior::constrained_projection_equal_tailed_interval;
+use gam_solve::constrained_posterior::{
+    ConstrainedPosteriorGeometry, constrained_posterior_correction_from_covariance,
+    constrained_projection_equal_tailed_interval,
+};
 use gam_solve::mixture_link::{
     InverseLinkJet, beta_logistic_inverse_link_jetwith_param_partials,
     mixture_inverse_link_jetwith_rho_partials_into, sas_inverse_link_jetwith_param_partials,
@@ -1925,23 +1930,137 @@ fn constrained_ambient_covariance(
         .map_err(EstimationError::InvalidInput)
 }
 
+/// The inequality-truncated posterior law of a constrained fit under one
+/// covariance definition: the untruncated ambient covariance in the active
+/// coefficient frame, and the truncation moments that belong to it.
+///
+/// The persisted [`ConstrainedPosteriorGeometry`] carries the moments of the
+/// CONDITIONAL law (its lift and mean shift are functions of `Vb`), so the
+/// smoothing-corrected law is not "the same moments with a wider matrix": it
+/// is re-derived from `Vp = Vb + J·Var(ρ̂)·Jᵀ` by the same construction the fit
+/// uses to publish its truncated `Vp` for `summary()` (#2784). The feasible
+/// set constrains β and says nothing about ρ, so the β-marginal of the
+/// truncated joint posterior is exactly the truncation of the β-marginal —
+/// the corrected ambient covariance defines a truncated law as well as the
+/// conditional one does.
+struct ConstrainedLaw<'a> {
+    ambient: Array2<f64>,
+    geometry: std::borrow::Cow<'a, ConstrainedPosteriorGeometry>,
+}
+
+fn constrained_law<'a>(
+    fit: &UnifiedFitResult,
+    geometry: &'a FitGeometry,
+    mode: InferenceCovarianceMode,
+) -> Result<ConstrainedLaw<'a>, EstimationError> {
+    let posterior = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "constrained law requested without a persisted constrained posterior".to_string(),
+        )
+    })?;
+    let conditional = constrained_ambient_covariance(fit, geometry)?;
+    match mode {
+        InferenceCovarianceMode::Conditional => Ok(ConstrainedLaw {
+            ambient: conditional,
+            geometry: std::borrow::Cow::Borrowed(posterior),
+        }),
+        InferenceCovarianceMode::SmoothingCorrected => {
+            let correction = fit.smoothing_correction().ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "fit result does not contain smoothing-corrected covariance".to_string(),
+                )
+            })?;
+            let correction = reduced_bilinear_form(&geometry.coefficient_gauge, correction)?;
+            if correction.dim() != conditional.dim() {
+                return Err(EstimationError::InvalidInput(format!(
+                    "smoothing correction is {:?} against a {:?} constrained ambient covariance",
+                    correction.dim(),
+                    conditional.dim()
+                )));
+            }
+            let ambient = &conditional + &correction;
+            let center = posterior
+                .unconstrained_center()
+                .map_err(EstimationError::InvalidInput)?;
+            let moments = constrained_posterior_correction_from_covariance(
+                &ambient,
+                center,
+                &posterior.constraints,
+            )
+            .map_err(EstimationError::InvalidInput)?;
+            Ok(ConstrainedLaw {
+                ambient,
+                geometry: std::borrow::Cow::Owned(ConstrainedPosteriorGeometry::with_moments(
+                    posterior.constraints.clone(),
+                    posterior.mode.clone(),
+                    center.clone(),
+                    moments,
+                )),
+            })
+        }
+    }
+}
+
+/// Carry a coefficient-space bilinear form saved in the raw frame (`C_raw =
+/// T·C·Tᵀ`, the gauge congruence every saved covariance-like matrix
+/// receives) back into the active frame: `C = T⁺·C_raw·T⁺ᵀ` with `T⁺ =
+/// (TᵀT)⁻¹Tᵀ`, exact because `T` has full column rank. An identity gauge is
+/// the common case and costs nothing.
+fn reduced_bilinear_form(
+    gauge: &gam_problem::gauge::Gauge,
+    raw: &Array2<f64>,
+) -> Result<Array2<f64>, EstimationError> {
+    let (raw_total, reduced_total) = (gauge.raw_total(), gauge.reduced_total());
+    if raw.dim() != (raw_total, raw_total) {
+        return Err(EstimationError::InvalidInput(format!(
+            "raw-frame bilinear form is {:?} but the coefficient gauge lifts {raw_total} rows",
+            raw.dim()
+        )));
+    }
+    if gauge.is_identity() {
+        return Ok(raw.clone());
+    }
+    let t = &gauge.t_full;
+    let gram = t.t().dot(t);
+    let factor = gram.cholesky(Side::Lower).map_err(|error| {
+        EstimationError::InvalidInput(format!(
+            "coefficient gauge Gram matrix is not positive definite: {error:?}"
+        ))
+    })?;
+    // X = (TᵀT)⁻¹ · (Tᵀ C_raw T), column by column, then C = X · (TᵀT)⁻¹ = (M⁻¹ Xᵀ)ᵀ.
+    let projected = t.t().dot(raw).dot(t);
+    let mut half = Array2::<f64>::zeros((reduced_total, reduced_total));
+    for column in 0..reduced_total {
+        half.column_mut(column)
+            .assign(&factor.solvevec(&projected.column(column).to_owned()));
+    }
+    let mut reduced = Array2::<f64>::zeros((reduced_total, reduced_total));
+    for row in 0..reduced_total {
+        reduced
+            .row_mut(row)
+            .assign(&factor.solvevec(&half.row(row).to_owned()));
+    }
+    Ok(0.5 * (&reduced + &reduced.t()))
+}
+
 fn constrained_linear_predictor_intervals(
     fit: &UnifiedFitResult,
     design: &DesignMatrix,
     offset: ArrayView1<'_, f64>,
     level: f64,
+    covariance_mode: InferenceCovarianceMode,
 ) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
     let geometry = fit.geometry.as_ref().ok_or_else(|| {
         EstimationError::InvalidInput(
             "constrained prediction interval requires saved coefficient geometry".to_string(),
         )
     })?;
-    let posterior = geometry.constrained_posterior.as_ref().ok_or_else(|| {
-        EstimationError::InvalidInput(
+    if geometry.constrained_posterior.is_none() {
+        return Err(EstimationError::InvalidInput(
             "constrained prediction interval requires a persisted constrained posterior"
                 .to_string(),
-        )
-    })?;
+        ));
+    }
     if geometry.coefficient_gauge.raw_total() != design.ncols() {
         return Err(EstimationError::InvalidInput(format!(
             "constrained prediction design has {} columns but the coefficient gauge has {} raw rows",
@@ -1956,7 +2075,7 @@ fn constrained_linear_predictor_intervals(
             design.nrows()
         )));
     }
-    let ambient_covariance = constrained_ambient_covariance(fit, geometry)?;
+    let law = constrained_law(fit, geometry, covariance_mode)?;
     let n_rows = design.nrows();
     let mut lower = Array1::<f64>::zeros(n_rows);
     let mut upper = Array1::<f64>::zeros(n_rows);
@@ -1976,8 +2095,8 @@ fn constrained_linear_predictor_intervals(
                 .t()
                 .dot(&rows.row(local_row));
             let (row_lower, row_upper) = constrained_projection_equal_tailed_interval(
-                &ambient_covariance,
-                posterior,
+                &law.ambient,
+                &law.geometry,
                 &contrast,
                 level,
             )
@@ -2735,13 +2854,10 @@ where
     let requested_mode = options.covariance_mode;
     let constrained_fit = source.constrained_fit_result();
     if constrained_fit.is_some() {
-        if requested_mode != InferenceCovarianceMode::Conditional {
-            return Err(EstimationError::InvalidInput(
-                "inequality-truncated credible intervals require the persisted conditional \
-                 posterior; smoothing-corrected covariance does not define a truncated law"
-                    .to_string(),
-            ));
-        }
+        // The truncated law is formed under the REQUESTED covariance definition
+        // by `constrained_law` (#2784): conditional from the persisted moments,
+        // smoothing-corrected by re-deriving them from `Vp`, exactly as the
+        // fit publishes its own truncated `Vp` for `summary()`.
         if options.mean_interval_method != MeanIntervalMethod::TransformEta {
             return Err(EstimationError::InvalidInput(
                 "inequality-truncated credible intervals require TransformEta response bounds; \
@@ -2952,7 +3068,7 @@ where
         } else {
             level
         };
-        constrained_linear_predictor_intervals(fit, &x, offset, interval_level)?
+        constrained_linear_predictor_intervals(fit, &x, offset, interval_level, requested_mode)?
     } else {
         (
             Array1::from_iter(
@@ -3404,16 +3520,8 @@ pub fn coefficient_uncertaintywith_mode(
     }
 
     if let Some(geometry) = fit.geometry.as_ref()
-        && let Some(posterior) = geometry.constrained_posterior.as_ref()
+        && geometry.constrained_posterior.is_some()
     {
-        if covariance_mode != InferenceCovarianceMode::Conditional {
-            return Err(EstimationError::InvalidInput(
-                "smoothing-corrected intervals for an inequality-truncated posterior are \
-                 undefined: the fit retains a conditional truncated law but no joint \
-                 smoothing-parameter/truncation law"
-                    .to_string(),
-            ));
-        }
         if geometry.coefficient_gauge.raw_total() != fit.beta.len() {
             return Err(EstimationError::InvalidInput(format!(
                 "coefficient interval gauge has {} raw rows but the fit reports {} coefficients",
@@ -3421,7 +3529,7 @@ pub fn coefficient_uncertaintywith_mode(
                 fit.beta.len()
             )));
         }
-        let ambient_covariance = constrained_ambient_covariance(fit, geometry)?;
+        let law = constrained_law(fit, geometry, covariance_mode)?;
         let mut lower = Array1::<f64>::zeros(fit.beta.len());
         let mut upper = Array1::<f64>::zeros(fit.beta.len());
         for coefficient in 0..fit.beta.len() {
@@ -3431,8 +3539,8 @@ pub fn coefficient_uncertaintywith_mode(
                 .row(coefficient)
                 .to_owned();
             let (active_lower, active_upper) = constrained_projection_equal_tailed_interval(
-                &ambient_covariance,
-                posterior,
+                &law.ambient,
+                &law.geometry,
                 &contrast,
                 confidence_level,
             )
