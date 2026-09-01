@@ -1081,25 +1081,6 @@ mod active_constraint_tangent_geometry_tests {
     }
 }
 
-/// Dense `p × p` materialization of a penalty coordinate via canonical
-/// basis vectors. `S_k e_j` is the `j`-th column of `S_k`; assembled into
-/// a p × p matrix. Cost O(p² · matvec).
-pub(crate) fn materialize_penalty_coord_dense(coord: &PenaltyCoordinate, p: usize) -> Array2<f64> {
-    // Each `PenaltyCoordinate` variant already has a structure-aware
-    // materializer (`scaled_dense_matrix(1.0)`):
-    //   - `DenseRoot` / `DenseRootCentered` → `Rᵀ R` via faer matmul
-    //     (BLAS3, parallel).
-    //   - `BlockRoot` / `BlockRootCentered` → block-local `Rᵀ R` embedded
-    //     into a `total_dim × total_dim` matrix.
-    //   - `KroneckerMarginal` → diagonal write (no matmul needed).
-    // Routing through it replaces the previous serial p-fold matvec loop
-    // with the variant-appropriate O(p²) (or O(p) for Kronecker) path.
-    let out = coord.scaled_dense_matrix(1.0);
-    assert_eq!(out.nrows(), p, "penalty coord dim mismatch");
-    assert_eq!(out.ncols(), p, "penalty coord dim mismatch");
-    out
-}
-
 /// Reconstruct the *raw* Hessian `H = V · diag(σ) · Vᵀ` (pre-regularization)
 /// from a `DenseSpectralOperator`. The operator stores
 /// `r_ε(σ) = ½(σ + √(σ² + 4ε²))`; invert via `σ = r − ε²/r` so the tangent
@@ -1231,86 +1212,11 @@ impl HessianFactorization for TangentProjectedHessianOperator {
     // code mix p- and m-dim eigenvectors.
 }
 
-/// Build `PenaltyLogdetDerivs` for `log|ZᵀS(λ)Z|_+`, its first
-/// derivatives, and its second derivatives. The identities are the same
-/// as in p-space, applied to the projected penalty:
-///   value      = log|M(λ)|_+,                M(λ) = ZᵀS(λ)Z = Σ_k λ_k Zᵀ S_k Z
-///   ∂_k value  = λ_k · tr(M⁺ · Zᵀ S_k Z)
-///   ∂²_kl      = δ_{kl} ∂_k value − λ_k λ_l · tr(M⁺ · Zᵀ S_l Z · M⁺ · Zᵀ S_k Z)
-pub(crate) fn tangent_penalty_logdet(
-    z: &Array2<f64>,
-    penalty_coords: &[PenaltyCoordinate],
-    lambdas: &[f64],
-    p: usize,
-) -> Result<PenaltyLogdetDerivs, String> {
-    let m = z.ncols();
-    let k = lambdas.len();
-    let zsz: Vec<Array2<f64>> = penalty_coords
-        .iter()
-        .map(|c| {
-            let s_k_full = materialize_penalty_coord_dense(c, p);
-            z.t().dot(&s_k_full).dot(z)
-        })
-        .collect();
-    let mut s_t = Array2::<f64>::zeros((m, m));
-    for k_idx in 0..k {
-        s_t.scaled_add(lambdas[k_idx], &zsz[k_idx]);
-    }
-    let (evals, evecs) = s_t
-        .eigh(faer::Side::Lower)
-        .map_err(|e| format!("tangent S eigendecomposition failed: {e}"))?;
-    let evals_slice = evals.as_slice().ok_or_else(|| {
-        "tangent S eigendecomposition returned non-contiguous eigenvalues".to_string()
-    })?;
-    let threshold = positive_eigenvalue_threshold(evals_slice);
-    let value = exact_pseudo_logdet(evals_slice, threshold);
-    // Build M⁺ = Σ_{σ_j > τ} u_j u_jᵀ / σ_j once for first AND second derivatives.
-    let mut s_t_plus = Array2::<f64>::zeros((m, m));
-    for j in 0..m {
-        if evals[j] > threshold {
-            let inv = 1.0 / evals[j];
-            for r in 0..m {
-                let factor = evecs[[r, j]] * inv;
-                for c in 0..m {
-                    s_t_plus[[r, c]] += factor * evecs[[c, j]];
-                }
-            }
-        }
-    }
-    let mut first = Array1::<f64>::zeros(k);
-    for k_idx in 0..k {
-        first[k_idx] = lambdas[k_idx] * dense::trace_product(&s_t_plus, &zsz[k_idx]);
-    }
-    let mut second = Array2::<f64>::zeros((k, k));
-    // δ_{kl} ∂_k value contribution (from ∂_ρ_l λ_k = λ_k δ_{kl}).
-    for k_idx in 0..k {
-        second[[k_idx, k_idx]] += first[k_idx];
-    }
-    // − λ_k λ_l · tr(M⁺ · Zᵀ S_l Z · M⁺ · Zᵀ S_k Z).
-    let s_plus_zsz: Vec<Array2<f64>> = zsz.iter().map(|m_k| s_t_plus.dot(m_k)).collect();
-    for k_idx in 0..k {
-        for l_idx in 0..=k_idx {
-            let cross = dense::trace_product(&s_plus_zsz[k_idx], &s_plus_zsz[l_idx]);
-            let entry = -lambdas[k_idx] * lambdas[l_idx] * cross;
-            second[[k_idx, l_idx]] += entry;
-            if l_idx != k_idx {
-                second[[l_idx, k_idx]] += entry;
-            }
-        }
-    }
-    Ok(PenaltyLogdetDerivs {
-        value,
-        first,
-        second: Some(second),
-    })
-}
-
-/// Borrowing adapter that lets a tangent-projected `InnerSolution` reuse
-/// the original `HessianDerivativeProvider` without taking ownership.
-/// The provider returns p-space drift matrices (`D_β H[v]`) which the
-/// tangent-wrapped `HessianFactorization` correctly projects via `ZᵀMZ` in
-/// its `trace_logdet_gradient` / `trace_hinv_product` methods. So no
-/// per-method projection is needed here — pure delegation suffices.
+/// Borrowing adapter that lets the constrained-response `InnerSolution` reuse
+/// the original `HessianDerivativeProvider` without taking ownership. The
+/// provider's drift matrices stay in the full coefficient space because the
+/// LAML value and trace kernel stay there; only the mode-response vectors fed
+/// into those drifts are tangent-restricted.
 pub(crate) struct BorrowedDerivProvider<'a>(&'a dyn HessianDerivativeProvider);
 
 impl<'a> HessianDerivativeProvider for BorrowedDerivProvider<'a> {
@@ -1375,12 +1281,67 @@ impl<'a> HessianDerivativeProvider for BorrowedDerivProvider<'a> {
     }
 }
 
+/// A zero-dimensional inverse on the tangent of a fully pinned mode.
+///
+/// This operator is installed only as InnerSolution::mode_response_op; the
+/// full-space Hessian remains the sole owner of the LAML value and traces.
+/// Every response of a mode with null(A_act) = {0} is exactly zero.
+struct FullyPinnedModeResponse {
+    dimension: usize,
+}
+
+impl HessianFactorization for FullyPinnedModeResponse {
+    fn logdet(&self) -> f64 {
+        0.0
+    }
+
+    fn trace_hinv_product(&self, a: &Array2<f64>) -> f64 {
+        assert_eq!(a.dim(), (self.dimension, self.dimension));
+        0.0
+    }
+
+    fn solve(&self, rhs: &Array1<f64>) -> Array1<f64> {
+        assert_eq!(rhs.len(), self.dimension);
+        Array1::zeros(self.dimension)
+    }
+
+    fn solve_multi(&self, rhs: &Array2<f64>) -> Array2<f64> {
+        assert_eq!(rhs.nrows(), self.dimension);
+        Array2::zeros(rhs.raw_dim())
+    }
+
+    fn dim(&self) -> usize {
+        self.dimension
+    }
+}
+
 /// If the inner solution carries a non-empty active inequality-constraint
-/// set, build a tangent-projected solution and dispatch the outer
-/// derivative computation to it. Returns `Ok(None)` when no projection is
-/// required (no active constraints); `Ok(Some(result))` when projection
-/// succeeded and the recursive evaluate returned a value; `Err` only if
-/// projection failed (e.g., dense backend required but not available).
+/// set, keep the LAML criterion on the fitted model's full coefficient space
+/// and restrict only the implicit response of its constrained mode.
+///
+/// The constraint polytope is part of the model, but the rows a numerical QP
+/// happens to list as active are not a new statistical model and cannot change
+/// the dimension of its Laplace integral. In particular, listing a row that is
+/// tight with zero multiplier changes neither the mode nor the likelihood, so
+/// it must not change 1/2 log|H(beta_hat)| - 1/2 log|S(rho)|+.
+///
+/// Active geometry enters through the derivative of the constrained mode. With
+/// Z an orthonormal basis of null(A_act),
+///
+/// d beta_hat / d theta = -Z (Z' M_true Z)^-1 Z' d g / d theta,
+///
+/// where M_true is the inner stationarity system (which may deliberately
+/// differ from the log-determinant operator; #2612). The borrowed solution
+/// therefore retains every full-space value/trace object and installs only this
+/// tangent-restricted mode-response operator. Clearing active_constraints on
+/// it prevents recursion; the constraint's first-order effect is already
+/// represented by the installed operator.
+///
+/// Returns Ok(None) when no active constraints are present and Ok(Some(result))
+/// after evaluating the full-space criterion with the constrained response. A
+/// backend that cannot materialize the true response curvature returns a named
+/// error rather than silently differentiating through the log-determinant
+/// curvature.
 pub(crate) fn try_tangent_projected_evaluate(
     solution: &InnerSolution<'_>,
     rho: &[f64],
@@ -1388,257 +1349,65 @@ pub(crate) fn try_tangent_projected_evaluate(
     prior_cost_gradient: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
 ) -> Result<Option<RemlLamlResult>, String> {
     let block = match solution.active_constraints.as_ref() {
-        Some(b) if b.a.nrows() > 0 => b,
+        Some(block) if block.a.nrows() > 0 => block,
         _ => return Ok(None),
     };
     let p = solution.beta.len();
     if block.a.ncols() != p {
         return Err(format!(
-            "active_constraints.a has {} columns but β is {}-dim",
+            "active_constraints.a has {} columns but beta is {}-dim",
             block.a.ncols(),
             p
         ));
     }
-    // Principled pass-through / projection of optional `InnerSolution`
-    // features.  Cost-side scalars such as barrier cost at β̂ are not in
-    // β-space and require no projection.  `hessian_logdet_correction` encodes
-    // a p-space uniform rescale `−p·log α`; under projection the equivalent
-    // correction is `−m·log α`, recovered by the scalar factor `m/p`.
-    // `barrier_config` propagates to the projected solution so the
-    // barrier-derivative wrapper still augments dH/dρ; the tangent operator
-    // applies `ZᵀMZ` correctly in its trace methods.
-    //
-    // `firth` and `ext_coords` carry p-space objects (Jeffreys `½ log|J|`,
-    // ext-coord g/drift).  Both are projected here under the same
-    // tangent-projected LAML setup as the rest of this routine
-    // (`½ log|J| → ½ log|ZᵀJZ|`, `g → Zᵀ g`, `drift M → Zᵀ M Z`).  The
-    // only remaining unsupported case is the `ValueGradientHessian`
-    // mode with non-empty `ext_coord_pair_fn` / `rho_ext_pair_fn` —
-    // those callbacks return objects in p-space whose projected form
-    // requires composing with `Z` per-call; for `ValueAndGradient` the
-    // per-coord `g`/`drift` is sufficient.
-    let z = match active_constraint_tangent_geometry(&block.a)? {
-        ActiveConstraintTangentGeometry::Tangent(z) => z,
-        ActiveConstraintTangentGeometry::FullyPinned => {
-            // Constraint matrix spans the full p-space — the tangent manifold is
-            // the single point {β̂}: β̂ is fully pinned by the active set and has
-            // NO mode response to ρ. The exact-Newton outer objective is still
-            // well-defined — it is the fixed-β̂ Laplace/REML criterion
-            //   V(ρ) = −ℓ(β̂) + ½ β̂ᵀS(λ)β̂ + ½ log|H + S(λ)| − ½ log|S(λ)|₊
-            // evaluated at the frozen β̂, with the gradient carrying ONLY the
-            // explicit ρ-dependence (no `∂β̂/∂ρ` mode response, since β̂ cannot
-            // move). The references in the constrained fixtures compute exactly
-            // this (full unconstrained-curvature Laplace term at the clamped β̂),
-            // so rather than refuse the evaluation, re-dispatch to the standard
-            // evaluator with the active set cleared (no tangent projection — the
-            // Laplace term stays on the full curvature `H + S(λ)`) and the IFT
-            // mode response suppressed: dropping the KKT residual freezes β̂ (the
-            // envelope correction `−½rᵀH⁻¹r` and the per-coordinate mode-response
-            // gradient both vanish), leaving the explicit fixed-β̂ ρ-derivative
-            // the reference expects (gam#1395).
-            let frozen = InnerSolution {
-                log_likelihood: solution.log_likelihood,
-                penalty_quadratic: solution.penalty_quadratic,
-                hessian_op: Arc::clone(&solution.hessian_op),
-                mode_response_op: solution.mode_response_op.clone(),
-                beta: solution.beta.clone(),
-                penalty_coords: solution.penalty_coords.clone(),
-                penalty_logdet: solution.penalty_logdet.clone(),
-                deriv_provider: Box::new(BorrowedDerivProvider(solution.deriv_provider.as_ref())),
-                firth: solution.firth.clone(),
-                hessian_logdet_correction: solution.hessian_logdet_correction,
-                penalty_subspace_trace: solution.penalty_subspace_trace.clone(),
-                rho_curvature_scale: solution.rho_curvature_scale,
-                rho_prior: solution.rho_prior.clone(),
-                n_observations: solution.n_observations,
-                nullspace_dim: solution.nullspace_dim,
-                gaussian_weight_log_sum_half: solution.gaussian_weight_log_sum_half,
-                dp_floor_scale: solution.dp_floor_scale,
-                dispersion: solution.dispersion.clone(),
-                ext_coords: solution.ext_coords.clone(),
-                ext_coord_pair_fn: None,
-                rho_ext_pair_fn: None,
-                contracted_psi_second_order: None,
-                fixed_drift_deriv: None,
-                barrier_config: solution.barrier_config.clone(),
-                // β̂ frozen: no IFT mode response.
-                kkt_residual: None,
-                // Prevents recursion via `try_tangent_projected_evaluate`.
-                active_constraints: None,
-                stochastic_trace_state: solution.stochastic_trace_state.clone(),
-            };
-            let result = reml_laml_evaluate(&frozen, rho, mode, prior_cost_gradient)?;
-            return Ok(Some(result));
-        }
-    };
-    // #2765: the criterion below is `½log|ZᵀHZ|` on THIS face. Publish the face
-    // before recursing so an armed audit can state which subspace its
-    // determinant was taken on — and, across two displaced θ, whether it is the
-    // same subspace at all.
-    crate::estimate::outer_eval_capture::record_outer_tangent_basis(z.clone());
-    // The state that decides whether the projected criterion is differentiable,
-    // reported only inside an armed audit window so an ordinary constrained fit
-    // pays nothing for it.
-    if crate::estimate::outer_eval_capture::outer_gradient_audit_capture_armed() {
-        log::info!(
-            "[OUTER tangent-face] p={p} m={} hessian_logdet_correction={:+.6e} \
-             subspace_trace={} subspace_correction={:+.6e} mode_response_op={} firth={}",
-            z.ncols(),
-            solution.hessian_logdet_correction,
-            solution.penalty_subspace_trace.is_some(),
-            solution
-                .penalty_subspace_trace
-                .as_ref()
-                .map_or(0.0, |kernel| kernel.logdet_correction),
-            solution.mode_response_op.is_some(),
-            solution.firth.is_some(),
-        );
-    }
-    let h_full = solution
-        .hessian_op
-        .assemble_h_dense_for_tangent_projection()?;
-    let h_t = z.t().dot(&h_full).dot(&z);
-    let h_t_op = DenseSpectralOperator::from_symmetric(&h_t)
-        .map_err(|e| format!("tangent H eigendecomposition failed: {e}"))?;
-    let lambdas = gam_problem::checked_exp_log_strengths(rho.iter().copied())
-        .map_err(|error| format!("tangent-projected rho: {error}"))?;
-    let projected_logdet = tangent_penalty_logdet(&z, &solution.penalty_coords, &lambdas, p)?;
-    // Project the KKT residual to lift the IFT correction into tangent
-    // coordinates: with `q = H⁺_T r = Z (ZᵀHZ)⁻¹ Zᵀ r`, the formulas
-    // `-½ rᵀ q` and `-aᵀ_k q + ½ qᵀ A_k q` are the same as the p-space
-    // formulas (Zᵀ cancels through the operator wrapper). We pass r in
-    // p-space; the wrapper does the projection internally.
-    let projected_kkt = solution.kkt_residual.clone();
-    let m_tangent = z.ncols();
-    let wrapper = TangentProjectedHessianOperator {
-        z: z.clone(),
-        h_t_op,
-    };
-    // Rank-aware projection of a uniform-rescale correction:
-    //   the p-space correction encodes `−p·log α` so that
-    //   `log|H| = log|H'| − p·log α`. Under tangent projection the
-    //   correction becomes `−m·log α = (m/p) · (−p·log α)`, i.e. the
-    //   same scalar scaled by the rank ratio m/p.
-    let projected_hlogdet_correction = if p == 0 {
-        0.0
-    } else {
-        solution.hessian_logdet_correction * (m_tangent as f64 / p as f64)
-    };
-    // Construct the projected InnerSolution. The fields that must be
-    // overridden are: hessian_op (now tangent-wrapped), penalty_logdet
-    // (now in tangent space), hessian_logdet_correction (rank-ratio
-    // rescaled to tangent space), penalty_subspace_trace (None; direct
-    // tangent-H path replaces the kernel route), active_constraints
-    // (None; prevents recursion). `tk_*` (ρ-/scalar-space) and
-    // `barrier_config` (cost evaluated at β̂ in p-space; barrier-derivative
-    // wrapper produces p-space drift that the tangent operator projects
-    // via ZᵀMZ in its trace methods) pass through unchanged.
-    // Active-constraint tangent projection for the Firth/Jeffreys term.
-    // Replace the operator's full-space `½ log|J|` with the projected
-    // `½ log|ZᵀJZ|`. The same underlying `FirthDenseOperator` is retained
-    // so any downstream β-gradient consumer still sees a consistent
-    // operator — only the scalar contribution to the outer LAML cost is
-    // overridden. This projection-aware Firth is exact under the same
-    // tangent-projected LAML setup as the rest of
-    // `try_tangent_projected_evaluate` (mode = ValueAndGradient or below).
-    let projected_firth = solution
-        .firth
-        .as_ref()
-        .map(|term| match term.operator_arc() {
-            Some(op_arc) => {
-                let projected_value = op_arc.jeffreys_logdet_projected(z.view());
-                ExactJeffreysTerm::with_projected_value(op_arc, projected_value)
+
+    let constrained_mode_response: Arc<dyn HessianFactorization> =
+        match active_constraint_tangent_geometry(&block.a)? {
+            ActiveConstraintTangentGeometry::FullyPinned => {
+                Arc::new(FullyPinnedModeResponse { dimension: p })
             }
-            // Tier-B value-only carrier: the scalar Φ(β̂) is already final (the
-            // coupled joint path owns its own constraint handling upstream), so
-            // the term passes through unchanged.
-            None => term.clone(),
-        });
-    // Active-constraint tangent projection for ext coords. The tangent
-    // hessian wrapper accepts p-space `g` and p-space drift `M` and
-    // applies the `Zᵀ · Z` projection internally inside its `solve` /
-    // `trace_logdet_gradient` / `trace_hinv_product` methods, so
-    // pass-through is mathematically equivalent to projecting `g → Zᵀg`
-    // and `M → ZᵀMZ` here (the wrapper composes the projections with
-    // the inner H_T operator). This is the same pattern
-    // `BorrowedDerivProvider` uses for the deriv-provider corrections.
-    //
-    // The pair callbacks (`ext_coord_pair_fn`, `rho_ext_pair_fn`) return
-    // `HyperCoordPair` objects with p-space `b_mat` / `b_operator` / `g`.
-    // `ValueGradientHessian` consumes them in outer-Hessian assembly, but
-    // every consumer contracts them THROUGH the (now tangent-wrapped)
-    // Hessian operator: `b_mat` / `b_operator` enter via
-    // `hop.trace_logdet_gradient` / `hop.trace_logdet_operator`, and the
-    // pair `g` is dotted against the mode-response vectors `coord.v =
-    // hop.solve(rhs)`. The `TangentProjectedHessianOperator` wrapper applies
-    // `Zᵀ·Z` inside exactly those `trace_*` / `solve` methods, so a
-    // clone-through of the pair callbacks is the EXACT second-order analog of
-    // the single-coordinate ext drift / `g` already passed through above for
-    // `ValueAndGradient`. Cloning is cheap and ownership-safe because the
-    // callbacks are now `Arc`-backed ([`HyperCoordPairFn`]).
-    //
-    // The only combination that is still NOT contracted through the wrapper
-    // is the direction-contracted ψψ hook (`contracted_psi_second_order`): it
-    // returns pre-traced `base_h2` scalars that bypass the operator, so it
-    // would need its drifts re-projected at source rather than a posteriori.
-    // That hook is mutually exclusive with the per-pair `ext_coord_pair_fn`
-    // assembly (operator.rs #740), and the active-constraint families that
-    // reach this path use the per-pair callbacks, so we drop the hook (set to
-    // `None`, as the `ValueAndGradient` path already did) and keep the per-pair
-    // callbacks, which the wrapper projects exactly.
-    let projected_ext_coord_pair_fn = solution.ext_coord_pair_fn.clone();
-    let projected_rho_ext_pair_fn = solution.rho_ext_pair_fn.clone();
-    // Reduce the distinct IFT operator onto the same face (#2765). Built the
-    // same way as the scalar wrapper above — `ZᵀMZ` re-eigendecomposed — so the
-    // mode response and the criterion agree about which subspace β̂ can move in.
-    let projected_mode_response_op: Option<Arc<dyn HessianFactorization>> =
-        match solution.mode_response_op.as_ref() {
-            None => None,
-            Some(op) => {
-                let m_full = op.assemble_h_dense_for_tangent_projection().map_err(|error| {
-                    format!(
-                        "active-constraint tangent projection needs a dense mode-response \
-                         curvature and the installed operator has none: {error}"
-                    )
-                })?;
-                let m_t = z.t().dot(&m_full).dot(&z);
-                let m_t_op = DenseSpectralOperator::from_symmetric(&m_t).map_err(|error| {
-                    format!("tangent mode-response eigendecomposition failed: {error}")
-                })?;
-                Some(Arc::new(TangentProjectedHessianOperator {
-                    z: z.clone(),
-                    h_t_op: m_t_op,
-                }))
+            ActiveConstraintTangentGeometry::Tangent(z) => {
+                // Differentiate the stationarity system the inner solve
+                // actually used, not the operator that owns the Laplace
+                // log-determinant. The two differ under a Jeffreys completion
+                // (#2612).
+                let response_full = solution
+                    .mode_response_operator()
+                    .assemble_h_dense_for_tangent_projection()
+                    .map_err(|error| {
+                        format!(
+                            "active-constraint mode response needs a dense stationarity \
+                             curvature: {error}"
+                        )
+                    })?;
+                let response_tangent = z.t().dot(&response_full).dot(&z);
+                let response_tangent_op =
+                    DenseSpectralOperator::from_symmetric(&response_tangent).map_err(|error| {
+                        format!(
+                            "constrained mode-response eigendecomposition failed: {error}"
+                        )
+                    })?;
+                Arc::new(TangentProjectedHessianOperator {
+                    z,
+                    h_t_op: response_tangent_op,
+                })
             }
         };
-    let projected = InnerSolution {
+
+    let constrained = InnerSolution {
         log_likelihood: solution.log_likelihood,
         penalty_quadratic: solution.penalty_quadratic,
-        hessian_op: Arc::new(wrapper),
-        // The inner stationarity system `β̂(θ)` is differentiated through is the
-        // REDUCED one here (#2765). On an active inequality face the mode stays
-        // on the face under a small θ perturbation, so `dβ̂/dθ` lies in
-        // `range(Z)` and solves against `ZᵀM_trueZ` — not against the p-space
-        // `M_true`, whose solve has a component off the face that the mode
-        // cannot take.
-        //
-        // Passing the operator through unprojected was harmless only while no
-        // lane installed a distinct one AND reached this entry: with
-        // `mode_response_op = None` the response falls back to `hessian_op`,
-        // which the wrapper above already projects. #2765 makes the Jeffreys
-        // completion install a distinct operator on every route, so the
-        // fallback no longer covers this case and the projection has to be
-        // explicit.
-        mode_response_op: projected_mode_response_op,
+        // Value and trace geometry stay on the fitted model's full coefficient
+        // space. Only the constrained mode response is tangent-restricted.
+        hessian_op: Arc::clone(&solution.hessian_op),
+        mode_response_op: Some(constrained_mode_response),
         beta: solution.beta.clone(),
         penalty_coords: solution.penalty_coords.clone(),
-        penalty_logdet: projected_logdet,
+        penalty_logdet: solution.penalty_logdet.clone(),
         deriv_provider: Box::new(BorrowedDerivProvider(solution.deriv_provider.as_ref())),
-        // Same operator, projection-aware scalar contribution.
-        firth: projected_firth,
-        hessian_logdet_correction: projected_hlogdet_correction,
-        // Direct tangent-H path; the projected-kernel route is unused here.
-        penalty_subspace_trace: None,
+        firth: solution.firth.clone(),
+        hessian_logdet_correction: solution.hessian_logdet_correction,
+        penalty_subspace_trace: solution.penalty_subspace_trace.clone(),
         rho_curvature_scale: solution.rho_curvature_scale,
         rho_prior: solution.rho_prior.clone(),
         n_observations: solution.n_observations,
@@ -1646,36 +1415,19 @@ pub(crate) fn try_tangent_projected_evaluate(
         gaussian_weight_log_sum_half: solution.gaussian_weight_log_sum_half,
         dp_floor_scale: solution.dp_floor_scale,
         dispersion: solution.dispersion.clone(),
-        // ext_coord g/drift pass-through: projection is applied by the
-        // tangent hessian wrapper's trace and solve methods.
         ext_coords: solution.ext_coords.clone(),
-        // Pair callbacks pass through (cloned `Arc`s): the tangent hessian
-        // wrapper projects every p-space object they return via `ZᵀMZ` /
-        // `Z H_T⁻¹ Zᵀ` in its `trace_*` / `solve` methods, so this is the exact
-        // second-order analog of the per-coord `g`/`drift` pass-through above.
-        ext_coord_pair_fn: projected_ext_coord_pair_fn,
-        rho_ext_pair_fn: projected_rho_ext_pair_fn,
-        // The direction-contracted ψψ hook returns pre-traced scalars that
-        // bypass the wrapper (it cannot re-project them a posteriori), and it
-        // is mutually exclusive with the per-pair `ext_coord_pair_fn` assembly
-        // (#740). Drop it; the per-pair callbacks above carry the exact ψψ
-        // block under projection.
-        contracted_psi_second_order: None,
-        // The `M_i[u] = D_β B_i[u]` drift is a p-space matrix the wrapper
-        // projects via `ZᵀMZ` in `trace_logdet_*`, and its `β_i`/`β_j`
-        // arguments are mode responses already in range(Z) (`hop.solve`
-        // outputs). Clone it through so the constraint-active families whose
-        // basis depends on β (`b_depends_on_beta`, e.g. the wiggle block) keep
-        // their genuine `m_terms` second-order contribution.
+        ext_coord_pair_fn: solution.ext_coord_pair_fn.clone(),
+        rho_ext_pair_fn: solution.rho_ext_pair_fn.clone(),
+        contracted_psi_second_order: solution.contracted_psi_second_order.clone(),
         fixed_drift_deriv: solution.fixed_drift_deriv.clone(),
         barrier_config: solution.barrier_config.clone(),
-        kkt_residual: projected_kkt,
-        // Prevents recursion via `try_tangent_projected_evaluate`.
+        kkt_residual: solution.kkt_residual.clone(),
+        // Prevent recursive constrained-response installation. The operator
+        // above already carries the active geometry.
         active_constraints: None,
         stochastic_trace_state: solution.stochastic_trace_state.clone(),
     };
-    let result = reml_laml_evaluate(&projected, rho, mode, prior_cost_gradient)?;
-    Ok(Some(result))
+    reml_laml_evaluate(&constrained, rho, mode, prior_cost_gradient).map(Some)
 }
 
 #[cfg(test)]
