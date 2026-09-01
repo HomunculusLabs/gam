@@ -7538,7 +7538,7 @@ fn predict_columns(
     let posterior_mean = resolved.posterior_mean.ok_or_else(|| {
         "default prediction did not produce the required posterior mean".to_string()
     })?;
-    if matches!(model_class, PredictModelClass::Standard) {
+    if matches!(model.predict_model_class(), PredictModelClass::Standard) {
         // #2785: publish the complete plug-in pair and the posterior estimand
         // under names that make their different meanings explicit. In
         // particular, `mean_plugin` is exactly the inverse link of
