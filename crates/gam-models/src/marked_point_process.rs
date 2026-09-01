@@ -1160,9 +1160,10 @@ pub fn forecast_cumulative_incidence(
     if landmark.mean.len() != model.state_dimension()
         || landmark.covariance.dim() != (model.state_dimension(), model.state_dimension())
         || !landmark.time.is_finite()
+        || landmark.mean.iter().any(|value| !value.is_finite())
     {
         return Err(invalid(
-            "landmark state has incompatible dimensions or time",
+            "landmark state has incompatible dimensions or non-finite values",
         ));
     }
     if future.is_empty() {

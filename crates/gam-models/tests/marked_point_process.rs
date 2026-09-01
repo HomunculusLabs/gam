@@ -326,6 +326,54 @@ fn global_laplace_mode_is_stationary_and_covariance_is_positive() {
 }
 
 #[test]
+fn block_smoother_covariance_matches_dense_hessian_inverse() {
+    let model = model(MaternMarkovOrder::Half);
+    let history = history();
+    let fit = smooth_laplace(&model, &history, control()).unwrap();
+    let variance = model.factors[0].marginal_variance;
+    let mut diagonal = [1.0 / variance, 0.0, 0.0];
+    let mut lower = [0.0, 0.0];
+    for index in 1..history.intervals.len() {
+        let elapsed = history.intervals[index].exit - history.intervals[index - 1].exit;
+        let transition = model.transition(elapsed).unwrap();
+        let propagation = transition.transition[[0, 0]];
+        let innovation_precision = 1.0 / transition.innovation_covariance[[0, 0]];
+        diagonal[index - 1] += propagation * propagation * innovation_precision;
+        diagonal[index] += innovation_precision;
+        lower[index - 1] = -propagation * innovation_precision;
+    }
+    for (index, interval) in history.intervals.iter().enumerate() {
+        let state = fit.mode[index][0];
+        for mark in 0..model.mark_count() {
+            let loading = model.loadings[[mark, 0]];
+            let log_mean =
+                interval.exposure().ln() + interval.fixed_log_intensity[mark] + loading * state;
+            diagonal[index] += loading * loading * log_mean.exp();
+        }
+    }
+
+    // Independent closed-form inverse of the symmetric tridiagonal 3x3
+    // Hessian. This is intentionally separate from the block factorization.
+    let [a, d, f] = diagonal;
+    let [b, e] = lower;
+    let determinant = a * d * f - a * e * e - b * b * f;
+    assert!(determinant.is_finite() && determinant > 0.0);
+    let dense_inverse_diagonal = [
+        (d * f - e * e) / determinant,
+        a * f / determinant,
+        (a * d - b * b) / determinant,
+    ];
+    for (index, expected) in dense_inverse_diagonal.into_iter().enumerate() {
+        assert_close(
+            fit.marginal_covariances[index][[0, 0]],
+            expected,
+            2.0e-13,
+            2.0e-12,
+        );
+    }
+}
+
+#[test]
 fn cohort_evidence_is_the_sum_of_independent_subject_chains() {
     let model = model(MaternMarkovOrder::Half);
     let first = history();
@@ -723,6 +771,28 @@ fn forecast_rejects_nonfinite_cumulative_horizon() {
             ForecastMonteCarlo {
                 trajectories: 2,
                 seed: 3,
+            },
+        )
+        .is_err()
+    );
+
+    let invalid_landmark = FilteredState {
+        time: 0.0,
+        mean: array![f64::NAN],
+        covariance: array![[0.0]],
+    };
+    assert!(
+        forecast_cumulative_incidence(
+            &model,
+            &invalid_landmark,
+            &[ForecastInterval {
+                duration: 1.0,
+                fixed_log_intensity: array![0.0, 0.0],
+            }],
+            &[0],
+            ForecastMonteCarlo {
+                trajectories: 2,
+                seed: 1,
             },
         )
         .is_err()
