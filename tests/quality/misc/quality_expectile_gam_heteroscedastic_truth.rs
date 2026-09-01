@@ -69,21 +69,7 @@ fn phi(z: f64) -> f64 {
 
 /// Standard-normal cdf via erf.
 fn big_phi(z: f64) -> f64 {
-    0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
-}
-
-/// Abramowitz–Stegun 7.1.26 error-function approximation (|err| < 1.5e-7),
-/// sufficient for constructing the analytic expectile reference constant.
-fn erf(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let y = 1.0
-        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
-            + 0.254829592)
-            * t
-            * (-x * x).exp();
-    sign * y
+    gam_math::probability::normal_cdf(z)
 }
 
 /// τ-expectile of the standard normal, the root `m` of the defining equation

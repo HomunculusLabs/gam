@@ -73,7 +73,7 @@ fn planted_eta(time: f64, z: f64) -> f64 {
 /// the crate under test: the fixture's truth must not be produced by the same
 /// code path the fit uses.
 fn normal_quantile(p: f64) -> f64 {
-    let cdf = |x: f64| 0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2));
+    let cdf = |x: f64| gam_math::probability::normal_cdf(x);
     let (mut low, mut high) = (-12.0_f64, 12.0_f64);
     for _ in 0..200 {
         let mid = 0.5 * (low + high);
@@ -84,19 +84,6 @@ fn normal_quantile(p: f64) -> f64 {
         }
     }
     0.5 * (low + high)
-}
-
-/// Abramowitz–Stegun 7.1.26; ~1.5e-7 absolute, far finer than the fixture needs.
-fn erf(x: f64) -> f64 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0
-        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
-            + 0.254_829_592)
-            * t
-            * (-x * x).exp();
-    sign * y
 }
 
 /// Invert `Φ(−η(T)) = u` for `T` by bisection on `log T`. `η` is increasing in

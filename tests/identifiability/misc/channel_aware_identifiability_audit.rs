@@ -20,6 +20,7 @@ use gam::identifiability::families::compiler::{IdentityRowHessian, RowJacobianOp
 use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use ndarray::{Array1, Array2, Array3};
 use std::sync::Arc;
+use gam_problem::test_support::spec_from_dense;
 
 const N: usize = 64;
 
@@ -68,23 +69,6 @@ impl RowJacobianOperator for SingleChannelOperator {
             }
         }
         out
-    }
-}
-
-fn spec_from_dense(name: &str, design: Array2<f64>) -> ParameterBlockSpec {
-    let n = design.nrows();
-    ParameterBlockSpec {
-        name: name.to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(design)),
-        offset: Array1::<f64>::zeros(n),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::<f64>::zeros(0),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
     }
 }
 

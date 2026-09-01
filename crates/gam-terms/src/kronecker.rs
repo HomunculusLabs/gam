@@ -1,8 +1,7 @@
 use crate::basis::BasisError;
 use faer::{Mat, MatRef, Side};
 use gam_linalg::faer_ndarray::FaerLinalgError;
-use ndarray::{Array1, Array2, Axis};
-use rayon::prelude::*;
+use ndarray::{Array1, Array2};
 use std::sync::Arc;
 
 fn array_to_faer(array: &Array2<f64>) -> Mat<f64> {
@@ -233,37 +232,7 @@ fn kronecker_marginal_eigensystems(
     Ok(eigensystems)
 }
 
-/// Computes the Kronecker product A ⊗ B for penalty matrix construction.
-/// This is used to create tensor product penalties that enforce smoothness
-/// in multiple dimensions for interaction terms.
-pub fn kronecker_product(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    let (arows, a_cols) = a.dim();
-    let (brows, b_cols) = b.dim();
-    if arows == 0 || a_cols == 0 || brows == 0 || b_cols == 0 {
-        return Array2::zeros((arows * brows, a_cols * b_cols));
-    }
-    let mut result = Array2::zeros((arows * brows, a_cols * b_cols));
-
-    result
-        .axis_chunks_iter_mut(Axis(0), brows)
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(i, mut row_block)| {
-            let arow = a.row(i);
-            let col_chunks = row_block.axis_chunks_iter_mut(Axis(1), b_cols);
-            for (j, mut block) in col_chunks.into_iter().enumerate() {
-                let aval = arow[j];
-                if aval == 0.0 {
-                    continue;
-                }
-                for (dest, &src) in block.iter_mut().zip(b.iter()) {
-                    *dest = aval * src;
-                }
-            }
-        });
-
-    result
-}
+pub use gam_problem::penalty_matrix::kronecker_product;
 
 /// Advance a row-major multi-index over the `dims` grid in place.
 /// Returns `true` when the grid is exhausted (the index wrapped back to all-zero).

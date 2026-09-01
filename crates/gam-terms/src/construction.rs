@@ -621,37 +621,7 @@ fn compose_qs_from_split(q_pen: &Mat<f64>, q_null: &Mat<f64>, p: usize) -> Mat<f
     qs
 }
 
-/// Computes the Kronecker product A ⊗ B for penalty matrix construction.
-/// This is used to create tensor product penalties that enforce smoothness
-/// in multiple dimensions for interaction terms.
-pub fn kronecker_product(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    let (arows, a_cols) = a.dim();
-    let (brows, b_cols) = b.dim();
-    if arows == 0 || a_cols == 0 || brows == 0 || b_cols == 0 {
-        return Array2::zeros((arows * brows, a_cols * b_cols));
-    }
-    let mut result = Array2::zeros((arows * brows, a_cols * b_cols));
-
-    result
-        .axis_chunks_iter_mut(Axis(0), brows)
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(i, mut row_block)| {
-            let arow = a.row(i);
-            let col_chunks = row_block.axis_chunks_iter_mut(Axis(1), b_cols);
-            for (j, mut block) in col_chunks.into_iter().enumerate() {
-                let aval = arow[j];
-                if aval == 0.0 {
-                    continue;
-                }
-                for (dest, &src) in block.iter_mut().zip(b.iter()) {
-                    *dest = aval * src;
-                }
-            }
-        });
-
-    result
-}
+pub use crate::kronecker::kronecker_product;
 
 /// Result of the stable reparameterization algorithm from Wood (2011) Appendix B
 #[derive(Clone)]

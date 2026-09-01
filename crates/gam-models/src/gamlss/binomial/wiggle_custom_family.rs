@@ -29,9 +29,6 @@ impl CustomFamily for BinomialLocationScaleWiggleFamily {
     // cond≈7e2) and the monotone wiggle is already bounded by its β≥0 inequality
     // constraint, so genuine separation is regularized by the penalty + cone, not
     // by Firth. Disabling the term lets the well-conditioned Newton converge.
-    fn joint_jeffreys_term_required(&self) -> bool {
-        false
-    }
 
     /// The Binomial location-scale-wiggle joint Hessian depends on β because
     /// it involves the nonlinear link function evaluated at the combined

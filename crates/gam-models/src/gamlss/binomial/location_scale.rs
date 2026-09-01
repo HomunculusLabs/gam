@@ -2161,9 +2161,6 @@ impl CustomFamily for BinomialLocationScaleFamily {
     // `joint_jeffreys_information_*` methods are retained: they still back the
     // directly-tested Fisher-information derivative surface and any future
     // opt-in.)
-    fn joint_jeffreys_term_required(&self) -> bool {
-        false
-    }
 
     /// The Binomial location-scale joint Hessian depends on β because the
     /// Hessian blocks are functions of q = -t/σ and the link derivatives,
