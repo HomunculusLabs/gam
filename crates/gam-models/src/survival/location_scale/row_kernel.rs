@@ -5,7 +5,7 @@ use gam_math::jet_scalar::{
     DynamicJetArena, DynamicOneSeed, DynamicOrder2, DynamicTwoSeed, JetScalar, OneSeedBatch,
     Order2AtomChannels, RuntimeJetScalar,
 };
-use gam_row_macros::{row_atom, row_program};
+use gam_row_macros::row_program;
 use wide::f64x4;
 
 #[derive(Clone, Copy, Debug)]
@@ -621,24 +621,6 @@ fn sls_outer_plan<const ORDER: usize>(
         u0,
         u1: (censored_weight != 0.0 || event_weight != 0.0).then_some(u1),
         g,
-    }
-}
-
-row_atom! {
-    fn sls_index [generic, order2](h, eta_t, eta_ls) {
-        h - eta_t * exp(-eta_ls)
-    }
-}
-
-row_atom! {
-    fn sls_event_rate [generic, order2](
-        hdot,
-        eta_t,
-        eta_t_deriv,
-        eta_ls,
-        eta_ls_deriv
-    ) {
-        hdot + exp(-eta_ls) * (eta_t * eta_ls_deriv - eta_t_deriv)
     }
 }
 
