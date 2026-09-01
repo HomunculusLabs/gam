@@ -936,6 +936,7 @@ impl GlobalIdentifiabilityPlan {
         owner_terms: &[usize],
         has_parametric_block: bool,
         local_identifiability_transform: Option<Array2<f64>>,
+        coefficient_transform: Array2<f64>,
         local_columns: usize,
     ) -> Option<SmoothCollectionGauge> {
         let (arm, block) = match self {
@@ -949,6 +950,7 @@ impl GlobalIdentifiabilityPlan {
             owner_terms: owner_terms.to_vec(),
             has_parametric_block,
             local_identifiability_transform,
+            coefficient_transform,
             local_columns,
         })
     }
@@ -1012,28 +1014,69 @@ fn basis_local_identifiability_transform(metadata: &BasisMetadata) -> Option<Arr
 
 /// One smooth term's realized block, put into a COLLECTION gauge.
 pub struct RealizedCollectionGauge {
-    /// `X·Z` (Delete) or `X·T − C·R` (Residualize).
+    /// `P_C X_local T0`, represented lazily as `X_local T0 − C R`.
     pub design: DesignMatrix,
     /// The coefficient transform this realization applied, for composition into
     /// the term's basis metadata by the caller.
     pub coefficient_transform: Array2<f64>,
-    /// The row-space half, present only on the `Residualize` arm.
-    pub residualization: Option<crate::basis::ParametricResidualization>,
+    /// The moving row-space correction in the fixed coefficient chart. Both
+    /// arms carry it: away from the reference psi even a `Delete` chart needs a
+    /// nonzero left projection while keeping its right-hand section fixed.
+    pub residualization: crate::basis::ParametricResidualization,
 }
 
-/// Put a freshly built TERM-LOCAL design into a collection's gauge (#2747).
+/// Derive the collection's fixed coefficient chart at its reference
+/// realization.
+///
+/// This is the ONLY operation that may choose RRQR/eigenvectors.  A later
+/// spatial-psi replay uses [`realize_smooth_collection_gauge`] with the chart
+/// stored on [`SmoothCollectionGauge`]; differentiating or replaying freshly
+/// chosen vectors would differentiate a numerical coordinate convention rather
+/// than the statistical smooth (gam#2760).
+fn derive_smooth_collection_coefficient_transform(
+    design_local: &DesignMatrix,
+    arm: SmoothCollectionGaugeArm,
+    block: ArrayView2<'_, f64>,
+    has_owner_terms: bool,
+) -> Result<Array2<f64>, BasisError> {
+    match arm {
+        SmoothCollectionGaugeArm::Delete => {
+            match orthogonality_transform_for_design(design_local, block, None) {
+                Ok(transform) => Ok(transform),
+                // Mirrors the collection's historical fallback: a constraint
+                // block made entirely of owner columns may consume the whole
+                // dependent block.
+                Err(BasisError::ConstraintNullspaceCollapsed { .. }) if has_owner_terms => {
+                    Ok(Array2::zeros((design_local.ncols(), 0)))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        SmoothCollectionGaugeArm::Residualize => {
+            Ok(crate::basis::parametric_residualization_for_design(
+                design_local,
+                block,
+                None, // fixed subspace: never use iteration-varying PIRLS weights
+            )?
+            .coefficient_transform)
+        }
+    }
+}
+
+/// Put a freshly built TERM-LOCAL design into a collection's FROZEN gauge.
 ///
 /// This is the single owner of "make this term's realized block orthogonal to
-/// `C`". `apply_global_smooth_identifiability` calls it once the collection has
-/// DECIDED the gauge; the spatial outer search's incremental single-term
-/// realizer calls it with the gauge the collection already decided, so a spliced
-/// realization is in the collection's gauge by construction rather than by luck.
+/// `C`" after the collection has decided both `C` and its coefficient chart
+/// `T0`. `apply_global_smooth_identifiability` calls it at the reference
+/// realization; the spatial outer search calls it at every moving-psi value.
 ///
-/// The split of labour is the point. `C` and the arm are frozen because they are
-/// ψ-independent; `T` and `R` are re-derived here because they are not. Freezing
-/// the second pair across a ψ move is exactly the defect this function exists to
-/// make unrepresentable: the pair would then belong to a design that no longer
-/// exists.
+/// The statistical design is represented in one fixed coefficient chart:
+///
+/// `X_g(psi) = P_C X_local(psi) T0`, `P_C = I - C(C'C)^- C'`.
+///
+/// Only the row-space correction `R(psi)` moves, because it is the value of the
+/// fixed projection on the moving design.  It is returned for predict-time
+/// replay.  No RRQR/eigenvector is re-derived here.
 ///
 /// The orthogonality the whole step is for is asserted here, at the same
 /// relative bar the collection has always used, so neither caller can produce a
@@ -1051,40 +1094,31 @@ pub fn realize_smooth_collection_gauge(
             block.nrows()
         );
     }
-    let (design, coefficient_transform, residualization) = match gauge.arm {
-        SmoothCollectionGaugeArm::Delete => {
-            let z = match orthogonality_transform_for_design(&design_local, block, None) {
-                Ok(z) => z,
-                // Mirrors the collection's own fallback: a constraint block that
-                // is entirely owner columns can collapse the nullspace, and an
-                // empty chart (rather than a refusal) is what that has always
-                // produced.
-                Err(BasisError::ConstraintNullspaceCollapsed { .. })
-                    if !gauge.owner_terms.is_empty() =>
-                {
-                    Array2::zeros((design_local.ncols(), 0))
-                }
-                Err(err) => return Err(err),
-            };
-            let design = apply_smooth_transform_to_design(design_local, &z, termname)?;
-            (design, z, None)
-        }
-        SmoothCollectionGaugeArm::Residualize => {
-            let plan = crate::basis::parametric_residualization_for_design(
-                &design_local,
-                block,
-                None, // fixed subspace: do not use iteration-varying PIRLS weights
-            )?;
-            let transform = plan.coefficient_transform.clone();
-            let design = apply_smooth_transform_to_design(design_local, &transform, termname)?;
-            let design = subtract_row_space_correction(
-                design,
-                block,
-                plan.row_space_correction.view(),
-                termname,
-            )?;
-            (design, transform, Some(plan))
-        }
+    if gauge.coefficient_transform.nrows() != gauge.local_columns {
+        gam_problem::bail_dim_basis!(
+            "collection gauge for term '{termname}' declares {} local columns but its fixed coefficient chart has {} rows",
+            gauge.local_columns,
+            gauge.coefficient_transform.nrows()
+        );
+    }
+    if design_local.ncols() != gauge.local_columns {
+        gam_problem::bail_dim_basis!(
+            "collection gauge local width mismatch for term '{termname}': the design has {} columns but the fixed chart was derived on {}",
+            design_local.ncols(),
+            gauge.local_columns
+        );
+    }
+    let coefficient_transform = gauge.coefficient_transform.clone();
+    let design = apply_smooth_transform_to_design(
+        design_local,
+        &coefficient_transform,
+        termname,
+    )?;
+    let projector = crate::basis::FixedRowSpaceProjector::from_constraint_block(block)?;
+    let (design, row_space_correction) = projector.project_design(design, termname)?;
+    let residualization = crate::basis::ParametricResidualization {
+        coefficient_transform: coefficient_transform.clone(),
+        row_space_correction,
     };
     assert_orthogonal_to_constraint_block(&design, block, termname)?;
     Ok(RealizedCollectionGauge {
@@ -1178,15 +1212,11 @@ pub fn place_term_in_collection_gauge(
         None => realized.coefficient_transform.clone(),
     };
     let metadata = with_identifiability_transform(metadata, Some(&realized_transform))?;
-    let parametric_residualization =
-        realized
-            .residualization
-            .as_ref()
-            .map(|plan| ParametricResidualizationChart {
-                owner_terms: gauge.owner_terms.clone(),
-                has_parametric_block: gauge.has_parametric_block,
-                correction: plan.row_space_correction.clone(),
-            });
+    let parametric_residualization = Some(ParametricResidualizationChart {
+        owner_terms: gauge.owner_terms.clone(),
+        has_parametric_block: gauge.has_parametric_block,
+        correction: realized.residualization.row_space_correction.clone(),
+    });
     Ok(CollectionGaugedTerm {
         design: realized.design,
         metadata,
@@ -1619,20 +1649,44 @@ fn apply_global_smooth_identifiability(
                     GlobalIdentifiabilityPlan::Residualize { block: raw }
                 }
             };
-        // The COLLECTION's half of this decision, frozen for export: `C` and the
-        // arm, both of which are functions of the data and of OTHER terms and
-        // therefore invariant under any move of THIS term's basis parameters.
-        // The pair derived from them — `T` and `R` — is not, which is why the
-        // gauge carries neither (#2747).
+        // Freeze the COLLECTION decision and its reference coefficient chart.
+        // `C`, the arm, and `T0` are invariant under a move of THIS term's basis
+        // parameters. Only the value-side row correction `R(psi)` moves, and it
+        // is recomputed by projecting `X_local(psi) T0` through the fixed `C`.
+        // This keeps the objective out of arbitrary moving RRQR/eigenvector
+        // coordinates (#2760).
         // Read the term-local chart BEFORE the gauge composes its own into the
         // metadata below (gam#2760): after `with_identifiability_transform` the
         // two are one matrix and cannot be told apart.
-        let collection_gauge = plan.as_gauge(
-            &owner_indices,
-            parametric_block.is_some(),
-            basis_local_identifiability_transform(&term.metadata),
-            design_local.ncols(),
-        );
+        let collection_coefficient_transform = match &plan {
+            GlobalIdentifiabilityPlan::Absent => None,
+            GlobalIdentifiabilityPlan::Delete { block } => Some(
+                derive_smooth_collection_coefficient_transform(
+                    &design_local,
+                    SmoothCollectionGaugeArm::Delete,
+                    block.view(),
+                    !owner_indices.is_empty(),
+                )?,
+            ),
+            GlobalIdentifiabilityPlan::Residualize { block } => Some(
+                derive_smooth_collection_coefficient_transform(
+                    &design_local,
+                    SmoothCollectionGaugeArm::Residualize,
+                    block.view(),
+                    !owner_indices.is_empty(),
+                )?,
+            ),
+        };
+        let collection_gauge = collection_coefficient_transform.map(|transform| {
+            plan.as_gauge(
+                &owner_indices,
+                parametric_block.is_some(),
+                basis_local_identifiability_transform(&term.metadata),
+                transform,
+                design_local.ncols(),
+            )
+            .expect("a derived collection coefficient chart implies a present gauge")
+        });
         let mut residualization: Option<crate::basis::ParametricResidualization> = None;
         let (design_constrained, z_opt) = if let Some(gauge) = collection_gauge.as_ref() {
             // This term takes a gauge, so it is realized through the one entry
@@ -1643,7 +1697,7 @@ fn apply_global_smooth_identifiability(
             // `plan = Absent` upstream, so reaching here means the collection is
             // DERIVING the gauge on these rows, and nothing frozen is in play.
             let realized = realize_smooth_collection_gauge(design_local, gauge, &term.name)?;
-            residualization = realized.residualization;
+            residualization = Some(realized.residualization);
             (realized.design, Some(realized.coefficient_transform))
         } else {
             // No gauge: either there is nothing to be orthogonal to, or this is

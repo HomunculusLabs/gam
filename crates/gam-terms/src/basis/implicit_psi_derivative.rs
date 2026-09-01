@@ -4,9 +4,10 @@ use super::*;
 ///
 /// A smooth collection chooses a row-space constraint block `C` once, while a
 /// spatial hyperparameter move changes the term-local design `X(psi)`.  The
-/// collection may re-whiten its coefficient chart at every `psi`, but that
-/// right-coordinate motion is not part of the statistical derivative.  In the
-/// current coefficient chart the canonical derivative is instead
+/// collection freezes one coefficient chart at its reference realization;
+/// re-whitening it at every `psi` would make arbitrary right-coordinate motion
+/// part of the statistical derivative. In the frozen chart the canonical
+/// derivative is instead
 ///
 /// `P_C X_psi T`, where `P_C = I - Q_C Q_C^T`.
 ///
@@ -17,6 +18,14 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct FixedRowSpaceProjector {
     range_basis: Array2<f64>,
+    /// Maps coordinates in `range_basis` back to coefficients of the raw
+    /// constraint block supplied to [`Self::from_constraint_block`].  If
+    /// `C = U Sigma V^T D` after column normalization, this is
+    /// `D^-1 V Sigma^-1`, so `C * constraint_coordinates == U` on the retained
+    /// range.  Keeping this small `q x rank(C)` map lets a projected VALUE
+    /// design export the exact row-space correction prediction must replay,
+    /// without materializing an `n x p` block.
+    constraint_coordinates: Array2<f64>,
 }
 
 impl FixedRowSpaceProjector {
@@ -30,18 +39,21 @@ impl FixedRowSpaceProjector {
         if q == 0 {
             return Ok(Self {
                 range_basis: Array2::zeros((n, 0)),
+                constraint_coordinates: Array2::zeros((0, 0)),
             });
         }
 
         let mut normalized = constraint.to_owned();
+        let mut column_norms = vec![0.0_f64; q];
         for column in 0..q {
             let norm = normalized.column(column).dot(&normalized.column(column)).sqrt();
+            column_norms[column] = norm;
             if norm > 0.0 && norm.is_finite() {
                 normalized.column_mut(column).mapv_inplace(|value| value / norm);
             }
         }
-        let (left, singular, _) =
-            gam_linalg::faer_ndarray::FaerSvd::svd(&normalized, true, false)
+        let (left, singular, right_t) =
+            gam_linalg::faer_ndarray::FaerSvd::svd(&normalized, true, true)
                 .map_err(BasisError::LinalgError)?;
         let leading = singular.first().copied().unwrap_or(0.0);
         let cutoff = default_rrqr_rank_alpha()
@@ -62,8 +74,34 @@ impl FixedRowSpaceProjector {
                 left.ncols(),
             )));
         }
+        let right_t = right_t.ok_or_else(|| {
+            BasisError::InvalidInput(
+                "fixed row-space projector SVD did not return its requested right frame"
+                    .to_string(),
+            )
+        })?;
+        if right_t.nrows() < rank || right_t.ncols() != q {
+            return Err(BasisError::InvalidInput(format!(
+                "fixed row-space projector SVD returned a {}x{} right frame for an {n}x{q} constraint block of rank {rank}",
+                right_t.nrows(),
+                right_t.ncols(),
+            )));
+        }
+        let mut constraint_coordinates = Array2::<f64>::zeros((q, rank));
+        for constraint_column in 0..q {
+            let norm = column_norms[constraint_column];
+            if !(norm > 0.0 && norm.is_finite()) {
+                continue;
+            }
+            for range_column in 0..rank {
+                constraint_coordinates[[constraint_column, range_column]] =
+                    right_t[[range_column, constraint_column]]
+                        / (norm * singular[range_column]);
+            }
+        }
         Ok(Self {
             range_basis: left.slice(s![.., 0..rank]).to_owned(),
+            constraint_coordinates,
         })
     }
 
@@ -97,6 +135,91 @@ impl FixedRowSpaceProjector {
             *values -= &fast_ab(&self.range_basis, &coordinates);
         }
         Ok(())
+    }
+
+    /// Project a possibly-lazy value design into this fixed row-space
+    /// complement, retaining lazy storage and returning the correction in the
+    /// ORIGINAL constraint block's coordinates.
+    ///
+    /// For `D = X T0`, this returns
+    ///
+    /// `D_projected = D - C R = P_C D`,
+    ///
+    /// with `R` satisfying `C R = Q_C Q_C^T D`.  The cross `Q_C^T D` is
+    /// streamed in bounded row chunks; the projected design is represented as
+    /// one block operator, so an outer-psi replay never materializes `n x p`.
+    pub fn project_design(
+        &self,
+        design: DesignMatrix,
+        context: &str,
+    ) -> Result<(DesignMatrix, Array2<f64>), BasisError> {
+        use gam_linalg::matrix::{BlockDesignOperator, DesignBlock};
+
+        if design.nrows() != self.nrows() {
+            crate::bail_dim_basis!(
+                "fixed row-space projector has {} rows but value design '{context}' has {}",
+                self.nrows(),
+                design.nrows()
+            );
+        }
+        let p = design.ncols();
+        let rank = self.rank();
+        if rank == 0 {
+            return Ok((
+                design,
+                Array2::zeros((self.constraint_coordinates.nrows(), p)),
+            ));
+        }
+
+        let mut range_cross = Array2::<f64>::zeros((rank, p));
+        const CHUNK: usize = 1024;
+        for start in (0..design.nrows()).step_by(CHUNK) {
+            let end = (start + CHUNK).min(design.nrows());
+            let design_chunk = design
+                .try_row_chunk(start..end)
+                .map_err(|error| BasisError::InvalidInput(error.to_string()))?;
+            range_cross += &fast_atb(
+                &self.range_basis.slice(s![start..end, ..]),
+                &design_chunk,
+            );
+        }
+        let row_space_correction = fast_ab(&self.constraint_coordinates, &range_cross);
+
+        let design_block = match design {
+            DesignMatrix::Dense(inner) => DesignBlock::Dense(inner),
+            DesignMatrix::Sparse(inner) => DesignBlock::Sparse(inner),
+        };
+        let stacked = BlockDesignOperator::new(vec![
+            design_block,
+            DesignBlock::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                self.range_basis.clone(),
+            )),
+        ])
+        .map_err(BasisError::InvalidInput)?;
+        let mut transform = Array2::<f64>::zeros((p + rank, p));
+        for column in 0..p {
+            transform[[column, column]] = 1.0;
+        }
+        for range_column in 0..rank {
+            for column in 0..p {
+                transform[[p + range_column, column]] = -range_cross[[range_column, column]];
+            }
+        }
+        let projected = CoefficientTransformOperator::new(
+            gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(stacked)),
+            transform,
+        )
+        .map_err(|error| {
+            BasisError::InvalidInput(format!(
+                "fixed row-space projection failed for value design '{context}': {error}"
+            ))
+        })?;
+        Ok((
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(
+                projected,
+            ))),
+            row_space_correction,
+        ))
     }
 
     fn project_matrix_owned(&self, mut values: Array2<f64>) -> Array2<f64> {
@@ -3632,4 +3755,62 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
         design_second_diag: op.materialize_second_diag(0)?,
         implicit_operator: Some(op),
     })
+}
+
+#[cfg(test)]
+mod fixed_row_space_value_tests {
+    use super::*;
+
+    fn frobenius(matrix: &Array2<f64>) -> f64 {
+        matrix.iter().map(|value| value * value).sum::<f64>().sqrt()
+    }
+
+    #[test]
+    fn projected_value_design_exports_raw_constraint_correction() {
+        // The third column is a rescaled duplicate of the first. This pins the
+        // rank-deficient/scaled case: the exported correction need not be the
+        // minimum-norm raw coefficient vector, but C*R must be exactly the
+        // projector's removed row-space component.
+        let constraint = Array2::from_shape_vec(
+            (5, 3),
+            vec![
+                1.0, -2.0, 7.0, 1.0, -1.0, 7.0, 1.0, 0.0, 7.0, 1.0, 1.0, 7.0,
+                1.0, 2.0, 7.0,
+            ],
+        )
+        .expect("constraint shape");
+        let value = Array2::from_shape_vec(
+            (5, 2),
+            vec![0.3, -1.0, 2.0, 0.5, -0.7, 3.0, 1.4, -0.2, 4.0, 1.1],
+        )
+        .expect("value shape");
+        let projector = FixedRowSpaceProjector::from_constraint_block(constraint.view())
+            .expect("projector");
+        assert_eq!(projector.rank(), 2);
+
+        let mut expected = value.clone();
+        projector
+            .project_matrix_in_place(&mut expected)
+            .expect("dense projection");
+        let (lazy, correction) = projector
+            .project_design(DesignMatrix::from(value.clone()), "unit value")
+            .expect("lazy projection");
+        let actual = lazy.to_dense();
+        let reconstructed = &value - &constraint.dot(&correction);
+        let scale = frobenius(&expected).max(1.0);
+        assert!(
+            frobenius(&(&actual - &expected)) / scale < 1.0e-12,
+            "lazy value projection must equal the dense projector"
+        );
+        assert!(
+            frobenius(&(&reconstructed - &expected)) / scale < 1.0e-12,
+            "raw constraint correction must replay the same projected value"
+        );
+        assert!(
+            frobenius(&constraint.t().dot(&actual))
+                / (frobenius(&constraint) * frobenius(&actual)).max(1.0e-300)
+                < 1.0e-12,
+            "projected value must be collection-orthogonal"
+        );
+    }
 }

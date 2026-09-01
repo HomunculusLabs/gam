@@ -5359,15 +5359,13 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // derivatives, and the geometry cache all start from the same centers,
         // scaling, identifiability transform, and penalty topology.
         //
-        // EXCEPT the half a collection GAUGE owns (gam#2760). `#2747` made the
-        // gauge — `C` and the arm — the object that travels, and its `(T, R)`
-        // pair RE-DERIVED at every rebuild, precisely because `T = null((XᵀC)ᵀ)`
-        // is a function of the design and therefore of the ψ this realizer
-        // exists to move. The freeze above writes the metadata's identifiability
-        // transform into the replay spec, and for a gauged term that transform
-        // IS that same step, already composed. Both then run: the term-local
-        // rebuild applies the frozen ψ₀ chart and `replace_term_realization`
-        // applies a freshly derived one on top.
+        // EXCEPT the half a collection GAUGE owns (gam#2760). The gauge carries
+        // the fixed row space `C` AND the fixed reference coefficient chart
+        // `T0`; a moving-psi value is represented canonically as
+        // `P_C X_local(psi) T0`. The freeze above writes the metadata's composed
+        // `z_local*T0` into the replay spec. Leaving that composition in place
+        // would apply `T0` once in the local rebuild and once again when the
+        // gauge performs its fixed-chart placement.
         //
         // MEASURED on the `kappa_loop_n_scaling` fixture's own spec
         // (`examples/probe_2760_replay_gauge_double_apply`, 12 centers, n = 600,
@@ -5388,10 +5386,10 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // green while every Duchon one went red.
         //
         // So a gauged term's replay spec is put back into the TERM-LOCAL chart
-        // the gauge was derived on — which the gauge itself now carries, because
-        // the composed transform in the metadata cannot be decomposed after the
-        // fact. Everything else the freeze decides (centers, input scale, radial
-        // chart, penalty topology) is ψ-invariant and is kept.
+        // the fixed `T0` was derived on. The gauge carries both pieces because
+        // the composition in metadata cannot be decomposed after the fact.
+        // Everything else the freeze decides (centers, input scale, radial
+        // chart, penalty topology) is psi-invariant and is kept.
         //
         // The caller's own spec is NOT the source: by the time it reaches this
         // realizer it has already been frozen at least once upstream, so its
@@ -6171,9 +6169,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // replayed. The κ search was therefore also minimizing a criterion for
         // a model the fit did not ship.
         //
-        // `C` and the arm are ψ-INDEPENDENT and travel on the term; `T` and `R`
-        // are re-derived here, through the entry point the collection build
-        // itself uses.
+        // `C`, the arm, and `T0` are psi-INDEPENDENT and travel on the term.
+        // Placement recomputes only the left-projection correction `R(psi)`,
+        // through the same entry point the collection build itself uses. This
+        // makes the value replay identical to the analytic fixed-chart jet and
+        // prevents penalty normalization from acquiring arbitrary RRQR motion.
         let collection_gauge = self
             .design
             .smooth
@@ -6197,9 +6197,7 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             ),
             None => "none".to_string(),
         };
-        let collection_gauge_local_columns = collection_gauge
-            .as_ref()
-            .map(|gauge| gauge.local_columns);
+        let had_collection_gauge = collection_gauge.is_some();
         let (
             design_local,
             metadata,
@@ -6269,23 +6267,12 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             .coeff_range
             .clone();
         if design_local.ncols() != coeff_range.len() {
-            // WHICH half moved decides whether this is a defect or a domain wall
-            // (gam#2760). The gauge records the term-local width it was derived
-            // on, so the two questions are separable:
-            //
-            //   * a LOCAL width that no longer matches means the rebuild is not
-            //     the same basis the collection gauged — a defect, and fatal;
-            //   * a matching local width that still comes out narrow after the
-            //     arm means the realized design lost rank in this gauge's chart
-            //     AT THIS ψ. The frozen chart is `G`-orthonormalizing at the ψ it
-            //     was derived at and nowhere else (measured: the local Gram's
-            //     eigenvalue ratio runs 1.0 at the fit's own ℓ to 2.3e-17 two
-            //     decades away), so a direction can become numerically
-            //     indistinguishable from zero there. That is a statement about
-            //     the trial point, and the outer search already knows how to
-            //     retreat from one — it must not abort the whole fit.
-            let local_width_moved = collection_gauge_local_columns
-                .is_some_and(|expected| pre_gauge_cols != expected);
+            // A collection-gauged term has a fixed coefficient transform. Its
+            // local-input width is checked inside placement and its output width
+            // is `T0.ncols()`, so reaching this branch with a gauge is an
+            // invariant violation, never a moving-rank domain wall. An ungauged
+            // radial basis may still lose a numerical chart direction at this
+            // psi; that remains a recoverable trial refusal.
             let reason = format!(
                 "incremental realizer width mismatch for term {term_idx} ('{name}'): rebuilt_cols={}, \
                  cached_cols={}; the local rebuild produced {pre_gauge_cols} column(s) before the \
@@ -6294,17 +6281,16 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 coeff_range.len(),
                 design_local.ncols(),
             );
-            if local_width_moved {
+            if had_collection_gauge {
                 return Err(EstimationError::InvalidInput(format!(
-                    "{reason}. The LOCAL width moved, so this rebuild is not the basis the \
-                     collection gauged (gam#2760)"
+                    "{reason}. A fixed collection coefficient chart cannot change width; the \
+                     replay is not the collection-gauged model (gam#2760)"
                 )));
             }
             return Err(EstimationError::TrialPointRefused {
                 reason: format!(
-                    "{reason}. The local width is unchanged, so the realized design loses rank in \
-                     the collection gauge's chart at this psi and the model the collection \
-                     specified does not exist here (gam#2760)"
+                    "{reason}. This ungauged realized basis loses a numerical chart direction at \
+                     this psi, so the model does not exist at the trial (gam#2760)"
                 ),
             });
         }
