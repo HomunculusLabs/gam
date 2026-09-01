@@ -3579,7 +3579,8 @@ mod tests {
     use gam_models::inference::model::SavedLatentZNormalization;
     use gam_problem::BlockRole;
     use gam_solve::model_types::{
-        FitArtifacts, FittedBlock, FittedLinkState, UnifiedFitResult, UnifiedFitResultParts,
+        FitArtifacts, FitInference, FittedBlock, FittedLinkState, SmoothingCorrectionMethod,
+        UnifiedFitResult, UnifiedFitResultParts,
     };
     use gam_solve::pirls::PirlsStatus;
     use gam_spec::{LinkFunction, StandardLink};
@@ -3819,6 +3820,145 @@ mod tests {
             working: None,
         });
         fit
+    }
+
+    fn smoothing_corrected_half_normal_fit(ambient_variance: f64) -> UnifiedFitResult {
+        assert!(ambient_variance > 1.0);
+        let mut fit = half_normal_constrained_fit();
+        let smoothing_correction = array![[ambient_variance - 1.0]];
+        let constraints = fit
+            .geometry
+            .as_ref()
+            .and_then(|geometry| geometry.constrained_posterior.as_ref())
+            .expect("constrained geometry")
+            .constraints
+            .clone();
+        let ambient = array![[ambient_variance]];
+        let marginal_correction =
+            gam_solve::constrained_posterior::constrained_posterior_correction_from_covariance(
+                &ambient,
+                &array![0.0],
+                &constraints,
+            )
+            .expect("smoothing-corrected truncation")
+            .expect("active smoothing-corrected half-space");
+        let published = marginal_correction
+            .truncated_covariance_psd(&ambient, &constraints)
+            .expect("published smoothing-corrected covariance");
+
+        fit.log_lambdas = array![0.0];
+        fit.lambdas = array![1.0];
+        fit.blocks[0].lambdas = array![1.0];
+        fit.covariance_corrected = Some(published.clone());
+        fit.inference = Some(FitInference {
+            edf_by_block: vec![0.0],
+            penalty_block_trace: vec![0.0],
+            edf_total: 0.0,
+            smoothing_correction: Some(smoothing_correction.clone()),
+            smoothing_correction_method: Some(
+                SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                    active_rank: 1,
+                    rho_dimension: 1,
+                },
+            ),
+            smoothing_correction_first_order: Some(smoothing_correction),
+            smoothing_correction_method_first_order: Some(
+                SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                    active_rank: 1,
+                    rho_dimension: 1,
+                },
+            ),
+            penalized_hessian: array![[1.0]].into(),
+            reparam_qs: None,
+            dispersion: gam_problem::Dispersion::UNIT,
+            beta_covariance: Some(array![[1.0 - 2.0 / std::f64::consts::PI]].into()),
+            beta_standard_errors: Some(array![
+                (1.0 - 2.0 / std::f64::consts::PI).sqrt()
+            ]),
+            beta_covariance_corrected: Some(published.clone()),
+            beta_standard_errors_corrected: Some(array![published[[0, 0]].sqrt()]),
+            beta_covariance_frequentist: None,
+            coefficient_influence: None,
+            weighted_gram: None,
+            bias_correction_beta: None,
+            bias_correction_jacobian: None,
+        });
+        fit
+    }
+
+    #[test]
+    fn constrained_conditional_law_keeps_its_persisted_geometry() {
+        let fit = half_normal_constrained_fit();
+        let geometry = fit.geometry.as_ref().expect("fit geometry");
+        let law = constrained_law(&fit, geometry, InferenceCovarianceMode::Conditional)
+            .expect("conditional constrained law");
+        assert_eq!(law.ambient, array![[1.0]]);
+        assert!(matches!(law.geometry, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn constrained_smoothing_law_rebuilds_the_truncation_at_its_own_width() {
+        let fit = smoothing_corrected_half_normal_fit(4.0);
+        let geometry = fit.geometry.as_ref().expect("fit geometry");
+        let law = constrained_law(
+            &fit,
+            geometry,
+            InferenceCovarianceMode::SmoothingCorrected,
+        )
+        .expect("smoothing-corrected constrained law");
+        assert_eq!(law.ambient, array![[4.0]]);
+        assert!(matches!(law.geometry, std::borrow::Cow::Owned(_)));
+
+        let (lower, upper) = constrained_projection_equal_tailed_interval(
+            &law.ambient,
+            &law.geometry,
+            &array![1.0],
+            0.95,
+        )
+        .expect("smoothing-corrected half-normal quantiles");
+        let expected_lower = 2.0 * standard_normal_quantile(0.5125).expect("lower quantile");
+        let expected_upper = 2.0 * standard_normal_quantile(0.9875).expect("upper quantile");
+        assert!((lower - expected_lower).abs() < 1e-12);
+        assert!((upper - expected_upper).abs() < 1e-12);
+    }
+
+    #[test]
+    fn constrained_default_uses_the_covariance_definition_the_fit_publishes() {
+        let fit = smoothing_corrected_half_normal_fit(4.0);
+        let published = fit.published_covariance_mode();
+        assert_eq!(published, InferenceCovarianceMode::SmoothingCorrected);
+        let options = PredictUncertaintyOptions {
+            confidence_level: 0.95,
+            covariance_mode: published,
+            mean_interval_method: MeanIntervalMethod::TransformEta,
+            includeobservation_interval: false,
+            apply_bias_correction: false,
+            edgeworth_one_sided: false,
+            boundary_correction: false,
+            ood_inflation: false,
+            multi_point_joint: false,
+            ..PredictUncertaintyOptions::default()
+        };
+        let result = predict_gamwith_uncertainty(
+            array![[1.0]].view(),
+            fit.beta.view(),
+            array![0.0].view(),
+            gam_spec::LikelihoodSpec::gaussian_identity(),
+            &fit,
+            &options,
+        )
+        .expect("published constrained prediction interval");
+        let expected_lower = 2.0 * standard_normal_quantile(0.5125).expect("lower quantile");
+        let expected_upper = 2.0 * standard_normal_quantile(0.9875).expect("upper quantile");
+        let expected_standard_error =
+            2.0 * (1.0 - 2.0 / std::f64::consts::PI).sqrt();
+        assert_eq!(
+            result.covariance_source,
+            InferenceCovarianceMode::SmoothingCorrected
+        );
+        assert!((result.eta_lower[0] - expected_lower).abs() < 1e-12);
+        assert!((result.eta_upper[0] - expected_upper).abs() < 1e-12);
+        assert!((result.eta_standard_error[0] - expected_standard_error).abs() < 1e-12);
     }
 
     #[test]
