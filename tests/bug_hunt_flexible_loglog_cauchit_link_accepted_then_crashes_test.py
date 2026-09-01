@@ -72,7 +72,9 @@ def test_flexible_cloglog_positive_control_fits() -> None:
     df = _binomial_frame()
     model = gamfit.fit(df, "y ~ x + link(type=flexible(cloglog))", family="binomial")
     mean = np.asarray(
-        model.predict(pd.DataFrame({"x": [0.0]}), return_type="pandas")["mean"],
+        model.predict(pd.DataFrame({"x": [0.0]}), return_type="pandas")[
+            "posterior_mean"
+        ],
         dtype=float,
     )
     assert np.all((mean >= 0.0) & (mean <= 1.0))
@@ -95,7 +97,9 @@ def test_flexible_advertised_link_is_handled_gracefully(link: str) -> None:
 
     # If it did fit, it must produce a valid probability prediction.
     mean = np.asarray(
-        model.predict(pd.DataFrame({"x": [0.0]}), return_type="pandas")["mean"],
+        model.predict(pd.DataFrame({"x": [0.0]}), return_type="pandas")[
+            "posterior_mean"
+        ],
         dtype=float,
     )
     assert np.all((mean >= 0.0) & (mean <= 1.0))

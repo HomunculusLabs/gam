@@ -104,7 +104,7 @@ def _signature(formula: str) -> tuple[float, float, int, tuple[float, ...]]:
     model = gamfit.fit(_data(), formula, family="gaussian")
     summary = model.summary()
     predictions = np.asarray(
-        model.predict(_GRID, return_type="dict")["mean"], dtype=float
+        model.predict(_GRID, return_type="dict")["posterior_mean"], dtype=float
     )
     return (
         float(summary.deviance),

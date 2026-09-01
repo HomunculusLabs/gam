@@ -92,7 +92,9 @@ def _hourly() -> dict[str, Any]:
 
 
 def _seam_gap(model: Any) -> float:
-    p = np.asarray(model.predict(_SEAM, return_type="dict")["mean"], dtype=float)
+    p = np.asarray(
+        model.predict(_SEAM, return_type="dict")["posterior_mean"], dtype=float
+    )
     return abs(float(p[0] - p[1]))
 
 
@@ -155,7 +157,9 @@ def _cylinder() -> dict[str, Any]:
 
 def _tensor_seam_gap(model: Any) -> float:
     frame = {"theta": np.array([0.0, 2.0 * np.pi]), "h": np.array([0.5, 0.5])}
-    p = np.asarray(model.predict(frame, return_type="dict")["mean"], dtype=float)
+    p = np.asarray(
+        model.predict(frame, return_type="dict")["posterior_mean"], dtype=float
+    )
     return abs(float(p[0] - p[1]))
 
 

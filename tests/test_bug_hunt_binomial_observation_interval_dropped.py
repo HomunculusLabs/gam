@@ -94,9 +94,9 @@ def test_binomial_observation_interval_is_a_valid_response_band() -> None:
     model = _fit_binomial()
     out = model.predict(_grid(), interval=0.95, observation_interval=True)
 
-    mean = np.asarray(out["mean"], dtype=float)
-    mlo = np.asarray(out["mean_lower"], dtype=float)
-    mhi = np.asarray(out["mean_upper"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
+    mlo = np.asarray(out["posterior_mean_lower"], dtype=float)
+    mhi = np.asarray(out["posterior_mean_upper"], dtype=float)
     olo = np.asarray(out["observation_lower"], dtype=float)
     ohi = np.asarray(out["observation_upper"], dtype=float)
 

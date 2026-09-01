@@ -52,7 +52,7 @@ def _mean(out: object) -> np.ndarray:
     """
     if isinstance(out, np.ndarray):
         return np.asarray(out, dtype=float).ravel()
-    return np.asarray(out["mean"], dtype=float)
+    return np.asarray(out["posterior_mean"], dtype=float)
 
 
 def _make_frame(seed: int = 0, n: int = 60) -> pd.DataFrame:

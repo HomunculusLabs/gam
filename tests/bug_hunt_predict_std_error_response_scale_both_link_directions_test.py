@@ -36,10 +36,10 @@ _Z_90 = 1.6448536269514722
 
 
 def _band_se(out):
-    mean = np.asarray(out["mean"], dtype=float)
-    se = np.asarray(out["std_error"], dtype=float)
-    lower = np.asarray(out["mean_lower"], dtype=float)
-    upper = np.asarray(out["mean_upper"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
+    se = np.asarray(out["posterior_mean_standard_error"], dtype=float)
+    lower = np.asarray(out["posterior_mean_lower"], dtype=float)
+    upper = np.asarray(out["posterior_mean_upper"], dtype=float)
     return mean, se, (upper - lower) / (2.0 * _Z_90)
 
 

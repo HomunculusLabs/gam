@@ -79,7 +79,7 @@ def test_overlapping_global_and_factor_smooth_can_be_predicted(formula: str) -> 
         {"x": np.linspace(0.02, 0.98, 30), "g": (["A", "B", "C"] * 10)}
     )
     preds = model.predict(grid, return_type="dict")
-    mean = np.asarray(preds["mean"], dtype=float)
+    mean = np.asarray(preds["posterior_mean"], dtype=float)
 
     assert mean.shape == (30,), f"expected 30 predictions, got {mean.shape}"
     assert np.all(np.isfinite(mean)), "predictions must be finite"
@@ -87,6 +87,8 @@ def test_overlapping_global_and_factor_smooth_can_be_predicted(formula: str) -> 
     # And the fit must be useful, not a flat constant: in-sample predictions
     # should track the response (guards against a degenerate "fix" that drops
     # the factor smooth entirely).
-    in_sample = np.asarray(model.predict(df, return_type="dict")["mean"], dtype=float)
+    in_sample = np.asarray(
+        model.predict(df, return_type="dict")["posterior_mean"], dtype=float
+    )
     corr = float(np.corrcoef(in_sample, df["y"].to_numpy())[0, 1])
     assert corr > 0.5, f"in-sample predictions barely track y (corr={corr:.3f})"

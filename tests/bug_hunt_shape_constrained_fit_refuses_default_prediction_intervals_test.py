@@ -93,9 +93,9 @@ def _fit(shape: str | None) -> Any:
 
 
 def _assert_usable_band(table: Any, label: str) -> None:
-    lower = np.asarray(table["mean_lower"], dtype=float)
-    point = np.asarray(table["mean"], dtype=float)
-    upper = np.asarray(table["mean_upper"], dtype=float)
+    lower = np.asarray(table["posterior_mean_lower"], dtype=float)
+    point = np.asarray(table["posterior_mean"], dtype=float)
+    upper = np.asarray(table["posterior_mean_upper"], dtype=float)
     assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper)), f"{label}: non-finite band"
     assert np.all(lower <= point) and np.all(point <= upper), f"{label}: band excludes the point"
     assert np.all(upper > lower), f"{label}: degenerate band"

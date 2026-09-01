@@ -161,7 +161,9 @@ def test_cyclic_smooth_gauge_is_read_and_still_wraps_under_none() -> None:
     uncentered = _fit("y ~ cyclic(t, k=10, period=1, identifiability='none')", data)
 
     for model in (centered, uncentered):
-        p = np.asarray(model.predict(seam, return_type="dict")["mean"], dtype=float)
+        p = np.asarray(
+            model.predict(seam, return_type="dict")["posterior_mean"], dtype=float
+        )
         assert abs(float(p[0] - p[1])) < 1e-9, "a cyclic smooth must close its seam"
 
     assert abs(float(_smooth_values(centered, data, "cyclic(t").mean())) < 1e-8

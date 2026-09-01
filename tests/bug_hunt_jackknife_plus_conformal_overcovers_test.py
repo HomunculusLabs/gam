@@ -64,8 +64,8 @@ def test_jackknife_plus_conformal_coverage_matches_requested_level() -> None:
         out = model.predict(
             pd.DataFrame({"x": xte}), interval="conformal", conformal_level=level
         )
-        lo = np.asarray(out["mean_lower"], dtype=float)
-        hi = np.asarray(out["mean_upper"], dtype=float)
+        lo = np.asarray(out["posterior_mean_lower"], dtype=float)
+        hi = np.asarray(out["posterior_mean_upper"], dtype=float)
         assert np.all(hi >= lo), "conformal interval must satisfy lower <= upper"
         coverages.append(float(np.mean((yte >= lo) & (yte <= hi))))
 

@@ -79,7 +79,7 @@ def test_tweedie_observation_upper_edge_is_above_the_symmetric_band():
     p = m.predict(test, interval=0.95, observation_interval=True)
 
     hi = p["observation_upper"].to_numpy()
-    mu_hat = p["mean"].to_numpy()
+    mu_hat = p["posterior_mean"].to_numpy()
     # Conditional Tweedie sd; the symmetric band's upper edge would be mu + 1.96*sd.
     sd = np.sqrt(PHI * mu_hat ** POWER)
     symmetric_upper = mu_hat + 1.959963984540054 * sd

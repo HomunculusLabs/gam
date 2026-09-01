@@ -57,7 +57,7 @@ def test_well_conditioned_gaussian_response_still_fits() -> None:
 
     model = gamfit.fit(data, "y ~ s(x)", family="gaussian")
     out = model.predict(data)
-    mean = out if isinstance(out, np.ndarray) else out["mean"]
+    mean = out if isinstance(out, np.ndarray) else out["posterior_mean"]
     mean = np.asarray(mean, dtype=float).ravel()
     assert mean.shape[0] == n
     assert np.all(np.isfinite(mean))
@@ -74,6 +74,6 @@ def test_small_but_real_gaussian_signal_not_over_rejected() -> None:
     # Must not raise: this is a valid (if tiny-variance) signal.
     model = gamfit.fit(data, "y ~ s(x)", family="gaussian")
     out = model.predict(data)
-    mean = out if isinstance(out, np.ndarray) else out["mean"]
+    mean = out if isinstance(out, np.ndarray) else out["posterior_mean"]
     mean = np.asarray(mean, dtype=float).ravel()
     assert np.all(np.isfinite(mean))

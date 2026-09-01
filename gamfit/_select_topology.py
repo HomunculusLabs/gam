@@ -512,7 +512,7 @@ def _holdout_predictive_interval(
         observation_interval=True,
         return_type="dict",
     )
-    means = [float(value) for value in prediction["mean"]]
+    means = [float(value) for value in prediction["posterior_mean"]]
     lower = [float(value) for value in prediction["observation_lower"]]
     upper = [float(value) for value in prediction["observation_upper"]]
     return means, lower, upper
@@ -520,8 +520,8 @@ def _holdout_predictive_interval(
 
 def _predict_response_mean(model: Any, data: Any, **predict_kwargs: Any) -> list[float]:
     prediction = model.predict(data, return_type="dict", **predict_kwargs)
-    if isinstance(prediction, Mapping) and "mean" in prediction:
-        return [float(value) for value in prediction["mean"]]
+    if isinstance(prediction, Mapping) and "posterior_mean" in prediction:
+        return [float(value) for value in prediction["posterior_mean"]]
     # Families whose predict() returns a bare response vector (e.g. probabilities)
     # rather than the linear-predictor/mean table.
     return [float(value) for value in prediction]

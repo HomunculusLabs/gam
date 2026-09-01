@@ -64,7 +64,7 @@ def _low_mean_quartile_coverage(model, test):
     y = test["y"].to_numpy()
     lo = pr["observation_lower"].to_numpy()
     hi = pr["observation_upper"].to_numpy()
-    mean = pr["mean"].to_numpy()
+    mean = pr["posterior_mean"].to_numpy()
     inside = (y >= lo) & (y <= hi)
     low_cut = np.quantile(mean, 0.25)
     low_stratum = mean <= low_cut
@@ -83,7 +83,7 @@ def test_bare_tweedie_low_mean_coverage_is_near_nominal_on_p_neq_1p5_data():
     # INTERVAL defect (the reported bug), not a broken fit. The log-link mean is
     # robust to the power regardless, so this holds for both fits.
     pr = m_est.predict(test, interval=LEVEL, observation_interval=True)
-    mean_hat = pr["mean"].to_numpy()
+    mean_hat = pr["posterior_mean"].to_numpy()
     corr = np.corrcoef(np.log(mean_hat), np.log(mu_true))[0, 1]
     assert corr > 0.95, f"mean not recovered (precondition failed): corr={corr:.3f}"
 

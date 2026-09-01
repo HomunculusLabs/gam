@@ -205,9 +205,11 @@ def _point_payload_spec(
       are response-scale (probability) quantiles from the marginal-slope
       coefficient covariance, so they are clipped to ``(0, 1)`` exactly like
       the point ``mean``; ``std_error`` is the η-scale SE and is left untouched.
-    * **standard GAM / GLM** — ``mean`` as emitted; table form is the *full*
-      Rust column payload (``linear_predictor`` + ``mean`` always, plus
-      ``std_error`` / ``mean_lower`` / ``mean_upper`` when an interval was set).
+    * **standard GAM / GLM** — ``posterior_mean`` as emitted; table form is the
+      *full* Rust estimand-explicit payload (``linear_predictor_plugin``,
+      ``mean_plugin``, and ``posterior_mean`` always, plus
+      ``posterior_mean_standard_error`` / ``posterior_mean_lower`` /
+      ``posterior_mean_upper`` when an interval was set).
 
     The shared "return the vector, else restore a table" tail lives in
     :func:`_shape_point_payload`; this function owns only the differences.
@@ -259,11 +261,11 @@ def _point_payload_spec(
                     )
         return probs, table_columns
 
-    mean = rust_module().vec_to_array1_f64(
-        [float(value) for value in columns["mean"]]
+    posterior_mean = rust_module().vec_to_array1_f64(
+        [float(value) for value in columns["posterior_mean"]]
     )
     # Standard models keep the full multi-column payload in tabular form.
-    return mean, columns
+    return posterior_mean, columns
 
 
 def _shape_point_payload(

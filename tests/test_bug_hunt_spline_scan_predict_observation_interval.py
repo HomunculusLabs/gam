@@ -95,9 +95,9 @@ def test_scan_observation_band_strictly_wider_by_sigma2(formula: str) -> None:
         observation_interval=True,
         return_type="dict",
     )
-    mean = np.asarray(out["mean"], dtype=float)
-    mlo = np.asarray(out["mean_lower"], dtype=float)
-    mhi = np.asarray(out["mean_upper"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
+    mlo = np.asarray(out["posterior_mean_lower"], dtype=float)
+    mhi = np.asarray(out["posterior_mean_upper"], dtype=float)
     olo = np.asarray(out["observation_lower"], dtype=float)
     ohi = np.asarray(out["observation_upper"], dtype=float)
 
@@ -183,7 +183,7 @@ def test_scan_confidence_interval_unchanged_when_observation_requested() -> None
         observation_interval=True,
         return_type="dict",
     )
-    for key in ("mean", "mean_lower", "mean_upper"):
+    for key in ("posterior_mean", "posterior_mean_lower", "posterior_mean_upper"):
         np.testing.assert_allclose(
             np.asarray(both[key], dtype=float),
             np.asarray(base[key], dtype=float),

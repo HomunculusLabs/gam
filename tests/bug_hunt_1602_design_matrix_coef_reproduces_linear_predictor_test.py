@@ -70,7 +70,7 @@ def _coef(model) -> np.ndarray:
 
 def _engine_eta(model, df: pd.DataFrame) -> np.ndarray:
     out = model.predict(df, interval=0.95, return_type="dict")
-    return np.asarray(out["linear_predictor"], dtype=float)
+    return np.asarray(out["linear_predictor_plugin"], dtype=float)
 
 
 CASES = [

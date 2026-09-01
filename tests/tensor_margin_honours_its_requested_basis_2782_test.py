@@ -56,7 +56,9 @@ def _signature(formula: str) -> tuple[float, float, tuple[float, ...]]:
         "x": np.linspace(0.05, 0.95, 11),
         "z": np.full(11, 0.5),
     }
-    predictions = np.asarray(model.predict(grid, return_type="dict")["mean"], dtype=float)
+    predictions = np.asarray(
+        model.predict(grid, return_type="dict")["posterior_mean"], dtype=float
+    )
     return float(summary.deviance), float(summary.edf_total), tuple(predictions.tolist())
 
 
@@ -65,7 +67,9 @@ def _curvature_along_x(formula: str, n: int = 401) -> Any:
     model = _fit(formula)
     x = np.linspace(0.02, 0.98, n)
     frame = {"x": x, "z": np.full(n, 0.5)}
-    f = np.asarray(model.predict(frame, return_type="dict")["mean"], dtype=float)
+    f = np.asarray(
+        model.predict(frame, return_type="dict")["posterior_mean"], dtype=float
+    )
     return np.abs(np.diff(f, n=2))
 
 

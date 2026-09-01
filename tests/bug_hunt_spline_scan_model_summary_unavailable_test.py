@@ -171,9 +171,9 @@ def test_scan_predict_point_and_interval_still_work():
     # smoothing parameter, so the interval must be requested as conditional —
     # the (default) smoothing-corrected request is an honest typed refusal.
     out = model.predict(df, interval=0.9, covariance_mode="conditional")
-    mean = np.asarray(out["mean"])
-    lower = np.asarray(out["mean_lower"])
-    upper = np.asarray(out["mean_upper"])
+    mean = np.asarray(out["posterior_mean"])
+    lower = np.asarray(out["posterior_mean_lower"])
+    upper = np.asarray(out["posterior_mean_upper"])
     assert np.all(np.isfinite(mean))
     assert np.all(lower <= mean + 1e-9)
     assert np.all(mean <= upper + 1e-9)
@@ -214,7 +214,7 @@ def test_scan_predictions_intervals_and_summary_replay_exactly_after_save_load(t
         observation_interval=True,
         return_type="dict",
     )
-    for key in ("linear_predictor", "mean"):
+    for key in ("linear_predictor_plugin", "mean_plugin", "posterior_mean"):
         np.testing.assert_array_equal(point_before[key], bands_before[key])
 
     path = tmp_path / "scan_model.gam"
@@ -241,11 +241,12 @@ def test_scan_predictions_intervals_and_summary_replay_exactly_after_save_load(t
         np.testing.assert_array_equal(point_after[key], point_before[key])
 
     expected_band_columns = {
-        "linear_predictor",
-        "mean",
-        "std_error",
-        "mean_lower",
-        "mean_upper",
+        "linear_predictor_plugin",
+        "mean_plugin",
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
         "observation_lower",
         "observation_upper",
         # Result-owned provenance tag (#2296): interval dicts name the exact

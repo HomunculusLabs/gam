@@ -22,7 +22,7 @@ model.predict(
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `data` | required | Table-like input matching the training schema. |
-| `interval` | `None` | Single uncertainty knob. `None` returns point predictions only; a float in `(0, 1)` (e.g. `0.95`) requests the full uncertainty decomposition at that pointwise coverage. `"conformal"` requests exact jackknife+ intervals for eligible Gaussian-identity fits; `"full_conformal"` requests the exact full-conformal set. On standard GLMs / location-scale this populates `std_error`, `mean_lower`, `mean_upper`. On supported single-event survival modes it populates `survival_se` and `eta_se`. On competing-risks survival it populates SE/lower/upper arrays for every cause-specific hazard, survival, cumulative hazard, CIF, overall survival, and eta surface. |
+| `interval` | `None` | Single uncertainty knob. `None` returns point predictions only; a float in `(0, 1)` (e.g. `0.95`) requests the full uncertainty decomposition at that pointwise coverage. `"conformal"` requests exact jackknife+ intervals for eligible Gaussian-identity fits; `"full_conformal"` requests the exact full-conformal set. On standard GLMs this populates `posterior_mean_standard_error`, `posterior_mean_lower`, and `posterior_mean_upper`; specialised location-scale schemas retain their class-specific uncertainty names. On supported single-event survival modes it populates `survival_se` and `eta_se`. On competing-risks survival it populates SE/lower/upper arrays for every cause-specific hazard, survival, cumulative hazard, CIF, overall survival, and eta surface. |
 | `conformal_level` | `0.9` | Marginal coverage for `interval="conformal"` or `"full_conformal"`. Ignored for numeric Wald intervals. |
 | `covariance_mode` | `None` | Python accepts `"conditional"` or `"smoothing"` for interval covariance. `None` uses the covariance the fit *publishes* — the definition `summary()` prices its standard errors from: smoothing-corrected whenever the fit carries that matrix, otherwise conditional (a fit certified at an infinite-smoothing rail, for example) — and the result names the resolved definition in `covariance_source`. Naming a mode is a requirement: `"smoothing"` errors when the fit cannot supply the corrected matrix. Competing-risks predictions expose the resolved source as `covariance_source`; current cause-specific fits provide the full joint conditional covariance, so callers must request `"conditional"` until the fitter produces a smoothing correction. The CLI uses the equivalent `--covariance-mode conditional|corrected` names. |
 | `observation_interval` | `False` | When `True` and `interval` is numeric, adds response-scale prediction interval columns for families with an observation variance. |
@@ -31,11 +31,10 @@ model.predict(
 
 When the table target is `"dict"` (either explicitly or because no input /
 training table kind determines a richer container), the returned object is a
-`PredictionResult`: it is still a normal mapping, so `pred["mean"]` works, and
-it also exposes prediction columns as attributes such as `pred.mean`,
-`pred.std_error`, `pred.mean_lower`, and `pred.mean_upper`. For convenience,
-`pred.lower`, `pred.upper`, and `pred.se_mean` alias the interval columns
-`mean_lower`, `mean_upper`, and `std_error`.
+`PredictionResult`: it is still a normal mapping, so
+`pred["posterior_mean"]` works for a standard model, and it exposes prediction
+columns directly as attributes such as `pred.posterior_mean`,
+`pred.posterior_mean_standard_error`, and `pred.posterior_mean_lower`.
 For model-based intervals, a dict-shaped result also carries the scalar
 `covariance_source` provenance field (`"conditional"` or
 `"smoothing-corrected"`); pandas results expose the same value in
@@ -45,28 +44,24 @@ For model-based intervals, a dict-shaped result also carries the scalar
 
 | Model class | Default return | Columns / fields |
 | --- | --- | --- |
-| Gaussian, binomial, Poisson, negative-binomial, Gamma, Beta, Tweedie | 1-D `numpy.ndarray` | Response-scale point predictions. Table form has `linear_predictor`, `mean`; adds `std_error`, `mean_lower`, `mean_upper` when `interval` is set. |
+| Gaussian, binomial, Poisson, negative-binomial, Gamma, Beta, Tweedie | 1-D `numpy.ndarray` | Response-scale posterior means. Table form has `linear_predictor_plugin`, `mean_plugin`, and `posterior_mean`; adds `posterior_mean_standard_error`, `posterior_mean_lower`, and `posterior_mean_upper` when `interval` is set. |
 | Gaussian / binomial / dispersion location-scale | 1-D `numpy.ndarray` | Response-scale point predictions. Table form has `linear_predictor`, `mean`, `noise_scale`; adds `std_error`, `mean_lower`, `mean_upper` when `interval` is set. |
 | Transformation-normal | 1-D `numpy.ndarray` | Per-row response-scale conditional mean `E[Y|x]` (issue #1612). |
 | Bernoulli marginal-slope | 1-D `numpy.ndarray` | Per-row probabilities clipped to `[0, 1]`. Table form has `mean`; with `interval=` it also includes `linear_predictor`, `std_error`, `mean_lower`, and `mean_upper`. |
 | Survival (any likelihood mode) | `SurvivalPrediction` | Per-row hazard / survival evaluators. |
 | Competing-risks survival | `CompetingRisksPrediction` | Endpoint-stacked hazard, survival, CIF, and overall survival arrays. |
 
-### `linear_predictor` and `mean` are two estimands
+### Standard prediction estimands are explicit
 
-`linear_predictor` is the plug-in linear predictor `η̂ = Xβ̂` (it reproduces
-`design_matrix(data) @ summary().coefficients` exactly). `mean` is the
-**posterior mean of the response**, `E[g⁻¹(η)]` integrated over the
-conditional posterior `η ~ N(η̂, Var(η̂))` — the default SPEC mandates for
-every point prediction (never the plug-in mode). For a curved inverse link
-the two are related by Jensen's inequality rather than by `g⁻¹`: `mean`
-differs from `g⁻¹(linear_predictor)` by an `O(Var(η̂)) = O(1/n)` term whose
-sign follows the curvature of `g⁻¹` — positive for `exp` (Poisson, Gamma),
-zero at `p = 0.5` and negative above it for the logit. For the identity link
-the two coincide exactly. The gap is largest for small `n` and far from the
-data (up to tens of percent relative at `n = 100` in the tails), which is the
-posterior-mean estimate doing its job, not a discrepancy to reconcile; a
-caller who wants the plug-in transform applies `g⁻¹` to `linear_predictor`.
+`linear_predictor_plugin` is `η̂ = Xβ̂` (and reproduces
+`design_matrix(data) @ summary().coefficients` exactly).
+`mean_plugin = g⁻¹(linear_predictor_plugin)` is its coherent response-scale
+pair. `posterior_mean = E[g⁻¹(η) | data]` is the distinct, SPEC-mandated
+default point prediction. For a curved inverse link, Jensen's inequality means
+`posterior_mean` generally differs from `mean_plugin` by an
+`O(Var(η̂)) = O(1/n)` term; for the identity link all three columns coincide.
+The names expose that distinction directly rather than placing two estimands
+under a generic `linear_predictor` / `mean` pair (#2785).
 
 For all point-payload classes, passing `return_type=`, `id_column=`, or
 numeric `interval=` switches output to a table. Transformation-normal
@@ -78,12 +73,13 @@ first.
 
 ```python
 preds = model.predict(test_df, interval=0.95)
-# columns: linear_predictor, mean, std_error, mean_lower, mean_upper
+# columns: linear_predictor_plugin, mean_plugin, posterior_mean,
+#          posterior_mean_standard_error, posterior_mean_lower, posterior_mean_upper
 
 pred_dict = model.predict(test_df, interval=0.95, return_type="dict")
-mu = pred_dict["mean"]       # mapping access
-mu_attr = pred_dict.mean     # same column on PredictionResult output
-lo = pred_dict.mean_lower    # also available as pred_dict.lower
+mu = pred_dict["posterior_mean"]       # mapping access
+mu_attr = pred_dict.posterior_mean     # same column on PredictionResult output
+lo = pred_dict.posterior_mean_lower
 ```
 
 Intervals are computed from the asymptotic covariance of the fitted
@@ -133,7 +129,8 @@ full = model.predict(test_df, interval="full_conformal", conformal_level=0.95)
 ## Split-conformal intervals
 
 `Model.predict_conformal(...)` runs the standard predictor on `data`, then
-replaces the response-scale `mean_lower` / `mean_upper` columns with the
+replaces the response-scale `posterior_mean_lower` /
+`posterior_mean_upper` columns with the
 split-conformal interval `mu_hat(x) ± q_hat · s(x)` calibrated from a
 held-out labeled `calibration` fold. The interval carries finite-sample
 marginal coverage `≥ conformal_level` regardless of model misspecification,
@@ -146,7 +143,8 @@ preds = model.predict_conformal(
     calibration=cal_df,        # held-out fold; MUST include the response column
     conformal_level=0.9,
 )
-# columns: linear_predictor, mean, std_error, mean_lower, mean_upper
+# columns: linear_predictor_plugin, mean_plugin, posterior_mean,
+#          posterior_mean_standard_error, posterior_mean_lower, posterior_mean_upper
 ```
 
 `calibration` must contain the response column in addition to the predictors
@@ -162,7 +160,7 @@ For models fitted via `gamfit.fit_array(...)` (positional columns
 
 ```python
 y = model.predict_array(X)                       # 1-D ndarray of point predictions
-table = model.predict_array(X, interval=0.95)    # adds std_error / mean_lower / mean_upper
+table = model.predict_array(X, interval=0.95)    # adds posterior-mean uncertainty columns
 ```
 
 `predict_array` accepts `interval`, `covariance_mode`, and
@@ -183,7 +181,8 @@ preds = model.predict(
     id_column="patient_id",
     return_type="dict",
 )
-# preds = {"patient_id": ["P001", "P002"], "linear_predictor": [...], "mean": [...]}
+# preds = {"patient_id": ["P001", "P002"], "linear_predictor_plugin": [...],
+#          "mean_plugin": [...], "posterior_mean": [...]}
 ```
 
 The id column is not used by the model. Values are copied through after

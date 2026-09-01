@@ -1040,15 +1040,32 @@ pub(crate) fn run_predict_unified(
         &request,
     )
     .map_err(|e| format!("prediction failed: {e}"))?;
-    let (eta, mean, se_opt, mean_lo, mean_hi, point_covariance, uncertainty_covariance) = (
-        columns.eta,
-        columns.mean,
-        columns.mean_standard_error,
-        columns.mean_lower,
-        columns.mean_upper,
+    let (
+        linear_predictor_plugin,
+        mean_plugin,
+        posterior_mean,
+        posterior_mean_standard_error,
+        posterior_mean_lower,
+        posterior_mean_upper,
+        point_covariance,
+        uncertainty_covariance,
+    ) = (
+        columns.linear_predictor_plugin,
+        columns.mean_plugin,
+        columns.posterior_mean,
+        columns.posterior_mean_standard_error,
+        columns.posterior_mean_lower,
+        columns.posterior_mean_upper,
         columns.point_covariance_source,
         columns.uncertainty_covariance_source,
     );
+    let specialised_point = match (args.mode, posterior_mean.as_ref()) {
+        (PredictModeArg::PosteriorMean, Some(posterior_mean)) => posterior_mean,
+        (PredictModeArg::PosteriorMean, None) => {
+            return Err("posterior-mean prediction did not produce a posterior mean".to_string());
+        }
+        (PredictModeArg::Map, _) => &mean_plugin,
+    };
 
     // --- Write CSV output ---
 
@@ -1060,12 +1077,12 @@ pub(crate) fn run_predict_unified(
             })?;
             write_gaussian_location_scale_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
                 sigma.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
         PredictModelClass::BernoulliMarginalSlope => {
@@ -1091,21 +1108,32 @@ pub(crate) fn run_predict_unified(
             // need.
             write_survival_binary_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
+            )?;
+        }
+        PredictModelClass::Standard => {
+            write_standard_prediction_csv(
+                &args.out,
+                linear_predictor_plugin.view(),
+                mean_plugin.view(),
+                posterior_mean.as_ref().map(|values| values.view()),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
         _ => {
             write_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
     }
@@ -1113,7 +1141,7 @@ pub(crate) fn run_predict_unified(
     cli_out!(
         "wrote predictions: {} (rows={}){}",
         args.out.display(),
-        mean.len(),
+        specialised_point.len(),
         covariance_provenance_note(point_covariance, uncertainty_covariance)
     );
     Ok(())
@@ -1218,10 +1246,11 @@ pub(crate) fn run_predict_spline_scan(
     } else {
         (None, None, None)
     };
-    write_prediction_csv(
+    write_standard_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
+        Some(mean.view()),
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),
@@ -1297,10 +1326,11 @@ pub(crate) fn run_predict_residual_cascade(
     } else {
         (None, None, None)
     };
-    write_prediction_csv(
+    write_standard_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
+        Some(mean.view()),
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),

@@ -57,7 +57,7 @@ def _predict_eta(model: "gamfit.Model", rows: list[dict[str, Any]]) -> np.ndarra
     # fitted means for standard GAMs and would not expose the linear
     # predictor. (Issue #310 renamed the column from ``eta``.)
     out = model.predict(rows, return_type="dict")
-    return np.asarray(out["linear_predictor"], dtype=float)
+    return np.asarray(out["linear_predictor_plugin"], dtype=float)
 
 
 # ---------------------------------------------------------------------------

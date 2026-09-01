@@ -7281,16 +7281,19 @@ fn predict_array_impl(
     let options = parse_predict_options(options_json)?;
     let (columns, _provenance) = predict_columns(&model, dataset, &options)?;
     // Parity with `predict()` (#1537): with no interval requested, return the
-    // single response-scale `mean` column as an `(n, 1)` array — the Python
+    // single response-scale point column as an `(n, 1)` array — the Python
     // wrapper ravels it to the documented 1-D response-scale prediction vector.
-    // Returning the full alphabetical `[linear_predictor, mean]` matrix here
-    // both breaks shape parity and silently hands a naive `[:, 0]` / `.ravel()`
-    // caller the LINK-scale linear predictor on non-identity links. With an
-    // interval the full column matrix is retained for the array caller.
+    // Standard models name that estimand `posterior_mean` explicitly (#2785);
+    // specialised model classes retain their class-specific point column.
     if options.interval.is_none() {
+        let point_column = if matches!(model_class, PredictModelClass::Standard) {
+            "posterior_mean"
+        } else {
+            "mean"
+        };
         let mean = columns
-            .get("mean")
-            .ok_or_else(|| "predict_array: response `mean` column missing".to_string())?;
+            .get(point_column)
+            .ok_or_else(|| format!("predict_array: response `{point_column}` column missing"))?;
         return Array2::from_shape_vec((mean.len(), 1), mean.clone())
             .map_err(|err| format!("predict_array: failed to shape mean column: {err}"));
     }
@@ -7388,8 +7391,9 @@ fn predict_columns(
             se.push(v.max(0.0).sqrt());
         }
         let mut columns = BTreeMap::<String, Vec<f64>>::new();
-        columns.insert("linear_predictor".to_string(), eta.clone());
-        columns.insert("mean".to_string(), eta.clone());
+        columns.insert("linear_predictor_plugin".to_string(), eta.clone());
+        columns.insert("mean_plugin".to_string(), eta.clone());
+        columns.insert("posterior_mean".to_string(), eta.clone());
         if let Some(confidence_level) = options.interval {
             let z = gam::inference::probability::standard_normal_quantile(
                 0.5 + confidence_level * 0.5,
@@ -7413,9 +7417,9 @@ fn predict_columns(
                 columns.insert("observation_lower".to_string(), obs_lower);
                 columns.insert("observation_upper".to_string(), obs_upper);
             }
-            columns.insert("std_error".to_string(), se);
-            columns.insert("mean_lower".to_string(), lower);
-            columns.insert("mean_upper".to_string(), upper);
+            columns.insert("posterior_mean_standard_error".to_string(), se);
+            columns.insert("posterior_mean_lower".to_string(), lower);
+            columns.insert("posterior_mean_upper".to_string(), upper);
         }
         return Ok((
             columns,
@@ -7531,17 +7535,50 @@ fn predict_columns(
         point: resolved.point_covariance_source,
         uncertainty: resolved.uncertainty_covariance_source,
     };
-    // User-facing column names follow issue #310: the engine's internal `eta`
-    // is renamed to `linear_predictor` at the FFI boundary, and the
-    // response-scale SE is published as `std_error`.
-    columns.insert("linear_predictor".to_string(), resolved.eta.to_vec());
-    columns.insert("mean".to_string(), resolved.mean.to_vec());
-    if let Some(standard_error) = resolved.mean_standard_error {
-        columns.insert("std_error".to_string(), standard_error.to_vec());
-    }
-    if let (Some(lower), Some(upper)) = (resolved.mean_lower, resolved.mean_upper) {
-        columns.insert("mean_lower".to_string(), lower.to_vec());
-        columns.insert("mean_upper".to_string(), upper.to_vec());
+    let posterior_mean = resolved.posterior_mean.ok_or_else(|| {
+        "default prediction did not produce the required posterior mean".to_string()
+    })?;
+    if matches!(model_class, PredictModelClass::Standard) {
+        // #2785: publish the complete plug-in pair and the posterior estimand
+        // under names that make their different meanings explicit. In
+        // particular, `mean_plugin` is exactly the inverse link of
+        // `linear_predictor_plugin`; `posterior_mean` remains the SPEC-mandated
+        // default point and is not generally their inverse-link image.
+        columns.insert(
+            "linear_predictor_plugin".to_string(),
+            resolved.linear_predictor_plugin.to_vec(),
+        );
+        columns.insert("mean_plugin".to_string(), resolved.mean_plugin.to_vec());
+        columns.insert("posterior_mean".to_string(), posterior_mean.to_vec());
+        if let Some(standard_error) = resolved.posterior_mean_standard_error {
+            columns.insert(
+                "posterior_mean_standard_error".to_string(),
+                standard_error.to_vec(),
+            );
+        }
+        if let (Some(lower), Some(upper)) =
+            (resolved.posterior_mean_lower, resolved.posterior_mean_upper)
+        {
+            columns.insert("posterior_mean_lower".to_string(), lower.to_vec());
+            columns.insert("posterior_mean_upper".to_string(), upper.to_vec());
+        }
+    } else {
+        // Specialised predictors retain their class-specific external schema;
+        // only the shared Rust contract changed so they can consume it.
+        columns.insert(
+            "linear_predictor".to_string(),
+            resolved.linear_predictor_plugin.to_vec(),
+        );
+        columns.insert("mean".to_string(), posterior_mean.to_vec());
+        if let Some(standard_error) = resolved.posterior_mean_standard_error {
+            columns.insert("std_error".to_string(), standard_error.to_vec());
+        }
+        if let (Some(lower), Some(upper)) =
+            (resolved.posterior_mean_lower, resolved.posterior_mean_upper)
+        {
+            columns.insert("mean_lower".to_string(), lower.to_vec());
+            columns.insert("mean_upper".to_string(), upper.to_vec());
+        }
     }
     // Observation (prediction) interval: present only when the request was made
     // AND the family exposes a conditional response variance. Separate columns
@@ -7695,18 +7732,49 @@ fn predict_columns_conformal(
     )
     .map_err(|err| format!("conformal prediction failed: {err}"))?;
 
+    // The conformal interval changes only the band. Its point remains the same
+    // posterior response mean as ordinary prediction (#398, SPEC), while the
+    // complete plug-in pair is exposed alongside it under explicit names.
+    let point = gam_predict::interval_policy::resolve_prediction_request(
+        predictor.as_ref(),
+        &predict_input,
+        &fit,
+        model.prediction_uses_posterior_mean(),
+        &gam_predict::interval_policy::PredictionRequest {
+            interval: None,
+            covariance_mode,
+            observation_interval: false,
+            observation_prior_weights: None,
+            point_estimate:
+                gam_predict::interval_policy::PointEstimate::PosteriorMeanWhenCurved,
+        },
+    )
+    .map_err(|err| format!("conformal point prediction failed: {err}"))?;
+    let posterior_mean = point.posterior_mean.ok_or_else(|| {
+        "conformal prediction did not produce the required posterior mean".to_string()
+    })?;
+
     let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    columns.insert("linear_predictor".to_string(), prediction.eta.to_vec());
-    columns.insert("mean".to_string(), prediction.mean.to_vec());
+    columns.insert(
+        "linear_predictor_plugin".to_string(),
+        point.linear_predictor_plugin.to_vec(),
+    );
+    columns.insert("mean_plugin".to_string(), point.mean_plugin.to_vec());
+    columns.insert("posterior_mean".to_string(), posterior_mean.to_vec());
     // Response-scale SE beside the response-scale mean/band (#1536): emit
     // `mean_standard_error`, not the link-scale `eta_standard_error`.
     columns.insert(
-        "std_error".to_string(),
+        "posterior_mean_standard_error".to_string(),
         prediction.mean_standard_error.to_vec(),
     );
-    // mean_lower / mean_upper now carry the distribution-free conformal bounds.
-    columns.insert("mean_lower".to_string(), prediction.mean_lower.to_vec());
-    columns.insert("mean_upper".to_string(), prediction.mean_upper.to_vec());
+    columns.insert(
+        "posterior_mean_lower".to_string(),
+        prediction.mean_lower.to_vec(),
+    );
+    columns.insert(
+        "posterior_mean_upper".to_string(),
+        prediction.mean_upper.to_vec(),
+    );
     if let (Some(obs_lower), Some(obs_upper)) =
         (prediction.observation_lower, prediction.observation_upper)
     {
@@ -7861,11 +7929,12 @@ fn predict_encoded_table_jackknife_plus_impl(
         upper_vec.push(iv.hi);
     }
     let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    // Identity link: linear_predictor == mean.
-    columns.insert("linear_predictor".to_string(), mean_vec.clone());
-    columns.insert("mean".to_string(), mean_vec);
-    columns.insert("mean_lower".to_string(), lower_vec);
-    columns.insert("mean_upper".to_string(), upper_vec);
+    // Identity link: the plug-in response and posterior mean coincide exactly.
+    columns.insert("linear_predictor_plugin".to_string(), mean_vec.clone());
+    columns.insert("mean_plugin".to_string(), mean_vec.clone());
+    columns.insert("posterior_mean".to_string(), mean_vec);
+    columns.insert("posterior_mean_lower".to_string(), lower_vec);
+    columns.insert("posterior_mean_upper".to_string(), upper_vec);
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),
@@ -7968,6 +8037,14 @@ fn predict_encoded_table_full_conformal_impl(
     // ≥ 1 − 2α guarantee). At frozen λ̂ that theorem is conditional on the
     // per-row frozen-ρ certificate — see the function doc.
     let alpha = 1.0 - conformal_level;
+    let fit = fit_result_from_saved_model_for_prediction(&model)?;
+    if fit.beta.len() != x_test.ncols() {
+        return Err(format!(
+            "full conformal: fit has {} coefficients but test design has {} columns",
+            fit.beta.len(),
+            x_test.ncols()
+        ));
+    }
     let mut mean_vec = Vec::with_capacity(n_test);
     let mut lower_vec = Vec::with_capacity(n_test);
     let mut upper_vec = Vec::with_capacity(n_test);
@@ -7977,25 +8054,20 @@ fn predict_encoded_table_full_conformal_impl(
         let iv = substrate
             .interval(&x_star, alpha)
             .map_err(|e| format!("full conformal at row {i}: {e}"))?;
-        // Report the envelope centre as the point summary when finite; an
-        // unbounded honest envelope reports its finite endpoint.
-        let point = if iv.lo.is_finite() && iv.hi.is_finite() {
-            0.5 * (iv.lo + iv.hi)
-        } else if iv.lo.is_finite() {
-            iv.lo
-        } else {
-            iv.hi
-        };
-        mean_vec.push(point);
+        // The conformal set changes only the interval. The point is the fitted
+        // Gaussian-identity posterior mean, which equals the plug-in X beta;
+        // using the envelope centre made the point depend on interval shape.
+        mean_vec.push(x_star.dot(&fit.beta));
         lower_vec.push(iv.lo);
         upper_vec.push(iv.hi);
         certified_vec.push(if iv.frozen_rho_certified { 1.0 } else { 0.0 });
     }
     let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    columns.insert("linear_predictor".to_string(), mean_vec.clone());
-    columns.insert("mean".to_string(), mean_vec);
-    columns.insert("mean_lower".to_string(), lower_vec);
-    columns.insert("mean_upper".to_string(), upper_vec);
+    columns.insert("linear_predictor_plugin".to_string(), mean_vec.clone());
+    columns.insert("mean_plugin".to_string(), mean_vec.clone());
+    columns.insert("posterior_mean".to_string(), mean_vec);
+    columns.insert("posterior_mean_lower".to_string(), lower_vec);
+    columns.insert("posterior_mean_upper".to_string(), upper_vec);
     columns.insert("frozen_rho_certified".to_string(), certified_vec);
     serde_json::to_string(&PredictionPayload {
         columns,
@@ -8051,8 +8123,9 @@ fn predict_table_full_conformal(
 /// targets ≈`conformal_level` marginal coverage (α = 1 − level, #1546); the
 /// distribution-free finite-sample guarantee at that setting is
 /// ≥ `2·conformal_level − 1` (Barber et al. 2021, coverage ≥ 1 − 2α).
-/// Returns the same column JSON as `predict_table` (with `linear_predictor`,
-/// `mean`, `mean_lower`, `mean_upper`) so the Python shaper is unchanged.
+/// Returns the same explicit standard-prediction columns as `predict_table`
+/// (`linear_predictor_plugin`, `mean_plugin`, `posterior_mean`, and posterior
+/// interval bounds) so the Python shaper is unchanged.
 ///
 /// Raises a descriptive Python exception for ineligible models (non-Gaussian,
 /// weighted, scan-routed, …) directing the user to `predict_conformal`.
