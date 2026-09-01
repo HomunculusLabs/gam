@@ -267,10 +267,6 @@ include!("design_assembly_constraint_tests.rs");
 // joint-hyper FD deps resolve post-#1521 carve. Self-contained `#[cfg(test)] mod`.
 include!("adaptive_bounded_duchon_tests.rs");
 
-// #2425 Half-A instrumentation. Measurement-only probes (they print numbers and
-// assert only that the measurement completed), kept in-tree so the next lane
-// does not have to rebuild this crate to re-derive them. Self-contained
-// `#[cfg(test)] mod`, so it adds nothing to the non-test build.
 // #2458: FD gates for the constant-curvature κ profile derivative jet. The
 // second derivative feeds a stationarity CERTIFICATE, so a wrong one is silent
 // — it moves the bound rather than the fit. Self-contained `#[cfg(test)] mod`.
@@ -282,10 +278,3 @@ include!("constant_curvature_kappa_jet_fd_tests.rs");
 // heuristic's — the cell the acceptance fixture happens to use.
 include!("constant_curvature_kappa_box_probe_tests.rs");
 
-include!("zz_measure_2425_kappa_tests.rs");
-
-// #2450 criterion-identity instrumentation. A PAIRED A/B over `rho_prior` at
-// one SHA: same data, same seed, same spec, only the prior varies, so the
-// reported difference is the criterion own bias. Measurement-only, same
-// contract as the probe above. Self-contained `#[cfg(test)] mod`.
-include!("zz_measure_2450_rho_prior_criterion_tests.rs");

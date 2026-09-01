@@ -3190,18 +3190,6 @@ mod tests {
     }
 }
 
-    crate::probability::normal_logcdf_derivatives(x)
-}
-
-    let r = 1.0 / x.exp_m1();
-    [
-        crate::probability::log1mexp_positive(x),
-        r,
-        -r * (1.0 + r),
-        r * (1.0 + r) * (1.0 + 2.0 * r),
-        -r * (1.0 + r) * (1.0 + 6.0 * r + 6.0 * r * r),
-    ]
-}
 #[cfg(test)]
 mod derivative_stack_tests {
     use super::*;

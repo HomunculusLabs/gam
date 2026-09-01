@@ -967,10 +967,6 @@ pub struct PirlsRowBackend {
 struct PirlsRowBackendLinux {
     ctx: Arc<CudaContext>,
     modules: Mutex<std::collections::HashMap<ModuleKey, Arc<CudaModule>>>,
-    /// Stage 6: separate cache for JIT-compiled custom-family modules
-    /// keyed by `(spec_id, curvature)`. Distinct JIT specs in the same
-    /// process get distinct cached modules.
-    jit_modules: Mutex<std::collections::HashMap<JitKey, Arc<CudaModule>>>,
 }
 
 /// Distinguishes the three kernel modes in the per-process module cache.
@@ -1025,7 +1021,6 @@ impl PirlsRowBackend {
             inner: PirlsRowBackendLinux {
                 ctx: parts.ctx,
                 modules: Mutex::new(std::collections::HashMap::new()),
-                jit_modules: Mutex::new(std::collections::HashMap::new()),
             },
         })
     }
@@ -1124,12 +1119,6 @@ impl PirlsRowBackend {
 
 /// Stage 6 cache key for JIT-compiled family modules.
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct JitKey {
-    spec_id: u64,
-    curvature: CurvatureMode,
-}
-
 /// Stage 6 custom-family JIT specification.
 ///
 /// Two levels per the charter:

@@ -26,6 +26,12 @@ use super::*;
 ///   dphi/dpsi_a         = shape_a + c * phi
 ///   d2phi/(dpsi_a dpsi_b) = shape_ab + c (shape_a + shape_b) + c^2 phi
 /// where `c = 0` for Matérn and `c = delta / d` for hybrid Duchon.
+///
+/// Under a kernel chart (gam#979) — the forward basis shipping `α(ψ)·phi`
+/// rather than `phi` — the operator differentiates the CHARTED kernel: the
+/// share becomes `g_a = c + ∂ln α/∂ψ_a`, the second derivative gains
+/// `∂²ln α/∂ψ_a∂ψ_b · phi`, and every value is multiplied by `α`. See
+/// [`ImplicitDesignPsiDerivative::with_kernel_chart`].
 #[derive(Debug, Clone)]
 pub struct ImplicitDesignPsiDerivative {
     /// Pre-computed kernel values (materialized mode).
@@ -80,6 +86,22 @@ pub struct ImplicitDesignPsiDerivative {
 
     /// Isotropic scaling contribution per raw anisotropic psi axis.
     pub(crate) psi_scale_share: f64,
+
+    /// The kernel chart's amplitude `α` (gam#979). The forward Duchon basis
+    /// ships `α·φ` when the raw kernel underflows in high dimension, so every
+    /// ψ-derivative this operator forms is a derivative of `α(ψ)·φ(ψ)`, not of
+    /// `φ` alone. `1.0` for every non-Duchon kernel and for a Duchon chart
+    /// that is not amplified.
+    pub(crate) chart_scale: f64,
+
+    /// `∂ ln α / ∂ψ_a` per RAW axis (empty ⇒ zero). Enters the first
+    /// derivative through the effective share `g_a = c + L_a`.
+    pub(crate) chart_first: Vec<f64>,
+
+    /// `∂² ln α / ∂ψ_a ∂ψ_b − (∂ ln α/∂ψ_a)(∂ ln α/∂ψ_b)`'s complement, i.e.
+    /// `Λ_ab = ∂² ln α/∂ψ_a∂ψ_b` per RAW axis pair (empty ⇒ zero). Enters the
+    /// second derivative as the extra `Λ_ab·φ` term beside `g_a g_b φ`.
+    pub(crate) chart_second: Array2<f64>,
 
     /// Optional exposed-axis to raw-axis linear combinations.
     /// When present, axis `a` represents Σ_i coeff_i * raw_axis_i.
@@ -805,6 +827,9 @@ impl ImplicitDesignPsiDerivative {
             n_poly,
             n_axes,
             psi_scale_share: 0.0,
+            chart_scale: 1.0,
+            chart_first: Vec::new(),
+            chart_second: Array2::<f64>::zeros((0, 0)),
             axis_combinations: None,
         }
     }
@@ -812,6 +837,86 @@ impl ImplicitDesignPsiDerivative {
     pub(crate) fn with_psi_scale_share(mut self, psi_scale_share: f64) -> Self {
         self.psi_scale_share = psi_scale_share;
         self
+    }
+
+    /// Install the kernel chart this operator differentiates under (gam#979):
+    /// the amplitude `scale` the forward basis multiplies into the kernel
+    /// block, `first[a] = ∂ ln scale/∂ψ_a` and `second[[a, b]] = ∂² ln
+    /// scale/∂ψ_a∂ψ_b` over the RAW axes. With `F̃ = scale·F`:
+    ///
+    /// ```text
+    ///   F̃_a  = scale · (F_a + L_a F)
+    ///   F̃_ab = scale · (F_ab + L_a F_b + L_b F_a + (Λ_ab + L_a L_b) F)
+    /// ```
+    ///
+    /// which the two kernel-value helpers realize as the effective share
+    /// `g_a = c + L_a` and the extra `Λ_ab φ` term.
+    pub(crate) fn with_kernel_chart(
+        mut self,
+        scale: f64,
+        first: Vec<f64>,
+        second: Array2<f64>,
+    ) -> Self {
+        let raw_axes = self.n_axes;
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "kernel chart scale must be a positive finite number, got {scale}"
+        );
+        assert_eq!(
+            first.len(),
+            raw_axes,
+            "kernel chart first log-jet must have one entry per raw axis"
+        );
+        assert_eq!(
+            second.dim(),
+            (raw_axes, raw_axes),
+            "kernel chart second log-jet must be raw-axes square"
+        );
+        self.chart_scale = scale;
+        self.chart_first = first;
+        self.chart_second = second;
+        self
+    }
+
+    /// `g_a = c + L_a` for an EXPOSED axis: the raw scaling-law share plus the
+    /// chart's first log-jet, combined linearly across raw axes when the
+    /// exposed axis is a combination.
+    #[inline]
+    pub(crate) fn effective_share(&self, axis: usize) -> f64 {
+        let raw_share = |raw: usize| {
+            self.psi_scale_share + self.chart_first.get(raw).copied().unwrap_or(0.0)
+        };
+        match self.axis_combinations.as_ref() {
+            Some(_) => self
+                .transformed_axis_combination(axis)
+                .iter()
+                .map(|(raw, coeff)| coeff * raw_share(*raw))
+                .sum(),
+            None => raw_share(axis),
+        }
+    }
+
+    /// `Λ_ab` for an EXPOSED axis pair (zero without a chart), bilinear across
+    /// raw axes when the exposed axes are combinations.
+    #[inline]
+    pub(crate) fn chart_lambda(&self, axis_a: usize, axis_b: usize) -> f64 {
+        if self.chart_second.is_empty() {
+            return 0.0;
+        }
+        match self.axis_combinations.as_ref() {
+            Some(_) => {
+                let combo_a = self.transformed_axis_combination(axis_a);
+                let combo_b = self.transformed_axis_combination(axis_b);
+                let mut total = 0.0;
+                for (raw_a, coeff_a) in combo_a {
+                    for (raw_b, coeff_b) in combo_b {
+                        total += coeff_a * coeff_b * self.chart_second[[*raw_a, *raw_b]];
+                    }
+                }
+                total
+            }
+            None => self.chart_second[[axis_a, axis_b]],
+        }
     }
 
     /// Construct a streaming operator that recomputes (q, t, s_a) on the fly
@@ -863,6 +968,9 @@ impl ImplicitDesignPsiDerivative {
             n_poly,
             n_axes,
             psi_scale_share,
+            chart_scale: 1.0,
+            chart_first: Vec::new(),
+            chart_second: Array2::<f64>::zeros((0, 0)),
             axis_combinations: None,
         }
     }
@@ -909,6 +1017,9 @@ impl ImplicitDesignPsiDerivative {
             n_poly,
             n_axes: 1,
             psi_scale_share: 0.0,
+            chart_scale: 1.0,
+            chart_first: Vec::new(),
+            chart_second: Array2::<f64>::zeros((0, 0)),
             axis_combinations: None,
         }
     }
@@ -1359,42 +1470,39 @@ impl ImplicitDesignPsiDerivative {
         );
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
                 let raw = self.streaming_accumulate_knot_vector(v, |phi, q, _, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
-                    Self::transformed_first_kernel_value(phi, q, s_combo, combo_sum, c)
+                    Self::first_kernel_value(scale, phi, q, s_combo, g)
                 })?;
                 return Ok(self.project_and_pad(&raw));
             }
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
             let raw = self.accumulate_knot_vector(v, |idx| {
                 let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
-                Self::transformed_first_kernel_value(
-                    self.phi_values[idx],
-                    self.q_values[idx],
-                    s_combo,
-                    combo_sum,
-                    c,
-                )
+                Self::first_kernel_value(scale, self.phi_values[idx], self.q_values[idx], s_combo, g)
             });
             return Ok(self.project_and_pad(&raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
             let raw =
-                self.streaming_accumulate_knot_vector(v, |phi, q, _, sb| q * sb[axis] + c * phi)?;
+                self.streaming_accumulate_knot_vector(v, |phi, q, _, sb| Self::first_kernel_value(scale, phi, q, sb[axis], g))?;
             return Ok(self.project_and_pad(&raw));
         }
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
-        let raw = self.accumulate_knot_vector(v, |idx| qv[idx] * af[[idx, axis]] + c * pv[idx]);
+        let raw = self.accumulate_knot_vector(v, |idx| Self::first_kernel_value(scale, pv[idx], qv[idx], af[[idx, axis]], g));
         Ok(self.project_and_pad(&raw))
     }
 
@@ -1419,20 +1527,21 @@ impl ImplicitDesignPsiDerivative {
         let u_knot = self.unproject(u);
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
                 return self.streaming_forward_mul(&u_knot, |phi, q, _, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
-                    Self::transformed_first_kernel_value(phi, q, s_combo, combo_sum, c)
+                    Self::first_kernel_value(scale, phi, q, s_combo, g)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
             if n >= IMPLICIT_MATVEC_PAR_THRESHOLD {
                 let mut result = Array1::<f64>::zeros(n);
                 let n_chunks = n.div_ceil(IMPLICIT_MATVEC_CHUNK_SIZE);
@@ -1449,13 +1558,7 @@ impl ImplicitDesignPsiDerivative {
                                 let idx = base + j;
                                 let s_combo =
                                     self.transformed_combo_axis_value_materialized(idx, combo);
-                                val += Self::transformed_first_kernel_value(
-                                    self.phi_values[idx],
-                                    self.q_values[idx],
-                                    s_combo,
-                                    combo_sum,
-                                    c,
-                                ) * u_knot[j];
+                                val += Self::first_kernel_value(scale, self.phi_values[idx], self.q_values[idx], s_combo, g) * u_knot[j];
                             }
                             local[i - start] = val;
                         }
@@ -1476,25 +1579,21 @@ impl ImplicitDesignPsiDerivative {
                 for j in 0..k {
                     let idx = base + j;
                     let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
-                    val += Self::transformed_first_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        s_combo,
-                        combo_sum,
-                        c,
-                    ) * u_knot[j];
+                    val += Self::first_kernel_value(scale, self.phi_values[idx], self.q_values[idx], s_combo, g) * u_knot[j];
                 }
                 result[i] = val;
             }
             return Ok(result);
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
-            return self.streaming_forward_mul(&u_knot, |phi, q, _, sb| q * sb[axis] + c * phi);
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            return self.streaming_forward_mul(&u_knot, |phi, q, _, sb| Self::first_kernel_value(scale, phi, q, sb[axis], g));
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
@@ -1513,7 +1612,7 @@ impl ImplicitDesignPsiDerivative {
                         let base = i * k;
                         let mut val = 0.0;
                         for j in 0..k {
-                            val += (qv[base + j] * af[[base + j, axis]] + c * pv[base + j])
+                            val += Self::first_kernel_value(scale, pv[base + j], qv[base + j], af[[base + j, axis]], g)
                                 * u_knot[j];
                         }
                         local[i - start] = val;
@@ -1533,7 +1632,7 @@ impl ImplicitDesignPsiDerivative {
                 let base = i * k;
                 let mut val = 0.0;
                 for j in 0..k {
-                    val += (qv[base + j] * af[[base + j, axis]] + c * pv[base + j]) * u_knot[j];
+                    val += Self::first_kernel_value(scale, pv[base + j], qv[base + j], af[[base + j, axis]], g) * u_knot[j];
                 }
                 result[i] = val;
             }
@@ -1562,55 +1661,50 @@ impl ImplicitDesignPsiDerivative {
         );
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
+                let lam = self.chart_lambda(axis, axis);
                 let raw = self.streaming_accumulate_knot_vector(v, |phi, q, t, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo, combo, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_combo, combo_sum, s_combo, combo_sum, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_combo, s_combo, overlap_s, g, g, lam)
                 })?;
                 return Ok(self.project_and_pad(&raw));
             }
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             let raw = self.accumulate_knot_vector(v, |idx| {
                 let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
                 let overlap_s = self.transformed_combo_overlap_materialized(idx, combo, combo);
-                Self::transformed_second_kernel_value(
-                    self.phi_values[idx],
-                    self.q_values[idx],
-                    self.t_values[idx],
-                    s_combo,
-                    combo_sum,
-                    s_combo,
-                    combo_sum,
-                    overlap_s,
-                    c,
-                )
+                Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_combo, s_combo, overlap_s, g, g, lam)
             });
             return Ok(self.project_and_pad(&raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             let raw = self.streaming_accumulate_knot_vector(v, |phi, q, t, sb| {
                 let s = sb[axis];
-                2.0 * q * s + t * s * s + 2.0 * c * q * s + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
             })?;
             return Ok(self.project_and_pad(&raw));
         }
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
+        let lam = self.chart_lambda(axis, axis);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
         let tv = &self.t_values;
         let raw = self.accumulate_knot_vector(v, |idx| {
             let s = af[[idx, axis]];
-            2.0 * qv[idx] * s + tv[idx] * s * s + 2.0 * c * qv[idx] * s + c * c * pv[idx]
+            Self::second_kernel_value(scale, pv[idx], qv[idx], tv[idx], s, s, s, g, g, lam)
         });
         Ok(self.project_and_pad(&raw))
     }
@@ -1644,10 +1738,11 @@ impl ImplicitDesignPsiDerivative {
         if self.axis_combinations.is_some() {
             let combo_d = self.transformed_axis_combination(axis_d);
             let combo_e = self.transformed_axis_combination(axis_e);
-            let sum_d = Self::transformed_combo_sum(combo_d);
-            let sum_e = Self::transformed_combo_sum(combo_e);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g_d = self.effective_share(axis_d);
+                let g_e = self.effective_share(axis_e);
+                let lam = self.chart_lambda(axis_d, axis_e);
                 let raw = self.streaming_accumulate_knot_vector(v, |phi, q, t, sb| {
                     let s_d = combo_d
                         .iter()
@@ -1658,47 +1753,42 @@ impl ImplicitDesignPsiDerivative {
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo_d, combo_e, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_d, sum_d, s_e, sum_e, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_d, s_e, overlap_s, g_d, g_e, lam)
                 })?;
                 return Ok(self.project_and_pad(&raw));
             }
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             let raw = self.accumulate_knot_vector(v, |idx| {
                 let s_d = self.transformed_combo_axis_value_materialized(idx, combo_d);
                 let s_e = self.transformed_combo_axis_value_materialized(idx, combo_e);
                 let overlap_s = self.transformed_combo_overlap_materialized(idx, combo_d, combo_e);
-                Self::transformed_second_kernel_value(
-                    self.phi_values[idx],
-                    self.q_values[idx],
-                    self.t_values[idx],
-                    s_d,
-                    sum_d,
-                    s_e,
-                    sum_e,
-                    overlap_s,
-                    c,
-                )
+                Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_d, s_e, overlap_s, g_d, g_e, lam)
             });
             return Ok(self.project_and_pad(&raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             let raw = self.streaming_accumulate_knot_vector(v, |phi, q, t, sb| {
-                t * sb[axis_d] * sb[axis_e] + c * q * (sb[axis_d] + sb[axis_e]) + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, sb[axis_d], sb[axis_e], 0.0, g_d, g_e, lam)
             })?;
             return Ok(self.project_and_pad(&raw));
         }
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g_d = self.effective_share(axis_d);
+        let g_e = self.effective_share(axis_e);
+        let lam = self.chart_lambda(axis_d, axis_e);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
         let tv = &self.t_values;
         let raw = self.accumulate_knot_vector(v, |idx| {
-            tv[idx] * af[[idx, axis_d]] * af[[idx, axis_e]]
-                + c * qv[idx] * (af[[idx, axis_d]] + af[[idx, axis_e]])
-                + c * c * pv[idx]
+            Self::second_kernel_value(scale, pv[idx], qv[idx], tv[idx], af[[idx, axis_d]], af[[idx, axis_e]], 0.0, g_d, g_e, lam)
         });
         Ok(self.project_and_pad(&raw))
     }
@@ -1722,23 +1812,24 @@ impl ImplicitDesignPsiDerivative {
         let u_knot = self.unproject(u);
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
+                let lam = self.chart_lambda(axis, axis);
                 return self.streaming_forward_mul(&u_knot, |phi, q, t, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo, combo, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_combo, combo_sum, s_combo, combo_sum, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_combo, s_combo, overlap_s, g, g, lam)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             let compute_row = |i: usize| -> f64 {
                 let base = i * k;
                 let mut val = 0.0;
@@ -1746,17 +1837,7 @@ impl ImplicitDesignPsiDerivative {
                     let idx = base + j;
                     let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
                     let overlap_s = self.transformed_combo_overlap_materialized(idx, combo, combo);
-                    val += Self::transformed_second_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        self.t_values[idx],
-                        s_combo,
-                        combo_sum,
-                        s_combo,
-                        combo_sum,
-                        overlap_s,
-                        c,
-                    ) * u_knot[j];
+                    val += Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_combo, s_combo, overlap_s, g, g, lam) * u_knot[j];
                 }
                 val
             };
@@ -1782,15 +1863,19 @@ impl ImplicitDesignPsiDerivative {
             return Ok(Array1::from_vec((0..n).map(compute_row).collect()));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             return self.streaming_forward_mul(&u_knot, |phi, q, t, sb| {
                 let s = sb[axis];
-                2.0 * q * s + t * s * s + 2.0 * c * q * s + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
             });
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
+        let lam = self.chart_lambda(axis, axis);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
@@ -1800,10 +1885,7 @@ impl ImplicitDesignPsiDerivative {
             let mut val = 0.0;
             for j in 0..k {
                 let s = af[[base + j, axis]];
-                val += (2.0 * qv[base + j] * s
-                    + tv[base + j] * s * s
-                    + 2.0 * c * qv[base + j] * s
-                    + c * c * pv[base + j])
+                val += Self::second_kernel_value(scale, pv[base + j], qv[base + j], tv[base + j], s, s, s, g, g, lam)
                     * u_knot[j];
             }
             val
@@ -1862,10 +1944,11 @@ impl ImplicitDesignPsiDerivative {
         if self.axis_combinations.is_some() {
             let combo_d = self.transformed_axis_combination(axis_d);
             let combo_e = self.transformed_axis_combination(axis_e);
-            let sum_d = Self::transformed_combo_sum(combo_d);
-            let sum_e = Self::transformed_combo_sum(combo_e);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g_d = self.effective_share(axis_d);
+                let g_e = self.effective_share(axis_e);
+                let lam = self.chart_lambda(axis_d, axis_e);
                 return self.streaming_forward_mul(&u_knot, |phi, q, t, sb| {
                     let s_d = combo_d
                         .iter()
@@ -1876,14 +1959,15 @@ impl ImplicitDesignPsiDerivative {
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo_d, combo_e, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_d, sum_d, s_e, sum_e, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_d, s_e, overlap_s, g_d, g_e, lam)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             let compute_row = |i: usize| -> f64 {
                 let base = i * k;
                 let mut val = 0.0;
@@ -1893,17 +1977,7 @@ impl ImplicitDesignPsiDerivative {
                     let s_e = self.transformed_combo_axis_value_materialized(idx, combo_e);
                     let overlap_s =
                         self.transformed_combo_overlap_materialized(idx, combo_d, combo_e);
-                    val += Self::transformed_second_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        self.t_values[idx],
-                        s_d,
-                        sum_d,
-                        s_e,
-                        sum_e,
-                        overlap_s,
-                        c,
-                    ) * u_knot[j];
+                    val += Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_d, s_e, overlap_s, g_d, g_e, lam) * u_knot[j];
                 }
                 val
             };
@@ -1929,14 +2003,20 @@ impl ImplicitDesignPsiDerivative {
             return Ok(Array1::from_vec((0..n).map(compute_row).collect()));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             return self.streaming_forward_mul(&u_knot, |phi, q, t, sb| {
-                t * sb[axis_d] * sb[axis_e] + c * q * (sb[axis_d] + sb[axis_e]) + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, sb[axis_d], sb[axis_e], 0.0, g_d, g_e, lam)
             });
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g_d = self.effective_share(axis_d);
+        let g_e = self.effective_share(axis_e);
+        let lam = self.chart_lambda(axis_d, axis_e);
         let af = &self.axis_components;
         let pv = &self.phi_values;
         let qv = &self.q_values;
@@ -1945,9 +2025,7 @@ impl ImplicitDesignPsiDerivative {
             let base = i * k;
             let mut val = 0.0;
             for j in 0..k {
-                val += (tv[base + j] * af[[base + j, axis_d]] * af[[base + j, axis_e]]
-                    + c * qv[base + j] * (af[[base + j, axis_d]] + af[[base + j, axis_e]])
-                    + c * c * pv[base + j])
+                val += Self::second_kernel_value(scale, pv[base + j], qv[base + j], tv[base + j], af[[base + j, axis_d]], af[[base + j, axis_e]], 0.0, g_d, g_e, lam)
                     * u_knot[j];
             }
             val
@@ -1993,50 +2071,46 @@ impl ImplicitDesignPsiDerivative {
         }
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
                 return self.streaming_materialize(|phi, q, _, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
-                    Self::transformed_first_kernel_value(phi, q, s_combo, combo_sum, c)
+                    Self::first_kernel_value(scale, phi, q, s_combo, g)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
             let mut raw = Array2::<f64>::zeros((n, k));
             for i in 0..n {
                 let base = i * k;
                 for j in 0..k {
                     let idx = base + j;
                     let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
-                    raw[[i, j]] = Self::transformed_first_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        s_combo,
-                        combo_sum,
-                        c,
-                    );
+                    raw[[i, j]] = Self::first_kernel_value(scale, self.phi_values[idx], self.q_values[idx], s_combo, g);
                 }
             }
             return Ok(self.project_matrix(raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
-            return self.streaming_materialize(|phi, q, _, sb| q * sb[axis] + c * phi);
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            return self.streaming_materialize(|phi, q, _, sb| Self::first_kernel_value(scale, phi, q, sb[axis], g));
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
         let mut raw = Array2::<f64>::zeros((n, k));
         for i in 0..n {
             let base = i * k;
             for j in 0..k {
-                raw[[i, j]] = self.q_values[base + j] * self.axis_components[[base + j, axis]]
-                    + c * self.phi_values[base + j];
+                raw[[i, j]] = Self::first_kernel_value(scale, self.phi_values[base + j], self.q_values[base + j], self.axis_components[[base + j, axis]], g);
             }
         }
         Ok(self.project_matrix(raw))
@@ -2054,23 +2128,24 @@ impl ImplicitDesignPsiDerivative {
         }
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g = self.effective_share(axis);
+                let lam = self.chart_lambda(axis, axis);
                 return self.streaming_materialize(|phi, q, t, sb| {
                     let s_combo = combo
                         .iter()
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo, combo, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_combo, combo_sum, s_combo, combo_sum, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_combo, s_combo, overlap_s, g, g, lam)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             let mut raw = Array2::<f64>::zeros((n, k));
             for i in 0..n {
                 let base = i * k;
@@ -2078,40 +2153,31 @@ impl ImplicitDesignPsiDerivative {
                     let idx = base + j;
                     let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
                     let overlap_s = self.transformed_combo_overlap_materialized(idx, combo, combo);
-                    raw[[i, j]] = Self::transformed_second_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        self.t_values[idx],
-                        s_combo,
-                        combo_sum,
-                        s_combo,
-                        combo_sum,
-                        overlap_s,
-                        c,
-                    );
+                    raw[[i, j]] = Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_combo, s_combo, overlap_s, g, g, lam);
                 }
             }
             return Ok(self.project_matrix(raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g = self.effective_share(axis);
+            let lam = self.chart_lambda(axis, axis);
             return self.streaming_materialize(|phi, q, t, sb| {
                 let s = sb[axis];
-                2.0 * q * s + t * s * s + 2.0 * c * q * s + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
             });
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
+        let lam = self.chart_lambda(axis, axis);
         let mut raw = Array2::<f64>::zeros((n, k));
         for i in 0..n {
             let base = i * k;
             for j in 0..k {
                 let s = self.axis_components[[base + j, axis]];
-                raw[[i, j]] = 2.0 * self.q_values[base + j] * s
-                    + self.t_values[base + j] * s * s
-                    + 2.0 * c * self.q_values[base + j] * s
-                    + c * c * self.phi_values[base + j];
+                raw[[i, j]] = Self::second_kernel_value(scale, self.phi_values[base + j], self.q_values[base + j], self.t_values[base + j], s, s, s, g, g, lam);
             }
         }
         Ok(self.project_matrix(raw))
@@ -2145,10 +2211,11 @@ impl ImplicitDesignPsiDerivative {
         if self.axis_combinations.is_some() {
             let combo_d = self.transformed_axis_combination(axis_d);
             let combo_e = self.transformed_axis_combination(axis_e);
-            let sum_d = Self::transformed_combo_sum(combo_d);
-            let sum_e = Self::transformed_combo_sum(combo_e);
             if self.is_streaming() {
-                let c = self.psi_scale_share;
+                let scale = self.chart_scale;
+                let g_d = self.effective_share(axis_d);
+                let g_e = self.effective_share(axis_e);
+                let lam = self.chart_lambda(axis_d, axis_e);
                 return self.streaming_materialize(|phi, q, t, sb| {
                     let s_d = combo_d
                         .iter()
@@ -2159,14 +2226,15 @@ impl ImplicitDesignPsiDerivative {
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum();
                     let overlap_s = Self::transformed_combo_overlap_streaming(combo_d, combo_e, sb);
-                    Self::transformed_second_kernel_value(
-                        phi, q, t, s_d, sum_d, s_e, sum_e, overlap_s, c,
-                    )
+                    Self::second_kernel_value(scale, phi, q, t, s_d, s_e, overlap_s, g_d, g_e, lam)
                 });
             }
             let n = self.n;
             let k = self.n_knots;
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             let mut raw = Array2::<f64>::zeros((n, k));
             for i in 0..n {
                 let base = i * k;
@@ -2176,41 +2244,31 @@ impl ImplicitDesignPsiDerivative {
                     let s_e = self.transformed_combo_axis_value_materialized(idx, combo_e);
                     let overlap_s =
                         self.transformed_combo_overlap_materialized(idx, combo_d, combo_e);
-                    raw[[i, j]] = Self::transformed_second_kernel_value(
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        self.t_values[idx],
-                        s_d,
-                        sum_d,
-                        s_e,
-                        sum_e,
-                        overlap_s,
-                        c,
-                    );
+                    raw[[i, j]] = Self::second_kernel_value(scale, self.phi_values[idx], self.q_values[idx], self.t_values[idx], s_d, s_e, overlap_s, g_d, g_e, lam);
                 }
             }
             return Ok(self.project_matrix(raw));
         }
         if self.is_streaming() {
-            let c = self.psi_scale_share;
+            let scale = self.chart_scale;
+            let g_d = self.effective_share(axis_d);
+            let g_e = self.effective_share(axis_e);
+            let lam = self.chart_lambda(axis_d, axis_e);
             return self.streaming_materialize(|phi, q, t, sb| {
-                t * sb[axis_d] * sb[axis_e] + c * q * (sb[axis_d] + sb[axis_e]) + c * c * phi
+                Self::second_kernel_value(scale, phi, q, t, sb[axis_d], sb[axis_e], 0.0, g_d, g_e, lam)
             });
         }
         let n = self.n;
         let k = self.n_knots;
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g_d = self.effective_share(axis_d);
+        let g_e = self.effective_share(axis_e);
+        let lam = self.chart_lambda(axis_d, axis_e);
         let mut raw = Array2::<f64>::zeros((n, k));
         for i in 0..n {
             let base = i * k;
             for j in 0..k {
-                raw[[i, j]] = self.t_values[base + j]
-                    * self.axis_components[[base + j, axis_d]]
-                    * self.axis_components[[base + j, axis_e]]
-                    + c * self.q_values[base + j]
-                        * (self.axis_components[[base + j, axis_d]]
-                            + self.axis_components[[base + j, axis_e]])
-                    + c * c * self.phi_values[base + j];
+                raw[[i, j]] = Self::second_kernel_value(scale, self.phi_values[base + j], self.q_values[base + j], self.t_values[base + j], self.axis_components[[base + j, axis_d]], self.axis_components[[base + j, axis_e]], 0.0, g_d, g_e, lam);
             }
         }
         Ok(self.project_matrix(raw))
@@ -2336,10 +2394,10 @@ impl ImplicitDesignPsiDerivative {
             "implicit psi first row chunk axis out of bounds: axis={axis}, n_axes={}",
             self.n_axes()
         );
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             return self.row_chunk_with_kernel(rows, |phi, q, _, sb, idx| {
                 let s_combo = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo)
@@ -2349,7 +2407,7 @@ impl ImplicitDesignPsiDerivative {
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum()
                 };
-                Self::transformed_first_kernel_value(phi, q, s_combo, combo_sum, c)
+                Self::first_kernel_value(scale, phi, q, s_combo, g)
             });
         }
         self.row_chunk_with_kernel(rows, |phi, q, _, sb, idx| {
@@ -2358,7 +2416,7 @@ impl ImplicitDesignPsiDerivative {
             } else {
                 sb[axis]
             };
-            q * s + c * phi
+            Self::first_kernel_value(scale, phi, q, s, g)
         })
     }
 
@@ -2378,10 +2436,10 @@ impl ImplicitDesignPsiDerivative {
             "implicit psi first raw row chunk axis out of bounds: axis={axis}, n_axes={}",
             self.n_axes()
         );
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             return self.row_chunk_with_kernel_raw(rows, |phi, q, _, sb, idx| {
                 let s_combo = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo)
@@ -2391,7 +2449,7 @@ impl ImplicitDesignPsiDerivative {
                         .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
                         .sum()
                 };
-                Self::transformed_first_kernel_value(phi, q, s_combo, combo_sum, c)
+                Self::first_kernel_value(scale, phi, q, s_combo, g)
             });
         }
         self.row_chunk_with_kernel_raw(rows, |phi, q, _, sb, idx| {
@@ -2400,7 +2458,7 @@ impl ImplicitDesignPsiDerivative {
             } else {
                 sb[axis]
             };
-            q * s + c * phi
+            Self::first_kernel_value(scale, phi, q, s, g)
         })
     }
 
@@ -2414,10 +2472,11 @@ impl ImplicitDesignPsiDerivative {
             "implicit psi second diagonal row chunk axis out of bounds: axis={axis}, n_axes={}",
             self.n_axes()
         );
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g = self.effective_share(axis);
+        let lam = self.chart_lambda(axis, axis);
         if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            let combo_sum = Self::transformed_combo_sum(combo);
             return self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
                 let s_combo = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo)
@@ -2432,9 +2491,7 @@ impl ImplicitDesignPsiDerivative {
                 } else {
                     Self::transformed_combo_overlap_streaming(combo, combo, sb)
                 };
-                Self::transformed_second_kernel_value(
-                    phi, q, t, s_combo, combo_sum, s_combo, combo_sum, overlap, c,
-                )
+                Self::second_kernel_value(scale, phi, q, t, s_combo, s_combo, overlap, g, g, lam)
             });
         }
         self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
@@ -2443,7 +2500,7 @@ impl ImplicitDesignPsiDerivative {
             } else {
                 sb[axis]
             };
-            2.0 * q * s + t * s * s + 2.0 * c * q * s + c * c * phi
+            Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
         })
     }
 
@@ -2467,12 +2524,13 @@ impl ImplicitDesignPsiDerivative {
             axis_d, axis_e,
             "implicit psi second cross row chunk requires distinct axes: axis_d={axis_d}, axis_e={axis_e}"
         );
-        let c = self.psi_scale_share;
+        let scale = self.chart_scale;
+        let g_d = self.effective_share(axis_d);
+        let g_e = self.effective_share(axis_e);
+        let lam = self.chart_lambda(axis_d, axis_e);
         if self.axis_combinations.is_some() {
             let combo_d = self.transformed_axis_combination(axis_d);
             let combo_e = self.transformed_axis_combination(axis_e);
-            let sum_d = Self::transformed_combo_sum(combo_d);
-            let sum_e = Self::transformed_combo_sum(combo_e);
             return self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
                 let s_d = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo_d)
@@ -2495,7 +2553,7 @@ impl ImplicitDesignPsiDerivative {
                 } else {
                     Self::transformed_combo_overlap_streaming(combo_d, combo_e, sb)
                 };
-                Self::transformed_second_kernel_value(phi, q, t, s_d, sum_d, s_e, sum_e, overlap, c)
+                Self::second_kernel_value(scale, phi, q, t, s_d, s_e, overlap, g_d, g_e, lam)
             });
         }
         self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
@@ -2509,7 +2567,7 @@ impl ImplicitDesignPsiDerivative {
             } else {
                 sb[axis_e]
             };
-            t * sd * se + c * q * (sd + se) + c * c * phi
+            Self::second_kernel_value(scale, phi, q, t, sd, se, 0.0, g_d, g_e, lam)
         })
     }
 
@@ -2551,10 +2609,6 @@ impl ImplicitDesignPsiDerivative {
     }
 
     #[inline]
-    pub(crate) fn transformed_combo_sum(combo: &[(usize, f64)]) -> f64 {
-        combo.iter().map(|(_, coeff)| *coeff).sum()
-    }
-
     #[inline]
     pub(crate) fn transformed_combo_axis_value_materialized(
         &self,
@@ -2602,33 +2656,33 @@ impl ImplicitDesignPsiDerivative {
         overlap
     }
 
+    /// One first-order kernel-derivative scalar under the chart:
+    /// `scale · (q·s + g·φ)` with `g = c + L_a` (gam#979).
     #[inline]
-    pub(crate) fn transformed_first_kernel_value(
-        phi: f64,
-        q: f64,
-        s_combo: f64,
-        coeff_sum: f64,
-        psi_scale_share: f64,
-    ) -> f64 {
-        q * s_combo + psi_scale_share * coeff_sum * phi
+    pub(crate) fn first_kernel_value(scale: f64, phi: f64, q: f64, s: f64, g: f64) -> f64 {
+        scale * (q * s + g * phi)
     }
 
+    /// One second-order kernel-derivative scalar under the chart:
+    /// `scale · (t s_a s_b + 2 q·overlap + q (g_b s_a + g_a s_b) + (g_a g_b + Λ_ab) φ)`
+    /// — the raw chain rule with the chart's first jets folded into the
+    /// effective shares and its second jet as the extra `Λ_ab φ` term
+    /// (gam#979). `overlap` is `s_a` on the diagonal of raw axes and the
+    /// combination overlap otherwise.
     #[inline]
-    pub(crate) fn transformed_second_kernel_value(
+    pub(crate) fn second_kernel_value(
+        scale: f64,
         phi: f64,
         q: f64,
         t: f64,
-        s_left: f64,
-        left_sum: f64,
-        s_right: f64,
-        right_sum: f64,
-        overlap_s: f64,
-        psi_scale_share: f64,
+        s_a: f64,
+        s_b: f64,
+        overlap: f64,
+        g_a: f64,
+        g_b: f64,
+        lam: f64,
     ) -> f64 {
-        t * s_left * s_right
-            + 2.0 * q * overlap_s
-            + psi_scale_share * q * (right_sum * s_left + left_sum * s_right)
-            + psi_scale_share * psi_scale_share * left_sum * right_sum * phi
+        scale * (t * s_a * s_b + 2.0 * q * overlap + q * (g_b * s_a + g_a * s_b) + (g_a * g_b + lam) * phi)
     }
 }
 
