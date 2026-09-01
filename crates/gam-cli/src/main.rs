@@ -302,13 +302,10 @@ fn run() -> CliResult<()> {
     // runtime-threads INFO line clap can't suppress.
     let cli = Cli::parse();
     // Honor an explicit `--log-level`; otherwise the logger installs at its
-    // quiet `Warn` default (#1688). An unparseable level falls back to the
-    // verbose `Info` stream the user clearly intended rather than silently
-    // dropping their request.
-    match cli.log_level.as_deref() {
-        Some(raw) => gam::progress_log::init_logging_at(
-            gam::progress_log::parse_level_directive(raw).unwrap_or(log::LevelFilter::Info),
-        ),
+    // quiet `Warn` default (#1688). Clap has already validated an explicit
+    // level, so initialization cannot reinterpret or guess at the request.
+    match cli.log_level {
+        Some(level) => gam::progress_log::init_logging_at(level),
         None if cli.quiet => gam::progress_log::init_logging_at(log::LevelFilter::Off),
         None if cli.verbose > 0 => {
             let level = match cli.verbose {

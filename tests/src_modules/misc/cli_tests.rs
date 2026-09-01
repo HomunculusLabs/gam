@@ -689,6 +689,28 @@ fn cli_predict_defaults_to_posterior_mean_instead_of_map() {
 }
 
 #[test]
+fn cli_log_level_is_typed_and_rejects_unknown_values_2670() {
+    let parsed = Cli::try_parse_from(["gam", "--log-level", "debug", "report", "model.json"])
+        .expect("a canonical log level must parse");
+    assert_eq!(parsed.log_level, Some(log::LevelFilter::Debug));
+
+    let error = Cli::try_parse_from([
+        "gam",
+        "--log-level",
+        "verbose",
+        "report",
+        "model.json",
+    ])
+    .expect_err("an unknown log level must be rejected rather than guessed as info");
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("accepted values: off, error, warn, info, debug, trace"),
+        "the parser error must enumerate the canonical levels: {rendered}"
+    );
+}
+
+#[test]
 fn cli_fit_request_replaces_formula_and_scientific_flags() {
     let cli = Cli::try_parse_from([
         "gam",
