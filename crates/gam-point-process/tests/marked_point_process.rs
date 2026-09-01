@@ -518,6 +518,46 @@ fn online_filter_is_recursive_and_finite() {
 }
 
 #[test]
+fn one_step_filter_api_exactly_matches_batch_recursion_with_impulses() {
+    let mut model = model(MaternMarkovOrder::Half);
+    model.mark_impulses[[0, 1]] = 0.75;
+    let history = history();
+    let batch = filter_laplace(&model, &history, control()).unwrap();
+    let mut predicted = FilteredState {
+        time: history.intervals[0].exit,
+        mean: array![0.0],
+        covariance: model.stationary_covariance().unwrap(),
+    };
+    let mut sequential = Vec::new();
+    for (index, interval) in history.intervals.iter().enumerate() {
+        if index > 0 {
+            predicted = propagate_filtered_state(
+                &model,
+                &sequential[index - 1],
+                interval.exit - history.intervals[index - 1].exit,
+                history.intervals[index - 1].counts.view(),
+            )
+            .unwrap();
+        }
+        let updated = update_laplace_filter(&model, &predicted, interval, control()).unwrap();
+        sequential.push(updated);
+    }
+    assert_eq!(sequential, batch);
+
+    let mut wrong_time = predicted;
+    wrong_time.time += 0.25;
+    assert!(
+        update_laplace_filter(
+            &model,
+            &wrong_time,
+            history.intervals.last().unwrap(),
+            control(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn impulse_response_is_the_transition_times_impulse() {
     let mut model = model(MaternMarkovOrder::ThreeHalves);
     model

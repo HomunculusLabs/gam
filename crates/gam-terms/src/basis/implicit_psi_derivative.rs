@@ -1703,6 +1703,27 @@ impl ImplicitDesignPsiDerivative {
         axis: usize,
         v: &ArrayView1<f64>,
     ) -> Result<Array1<f64>, BasisError> {
+        if let Some(row_projection) = self.row_projection.as_ref() {
+            let projected = row_projection.projector.project_vector_owned(v.to_owned());
+            return self.transpose_mul_unprojected(axis, &projected.view());
+        }
+        self.transpose_mul_unprojected(axis, v)
+    }
+
+    fn transpose_mul_unprojected(
+        &self,
+        axis: usize,
+        v: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
+        let raw = self.transpose_mul_first_raw_unprojected(axis, v)?;
+        Ok(self.project_and_pad(&raw))
+    }
+
+    fn transpose_mul_first_raw_unprojected(
+        &self,
+        axis: usize,
+        v: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
         assert!(
             axis < self.n_axes(),
             "implicit psi first transpose axis out of bounds: axis={axis}, n_axes={}",
@@ -1725,7 +1746,7 @@ impl ImplicitDesignPsiDerivative {
                         .sum();
                     Self::first_kernel_value(scale, phi, q, s_combo, g)
                 })?;
-                return Ok(self.project_and_pad(&raw));
+                return Ok(raw);
             }
             let scale = self.chart_scale;
             let g = self.effective_share(axis);
@@ -1733,14 +1754,14 @@ impl ImplicitDesignPsiDerivative {
                 let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
                 Self::first_kernel_value(scale, self.phi_values[idx], self.q_values[idx], s_combo, g)
             });
-            return Ok(self.project_and_pad(&raw));
+            return Ok(raw);
         }
         if self.is_streaming() {
             let scale = self.chart_scale;
             let g = self.effective_share(axis);
             let raw =
                 self.streaming_accumulate_knot_vector(v, |phi, q, _, sb| Self::first_kernel_value(scale, phi, q, sb[axis], g))?;
-            return Ok(self.project_and_pad(&raw));
+            return Ok(raw);
         }
         let scale = self.chart_scale;
         let g = self.effective_share(axis);
@@ -1748,7 +1769,7 @@ impl ImplicitDesignPsiDerivative {
         let pv = &self.phi_values;
         let qv = &self.q_values;
         let raw = self.accumulate_knot_vector(v, |idx| Self::first_kernel_value(scale, pv[idx], qv[idx], af[[idx, axis]], g));
-        Ok(self.project_and_pad(&raw))
+        Ok(raw)
     }
 
     /// Compute (∂X/∂ψ_d) u for a given axis d and vector u of length p_out.
@@ -1759,6 +1780,18 @@ impl ImplicitDesignPsiDerivative {
     ///   result_i = Σ_j q_{ij} · s_{d,ij} · u_knot_j
     /// where u_knot = Z · u_smooth (unprojected back to knot space).
     pub fn forward_mul(&self, axis: usize, u: &ArrayView1<f64>) -> Result<Array1<f64>, BasisError> {
+        let values = self.forward_mul_unprojected(axis, u)?;
+        Ok(match self.row_projection.as_ref() {
+            Some(row_projection) => row_projection.projector.project_vector_owned(values),
+            None => values,
+        })
+    }
+
+    fn forward_mul_unprojected(
+        &self,
+        axis: usize,
+        u: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
         assert!(
             axis < self.n_axes(),
             "implicit psi first forward axis out of bounds: axis={axis}, n_axes={}",
@@ -1894,6 +1927,18 @@ impl ImplicitDesignPsiDerivative {
         axis: usize,
         v: &ArrayView1<f64>,
     ) -> Result<Array1<f64>, BasisError> {
+        if let Some(row_projection) = self.row_projection.as_ref() {
+            let projected = row_projection.projector.project_vector_owned(v.to_owned());
+            return self.transpose_mul_second_diag_unprojected(axis, &projected.view());
+        }
+        self.transpose_mul_second_diag_unprojected(axis, v)
+    }
+
+    fn transpose_mul_second_diag_unprojected(
+        &self,
+        axis: usize,
+        v: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
         assert!(
             axis < self.n_axes(),
             "implicit psi second diagonal transpose axis out of bounds: axis={axis}, n_axes={}",
@@ -1956,6 +2001,23 @@ impl ImplicitDesignPsiDerivative {
 
     /// Compute (∂²X/∂ψ_d∂ψ_e)^T v — cross second derivative (d ≠ e).
     pub fn transpose_mul_second_cross(
+        &self,
+        axis_d: usize,
+        axis_e: usize,
+        v: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
+        if let Some(row_projection) = self.row_projection.as_ref() {
+            let projected = row_projection.projector.project_vector_owned(v.to_owned());
+            return self.transpose_mul_second_cross_unprojected(
+                axis_d,
+                axis_e,
+                &projected.view(),
+            );
+        }
+        self.transpose_mul_second_cross_unprojected(axis_d, axis_e, v)
+    }
+
+    fn transpose_mul_second_cross_unprojected(
         &self,
         axis_d: usize,
         axis_e: usize,
@@ -2040,6 +2102,18 @@ impl ImplicitDesignPsiDerivative {
 
     /// Compute (∂²X/∂ψ_d²) u — forward diagonal second derivative.
     pub fn forward_mul_second_diag(
+        &self,
+        axis: usize,
+        u: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
+        let values = self.forward_mul_second_diag_unprojected(axis, u)?;
+        Ok(match self.row_projection.as_ref() {
+            Some(row_projection) => row_projection.projector.project_vector_owned(values),
+            None => values,
+        })
+    }
+
+    fn forward_mul_second_diag_unprojected(
         &self,
         axis: usize,
         u: &ArrayView1<f64>,
@@ -2161,6 +2235,19 @@ impl ImplicitDesignPsiDerivative {
 
     /// Compute (∂²X/∂ψ_d∂ψ_e) u — forward cross second derivative.
     pub fn forward_mul_second_cross(
+        &self,
+        axis_d: usize,
+        axis_e: usize,
+        u: &ArrayView1<f64>,
+    ) -> Result<Array1<f64>, BasisError> {
+        let values = self.forward_mul_second_cross_unprojected(axis_d, axis_e, u)?;
+        Ok(match self.row_projection.as_ref() {
+            Some(row_projection) => row_projection.projector.project_vector_owned(values),
+            None => values,
+        })
+    }
+
+    fn forward_mul_second_cross_unprojected(
         &self,
         axis_d: usize,
         axis_e: usize,
@@ -2539,9 +2626,13 @@ impl ImplicitDesignPsiDerivative {
         };
 
         // Step 3: full identifiability transform.
-        match &self.full_ident_transform {
+        let projected = match &self.full_ident_transform {
             Some(zf) => fast_ab(&padded, zf),
             None => padded,
+        };
+        match self.row_projection.as_ref() {
+            Some(row_projection) => row_projection.projector.project_matrix_owned(projected),
+            None => projected,
         }
     }
 
@@ -2634,35 +2725,8 @@ impl ImplicitDesignPsiDerivative {
         axis: usize,
         rows: std::ops::Range<usize>,
     ) -> Result<Array2<f64>, BasisError> {
-        assert!(
-            axis < self.n_axes(),
-            "implicit psi first row chunk axis out of bounds: axis={axis}, n_axes={}",
-            self.n_axes()
-        );
-        let scale = self.chart_scale;
-        let g = self.effective_share(axis);
-        if self.axis_combinations.is_some() {
-            let combo = self.transformed_axis_combination(axis);
-            return self.row_chunk_with_kernel(rows, |phi, q, _, sb, idx| {
-                let s_combo = if sb.is_empty() {
-                    self.transformed_combo_axis_value_materialized(idx, combo)
-                } else {
-                    combo
-                        .iter()
-                        .map(|(raw_axis, coeff)| coeff * sb[*raw_axis])
-                        .sum()
-                };
-                Self::first_kernel_value(scale, phi, q, s_combo, g)
-            });
-        }
-        self.row_chunk_with_kernel(rows, |phi, q, _, sb, idx| {
-            let s = if sb.is_empty() {
-                self.axis_components[[idx, axis]]
-            } else {
-                sb[axis]
-            };
-            Self::first_kernel_value(scale, phi, q, s, g)
-        })
+        let raw = self.row_chunk_first_raw(axis, rows)?;
+        Ok(self.project_matrix_rows(raw))
     }
 
     /// Raw (chunk × n_knots) first-order kernel scalars for axis d, without
@@ -2683,9 +2747,9 @@ impl ImplicitDesignPsiDerivative {
         );
         let scale = self.chart_scale;
         let g = self.effective_share(axis);
-        if self.axis_combinations.is_some() {
+        let mut raw = if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            return self.row_chunk_with_kernel_raw(rows, |phi, q, _, sb, idx| {
+            self.row_chunk_with_kernel_raw(rows.clone(), |phi, q, _, sb, idx| {
                 let s_combo = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo)
                 } else {
@@ -2695,16 +2759,23 @@ impl ImplicitDesignPsiDerivative {
                         .sum()
                 };
                 Self::first_kernel_value(scale, phi, q, s_combo, g)
-            });
-        }
-        self.row_chunk_with_kernel_raw(rows, |phi, q, _, sb, idx| {
-            let s = if sb.is_empty() {
-                self.axis_components[[idx, axis]]
-            } else {
-                sb[axis]
-            };
-            Self::first_kernel_value(scale, phi, q, s, g)
-        })
+            })?
+        } else {
+            self.row_chunk_with_kernel_raw(rows.clone(), |phi, q, _, sb, idx| {
+                let s = if sb.is_empty() {
+                    self.axis_components[[idx, axis]]
+                } else {
+                    sb[axis]
+                };
+                Self::first_kernel_value(scale, phi, q, s, g)
+            })?
+        };
+        self.subtract_projected_row_chunk_correction(
+            ProjectedJetKey::FirstRaw(axis),
+            rows,
+            &mut raw,
+        )?;
+        Ok(raw)
     }
 
     pub fn row_chunk_second_diag(
@@ -2720,9 +2791,9 @@ impl ImplicitDesignPsiDerivative {
         let scale = self.chart_scale;
         let g = self.effective_share(axis);
         let lam = self.chart_lambda(axis, axis);
-        if self.axis_combinations.is_some() {
+        let mut chunk = if self.axis_combinations.is_some() {
             let combo = self.transformed_axis_combination(axis);
-            return self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
+            self.row_chunk_with_kernel(rows.clone(), |phi, q, t, sb, idx| {
                 let s_combo = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo)
                 } else {
@@ -2737,16 +2808,23 @@ impl ImplicitDesignPsiDerivative {
                     Self::transformed_combo_overlap_streaming(combo, combo, sb)
                 };
                 Self::second_kernel_value(scale, phi, q, t, s_combo, s_combo, overlap, g, g, lam)
-            });
-        }
-        self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
-            let s = if sb.is_empty() {
-                self.axis_components[[idx, axis]]
-            } else {
-                sb[axis]
-            };
-            Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
-        })
+            })?
+        } else {
+            self.row_chunk_with_kernel(rows.clone(), |phi, q, t, sb, idx| {
+                let s = if sb.is_empty() {
+                    self.axis_components[[idx, axis]]
+                } else {
+                    sb[axis]
+                };
+                Self::second_kernel_value(scale, phi, q, t, s, s, s, g, g, lam)
+            })?
+        };
+        self.subtract_projected_row_chunk_correction(
+            ProjectedJetKey::SecondDiagonal(axis),
+            rows,
+            &mut chunk,
+        )?;
+        Ok(chunk)
     }
 
     pub fn row_chunk_second_cross(
@@ -2773,10 +2851,10 @@ impl ImplicitDesignPsiDerivative {
         let g_d = self.effective_share(axis_d);
         let g_e = self.effective_share(axis_e);
         let lam = self.chart_lambda(axis_d, axis_e);
-        if self.axis_combinations.is_some() {
+        let mut chunk = if self.axis_combinations.is_some() {
             let combo_d = self.transformed_axis_combination(axis_d);
             let combo_e = self.transformed_axis_combination(axis_e);
-            return self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
+            self.row_chunk_with_kernel(rows.clone(), |phi, q, t, sb, idx| {
                 let s_d = if sb.is_empty() {
                     self.transformed_combo_axis_value_materialized(idx, combo_d)
                 } else {
@@ -2799,21 +2877,28 @@ impl ImplicitDesignPsiDerivative {
                     Self::transformed_combo_overlap_streaming(combo_d, combo_e, sb)
                 };
                 Self::second_kernel_value(scale, phi, q, t, s_d, s_e, overlap, g_d, g_e, lam)
-            });
-        }
-        self.row_chunk_with_kernel(rows, |phi, q, t, sb, idx| {
-            let sd = if sb.is_empty() {
-                self.axis_components[[idx, axis_d]]
-            } else {
-                sb[axis_d]
-            };
-            let se = if sb.is_empty() {
-                self.axis_components[[idx, axis_e]]
-            } else {
-                sb[axis_e]
-            };
-            Self::second_kernel_value(scale, phi, q, t, sd, se, 0.0, g_d, g_e, lam)
-        })
+            })?
+        } else {
+            self.row_chunk_with_kernel(rows.clone(), |phi, q, t, sb, idx| {
+                let sd = if sb.is_empty() {
+                    self.axis_components[[idx, axis_d]]
+                } else {
+                    sb[axis_d]
+                };
+                let se = if sb.is_empty() {
+                    self.axis_components[[idx, axis_e]]
+                } else {
+                    sb[axis_e]
+                };
+                Self::second_kernel_value(scale, phi, q, t, sd, se, 0.0, g_d, g_e, lam)
+            })?
+        };
+        self.subtract_projected_row_chunk_correction(
+            ProjectedJetKey::SecondCross(axis_d, axis_e),
+            rows,
+            &mut chunk,
+        )?;
+        Ok(chunk)
     }
 
     /// Single-row specialization of `row_chunk_first(axis, row..row+1)` that

@@ -446,6 +446,39 @@ impl RiskInterval {
     }
 }
 
+fn validate_risk_interval(
+    interval: &RiskInterval,
+    marks: usize,
+    context: &str,
+) -> Result<(), MarkedPointProcessError> {
+    if !interval.entry.is_finite()
+        || !interval.exit.is_finite()
+        || interval.exit <= interval.entry
+        || !interval.exposure().is_finite()
+    {
+        return Err(invalid(format!(
+            "{context} must have finite entry < exit and finite exposure"
+        )));
+    }
+    if interval.counts.len() != marks || interval.fixed_log_intensity.len() != marks {
+        return Err(invalid(format!(
+            "{context} has {} counts and {} fixed predictors, expected {marks} each",
+            interval.counts.len(),
+            interval.fixed_log_intensity.len()
+        )));
+    }
+    if interval
+        .fixed_log_intensity
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(invalid(format!(
+            "{context} has a non-finite fixed predictor"
+        )));
+    }
+    Ok(())
+}
+
 /// A time-ordered sequence of risk intervals for one subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubjectHistory {
@@ -466,16 +499,11 @@ impl SubjectHistory {
         }
         let mut previous_exit = None;
         for (index, interval) in self.intervals.iter().enumerate() {
-            if !interval.entry.is_finite()
-                || !interval.exit.is_finite()
-                || interval.exit <= interval.entry
-                || !interval.exposure().is_finite()
-            {
-                return Err(invalid(format!(
-                    "subject {:?} interval {index} must have finite entry < exit and finite exposure",
-                    self.subject
-                )));
-            }
+            validate_risk_interval(
+                interval,
+                marks,
+                &format!("subject {:?} interval {index}", self.subject),
+            )?;
             if let Some(previous) = previous_exit {
                 if interval.entry < previous {
                     return Err(invalid(format!(
@@ -483,24 +511,6 @@ impl SubjectHistory {
                         self.subject
                     )));
                 }
-            }
-            if interval.counts.len() != marks || interval.fixed_log_intensity.len() != marks {
-                return Err(invalid(format!(
-                    "subject {:?} interval {index} has {} counts and {} fixed predictors, expected {marks} each",
-                    self.subject,
-                    interval.counts.len(),
-                    interval.fixed_log_intensity.len()
-                )));
-            }
-            if interval
-                .fixed_log_intensity
-                .iter()
-                .any(|value| !value.is_finite())
-            {
-                return Err(invalid(format!(
-                    "subject {:?} interval {index} has a non-finite fixed predictor",
-                    self.subject
-                )));
             }
             previous_exit = Some(interval.exit);
         }
@@ -933,7 +943,9 @@ pub struct FilteredState {
 ///
 /// Unlike [`smooth_laplace`], this does not revisit earlier states. It is the
 /// recursive deployment algorithm and therefore an approximation to the global
-/// non-Gaussian posterior, not an exact point-process Kalman filter.
+/// non-Gaussian posterior, not an exact point-process Kalman filter. Deployment
+/// code that already retains the latest state can instead call
+/// [`propagate_filtered_state`] and [`update_laplace_filter`] once per row.
 pub fn filter_laplace(
     model: &MarkedPointProcessModel,
     history: &SubjectHistory,
@@ -942,113 +954,231 @@ pub fn filter_laplace(
     model.validate()?;
     history.validate(model.mark_count())?;
     control.validate()?;
-    let observation = model.observation_matrix();
     let mut filtered: Vec<FilteredState> = Vec::with_capacity(history.intervals.len());
-    let mut predicted_mean = Array1::zeros(model.state_dimension());
-    let mut predicted_covariance = model.stationary_covariance()?;
+    let mut predicted = FilteredState {
+        time: history.intervals[0].exit,
+        mean: Array1::zeros(model.state_dimension()),
+        covariance: model.stationary_covariance()?,
+    };
 
     for (index, interval) in history.intervals.iter().enumerate() {
         if index > 0 {
             let elapsed = interval.exit - history.intervals[index - 1].exit;
-            let transition = model.transition(elapsed)?;
-            let previous_counts = history.intervals[index - 1].counts.mapv(f64::from);
-            let impulse = model.mark_impulses.dot(&previous_counts);
-            predicted_mean = transition
-                .transition
-                .dot(&(&filtered[index - 1].mean + &impulse));
-            predicted_covariance = transition
-                .transition
-                .dot(&filtered[index - 1].covariance)
-                .dot(&transition.transition.t())
-                + transition.innovation_covariance;
+            predicted = propagate_filtered_state_validated(
+                model,
+                &filtered[index - 1],
+                elapsed,
+                history.intervals[index - 1].counts.view(),
+            )?;
         }
-        let (prior_precision, _) =
-            inverse_and_logdet_spd(&predicted_covariance, "predicted state covariance")?;
-        let mut mode = predicted_mean.clone();
-        let mut converged = false;
-        let mut posterior_covariance = None;
-        for _ in 0..control.max_iterations {
-            let eta = &interval.fixed_log_intensity + &observation.dot(&mode);
-            let likelihood =
-                evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
-            let displacement = &mode - &predicted_mean;
-            let gradient =
-                observation.t().dot(&likelihood.gradient) - prior_precision.dot(&displacement);
-            let weighted_observation =
-                &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
-            let negative_hessian = &prior_precision + &observation.t().dot(&weighted_observation);
-            let stationarity = vector_infinity_norm(&gradient);
-            let threshold = control.absolute_stationarity_tolerance
-                + control.relative_stationarity_tolerance * vector_infinity_norm(&mode).max(1.0);
-            if stationarity <= threshold {
-                posterior_covariance = Some(
-                    inverse_and_logdet_spd(&negative_hessian, "filtered posterior precision")?.0,
-                );
-                converged = true;
-                break;
-            }
-            let direction =
-                solve_spd_vector(&negative_hessian, &gradient, "filtered Newton Hessian")?;
-            let directional_derivative = gradient.dot(&direction);
-            let current = one_state_log_posterior(
+        let updated = update_laplace_filter_validated(model, &predicted, interval, control)?;
+        filtered.push(updated);
+    }
+    Ok(filtered)
+}
+
+/// Exact Gaussian prediction between two recursive point-process updates.
+///
+/// `event_counts` are the marks observed at `filtered.time`. Their impulses are
+/// applied immediately and then propagated through the exact Matérn transition.
+/// The returned time is `filtered.time + elapsed`.
+pub fn propagate_filtered_state(
+    model: &MarkedPointProcessModel,
+    filtered: &FilteredState,
+    elapsed: f64,
+    event_counts: ArrayView1<'_, u32>,
+) -> Result<FilteredState, MarkedPointProcessError> {
+    model.validate()?;
+    validate_filtered_state(filtered, model.state_dimension(), false, "filtered state")?;
+    if event_counts.len() != model.mark_count() {
+        return Err(invalid(format!(
+            "filter propagation has {} event counts, expected {}",
+            event_counts.len(),
+            model.mark_count()
+        )));
+    }
+    propagate_filtered_state_validated(model, filtered, elapsed, event_counts)
+}
+
+fn propagate_filtered_state_validated(
+    model: &MarkedPointProcessModel,
+    filtered: &FilteredState,
+    elapsed: f64,
+    event_counts: ArrayView1<'_, u32>,
+) -> Result<FilteredState, MarkedPointProcessError> {
+    let transition = model.transition(elapsed)?;
+    let time = filtered.time + elapsed;
+    if !time.is_finite() {
+        return Err(invalid("propagated filter time must be finite"));
+    }
+    let counts = event_counts.mapv(f64::from);
+    let impulse = model.mark_impulses.dot(&counts);
+    let mean = transition.transition.dot(&(&filtered.mean + &impulse));
+    if mean.iter().any(|value| !value.is_finite()) {
+        return Err(MarkedPointProcessError::NumericalFailure {
+            context: "propagated filter mean",
+        });
+    }
+    let raw_covariance = transition
+        .transition
+        .dot(&filtered.covariance)
+        .dot(&transition.transition.t())
+        + transition.innovation_covariance;
+    let covariance = 0.5 * (&raw_covariance + &raw_covariance.t());
+    cholesky(&covariance, "propagated filter covariance")?;
+    Ok(FilteredState {
+        time,
+        mean,
+        covariance,
+    })
+}
+
+/// Apply one point-process Laplace observation update to a predicted state.
+///
+/// `predicted.time` must equal the interval exit (within floating-point time
+/// resolution), because the piecewise-constant row is represented by its exit
+/// state. The result can be retained and passed to [`propagate_filtered_state`]
+/// when the next row arrives; no earlier history is required.
+pub fn update_laplace_filter(
+    model: &MarkedPointProcessModel,
+    predicted: &FilteredState,
+    interval: &RiskInterval,
+    control: LaplaceControl,
+) -> Result<FilteredState, MarkedPointProcessError> {
+    model.validate()?;
+    control.validate()?;
+    validate_risk_interval(interval, model.mark_count(), "filter interval")?;
+    validate_filtered_state(
+        predicted,
+        model.state_dimension(),
+        true,
+        "predicted filter state",
+    )?;
+    let time_scale = predicted.time.abs().max(interval.exit.abs()).max(1.0);
+    if (predicted.time - interval.exit).abs() > 16.0 * f64::EPSILON * time_scale {
+        return Err(invalid(format!(
+            "predicted filter time {} does not match interval exit {}",
+            predicted.time, interval.exit
+        )));
+    }
+    update_laplace_filter_validated(model, predicted, interval, control)
+}
+
+fn update_laplace_filter_validated(
+    model: &MarkedPointProcessModel,
+    predicted: &FilteredState,
+    interval: &RiskInterval,
+    control: LaplaceControl,
+) -> Result<FilteredState, MarkedPointProcessError> {
+    let observation = model.observation_matrix();
+    let (prior_precision, _) =
+        inverse_and_logdet_spd(&predicted.covariance, "predicted state covariance")?;
+    let mut mode = predicted.mean.clone();
+    let mut posterior_covariance = None;
+    for _ in 0..control.max_iterations {
+        let eta = &interval.fixed_log_intensity + &observation.dot(&mode);
+        let likelihood =
+            evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
+        let displacement = &mode - &predicted.mean;
+        let gradient =
+            observation.t().dot(&likelihood.gradient) - prior_precision.dot(&displacement);
+        let weighted_observation =
+            &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
+        let negative_hessian = &prior_precision + &observation.t().dot(&weighted_observation);
+        let stationarity = vector_infinity_norm(&gradient);
+        let threshold = control.absolute_stationarity_tolerance
+            + control.relative_stationarity_tolerance * vector_infinity_norm(&mode).max(1.0);
+        if stationarity <= threshold {
+            posterior_covariance = Some(
+                inverse_and_logdet_spd(&negative_hessian, "filtered posterior precision")?.0,
+            );
+            break;
+        }
+        let direction = solve_spd_vector(&negative_hessian, &gradient, "filtered Newton Hessian")?;
+        let directional_derivative = gradient.dot(&direction);
+        if !directional_derivative.is_finite() || directional_derivative <= 0.0 {
+            return Err(MarkedPointProcessError::NumericalFailure {
+                context: "filtered Newton ascent direction",
+            });
+        }
+        let current = one_state_log_posterior(
+            interval,
+            &observation,
+            &prior_precision,
+            &predicted.mean,
+            &mode,
+        )?;
+        let mut step = 1.0;
+        let accepted = loop {
+            let candidate = &mode + &(step * &direction);
+            let sufficient_ascent = match one_state_log_posterior(
                 interval,
                 &observation,
                 &prior_precision,
-                &predicted_mean,
-                &mode,
-            )?;
-            let mut step = 1.0;
-            let accepted = loop {
-                let candidate = &mode + &(step * &direction);
-                // Same rejection rule as the joint Newton ascent above: an
-                // Armijo failure and a non-evaluable trial point both shrink
-                // the step; any other error is the caller's.
-                let sufficient_ascent = match one_state_log_posterior(
-                    interval,
-                    &observation,
-                    &prior_precision,
-                    &predicted_mean,
-                    &candidate,
-                ) {
-                    Ok(value) => {
-                        value >= current + control.armijo_fraction * step * directional_derivative
-                    }
-                    Err(MarkedPointProcessError::NumericalFailure { .. }) => false,
-                    Err(error) => return Err(error),
-                };
-                if sufficient_ascent {
-                    mode = candidate;
-                    break true;
+                &predicted.mean,
+                &candidate,
+            ) {
+                Ok(value) => {
+                    value >= current + control.armijo_fraction * step * directional_derivative
                 }
-                step *= control.step_shrink;
-                if step < control.minimum_step {
-                    break false;
-                }
+                Err(MarkedPointProcessError::NumericalFailure { .. }) => false,
+                Err(error) => return Err(error),
             };
-            if !accepted {
-                return Err(MarkedPointProcessError::LineSearchFailure);
+            if sufficient_ascent {
+                mode = candidate;
+                break true;
             }
+            step *= control.step_shrink;
+            if step < control.minimum_step {
+                break false;
+            }
+        };
+        if !accepted {
+            return Err(MarkedPointProcessError::LineSearchFailure);
         }
-        if !converged {
+    }
+    let covariance = match posterior_covariance {
+        Some(covariance) => covariance,
+        None => {
             let eta = &interval.fixed_log_intensity + &observation.dot(&mode);
             let likelihood =
                 evaluate_poisson_interval(interval.counts.view(), eta.view(), interval.exposure())?;
             let gradient = observation.t().dot(&likelihood.gradient)
-                - prior_precision.dot(&(&mode - &predicted_mean));
+                - prior_precision.dot(&(&mode - &predicted.mean));
             return Err(MarkedPointProcessError::NonConvergence {
                 iterations: control.max_iterations,
                 stationarity: vector_infinity_norm(&gradient),
             });
         }
-        filtered.push(FilteredState {
-            time: interval.exit,
-            mean: mode,
-            covariance: posterior_covariance.ok_or(MarkedPointProcessError::NumericalFailure {
-                context: "filtered posterior covariance",
-            })?,
-        });
+    };
+    Ok(FilteredState {
+        time: interval.exit,
+        mean: mode,
+        covariance,
+    })
+}
+
+fn validate_filtered_state(
+    state: &FilteredState,
+    dimension: usize,
+    require_positive_definite: bool,
+    context: &'static str,
+) -> Result<(), MarkedPointProcessError> {
+    if !state.time.is_finite()
+        || state.mean.len() != dimension
+        || state.covariance.dim() != (dimension, dimension)
+        || state.mean.iter().any(|value| !value.is_finite())
+    {
+        return Err(invalid(format!(
+            "{context} has incompatible dimensions or non-finite values"
+        )));
     }
-    Ok(filtered)
+    if require_positive_definite {
+        cholesky(&state.covariance, context)?;
+    } else {
+        positive_semidefinite_square_root(&state.covariance, context)?;
+    }
+    Ok(())
 }
 
 fn one_state_log_posterior(
