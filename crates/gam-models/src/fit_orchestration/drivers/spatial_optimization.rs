@@ -201,6 +201,35 @@ fn try_build_spatial_term_log_kappa_derivative(
         };
         local_s_psi_psi = rotated_s_psi_psi;
     }
+
+    // gam#2760: the collection owns a FIXED row-space constraint `C`, while
+    // its per-realization coefficient whitening is only a coordinate chart.
+    // Differentiate the statistical smooth in the current coefficient chart:
+    //
+    //     X_g(psi) = P_C X(psi) T_0,  P_C = I - C(C'C)^-C'
+    //
+    // rather than differentiating the arbitrary RRQR/eigenvectors that produce
+    // a fresh `T(psi)`.  Penalty jets already use the fixed `T_0` through the
+    // metadata transform; only the design jets need this left projection.
+    if let Some(gauge) = smooth_term.collection_gauge.as_ref() {
+        let projector = FixedRowSpaceProjector::from_constraint_block(
+            gauge.constraint_block.view(),
+        )
+        .map_err(EstimationError::from)?;
+        if let Some(op) = implicit_operator.take() {
+            implicit_operator = Some(
+                op.with_fixed_row_space_projection(projector)
+                    .map_err(EstimationError::from)?,
+            );
+        } else {
+            projector
+                .project_matrix_in_place(&mut local_x_psi)
+                .map_err(EstimationError::from)?;
+            projector
+                .project_matrix_in_place(&mut local_x_psi_psi)
+                .map_err(EstimationError::from)?;
+        }
+    }
     let implicit_operator = implicit_operator.map(std::sync::Arc::new);
 
     if let Some(ref op) = implicit_operator {

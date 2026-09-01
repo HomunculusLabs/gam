@@ -9,8 +9,8 @@
 // `gam_solve::*`, basis/term machinery as `gam_terms::*`).
 use gam_terms::basis::{
     BasisError, BasisMetadata, BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult,
-    BasisWorkspace, CenterStrategy, MaternIdentifiability, PenaltySource, SpatialIdentifiability,
-    build_constant_curvature_basis_kappa_derivatives,
+    BasisWorkspace, CenterStrategy, FixedRowSpaceProjector, MaternIdentifiability, PenaltySource,
+    SpatialIdentifiability, build_constant_curvature_basis_kappa_derivatives,
     build_matern_basis_log_kappa_aniso_derivatives, build_matern_basis_log_kappa_derivatives,
     build_matern_collocation_operator_matrices, build_measure_jet_basis_psi_derivatives,
     build_thin_plate_basis_log_kappa_derivatives, estimate_penalty_nullity,
@@ -277,4 +277,3 @@ include!("constant_curvature_kappa_jet_fd_tests.rs");
 // criterion is correct on the one cell where the truth's range IS the auto
 // heuristic's — the cell the acceptance fixture happens to use.
 include!("constant_curvature_kappa_box_probe_tests.rs");
-

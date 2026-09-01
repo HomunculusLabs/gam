@@ -77,6 +77,24 @@ pub struct SurvivalMarginalSlopeTermSpec {
     /// Populated out-of-fold by `crossfit_score_calibration` in
     /// `solver/workflow.rs`; mirrors the BMS spec field of the same name.
     pub score_influence_jacobian: Option<Array2<f64>>,
+    /// Policy for the latent score `z`: the normalisation applied first (the
+    /// default `Frozen { mean: 0, sd: 1 }` is an identity that only checks and
+    /// warns), the standard-normal adequacy thresholds, and — through its
+    /// `latent_measure` — whether the AUTOMATIC latent-measure gate runs.
+    ///
+    /// Under the default `LatentMeasureSpec::Auto` this family runs the SAME
+    /// gate the Bernoulli marginal-slope runs (gam#2768): a Rao score test on
+    /// `E[z|C]` / `Var(z|C)` over the marginal-index span `a(C)`, escalating to
+    /// the conditional location-scale correction `ζ = (z − m(C))/√v(C)` when it
+    /// fires, with the rank inverse-normal transform below it. It is engaged by
+    /// `resolve_survival_latent_score_calibration` (`latent_measure.rs`) on the
+    /// frozen marginal design, before any consumer reads `z`; the decision is
+    /// carried per score column in
+    /// `SurvivalMarginalSlopeFitResult::latent_z_calibrations`, persisted
+    /// through `persisted_latent_z_calibrations`, and replayed at predict
+    /// against the marginal block of the q-design. The normalisation is
+    /// therefore NOT the whole of what happens to `z` on this path;
+    /// `LatentMeasureSpec::StandardNormal` is what switches the gate off.
     pub latent_z_policy: LatentZPolicy,
 }
 

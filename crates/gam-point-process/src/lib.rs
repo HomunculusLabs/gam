@@ -1082,16 +1082,14 @@ fn update_laplace_filter_validated(
         let displacement = &mode - &predicted.mean;
         let gradient =
             observation.t().dot(&likelihood.gradient) - prior_precision.dot(&displacement);
-        let weighted_observation =
-            &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
+        let weighted_observation = &observation * &likelihood.negative_hessian.insert_axis(Axis(1));
         let negative_hessian = &prior_precision + &observation.t().dot(&weighted_observation);
         let stationarity = vector_infinity_norm(&gradient);
         let threshold = control.absolute_stationarity_tolerance
             + control.relative_stationarity_tolerance * vector_infinity_norm(&mode).max(1.0);
         if stationarity <= threshold {
-            posterior_covariance = Some(
-                inverse_and_logdet_spd(&negative_hessian, "filtered posterior precision")?.0,
-            );
+            posterior_covariance =
+                Some(inverse_and_logdet_spd(&negative_hessian, "filtered posterior precision")?.0);
             break;
         }
         let direction = solve_spd_vector(&negative_hessian, &gradient, "filtered Newton Hessian")?;

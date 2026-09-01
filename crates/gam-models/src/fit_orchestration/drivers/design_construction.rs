@@ -8205,6 +8205,37 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             .collect()
     }
 
+    // The per-axis path has the same collection geometry as the isotropic
+    // builder: keep the current coefficient chart fixed and left-project every
+    // design jet into the collection's fixed row-space complement (gam#2760).
+    // The shared implicit operator covers first, diagonal-second, and cross-
+    // second axes; dense fallbacks are projected here by the identical object.
+    if let Some(gauge) = smooth_term.collection_gauge.as_ref() {
+        let projector = FixedRowSpaceProjector::from_constraint_block(
+            gauge.constraint_block.view(),
+        )
+        .map_err(EstimationError::from)?;
+        for matrix in aniso_result
+            .design_first
+            .iter_mut()
+            .chain(aniso_result.design_second_diag.iter_mut())
+            .chain(aniso_result.design_second_cross.iter_mut())
+        {
+            if matrix.nrows() > 0 {
+                projector
+                    .project_matrix_in_place(matrix)
+                    .map_err(EstimationError::from)?;
+            }
+        }
+        if let Some(operator) = aniso_result.implicit_operator.take() {
+            aniso_result.implicit_operator = Some(
+                operator
+                    .with_fixed_row_space_projection(projector)
+                    .map_err(EstimationError::from)?,
+            );
+        }
+    }
+
     // Dense first/diagonal-second matrices may be present even when the shared
     // operator is available. The operator remains the canonical source for
     // exact cross-axis second derivatives.

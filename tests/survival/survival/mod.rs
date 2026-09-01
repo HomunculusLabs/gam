@@ -9,7 +9,6 @@ mod survival_location_scale_small_repro;
 mod survival_loglogistic_aft_recovers_covariate_1110;
 mod survival_marginal_slope_jacobian_hyperbolic_correction;
 mod survival_marginal_slope_1040_convergence;
-mod probe_2768_shapes;
 mod survival_marginal_slope_conditional_latent_2768;
 mod survival_marginal_slope_follow_up_mode_response_fd_2765;
 mod survival_marginal_slope_follow_up_slope_replay_2765;
