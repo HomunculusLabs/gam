@@ -2609,7 +2609,6 @@ impl ImplicitDesignPsiDerivative {
     }
 
     #[inline]
-    #[inline]
     pub(crate) fn transformed_combo_axis_value_materialized(
         &self,
         idx: usize,
