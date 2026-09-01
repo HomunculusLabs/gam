@@ -1024,43 +1024,48 @@ pub(crate) fn row_set_from_survival_mask(
     }
 }
 
+/// The composed warp basis and every derivative order the row program's jet
+/// composes it at, at one row's entry and exit index. Each inner slice has one
+/// entry per wiggle column (`pw` long); bundling the slices keeps
+/// [`sls_row_nll_wiggle`] within the argument budget.
+///
+/// The jet is order 4, so a `compose_unary` stack has five slots, and the row
+/// program reads the basis at two places whose stacks are offset by one:
+///
+/// ```text
+///   u0w, u1w = index + Σ βw_j·I_j(index)    stack [I,  I′, I″, I‴, I⁗ ]
+///   m₁       = 1 + Σ βw_j·I′_j(q1)          stack [I′, I″, I‴, I⁗, I⁗′]   <- SHIFTED BY ONE
+/// ```
+///
+/// So the entry stack `b_u0` carries five orders (`I … I⁗`) and the exit stack
+/// `b_u1` carries SIX (`I … I⁗′`): the exit index feeds both the warp `u1w` and
+/// the event-Jacobian slope `m₁`. Every slot is the evaluated derivative of the
+/// basis actually built — none is a literal. Slot 4 of the value stack was once
+/// the literal `0.0` (exact only for degree ≤ 3), and slot 4 of `m₁`'s stack
+/// was once the literal `0.0` (exact only for degree ≤ 4); the composed-warp
+/// floor is `4` and is a floor, not a cap, so both literals differentiated a
+/// different function than the value at a degree the path admits (gam#2695).
+/// The ramp evaluator returns exact zeros for orders above the degree, so the
+/// evaluated table is bit-identical to the literal wherever the literal was
+/// right. A slot that is short changes nothing in the order-2 Hessian and
+/// leaves an O(1) error in `row_third_contracted` / `row_fourth_contracted`,
+/// which the FD oracle `survival_ls_wiggle_third_and_fourth_directional_match_fd_932`
+/// catches (#932).
+pub(crate) struct SlsWiggleRowBasis<'b> {
+    pub(crate) b_u0: [&'b [f64]; 5],
+    pub(crate) b_u1: [&'b [f64]; 6],
+}
+
 /// #932 link-wiggle: the survival-LS row NLL extended with the link warp
 /// `q = q0 + Σ_j βw_j·B_j(q0)` and the time-derivative coupling
 /// `g = hdot + m1·qdot0`, `m1 = 1 + Σ_j βw_j·B'_j(q0_exit)`, written ONCE over
-/// a generic jet scalar
-/// (`KW = SLS_ROW_K + pw`). `vars[0..9]` are the base channels (exactly
-/// [`sls_row_nll`]); `vars[9..9+pw]` are the wiggle amplitudes βw. The per-row
-/// basis stacks are evaluated at the BASE indices (the warp composes the basis
-/// onto the index jet): `b{0,1,2,3}e` = `B/B'/B''/B'''` at `q0_entry`,
-/// `b{0,1,2,3}x` = `B/B'/B''/B'''` at `q0_exit`. Bit-identical (modulo association) to the nested
-/// witness in `survival_ls_wiggle_joint_hessian_matches_assembler_932`.
-/// Per-row warp basis stacks evaluated at the BASE indices. `b_u0` holds
-/// `[B, B', B'', B''']` at `q0_entry` (entry warp `u0w`); `b_u1` holds
-/// `[B, B', B'', B''']` at `q0_exit` (exit warp `u1w` and the qdot slope `m1`).
-/// Both stacks must carry the basis through `B'''` — the highest derivative a
-/// cubic (degree-3) wiggle spline has that is nonzero within a knot span — so
-/// the composed jet is EXACT to 4th order (`B'''' ≡ 0` inside a span). Carrying
-/// the entry warp only to `B''` (as an earlier revision did) silently drops the
-/// entry `B'''` term: it is invisible to the 2nd-order Hessian (`Order2` never
-/// reads the 3rd compose slot) but leaves an O(1) error in `row_third_contracted`
-/// / `row_fourth_contracted`, which the FD oracle
-/// `survival_ls_wiggle_third_and_fourth_directional_match_fd_932` catches. (#932)
-/// Each inner slice has one entry per wiggle column (`pw` long). Bundling the
-/// eight slices keeps [`sls_row_nll_wiggle`] within the argument budget.
-/// The composed warp basis and every derivative order the row program's jet
-/// composes it at, at one row's entry and exit index.
-///
-/// The tower is FIVE slots — value plus four derivatives — because that is the
-/// order the jet lowerings reach: `H` is an order-2 jet and reads the basis
-/// SHIFTED BY ONE through `m₁ = 1 + Σ βw_j I′_j`, so it consumes `I‴`; the
-/// order-3 and order-4 lowerings that build `∇Φ` and the second directional
-/// derivative consume `I⁗`. Slot 4 used to be the literal `0.0`, which is the
-/// fourth derivative of a degree-`d` I-spline only for `d ≤ 3` (gam#2695).
-pub(crate) struct SlsWiggleRowBasis<'b> {
-    pub(crate) b_u0: [&'b [f64]; 5],
-    pub(crate) b_u1: [&'b [f64]; 5],
-}
-
+/// a generic jet scalar (`KW = SLS_ROW_K + pw`). `vars[0..9]` are the base
+/// channels (exactly [`sls_row_nll`]); `vars[9..9+pw]` are the wiggle
+/// amplitudes βw. The per-row basis stacks are evaluated at the BASE indices
+/// (the warp composes the basis onto the index jet) — see
+/// [`SlsWiggleRowBasis`] for which orders each stack carries. Bit-identical
+/// (modulo association) to the nested witness in
+/// `survival_ls_wiggle_joint_hessian_matches_assembler_932`.
 pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
     vars: &[S],
     kernel: &SurvivalExactRowKernel,
@@ -1073,7 +1078,7 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
         "link-wiggle row primary layout mismatch"
     );
     let [b0e, b1e, b2e, b3e, b4e] = basis.b_u0;
-    let [b0x, b1x, b2x, b3x, b4x] = basis.b_u1;
+    let [b0x, b1x, b2x, b3x, b4x, b5x] = basis.b_u1;
     let inv_sigma_entry = vars[7].neg().exp();
     let q0 = vars[4].mul(&inv_sigma_entry).neg();
     let inv_sigma_exit = vars[6].neg().exp();
@@ -1086,14 +1091,13 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
         let bw = &vars[SLS_ROW_K + j];
         // The composition stacks are the basis's OWN derivative tower at the
         // current index; `m₁` reads it shifted by one because it is built from
-        // `I′` rather than `I`. Slot 4 of `m₁` is `I⁗⁗`, the fifth derivative,
-        // which the tower does not carry — that is exact for every degree this
-        // path admits, since a composed warp is built at
-        // `composed_warp_minimum_degree() = 4` and a degree-4 I-spline's fifth
-        // derivative is identically zero (gam#2695).
+        // `I′` rather than `I`, so its top slot is the FIFTH derivative. That
+        // slot is evaluated, not stated: the composed-warp floor of 4 is a
+        // floor and not a cap, and at degree ≥ 5 the fifth derivative is not
+        // zero (gam#2695). At degree 4 the evaluated table is exactly `0.0`.
         q0w = q0w.add(&bw.mul(&q0.compose_unary([b0e[j], b1e[j], b2e[j], b3e[j], b4e[j]])));
         q1w = q1w.add(&bw.mul(&q1.compose_unary([b0x[j], b1x[j], b2x[j], b3x[j], b4x[j]])));
-        m1 = m1.add(&bw.mul(&q1.compose_unary([b1x[j], b2x[j], b3x[j], b4x[j], 0.0])));
+        m1 = m1.add(&bw.mul(&q1.compose_unary([b1x[j], b2x[j], b3x[j], b4x[j], b5x[j]])));
     }
     let u0w = vars[0].add(&q0w);
     let u1w = vars[1].add(&q1w);
@@ -1456,12 +1460,12 @@ pub fn survival_location_scale_alo_row_geometry(
             let basis = match link_wiggle {
                 None => SlsWiggleRowBasis {
                     b_u0: [empty, empty, empty, empty, empty],
-                    b_u1: [empty, empty, empty, empty, empty],
+                    b_u1: [empty, empty, empty, empty, empty, empty],
                 },
                 // The ALO lowering is an ORDER-2 jet, so `compose_unary` reads
-                // slots 0..=2 only and the two top slots are inert. They are
-                // filled with the third derivative the ALO input carries rather
-                // than with a fresh literal, so this site states no fourth
+                // slots 0..=2 only and the top slots are inert. They are filled
+                // with the third derivative the ALO input carries rather than
+                // with a fresh literal, so this site states no fourth or fifth
                 // derivative it does not have (gam#2695).
                 Some(wiggle) => SlsWiggleRowBasis {
                     b_u0: [
@@ -1475,6 +1479,7 @@ pub fn survival_location_scale_alo_row_geometry(
                         wiggle.exit_basis,
                         wiggle.exit_basis_d1,
                         wiggle.exit_basis_d2,
+                        wiggle.exit_basis_d3,
                         wiggle.exit_basis_d3,
                         wiggle.exit_basis_d3,
                     ],
@@ -1719,6 +1724,7 @@ pub(crate) struct SurvivalLsWiggleRowKernel<'a> {
     b_u1_2: Array2<f64>,
     b_u1_3: Array2<f64>,
     b_u1_4: Array2<f64>,
+    b_u1_5: Array2<f64>,
 }
 
 struct SurvivalLsDynamicFold {
@@ -1802,6 +1808,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
         )?;
         let b_u1_3 = survival_wiggle_third_basis(q_exit.view(), knots, degree)?;
         let b_u1_4 = survival_wiggle_fourth_basis(q_exit.view(), knots, degree)?;
+        let b_u1_5 = survival_wiggle_fifth_basis(q_exit.view(), knots, degree)?;
         let pw = b_u1_0.ncols();
         let design_pw = family
             .x_link_wiggle
@@ -1848,6 +1855,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
             b_u1_2,
             b_u1_3,
             b_u1_4,
+            b_u1_5,
         })
     }
 
@@ -1891,6 +1899,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
         let r_u1_2 = self.b_u1_2.row(row);
         let r_u1_3 = self.b_u1_3.row(row);
         let r_u1_4 = self.b_u1_4.row(row);
+        let r_u1_5 = self.b_u1_5.row(row);
         let basis = SlsWiggleRowBasis {
             b_u0: [
                 r_u0_0.as_slice().ok_or("non-contiguous wiggle basis row")?,
@@ -1905,6 +1914,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
                 r_u1_2.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u1_3.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u1_4.as_slice().ok_or("non-contiguous wiggle basis row")?,
+                r_u1_5.as_slice().ok_or("non-contiguous wiggle basis row")?,
             ],
         };
         Ok(sls_row_nll_wiggle(vars, &kernel, self.pw, &basis))
@@ -6085,9 +6095,10 @@ mod patterned_order2_perf_tests {
         p[..SLS_ROW_K].copy_from_slice(&p9);
         p[SLS_ROW_K..].copy_from_slice(&betaw);
 
-        // Per-row warp basis stacks `[B, B', B'', B''']` at the base entry (`b_u0`)
-        // and exit (`b_u1`) indices, one entry per wiggle column. Synthetic but
-        // finite; the parity oracle certifies the lowering, not these numbers.
+        // Per-row warp basis stacks `[B, B', B'', B''', B'''']` at the base entry
+        // (`b_u0`) and `[B, …, B''''']` at the exit (`b_u1`) index, one entry per
+        // wiggle column. Synthetic but finite; the parity oracle certifies the
+        // lowering, not these numbers.
         let b_u0_0 = [0.20_f64, -0.15, 0.09];
         let b_u0_1 = [-0.11_f64, 0.22, -0.07];
         let b_u0_2 = [0.05_f64, -0.03, 0.14];
@@ -6097,15 +6108,17 @@ mod patterned_order2_perf_tests {
         let b_u1_1 = [-0.09_f64, 0.04, 0.13];
         let b_u1_2 = [0.06_f64, -0.11, 0.03];
         let b_u1_3 = [-0.04_f64, 0.08, -0.05];
-        // The fourth-derivative slot carries a real, DISTINCT value rather than a
-        // repeat or a zero: this oracle certifies that the dynamic and the padded
-        // static lowering agree on the WHOLE tower, so a slot holding the same
-        // number as its neighbour could hide a lowering reading the wrong one
-        // (gam#2695, which put the true fourth derivative where a literal was).
+        // The fourth- and fifth-derivative slots carry real, DISTINCT values
+        // rather than a repeat or a zero: this oracle certifies that the dynamic
+        // and the padded static lowering agree on the WHOLE tower, so a slot
+        // holding the same number as its neighbour could hide a lowering reading
+        // the wrong one (gam#2695, which put the true fourth derivative where a
+        // literal was, and then the true fifth where `m₁`'s top slot was `0.0`).
         let b_u1_4 = [0.07_f64, -0.02, 0.10];
+        let b_u1_5 = [-0.06_f64, 0.09, -0.03];
         let basis = SlsWiggleRowBasis {
             b_u0: [&b_u0_0, &b_u0_1, &b_u0_2, &b_u0_3, &b_u0_4],
-            b_u1: [&b_u1_0, &b_u1_1, &b_u1_2, &b_u1_3, &b_u1_4],
+            b_u1: [&b_u1_0, &b_u1_1, &b_u1_2, &b_u1_3, &b_u1_4, &b_u1_5],
         };
 
         let dir_u: [f64; KW] = [

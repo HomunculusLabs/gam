@@ -117,6 +117,33 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 /// End to end, before any of this: at degree 2 the accept-test objective jumped
 /// by `2.976461e-1`, identically, at step norms from `1.436e-10` to `7.094e-13`,
 /// and the jump was Φ to twelve digits while `ℓ` and `½βᵀSβ` did not move at all.
+///
+/// # The whole ladder, so the floor is read for what it buys
+///
+/// This constant is the order the objective's VALUE reads. Each lowering of the
+/// row jet reads one order higher through `m₁`'s shifted stack, and each has a
+/// named consumer:
+///
+/// ```text
+///   jet order  lowering                          basis order  consumer
+///   0          value                             I′  (m₁)     ℓ in the accept test
+///   1          gradient                          I″  (m₁)     ∇ℓ, KKT residual
+///   2          row_order2 → H                    I‴  (m₁)     Φ = ½Σ g(λ(Z_JᵀHZ_J))  <- objective VALUE
+///   3          row_third_contracted → ∂H/∂β      I⁗  (m₁)     ∇Φ (Newton rhs, KKT residual), Daleckii–Krein H_Φ
+///   4          row_fourth_contracted → ∂²H/∂β²   I⁗′ (m₁)     exact Jeffreys completion, outer second directional
+/// ```
+///
+/// A degree-`d` I-spline is `C^{d−1}` at a simple knot, so degree `4` makes the
+/// objective's VALUE continuous (this floor) and leaves its GRADIENT reading a
+/// piecewise-constant `I⁗`: the objective is `C⁰` with a kink wherever an event
+/// row's index crosses a knot, and `∇Φ` — hence the KKT residual and the Newton
+/// right-hand side — steps there. A `C¹` objective needs order `4` continuous,
+/// i.e. degree `5`. That raise is NOT made here: the fit-level ladder above
+/// shows the witness fitting at 4, and a floor moves every survival link-warp
+/// basis (knot count, column count, penalties, saved metadata), so it lands
+/// with the measurement that decides it — `∇Φ` read across an EVENT row's knot
+/// crossing at `composed_warp_minimum_degree()`, the arm the existing `H`- and
+/// `Φ`-reading pins do not have.
 pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 3;
 
 /// The smallest public degree at which a composed warp's basis is continuous to

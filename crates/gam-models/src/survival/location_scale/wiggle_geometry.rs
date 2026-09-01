@@ -514,6 +514,29 @@ pub(crate) fn survival_wiggle_fourth_basis(
     monotone_wiggle_basis_with_derivative_order(q0, knots, degree, 4)
 }
 
+/// The FIFTH derivative of the composed warp basis (gam#2695).
+///
+/// The row program reads the basis at two places, and the event-Jacobian slope
+/// `m₁ = 1 + Σ βw_j·I′_j(q₁)` reads it SHIFTED BY ONE: its five-slot tower is
+/// `[I′, I″, I‴, I⁗, I⁗′]`, so the order-4 lowering (the second directional
+/// derivative behind the exact Jeffreys completion and the outer curvature
+/// path) consumes the basis's fifth derivative. That slot used to be the
+/// literal `0.0`, exact only for `degree ≤ 4`; the composed-warp floor
+/// [`crate::wiggle::composed_warp_minimum_degree`] `= 4` is a FLOOR, not a cap,
+/// so a user-requested `linkwiggle(degree=5)` or higher reached the order-4
+/// lowering with a tower that differentiated a different function than the
+/// value. Evaluated rather than stated: the ramp evaluator returns exact zeros
+/// for every order above the degree, so at the built degree 4 this table IS
+/// the zero the literal claimed, bit for bit, and at every higher degree it is
+/// the derivative the basis genuinely has.
+pub(crate) fn survival_wiggle_fifth_basis(
+    q0: ndarray::ArrayView1<'_, f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> Result<Array2<f64>, String> {
+    monotone_wiggle_basis_with_derivative_order(q0, knots, degree, 5)
+}
+
 pub(crate) fn survival_base_q_scalars(eta_t: f64, eta_ls: f64) -> SurvivalBaseQScalars {
     let (q_t, q_ls, q_tl, q_ll, q_tl_ls, q_ll_ls) = q_chain_derivs_scalar(eta_t, eta_ls);
     let inv_sigma = exp_sigma_inverse_from_eta_scalar(eta_ls);
