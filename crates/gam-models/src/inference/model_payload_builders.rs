@@ -47,6 +47,7 @@ use crate::survival::location_scale::{
     residual_distribution_from_inverse_link,
 };
 use crate::transformation_normal::{TransformationNormalFamily, TransformationNormalFitResult};
+use crate::wiggle::{WigglePenaltyMetadata, canonical_wiggle_function_penalties};
 use faer::Side;
 use gam_data::{DataSchema, EncodedDataset};
 use gam_linalg::faer_ndarray::{FaerCholesky, array2_to_nested_vec};
@@ -59,7 +60,7 @@ use gam_solve::estimate::{
     saved_mixture_state_from_fit, saved_sas_state_from_fit,
 };
 use gam_terms::inference::formula_dsl::{parse_formula, parse_surv_response};
-use gam_terms::smooth::{TermCollectionDesign, TermCollectionSpec};
+use gam_terms::smooth::{BlockwisePenalty, TermCollectionDesign, TermCollectionSpec};
 use ndarray::{Array1, Array2, s};
 use std::collections::HashMap;
 
@@ -185,8 +186,95 @@ fn fitted_inverse_link(state: &FittedLinkState) -> Option<InverseLink> {
     }
 }
 
+/// The complete penalty topology in the fit geometry's raw coefficient frame.
+///
+/// `TermCollectionDesign` describes the formula's mean block only. A standard
+/// learnable-link fit appends a `LinkWiggle` block, so treating that base design
+/// as the fitted model's complete raw topology compares different coordinate
+/// systems: the former has `p_mean` columns while the latter's gauge and
+/// Hessian have `p_mean + p_wiggle`. Keep the join here, at the one persistence
+/// boundary that owns both the realized term design and the canonical saved
+/// wiggle semantics, and hand null-space analysis one indivisible topology.
+struct RealizedRawPenaltyTopology {
+    coefficient_dim: usize,
+    penalties: Vec<BlockwisePenalty>,
+}
+
+impl RealizedRawPenaltyTopology {
+    fn from_standard_fit(
+        design: &TermCollectionDesign,
+        wiggle_knots: Option<&Array1<f64>>,
+        wiggle_degree: Option<usize>,
+        wiggle_penalty_metadata: Option<&WigglePenaltyMetadata>,
+    ) -> Result<Self, String> {
+        let mean_dim = design.design.ncols();
+        let mut topology = Self {
+            coefficient_dim: mean_dim,
+            penalties: design.penalties.clone(),
+        };
+
+        let (knots, degree, metadata) = match (
+            wiggle_knots,
+            wiggle_degree,
+            wiggle_penalty_metadata,
+        ) {
+            (None, None, None) => return Ok(topology),
+            (Some(knots), Some(degree), Some(metadata)) => (knots, degree, metadata),
+            _ => {
+                return Err(
+                    "standard fit has partial link-wiggle penalty topology; knots, degree, and canonical penalty metadata must be present together"
+                        .to_string(),
+                );
+            }
+        };
+
+        // Rebuild through the same canonical function-penalty factory used by
+        // fitting and saved-model replay. This is not a guessed coefficient
+        // ridge: these are the exact final-function penalties named by the
+        // fitted topology, in the fitted LinkWiggle raw coefficient frame.
+        let canonical = canonical_wiggle_function_penalties(
+            knots,
+            degree,
+            &metadata.derivative_orders,
+            metadata.double_penalty,
+        )
+        .map_err(|reason| {
+            format!("failed to realize standard link-wiggle penalty topology: {reason}")
+        })?;
+        if canonical.metadata != *metadata {
+            return Err(format!(
+                "standard link-wiggle penalty topology {:?} disagrees with the canonical topology {:?} rebuilt from the fitted knots and derivative orders",
+                metadata.blocks, canonical.metadata.blocks,
+            ));
+        }
+        let wiggle_dim = canonical
+            .matrices
+            .first()
+            .map(|matrix| matrix.nrows())
+            .ok_or_else(|| "standard link-wiggle topology has no penalty blocks".to_string())?;
+        if wiggle_dim == 0 {
+            return Err("standard link-wiggle topology has zero raw coefficients".to_string());
+        }
+        let wiggle_range = mean_dim..mean_dim + wiggle_dim;
+        for (index, matrix) in canonical.matrices.into_iter().enumerate() {
+            if matrix.dim() != (wiggle_dim, wiggle_dim) {
+                return Err(format!(
+                    "standard link-wiggle penalty {index} is {}x{} but the realized raw block has width {wiggle_dim}",
+                    matrix.nrows(),
+                    matrix.ncols(),
+                ));
+            }
+            topology
+                .penalties
+                .push(BlockwisePenalty::new(wiggle_range.clone(), matrix));
+        }
+        topology.coefficient_dim = wiggle_range.end;
+        Ok(topology)
+    }
+}
+
 fn standard_null_space_metadata(
-    design: &TermCollectionDesign,
+    topology: &RealizedRawPenaltyTopology,
     fit: &UnifiedFitResult,
 ) -> Result<(usize, f64), String> {
     let hessian = fit
@@ -200,12 +288,12 @@ fn standard_null_space_metadata(
             hessian.ncols()
         ));
     }
-    let p = design.design.ncols();
-    if design.penalties.is_empty() {
+    let p = topology.coefficient_dim;
+    if topology.penalties.is_empty() {
         return Ok((0, 0.0));
     }
     let mut penalty = Array2::<f64>::zeros((p, p));
-    for (idx, block) in design.penalties.iter().enumerate() {
+    for (idx, block) in topology.penalties.iter().enumerate() {
         let range = block.col_range.clone();
         if range.start > range.end
             || range.end > p
@@ -244,7 +332,7 @@ fn standard_null_space_metadata(
         let gauge = &geometry.coefficient_gauge;
         if gauge.raw_total() != p || gauge.reduced_total() != hessian_dim {
             return Err(format!(
-                "null-space Hessian logdet gauge mismatch: design has {p} raw columns, gauge \
+                "null-space Hessian logdet gauge mismatch: realized penalty topology has {p} raw columns, gauge \
                  maps {} raw from {} active coordinates, Hessian is {hessian_dim}x{hessian_dim}",
                 gauge.raw_total(),
                 gauge.reduced_total(),
@@ -417,7 +505,14 @@ pub fn assemble_standard_payload(
     fit.fitted_link = saved_link_state;
     let resolved_termspec = freeze_term_collection_from_design(&resolvedspec, &design)
         .map_err(|err| format!("failed to freeze standard term specification: {err}"))?;
-    let (null_space_dim, null_space_logdet) = standard_null_space_metadata(&design, &fit)?;
+    let raw_penalty_topology = RealizedRawPenaltyTopology::from_standard_fit(
+        &design,
+        wiggle_knots.as_ref(),
+        wiggle_degree,
+        wiggle_penalty_metadata.as_ref(),
+    )?;
+    let (null_space_dim, null_space_logdet) =
+        standard_null_space_metadata(&raw_penalty_topology, &fit)?;
     fit.artifacts.null_space_dim = Some(null_space_dim);
     fit.artifacts.null_space_logdet = Some(null_space_logdet);
     let family = fit
@@ -2788,5 +2883,103 @@ mod apply_timewiggle_beta_tests {
         apply_timewiggle_beta(&mut payload, SurvivalTimewiggleBeta::Single(vec![4.0, 5.0]));
         assert_eq!(payload.beta_baseline_timewiggle, Some(vec![4.0, 5.0]));
         assert!(payload.beta_baseline_timewiggle_by_cause.is_none());
+    }
+}
+
+#[cfg(test)]
+mod standard_payload_penalty_topology_tests {
+    use super::*;
+    use crate::fit_orchestration::fit_from_formula;
+    use csv::StringRecord;
+    use gam_data::encode_recordswith_inferred_schema;
+
+    /// A deterministic, well-conditioned binomial fixture with five linearly
+    /// independent covariates. Including the intercept makes the formula's raw
+    /// mean width exactly six; the canonical eight-knot cubic LinkWiggle block
+    /// has eleven raw columns, reproducing #2748's `6 -> 17` payload mismatch
+    /// without a benchmark dataset or a spatial outer search.
+    fn six_column_flexible_binomial_fixture() -> EncodedDataset {
+        const N: usize = 256;
+        let headers = ["y", "x0", "x1", "x2", "x3", "x4"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rows = (0..N)
+            .map(|row| {
+                let t = -2.75 + 5.5 * row as f64 / (N - 1) as f64;
+                let x0 = t;
+                let x1 = (1.3 * t).sin();
+                let x2 = (0.7 * t).cos();
+                let x3 = t * t - 2.5;
+                let x4 = (2.1 * t + 0.2).sin();
+                let eta = 0.15 + 0.65 * x0 - 0.45 * x1 + 0.30 * x2 - 0.08 * x3 + 0.22 * x4;
+                // A monotone non-logit response map gives the learned warp a
+                // genuine, numerically mild signal. The irrational rotation is
+                // a deterministic low-discrepancy Bernoulli draw, avoiding both
+                // RNG state and accidental separation.
+                let warped_eta = eta + 0.35 * eta.tanh();
+                let probability = 1.0 / (1.0 + (-warped_eta).exp());
+                let uniform = ((row + 1) as f64 * 0.618_033_988_749_894_9).fract();
+                let y = usize::from(uniform < probability);
+                StringRecord::from(vec![
+                    y.to_string(),
+                    x0.to_string(),
+                    x1.to_string(),
+                    x2.to_string(),
+                    x3.to_string(),
+                    x4.to_string(),
+                ])
+            })
+            .collect();
+        encode_recordswith_inferred_schema(headers, rows).expect("encode #2748 fixture")
+    }
+
+    #[test]
+    fn flexible_fit_payload_uses_the_full_six_plus_eleven_penalty_topology_2748() {
+        let dataset = six_column_flexible_binomial_fixture();
+        let formula =
+            "y ~ x0 + x1 + x2 + x3 + x4 + link(type=flexible(logit))";
+        let config = FitConfig {
+            family: Some("binomial".to_string()),
+            ..FitConfig::default()
+        };
+        let FitResult::Standard(result) = fit_from_formula(formula, &dataset, &config)
+            .expect("the small identifiable flexible-link fixture must fit")
+        else {
+            panic!("flexible-link formula did not produce a standard fit");
+        };
+
+        let mean_dim = result.design.design.ncols();
+        let raw_dim = result
+            .fit
+            .geometry
+            .as_ref()
+            .expect("joint flexible fit must retain coefficient geometry")
+            .coefficient_gauge
+            .raw_total();
+        assert_eq!(mean_dim, 6, "fixture must reproduce the base width");
+        assert_eq!(raw_dim, 17, "fixture must reproduce #2748's 6 -> 17 join");
+
+        let payload = assemble_standard_payload(StandardPayloadInputs {
+            formula: formula.to_string(),
+            dataset: &dataset,
+            fit_config: &config,
+            result,
+        })
+        .expect("payload assembly must use the full realized raw penalty topology");
+        let fit = payload
+            .fit_result
+            .expect("standard payload must retain its canonical fit result");
+        assert_eq!(
+            fit.artifacts.null_space_dim,
+            Some(mean_dim),
+            "the full-rank LinkWiggle penalty leaves exactly the six unpenalized mean coordinates",
+        );
+        assert!(
+            fit.artifacts
+                .null_space_logdet
+                .is_some_and(f64::is_finite),
+            "the null-space Hessian log-determinant must be finite",
+        );
     }
 }
