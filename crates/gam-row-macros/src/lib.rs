@@ -268,16 +268,6 @@ impl Graph {
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left - right);
         }
-        // A gated term enters a sum with its sign INSIDE the gate. `x - S` and
-        // `x + (-S)` are the same IEEE operation, but the derivative channels of
-        // a subtracted gate all carry the negated gate, so keeping the positive
-        // one for the value channel alone makes the same quantity live in two
-        // `Select`s: two `phi`s after the branch merge, two spills, two stores.
-        // The hand kernels keep one signed `entry` and add it everywhere.
-        if matches!(self.nodes[right], Node::Select(..)) {
-            let negated = self.neg(right);
-            return self.add(left, negated);
-        }
         self.intern(Node::Sub(left, right))
     }
 
@@ -333,15 +323,20 @@ impl Graph {
         if let Node::Neg(inner) = self.nodes[value] {
             return inner;
         }
-        // A sign belongs INSIDE an activity gate, on the branch that computes
-        // something. Left outside, the gate's Hessian channel is negated in
-        // the branch (the derivative of a reciprocal is negative) and negated
-        // back at the seam -- two `xorpd` on a value that needs none -- and
-        // its gradient channel is negated at the seam instead of folding into
-        // the coefficient the branch already multiplies by, which is what the
-        // hand kernel does. Pushing through lets the double negation cancel
-        // here and lets LLVM fold the remaining sign into a coefficient.
-        if let Node::Select(activity, when_true, when_false) = self.nodes[value] {
+        // A negation crosses an activity gate only when it CANCELS one inside
+        // (the Hessian of a reciprocal is `-(...)` and the channel that reads
+        // it negates again: pushed through, the two annihilate and the gate
+        // carries `w·r·r` with no sign flip at all). A fresh negation stays
+        // OUTSIDE. Pushed in, it would make the gate's positive value -- which
+        // the value channel subtracts -- and its negated twin two distinct
+        // gated quantities, two `phi`s and two sign flips; kept outside, one
+        // value crosses the gate, `x - Select` stays a subtraction that pairs
+        // with the gradient's, and the derivative channels share one negation.
+        // Measured on the cause-specific order-2 row: the hand kernel executes
+        // two sign flips; pushing every negation through executed six.
+        if let Node::Select(activity, when_true, when_false) = self.nodes[value]
+            && matches!(self.nodes[when_true], Node::Neg(_))
+        {
             let when_true = self.neg(when_true);
             let when_false = self.neg(when_false);
             return self.select(activity, when_true, when_false);
